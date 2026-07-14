@@ -1,0 +1,4 @@
+functions-framework3.*
+opencv-python-headless4.9.*
+pdf2image1.17.*
+numpy1.26.*
