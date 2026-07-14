@@ -6,19 +6,19 @@ on:
    branches: [ main ]
 
 env:
- # กำหนดตัวแปรสภาพแวดล้อม
- REGION: asia-southeast1
- REPO_NAME: cargo-repo
- SERVICE_NAME: cargo-safety-api
- IMAGE_NAME: cargo-safety-app
+  # กำหนดตัวแปรสภาพแวดล้อม
+  REGION: asia-southeast1
+  REPO_NAME: cargo-repo
+  SERVICE_NAME: cargo-safety-api
+  IMAGE_NAME: cargo-safety-app
 
 jobs:
- build-and-deploy:
-   runs-on: ubuntu-latest
-   steps:
-     # 1. ดึงโค้ดล่าสุดจาก Repository
-     - name: Checkout code
-       uses: actions/checkout@v4
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. ดึงโค้ดล่าสุดจาก Repository
+      - name: Checkout code
+        uses: actions/checkout@v4
 
      # 2. ยืนยันตัวตนกับ Google Cloud ด้วยไฟล์ JSON Key
      - name: Authenticate to Google Cloud
