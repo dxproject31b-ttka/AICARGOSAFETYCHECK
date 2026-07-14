@@ -57,102 +57,17 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"* ไม่ต้องดำเนินการใดๆ เพิ่มเติม สามารถอนุมัติปล่อยรถออกเดินทางขนส่งได้ทันที"
         )
 
-def scan_viewport_elements(crop_img):
-    """
-    ค้นหาระยะตำแหน่งของผนังสีเหลือง และพิกัดกล่องสินค้า (สีฟ้า/น้ำเงิน) ภายในขอบเขต Viewport ที่ถูกครอบตัด
-    """
-    hsv = cv2.cvtColor(crop_img, cv2.COLOR_BGR2HSV)
-    
-    # 1. ค้นหากลุ่มสีเหลือง (ผนังตู้คอนเทนเนอร์)
-    lower_yellow = np.array([15, 60, 80])
-    upper_yellow = np.array([35, 255, 255])
-    mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
-    
-    yellow_bbox = None
-    contours_y, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours_y:
-        best_y = max(contours_y, key=cv2.contourArea)
-        if cv2.contourArea(best_y) > 500:
-            yellow_bbox = cv2.boundingRect(best_y)
-            
-    # 2. ค้นหากลุ่มสินค้า (สีฟ้า Cyan / สีน้ำเงิน Blue)
-    lower_blue = np.array([85, 40, 50])
-    upper_blue = np.array([135, 255, 255])
-    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-    
-    cargo_bbox = None
-    contours_b, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours_b:
-        best_b = max(contours_b, key=cv2.contourArea)
-        if cv2.contourArea(best_b) > 800:
-            cargo_bbox = cv2.boundingRect(best_b)
-            
-    return yellow_bbox, cargo_bbox
-
-def compute_alert_box(case_type, yellow_bbox, cargo_bbox, w_crop, h_crop):
-    """
-    คำนวณตำแหน่งตีกรอบโดยอ้างอิงพิกัดกองสินค้าจริงและทิศทางของผนังสีเหลือง
-    """
-    if not cargo_bbox:
-        # หากตรวจไม่พบกลุ่มสินค้า ให้ประมาณพิกัดกึ่งกลางของ Viewport
-        return int(w_crop * 0.35), int(h_crop * 0.25), int(w_crop * 0.65), int(h_crop * 0.85)
-        
-    cx, cy, cw, ch = cargo_bbox
-    
-    # ตรวจสอบทิศทางหน้างานเชิงกายภาพ (ผนังสีเหลืองอยู่ด้านซ้าย หรือขวา ของกองสินค้า)
-    is_yellow_on_left = True
-    if yellow_bbox:
-        yx, _, yw, _ = yellow_bbox
-        if (yx + yw // 2) > (cx + cw // 2):
-            is_yellow_on_left = False
-    else:
-        # หากมองไม่เห็นแผงเหลือง ให้ประเมินจากตำแหน่งกองสินค้าเทียบกับครึ่งหนึ่งของภาพ
-        if (cx + cw // 2) < (w_crop // 2):
-            is_yellow_on_left = False
-            
-    # กำหนดพิกัดตีกรอบตามประเภทความเสียหาย
-    if case_type == "REAR_EMPTY_RISK":
-        if is_yellow_on_left:
-            # ผนังอยู่ซ้าย -> ท้ายตู้อยู่ขวา -> ตีกรอบคลุมฝั่งขวาของสินค้า
-            x1 = cx + int(cw * 0.4)
-            x2 = min(w_crop - 10, cx + cw + int(cw * 0.2))
-        else:
-            # ผนังอยู่ขวา -> ท้ายตู้อยู่ซ้าย -> ตีกรอบคลุมฝั่งซ้ายของสินค้า
-            x1 = max(10, cx - int(cw * 0.2))
-            x2 = cx + int(cw * 0.6)
-        y1 = max(10, cy - 10)
-        y2 = min(h_crop - 10, cy + ch + 10)
-        
-    elif case_type == "FRONT_EMPTY_RISK":
-        if is_yellow_on_left:
-            x1 = max(10, cx - int(cw * 0.2))
-            x2 = cx + int(cw * 0.6)
-        else:
-            x1 = cx + int(cw * 0.4)
-            x2 = min(w_crop - 10, cx + cw + int(cw * 0.2))
-        y1 = max(10, cy - 10)
-        y2 = min(h_crop - 10, cy + ch + 10)
-        
-    else:  # STEP_DOWN_RISK (รอยเหลื่อมต่างระดับตรงกลาง)
-        # ตีกรอบบริเวณจุดกึ่งกลางของกองสินค้าที่มีรอยต่างระดับความสูง
-        x1 = cx + int(cw * 0.15)
-        x2 = cx + int(cw * 0.80)
-        y1 = max(10, cy - 20)
-        y2 = min(h_crop - 10, cy + ch + 10)
-        
-    return int(x1), int(y1), int(x2), int(y2)
-
 @functions_framework.http
 def process_request(request):
     """
-    HTTP Webhook Endpoint รองรับการทำงานแบบข้ามแพลตฟอร์ม
+    HTTP Webhook Endpoint ประมวลผลภาพแบบระบุพิกัดตรงตัววัตถุ (Direct Blob Detection)
     """
     if request.method == 'OPTIONS':
         headers = {
             'Access-Control-Allow-Origin': '*', 
             'Access-Control-Allow-Methods': 'POST', 
             'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Allow-Max-Age': '3600'
+            'Access-Control-Max-Age': '3600'
         }
         return ('', 204, headers)
 
@@ -169,60 +84,79 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
-        # แปลงข้อมูล PDF หน้า 2 สู่ภาพ OpenCV
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=200)
         except Exception:
             pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=200)
         
         if not pages:
-            return ({"error": "Cannot render page data"}, 400, headers)
+            return ({"error": "Cannot render PDF page data"}, 400, headers)
 
         open_cv_image = np.array(pages[0]) 
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         h, w, _ = img.shape
 
         # -------------------------------------------------------------
-        # กติกาการแบ่ง Viewport เชิงพื้นที่ (ครึ่งบน FRONT / ครึ่งล่าง BACK)
-        # โดยหลีกเลี่ยงตารางรายงานด้านขวา (สแกนความกว้างเพียง 75% ซ้าย)
+        # สกัดหาพิกัดกองสินค้าจริงผ่านโมเดล 3D สีฟ้า/น้ำเงิน (Highly Saturated Color Filter)
         # -------------------------------------------------------------
-        front_y1, front_y2 = int(h * 0.12), int(h * 0.50)
-        back_y1, back_y2 = int(h * 0.50), int(h * 0.92)
-        crop_w_end = int(w * 0.75)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        
+        # คัดกรองเฉพาะเฉดสีฟ้า-น้ำเงินที่สว่างและอิ่มตัวสูงจัดเพื่อตัดสัญญาณรบกวน 100%
+        lower_cargo = np.array([85, 150, 150])
+        upper_cargo = np.array([135, 255, 255])
+        mask_cargo = cv2.inRange(hsv, lower_cargo, upper_cargo)
+        
+        # กำจัด Noise ขนาดเล็กในภาพ
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        mask_cargo = cv2.morphologyEx(mask_cargo, cv2.MORPH_OPEN, kernel)
+        
+        contours, _ = cv2.findContours(mask_cargo, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        cargo_blobs = []
+        for contour in contours:
+            if cv2.contourArea(contour) > 1000:  # กรองเฉพาะโมเดลตู้สินค้าขนาดใหญ่
+                bx, by, bw, bh = cv2.boundingRect(contour)
+                # ป้องกันการจับโดนกรอบภาพหรือตารางข้อมูลฝั่งขวา
+                if bx < int(w * 0.72):
+                    cargo_blobs.append((bx, by, bw, bh))
 
-        front_crop = img[front_y1:front_y2, 0:crop_w_end]
-        back_crop = img[back_y1:back_y2, 0:crop_w_end]
-
-        # ดึงประเภทกรณีความเสียหายจาก Request (เช่น STEP_DOWN_RISK)
+        # เรียงลำดับพิกัดที่พบจากบนลงล่าง (กลุ่มบน = FRONT, กลุ่มล่าง = BACK)
+        cargo_blobs = sorted(cargo_blobs, key=lambda b: b[1])
+        
         case_type = data.get('caseType', 'STEP_DOWN_RISK')
         detected_hazards = []
 
-        if case_type != "SAFE":
-            # --- ประมวลผลภาพแรก (FRONT VIEW) ---
-            f_yellow, f_cargo = scan_viewport_elements(front_crop)
-            fx1, fy1, fx2, fy2 = compute_alert_box(case_type, f_yellow, f_cargo, front_crop.shape[1], front_crop.shape[0])
+        if case_type != "SAFE" and len(cargo_blobs) > 0:
+            # 1. จัดการภาพตัวบน (FRONT VIEW)
+            front_blob = cargo_blobs[0]
+            fx, fy, fw, fh = front_blob
             
-            # แปลงพิกัดสับเซตกลับสู่ขนาดภาพจริง (Global Coordinates)
-            gx_f_x1, gy_f_y1 = fx1, fy1 + front_y1
-            gx_f_x2, gy_f_y2 = fx2, fy2 + front_y1
-
-            cv2.rectangle(img, (gx_f_x1, gy_f_y1), (gx_f_x2, gy_f_y2), (0, 0, 255), 4)
-            cv2.putText(img, f"🚨 POINT 1: {case_type}", (gx_f_x1, gy_f_y1 - 15),
+            # คำนวณขอบเขตตีกรอบให้ครอบคลุมจุดเสี่ยงต่างระดับของสินค้าโดยตรง
+            f_x1 = int(fx + fw * 0.05)
+            f_x2 = int(fx + fw * 0.95)
+            f_y1 = max(0, int(fy - fh * 0.15))
+            f_y2 = min(h - 1, int(fy + fh * 1.15))
+            
+            cv2.rectangle(img, (f_x1, f_y1), (f_x2, f_y2), (0, 0, 255), 4)
+            cv2.putText(img, f"🚨 WARNING: {case_type}", (f_x1, f_y1 - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
 
-            # --- ประมวลผลภาพสอง (BACK VIEW) ---
-            b_yellow, b_cargo = scan_viewport_elements(back_crop)
-            bx1, by1, bx2, by2 = compute_alert_box(case_type, b_yellow, b_cargo, back_crop.shape[1], back_crop.shape[0])
-            
-            # แปลงพิกัดสับเซตกลับสู่ขนาดภาพจริง (Global Coordinates)
-            gx_b_x1, gy_b_y1 = bx1, by1 + back_y1
-            gx_b_x2, gy_b_y2 = bx2, by2 + back_y1
+            # 2. จัดการภาพตัวล่าง (BACK VIEW)
+            # กรณีตรวจพบกองสินค้าทั้ง 2 ฝั่งสมบูรณ์
+            if len(cargo_blobs) >= 2:
+                back_blob = cargo_blobs[1]
+                bx, by, bw, bh = back_blob
+                
+                b_x1 = int(bx + bw * 0.05)
+                b_x2 = int(bx + bw * 0.95)
+                b_y1 = max(0, int(by - bh * 0.15))
+                b_y2 = min(h - 1, int(by + bh * 1.15))
+                
+                cv2.rectangle(img, (b_x1, b_y1), (b_x2, b_y2), (0, 0, 255), 4)
+                cv2.putText(img, f"🚨 WARNING: {case_type}", (b_x1, b_y1 - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
 
-            cv2.rectangle(img, (gx_b_x1, gy_b_y1), (gx_b_x2, gy_b_y2), (0, 0, 255), 4)
-            cv2.putText(img, f"🚨 POINT 1: {case_type}", (gx_b_x1, gy_b_y1 - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
-
-            # บันทึกข้อมูลและพารามิเตอร์ส่งกลับ
+            # จัดทำสรุปเอกสารรายงานผล
             report_detail = generate_action_report(
                 case_type=case_type,
                 zone_name="กลางตู้สินค้าเชื่อมโยงรอยต่อระดับ",
@@ -236,9 +170,17 @@ def process_request(request):
                 "title": f"ตรวจพบจุดเสี่ยงอันตรายรูปแบบ: {case_type}",
                 "detail": report_detail
             })
+            
+        elif case_type != "SAFE":
+            # Fallback ป้องกันการทำงานล้มเหลว กรณีแสกนไม่พบบล็อกสีในภาพ (จะจำกัดให้อยู่ฝั่งซ้ายของตารางข้อมูลเสมอ)
+            f_x1, f_y1, f_x2, f_y2 = int(w * 0.25), int(h * 0.22), int(w * 0.55), int(h * 0.45)
+            b_x1, b_y1, b_x2, b_y2 = int(w * 0.25), int(h * 0.60), int(w * 0.55), int(h * 0.82)
+            
+            cv2.rectangle(img, (f_x1, f_y1), (f_x2, f_y2), (0, 0, 255), 4)
+            cv2.rectangle(img, (b_x1, b_y1), (b_x2, b_y2), (0, 0, 255), 4)
 
         # -------------------------------------------------------------
-        # สรุปโครงสร้างและส่งกลับข้อมูลปลายทาง
+        # รวบรวมข้อมูลและแปลงผลลัพธ์ส่งกลับ
         # -------------------------------------------------------------
         if len(detected_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(detected_hazards)} จุด)"
@@ -263,7 +205,7 @@ def process_request(request):
             "processedImageUrl": processed_image_url
         }
 
-        # เคลียร์พอยน์เตอร์
+        # เคลียร์พอยน์เตอร์เพื่อป้องกัน Memory Leak
         del open_cv_image
         del img
 
