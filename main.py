@@ -33,7 +33,7 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"1. [Dunnage Blocking] ติดตั้งโครงไม้กระดานค้ำยันแนวดิ่งหนาพิเศษ (Rear Tomming Barrier) หรือใส่ถุงลมกันกระแทก (Dunnage Bag) บรรจุเต็มช่องว่างเพื่อปิดประคบหน้าตัดกำแพงสินค้าทั้งหมด\n"
             f"2. [Lashing] เดินสายรัดตรึง (Ratchet Strap) ในลักษณะไขว้กากบาท (Cross Lashing) ดึงกลับไปทางด้านหน้าตู้ ยึดทับแผงไม้โครงสร้างล็อกไม่ให้กำแพงสินค้าพลิกคว่ำเทมาทางด้านหลังเมื่อรถออกตัว\n\n"
             f"💡 [AI RECOMMENDED ALTERNATIVE] - แนะนำปรับวางจำนวนสินค้าให้ไม่เกิดความสูงต่ำ:\n"
-            f"* กระจายเกลี่ยแถวสินค้าที่ซ้อนสูงชัน {high_layer} ชั้น ให้ลงมาแผ่ราบในแนวระนาบราบขยายมาทางพื้นที่ว่างท้ายตู้ เพื่อลดทอนความสูงของกำแพงลงให้เตี้ยและกว้างขึ้น ช่วยเพิ่มเสถียรภาพในการทรงตัวของสินค้าโดยตรง"
+            f"* กระจายเกลี่ยแถวสินค้าที่ซ้อนสูงชัน {high_layer} ชั้น ให้ลงมาแผ่ราบในแนวระนาบราบขยายมาทางพื้นที่ว่างท้ายตู้ เพื่อลดทอนความสูงของกำแพงลงให้เตี้ยและกว้างขึ้น ช่วยเพิ่มเสถียรภาพในการทรงตัว of สินค้าโดยตรง"
         )
     elif case_type == "FRONT_EMPTY_RISK":
         return (
@@ -92,7 +92,7 @@ def scan_viewport_elements(crop_img):
 @functions_framework.http
 def process_request(request):
     """
-    HTTP Webhook Endpoint สำหรับประมวลผลตำแหน่งรอยต่อระดับสินค้าที่แม่นยำสูง
+    HTTP Webhook Endpoint สำหรับประมวลผลกล่องรอยต่อต่างระดับจำกัดบริเวณไม่เกิน 2 ช่องสินค้า
     """
     if request.method == 'OPTIONS':
         headers = {
@@ -146,9 +146,9 @@ def process_request(request):
             f_yellow, f_cargo = scan_viewport_elements(front_crop)
             if f_cargo:
                 fx, fy, fw, fh = f_cargo
-                # ปรับแต่งช่วงพิกัดสไลด์ไปทางขวา (45% ถึง 95%) เพื่อครอบคลุมเฉพาะรอยต่อสีฟ้า-น้ำเงิน
-                f_x1 = int(fx + fw * 0.45)
-                f_x2 = int(fx + fw * 0.95)
+                # จำกัดพิกัดให้กว้างเพียง 2 ช่องแถวสินค้าด้านขวา (เริ่มที่ 33% และจบที่ 98% ของหน้ารวมสินค้า)
+                f_x1 = int(fx + fw * 0.33)
+                f_x2 = int(fx + fw * 0.98)
                 f_y1 = max(0, int(fy - fh * 0.15))
                 f_y2 = min(front_crop.shape[0] - 1, int(fy + fh * 1.15))
                 
@@ -164,9 +164,9 @@ def process_request(request):
             b_yellow, b_cargo = scan_viewport_elements(back_crop)
             if b_cargo:
                 bx, by, bw, bh = b_cargo
-                # ปรับแต่งช่วงพิกัดให้ค่อนมาทางซ้าย (5% ถึง 55%) ซึ่งเป็นรอยต่อสีน้ำเงิน-ฟ้าของมุมมองกลับด้าน
-                b_x1 = int(bx + bw * 0.05)
-                b_x2 = int(bx + bw * 0.55)
+                # จำกัดพิกัดให้กว้างเพียง 2 ช่องแถวสินค้าด้านซ้าย (เริ่มที่ 2% และจบที่ 67% ของหน้ารวมสินค้า)
+                b_x1 = int(bx + bw * 0.02)
+                b_x2 = int(bx + bw * 0.67)
                 b_y1 = max(0, int(by - bh * 0.15))
                 b_y2 = min(back_crop.shape[0] - 1, int(by + bh * 1.15))
                 
