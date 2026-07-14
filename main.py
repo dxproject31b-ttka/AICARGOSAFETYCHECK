@@ -7,10 +7,9 @@ from pdf2image import convert_from_bytes
 
 def generate_action_report(case_type, zone_name, direction_text, high_sku, low_sku, high_layer, low_layer):
     """
-    ฟังก์ชันคลัง Template สรุปรูปแบบประโยคข้อความแจ้งแยกตามประเภทงาน 4 รูปแบบ
-    (ปรับปรุงกระชับและใช้คำว่าเหลื่อมกว่าด้านตรงกันข้าม)
+    คลังข้อมูลสรุปรูปแบบคำแนะนำแยกตามกรณีความปลอดภัย 4 รูปแบบ
     """
-    if case_type == "STEP_DOWN_RISK":  # รูปแบบที่ 1: รอยเหลื่อมต่างระดับกลางตู้
+    if case_type == "STEP_DOWN_RISK":
         return (
             f"พบจุดเสี่ยงอันตราย (รอยเหลื่อมต่างระดับ)\n\n"
             f"🚨 [ALERT] ผลการตรวจสอบความปลอดภัย: พบจุดเสี่ยงอันตราย (รอยเหลื่อมต่างระดับ)\n"
@@ -23,8 +22,7 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"💡 [AI RECOMMENDED ALTERNATIVE] - แนะนำปรับวางจำนวนสินค้าให้ไม่เกิดความสูงต่ำ:\n"
             f"* ย้ายสินค้าชั้นบนสุด (ชั้นที่ {high_layer}) ลงมาจัดวางเกลี่ยเฉลี่ยในพื้นที่ระนาบต่ำด้านตรงกันข้าม เพื่อปรับระดับหน้าตัดสินค้าให้เรียบเสมอกัน ป้องกันการพลิกคว่ำตั้งแต่ต้นทางโดยไม่ต้องใช้อุปกรณ์กั้นเพิ่ม"
         )
-        
-    elif case_type == "REAR_EMPTY_RISK":  # รูปแบบที่ 2: สินค้าสูงขนาบพื้นที่โล่งท้ายตู้
+    elif case_type == "REAR_EMPTY_RISK":
         return (
             f"พบจุดเสี่ยงอันตรายร้ายแรง (สินค้าสูงขนาบพื้นที่โล่งท้ายตู้)\n\n"
             f"🚨 [ALERT] ผลการตรวจสอบความปลอดภัย: พบจุดเสี่ยงอันตรายร้ายแรง (สินค้าสูงขนาบพื้นที่โล่งท้ายตู้)\n"
@@ -37,8 +35,7 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"💡 [AI RECOMMENDED ALTERNATIVE] - แนะนำปรับวางจำนวนสินค้าให้ไม่เกิดความสูงต่ำ:\n"
             f"* กระจายเกลี่ยแถวสินค้าที่ซ้อนสูงชัน {high_layer} ชั้น ให้ลงมาแผ่ราบในแนวระนาบราบขยายมาทางพื้นที่ว่างท้ายตู้ เพื่อลดทอนความสูงของกำแพงลงให้เตี้ยและกว้างขึ้น ช่วยเพิ่มเสถียรภาพในการทรงตัวของสินค้าโดยตรง"
         )
-        
-    elif case_type == "FRONT_EMPTY_RISK":  # รูปแบบที่ 3: สินค้าสูงขนาบพื้นที่โล่งหัวตู้
+    elif case_type == "FRONT_EMPTY_RISK":
         return (
             f"พบจุดเสี่ยงอันตราย (สินค้าสูงขนาบพื้นที่โล่งหัวตู้)\n\n"
             f"🚨 [ALERT] ผลการตรวจสอบความปลอดภัย: พบจุดเสี่ยงอันตราย (สินค้าสูงขนาบพื้นที่โล่งหัวตู้)\n"
@@ -49,8 +46,7 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"1. [Dunnage Blocking] ติดตั้งค้ำยันโครงสร้างไม้กั้นขวางฝั่งหัวรถ (Front Blocking) แนบชิดกับตัวสินค้าเพื่อกระจายแรงกดทับ\n"
             f"2. [Lashing] พาดสายรัดตรึงรัดดึงรั้งโครงสินค้าโยงกลับมาทางจุดยึดฝั่งท้ายตู้ เพื่อตรึงกระชับตัวสินค้าไม่ให้เกิดแรงไหลเฉื่อยพุ่งไปกระแทกผนังหน้าตู้สินค้าเมื่อรถเบรกกระทันหัน"
         )
-        
-    else:  # รูปแบบที่ 4: ปลอดภัย (SAFE)
+    else:
         return (
             f"ปลอดภัย (SAFE)\n\n"
             f"🟢 [STATUS] ผลการตรวจสอบสถานะความปลอดภัย: ปลอดภัย (SAFE)\n"
@@ -61,12 +57,119 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
             f"* ไม่ต้องดำเนินการใดๆ เพิ่มเติม สามารถอนุมัติปล่อยรถออกเดินทางขนส่งได้ทันที"
         )
 
+def find_yellow_wall_bounding_box(img):
+    """
+    ค้นหากลุ่มพิกเซลสีเหลือง (Safety Yellow Wall) เพื่อระบุตำแหน่งฝั่งหัวรถ
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower_yellow = np.array([18, 80, 80])
+    upper_yellow = np.array([32, 255, 255])
+    
+    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+    
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        best_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(best_contour) > 800:
+            return cv2.boundingRect(best_contour)
+    return None
+
+def calculate_hazard_coordinates(case_type, is_front_view, w, h, yellow_bbox=None):
+    """
+    คำนวณพิกัดกล่องแจ้งเตือนแยกตามกรณีและประเภทภาพมุมมอง
+    """
+    if is_front_view:
+        # === FRONT VIEW (ขวา = หัวตู้ / ซ้าย = ท้ายตู้) ===
+        if case_type == "REAR_EMPTY_RISK":
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = int(w * 0.05)
+                x2 = max(int(w * 0.35), wx - int(ww * 2.2))
+                y1 = wy + int(wh * 0.1)
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.05)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.38)
+                y2 = int(h * 0.85)
+                
+        elif case_type == "FRONT_EMPTY_RISK":
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = wx - int(ww * 0.5)
+                x2 = min(w - 10, wx + ww + int(ww * 0.2))
+                y1 = wy
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.65)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.95)
+                y2 = int(h * 0.85)
+                
+        else:  # STEP_DOWN_RISK (รอยเหลื่อมต่างระดับกลางตู้)
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = max(0, wx - int(ww * 1.8))
+                x2 = wx - int(ww * 0.2)
+                y1 = wy + int(wh * 0.2)
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.35)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.60)
+                y2 = int(h * 0.80)
+                
+    else:
+        # === BACK VIEW (ซ้าย = หัวตู้ / ขวา = ท้ายตู้) ===
+        if case_type == "REAR_EMPTY_RISK":
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = wx + ww + int(ww * 0.5)
+                x2 = int(w * 0.95)
+                y1 = wy + int(wh * 0.1)
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.62)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.95)
+                y2 = int(h * 0.85)
+                
+        elif case_type == "FRONT_EMPTY_RISK":
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = max(10, wx - int(ww * 0.2))
+                x2 = wx + ww + int(ww * 0.5)
+                y1 = wy
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.05)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.35)
+                y2 = int(h * 0.85)
+                
+        else:  # STEP_DOWN_RISK (รอยเหลื่อมต่างระดับกลางตู้)
+            if yellow_bbox:
+                wx, wy, ww, wh = yellow_bbox
+                x1 = wx + ww + int(ww * 0.2)
+                x2 = min(w, wx + ww + int(ww * 1.8))
+                y1 = wy + int(wh * 0.2)
+                y2 = wy + wh
+            else:
+                x1 = int(w * 0.40)
+                y1 = int(h * 0.25)
+                x2 = int(w * 0.65)
+                y2 = int(h * 0.80)
+                
+    return int(x1), int(y1), int(x2), int(y2)
+
 @functions_framework.http
 def process_request(request):
     """
-    HTTP Webhook รับ Request แบบ Base64 (Stateless)
+    HTTP Endpoint รองรับการเรียกจาก Google Apps Script
     """
-    # 1. จัดการเรื่อง CORS เพื่ออนุญาตให้ยิงข้ามโดเมนได้สำหรับการรันเว็บแอป
     if request.method == 'OPTIONS':
         headers = {
             'Access-Control-Allow-Origin': '*', 
@@ -83,102 +186,113 @@ def process_request(request):
         if not data or 'base64' not in data:
             return ({"error": "No base64 data provided"}, 400, headers)
 
-        file_name = data.get('fileName', 'unknown.pdf')
         base64_str = data.get('base64')
-        
-        # ลบ Data URI scheme ออกถ้ามีติดมา (เช่น data:application/pdf;base64,...)
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
-        # 2. ถอดรหัส Base64 ให้กลับเป็นไฟล์ไบนารี (Bytes) เข้าสู่หน่วยความจำ
         pdf_bytes = base64.b64decode(base64_str)
 
-        # 3. แปลง PDF หน้า 2 ให้เป็นไฟล์รูปภาพตาม Logic ที่กำหนด
+        # แปลงไฟล์ PDF เฉพาะหน้า 2 ในหน่วยความจำ
         try:
-            # พยายามดึงเฉพาะหน้า 2 (first_page=2, last_page=2)
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=200)
         except Exception:
-            # Fallback เผื่อกรณีไฟล์มีหน้าเดียวให้ดึงหน้าแรกแทน เพื่อป้องกัน Error
             pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=200)
         
         if not pages:
-            return ({"error": "Cannot read page 2 of the PDF"}, 400, headers)
+            return ({"error": "Cannot read PDF page data"}, 400, headers)
 
-        # แปลงโครงสร้างภาพของ PIL ให้เป็นอาร์เรย์ในระบบสี BGR เพื่อให้ OpenCV นำไปประมวลผล
         open_cv_image = np.array(pages[0]) 
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         h, w, _ = img.shape
 
-        # =========================================================================
-        # 🧠 4. CORE AI MULTI-LOGIC SELECTION 
-        # อ้างอิงตามเกณฑ์: ผนังสีเหลือง = ฝั่งหัวตู้สินค้า (ติดหัวลาก)
-        # 📸 ภาพแรก FRONT View: ขวามือ = หัวตู้สินค้า (ขอบเหลือง) | ซ้ายมือ = ท้ายตู้สินค้า (ประตูท้าย)
-        # 📸 ภาพสอง BACK View: ซ้ายมือ = หัวตู้สินค้า (แผงเหลือง) | ขวามือ = ท้ายตู้สินค้า (ประตูท้าย)
-        # =========================================================================
+        # -------------------------------------------------------------
+        # สแกนหาวัตถุจริงและประเมินพิกัดความเสี่ยงตามชนิดงาน
+        # -------------------------------------------------------------
+        # ค้นหาตำแหน่งผนังสีเหลืองทางกายภาพ
+        yellow_bbox = find_yellow_wall_bounding_box(img)
+        
+        # ค้นหาว่าระบบควรประเมินเป็นภาพมุมมอง FRONT หรือ BACK 
+        # (หากพบบล็อกสีเหลืองอยู่ฝั่งครึ่งขวาของรูปภาพ จะถือเป็นภาพ FRONT VIEW)
+        is_front_view = True
+        if yellow_bbox:
+            wx, _, ww, _ = yellow_bbox
+            if (wx + ww // 2) < (w // 2):
+                is_front_view = False
+
+        # ตั้งค่าประเภทร่างงานตามตรรกะความผิดพลาด (Manifest AC03-01)
+        # สามารถปรับรับค่าจากพารามิเตอร์ JSON ในกรณีที่เชื่อมโยงกับระบบ AI สแกนประเภทโมเดลอื่น
+        case_type = data.get('caseType', 'STEP_DOWN_RISK') 
+        
         detected_hazards = []
         
-        # 🧪 ตัวอย่างสถานการณ์จำลอง (Manifest AC03-01): 
-        # ตรวจพบสินค้าสีน้ำเงินเข้ม [ATFBA-F6] ฝั่งท้ายตู้ซ้อนสูง 2 ชั้น เหลื่อมกว่าฝั่งหัวตู้ติดผนังสีเหลืองที่เตี้ยเพียงชั้นเดียว
-        has_step_risk_ac03 = True  
-        has_other_risk = False
-        
-        # --- [ตรวจสอบจุดเสี่ยงรอยเหลื่อมต่างระดับผิวเปิดฝั่งค่อนไปทางหัวตู้สินค้า] ---
-        if has_step_risk_ac03:
-            report_1 = generate_action_report(
-                case_type="STEP_DOWN_RISK", 
-                zone_name="กลางตู้สินค้าต่อเนื่องช่วงค่อนไปทางหัวรถ", 
-                direction_text="ฝั่งขวาของภาพ FRONT / ฝั่งซ้ายของภาพ BACK",
-                high_sku="ATFBA-F6", 
-                low_sku="สินค้าแถวหน้าฝั่งหัวตู้", 
-                high_layer=2, 
+        if case_type != "SAFE":
+            # คำนวณพิกัดเป้าหมายจากแบบแผนของโครงสร้างและ Anchor สีเหลือง
+            x1, y1, x2, y2 = calculate_hazard_coordinates(case_type, is_front_view, w, h, yellow_bbox)
+            
+            # ป้องกันพิกัดล้นขอบนอกเขตระนาบภาพจริง
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w - 1, x2), min(h - 1, y2)
+            
+            # ประกอบรายงาน
+            report_detail = generate_action_report(
+                case_type=case_type,
+                zone_name="กลางตู้สินค้าต่อเนื่องช่วงค่อนไปทางหัวรถ" if is_front_view else "กลางตู้สินค้าค่อนมาทางด้านท้ายรถ",
+                direction_text="ฝั่งขวาของภาพ FRONT / ฝั่งซ้ายของภาพ BACK" if is_front_view else "ฝั่งซ้ายของภาพ FRONT / ฝั่งขวาของภาพ BACK",
+                high_sku="ATFBA-F6",
+                low_sku="สินค้าแถวต่ำฝั่งตรงข้าม",
+                high_layer=2,
                 low_layer=1
             )
+            
             detected_hazards.append({
-                "title": "จุดเสี่ยงที่ 1: รอยเหลื่อมต่างระดับผิวเปิดโล่ง (มีความสูงเหลื่อมกว่าด้านตรงกันข้ามฝั่งผนังสีเหลือง)",
-                "detail": report_1
+                "title": f"จุดเสี่ยงตรวจพบ: {case_type} ({'FRONT' if is_front_view else 'BACK'} View)",
+                "detail": report_detail
             })
             
-            # 📸 OpenCV ตีกรอบแจ้งเตือนสีแดงในภาพแรก FRONT View (วาดกรอบตรงรอยเหลื่อมกลางตู้ค่อนไปทางขวา)
-            cv2.rectangle(img, (int(w * 0.35), int(h * 0.25)), (int(w * 0.55), int(h * 0.45)), (0, 0, 255), 4)
-            cv2.putText(img, "🚨 POINT 1: RISK DETECTED", (int(w * 0.35), int(h * 0.25) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            # วาดกรอบพื้นที่แจ้งเตือนสีแดง (เส้นหนา 4px)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 4)
             
-            # 📸 OpenCV ตีกรอบแจ้งเตือนสีแดงในภาพสอง BACK View (วาดกรอบตรงรอยเหลื่อมกลางตู้ค่อนไปทางซ้าย)
-            cv2.rectangle(img, (int(w * 0.45), int(h * 0.70)), (int(w * 0.65), int(h * 0.90)), (0, 0, 255), 4)
+            # พิมพ์ข้อความเตือนภัย และตรวจสอบไม่ให้อักษรหลุดขอบบนของภาพ
+            text_label = f"🚨 WARNING: {case_type}"
+            text_y = y1 - 15 if y1 - 15 > 30 else y1 + 30
+            cv2.putText(img, text_label, (x1, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+            
+            # ตีจุดวงกลมกึ่งกลางเป้าหมายตรวจจับ (Center Indicator Point) เพื่อระบุตำแหน่งสัมพัทธ์
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            cv2.circle(img, (cx, cy), 12, (0, 255, 255), -1)
+            cv2.circle(img, (cx, cy), 16, (0, 0, 255), 2)
 
-        # --- ตัวอย่างเงื่อนไขการดักจับรูปแบบที่ 2 หรืออื่นๆ ในอนาคต ---
-        if has_other_risk:
-            pass
-
-        # =========================================================================
-        # 5. รวบรวมข้อมูลและมัดก้อนรายงานผลลัพธ์ (Final Output Compilation)
-        # =========================================================================
+        # -------------------------------------------------------------
+        # รวบรวมข้อมูลรายงานผลกลับปลายทาง
+        # -------------------------------------------------------------
         if len(detected_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(detected_hazards)} จุด)"
-            # นำรายงานใน List ทั้งหมดมาร้อยต่อกันและคั่นด้วยเส้นประยาวเพื่อให้อ่านง่ายบนจอมือถือ
             action_text = "\n\n--------------------------------------------------\n\n".join(
                 [f"[{h['title']}]\n{h['detail']}" for h in detected_hazards]
             )
             hazard_count = len(detected_hazards)
         else:
-            # หากประมวลผลแล้วปลอดภัยครบถ้วน ให้ดึงรูปแบบที่ 4 (SAFE) มาแสดงผล
             full_safe_report = generate_action_report("SAFE", "", "", "", "", 0, 0)
             status_text = "ปลอดภัย (SAFE)"
             action_text = full_safe_report
             hazard_count = 0
 
-        # 6. แปลงภาพผลลัพธ์จาก OpenCV กลับเป็น Base64
+        # เข้ารหัสภาพผลลัพธ์ PNG เพื่อส่งคืนไปแสดงผลฝั่งหน้าบ้าน
         _, encoded_img = cv2.imencode('.png', img)
         processed_base64 = base64.b64encode(encoded_img).decode('utf-8')
         processed_image_url = f"data:image/png;base64,{processed_base64}"
 
-        # 7. คืนค่าเป็น JSON กลับไปยัง Google Apps Script
         response_data = {
             "status": status_text,
             "hazardCount": hazard_count,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url
         }
+
+        # คืนหน่วยความจำระบบ
+        del open_cv_image
+        del img
 
         return (response_data, 200, headers)
 
