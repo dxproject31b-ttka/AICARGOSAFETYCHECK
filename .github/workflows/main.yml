@@ -38,7 +38,6 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
       # 6. Push Docker Image ขึ้น Artifact Registry
       - name: Push Docker Image
         run: |
