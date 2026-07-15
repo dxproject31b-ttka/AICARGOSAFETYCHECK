@@ -1,4 +1,4 @@
 functions-framework==3.*
 pdf2image
-google-generativeai>=0.5.2
+google-generativeai>=0.7.2
 pillow
