@@ -28,7 +28,7 @@ def generate_action_report(case_type, description):
     elif case_type == "FRONT_EMPTY_RISK":
         return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งหัวตู้\n{description}\n🛠️ ACTION: ติดตั้งค้ำยันกั้นขวางฝั่งหัวรถ (Front Blocking)"
     else:
-        return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
+        return f"🟢 [STATUS] ปกติ\n{description}"
 
 def clean_json_response(text):
     """
@@ -51,25 +51,26 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D isometric cargo loading diagram ({view_name} view).
-    วิเคราะห์ภาพตู้สินค้านี้ว่ามีการจัดวางที่เสี่ยงอันตรายหรือไม่ โดยมองหา:
-    1. STEP_DOWN_RISK: สินค้าสูงต่ำไม่เท่ากัน (รอยเหลื่อม) ระหว่างกล่องสินค้า
-    2. REAR_EMPTY_RISK: มีพื้นที่โล่งด้านท้ายตู้ แต่สินค้าสูงขนาบข้าง
-    3. FRONT_EMPTY_RISK: มีพื้นที่โล่งด้านหัวตู้ แต่สินค้าสูงขนาบข้าง
-    
-    Identify ALL safety risks. If the cargo is completely flat and safe, return SAFE.
+    Analyze this 3D isometric cargo diagram ({view_name} view). 
+    Focus entirely on the colored cargo blocks. Ignore the yellow container outline.
 
-    Return the result STRICTLY as a JSON array of objects. Example:
+    CRITICAL RULES for detecting risks:
+    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks (e.g., one block stack is noticeably higher or lower than the adjacent stack), this is a STEP_DOWN_RISK. Even a small height difference between different colored blocks is a risk.
+    2. REAR_EMPTY_RISK: If there is a tall stack of cargo but the floor space behind it (towards the rear doors) is completely empty.
+    3. FRONT_EMPTY_RISK: If there is a tall stack of cargo but the floor space in front of it (towards the front wall) is completely empty.
+
+    OUTPUT FORMAT:
+    - You MUST return ONLY a JSON array.
+    - If the cargo is perfectly level and has no empty space risks, return an empty array: []
+    - If you find risks, return them in this format:
     [
       {{
-        "risk_type": "STEP_DOWN_RISK",
-        "description": "The cyan box stack is lower than the blue box stack.",
-        "box_2d": [200, 300, 450, 600]
+        "risk_type": "STEP_DOWN_RISK", 
+        "description": "The blue boxes are stacked lower than the cyan boxes.",
+        "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
-    * IMPORTANT: 'box_2d' must be an array of exactly 4 integers [ymin, xmin, ymax, xmax].
-    * Values must be normalized to a scale of 0 to 1000 relative to this image's dimensions.
-    * Return ONLY the JSON array, no other text.
+    - 'box_2d' must be an array of exactly 4 integers [ymin, xmin, ymax, xmax] normalized 0-1000.
     """
 
     try:
@@ -80,6 +81,11 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         
         # คลีนข้อมูลก่อนแปลงเป็น JSON
         clean_text = clean_json_response(response.text)
+        
+        # ถ้า AI ตอบกลับมาเป็นค่าว่าง (ปลอดภัย)
+        if not clean_text or clean_text == '""' or clean_text == "[]":
+            return []
+            
         risks = json.loads(clean_text)
         
         # ตรวจสอบว่าถ้าคืนค่ามาเป็น dict ตัวเดียว ให้แปลงเป็น list
@@ -89,7 +95,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         return risks
     except json.JSONDecodeError as e:
         print(f"JSON Parse Error: {e} - Raw text: {response.text}")
-        return [{"risk_type": "ERROR", "description": "AI returned malformed JSON."}]
+        return [{"risk_type": "ERROR", "description": f"AI ส่งข้อมูลผิดรูปแบบ: {response.text[:50]}..."}]
     except Exception as e:
         print(f"AI Analysis Error: {e}")
         return [{"risk_type": "ERROR", "description": str(e)}]
@@ -132,6 +138,7 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
         
+        # Crop ภาพแบ่งเป็น Front และ Back
         front_x_offset, front_y_offset = 0, int(height * 0.12)
         front_w = int(width * 0.75)
         front_h = int(height * 0.50) - front_y_offset
@@ -143,21 +150,30 @@ def process_request(request):
         front_crop = img.crop((front_x_offset, front_y_offset, front_x_offset + front_w, front_y_offset + front_h))
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
+        # ส่งให้ AI วิเคราะห์
         front_risks = analyze_image_with_ai(front_crop, "FRONT")
         back_risks = analyze_image_with_ai(back_crop, "BACK")
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
 
-        def process_and_draw(risks, x_off, y_off, w, h):
+        def process_and_draw(risks, x_off, y_off, w, h, view_name):
             if not isinstance(risks, list):
                 return
                 
             for risk in risks:
-                risk_type = risk.get("risk_type", "SAFE")
+                risk_type = risk.get("risk_type", "")
                 
-                # ข้ามเคสที่ปลอดภัย หรือ Error จากการอ่าน JSON
-                if risk_type in ["SAFE", "ERROR", ""]:
+                # ถ้าเจอ Error จากระบบ AI ให้นำไปแสดงที่ UI ด้วย จะได้รู้ว่าไม่ได้ SAFE จริงๆ
+                if risk_type == "ERROR":
+                    detected_hazards.append({
+                        "title": f"⚠️ AI Error ({view_name})",
+                        "detail": risk.get("description", "ไม่สามารถวิเคราะห์ข้อมูลได้")
+                    })
+                    continue
+                    
+                # กรองเอาเฉพาะความเสี่ยงที่เราสนใจ
+                if risk_type not in ["STEP_DOWN_RISK", "REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"]:
                     continue
                     
                 desc = risk.get("description", "ตรวจพบความไม่สมดุลของสินค้า")
@@ -166,9 +182,11 @@ def process_request(request):
                     "detail": generate_action_report(risk_type, desc)
                 })
                 
+                # วาดกรอบสีแดง
                 if "box_2d" in risk and isinstance(risk["box_2d"], list) and len(risk["box_2d"]) == 4:
                     try:
-                        ymin, xmin, ymax, xmax = risk["box_2d"]
+                        # บังคับแปลงเป็น int เพื่อป้องกัน Error
+                        ymin, xmin, ymax, xmax = map(int, risk["box_2d"])
                         abs_xmin = x_off + (xmin * w / 1000)
                         abs_ymin = y_off + (ymin * h / 1000)
                         abs_xmax = x_off + (xmax * w / 1000)
@@ -178,9 +196,10 @@ def process_request(request):
                     except Exception as e:
                         print(f"Drawing Error: {e}")
 
-        process_and_draw(front_risks, front_x_offset, front_y_offset, front_w, front_h)
-        process_and_draw(back_risks, back_x_offset, back_y_offset, back_w, back_h)
+        process_and_draw(front_risks, front_x_offset, front_y_offset, front_w, front_h, "FRONT")
+        process_and_draw(back_risks, back_x_offset, back_y_offset, back_w, back_h, "BACK")
 
+        # สรุปผลลัพธ์
         if len(detected_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(detected_hazards)} จุด)"
             action_text = "\n\n--------------------------------------------------\n\n".join(
@@ -189,7 +208,7 @@ def process_request(request):
             hazard_count = len(detected_hazards)
         else:
             status_text = "ปลอดภัย (SAFE)"
-            action_text = generate_action_report("SAFE", "")
+            action_text = "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
             hazard_count = 0
 
         buffered = io.BytesIO()
