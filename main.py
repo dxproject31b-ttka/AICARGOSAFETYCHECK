@@ -51,7 +51,7 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
         return (
             f"ปลอดภัย (SAFE)\n\n"
             f"🟢 [STATUS] ผลการตรวจสอบสถานะความปลอดภัย: ปลอดภัย (SAFE)\n"
-            f"* 📍 พิกัดพื้นที่: ตรวจสอบระนาบภาพ FRONT และ BACK หน้า 2 ครบถ้วน\n"
+            f"* 📍 พิกัดพื้นที่: ตรวจสอบระนาบภาพ FRONT และ BACK ครบถ้วน\n"
             f"* 📦 สถานะสินค้า: ระดับความสูงและการกระจายน้ำหนักของกลุ่มสินค้าทุกบล็อกจัดวางอยู่ในแนวราบสมดุลเสมอกัน "
             f"ไม่มีพิกัดใดที่มีความสูงเหลื่อมกว่าด้านตรงกันข้าม สินค้าค้ำยันประคองซึ่งกันและกันอย่างสมบูรณ์\n\n"
             f"🛠️ ACTION REQUIRED:\n"
@@ -60,35 +60,87 @@ def generate_action_report(case_type, zone_name, direction_text, high_sku, low_s
 
 def scan_viewport_elements(crop_img):
     """
-    ค้นหาระยะตำแหน่งของผนังสีเหลือง และพิกัดกล่องสินค้า (สีฟ้า/น้ำเงิน) ภายในขอบเขต Viewport ที่ถูกครอบตัด
+    ค้นหาระยะพิกัดโมเดลสินค้าและแนวตู้หลัก ภายในขอบเขต Viewport ที่ถูกครอบตัด
     """
-    hsv = cv2.cvtColor(crop_img, cv2.COLOR_BGR2HSV)
-    
-    # 1. ค้นหากลุ่มสีเหลือง (ผนังตู้คอนเทนเนอร์)
-    lower_yellow = np.array([15, 60, 80])
-    upper_yellow = np.array([35, 255, 255])
-    mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
-    
-    yellow_bbox = None
-    contours_y, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours_y:
-        best_y = max(contours_y, key=cv2.contourArea)
-        if cv2.contourArea(best_y) > 500:
-            yellow_bbox = cv2.boundingRect(best_y)
-            
-    # 2. ค้นหากลุ่มสินค้า (สีฟ้า Cyan / สีน้ำเงิน Blue) แบบสกัดเฉพาะค่าความเข้มสูงจัด
-    lower_blue = np.array([85, 150, 150])
-    upper_blue = np.array([135, 255, 255])
-    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+    gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    binary = (gray < 250).astype(np.uint8) * 255
     
     cargo_bbox = None
-    contours_b, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours_b:
-        best_b = max(contours_b, key=cv2.contourArea)
-        if cv2.contourArea(best_b) > 800:
-            cargo_bbox = cv2.boundingRect(best_b)
+    best_area = 0
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        if w > 150 and h > 150 and w < crop_img.shape[1] - 10:
+            area = cv2.contourArea(c)
+            if area > best_area:
+                best_area = area
+                cargo_bbox = (x, y, w, h)
+                
+    return cargo_bbox
+
+def analyze_cargo_height_profile(crop_img, cargo_bbox):
+    """
+    วิเคราะห์ระนาบความสูงเฉลี่ยด้านซ้ายและขวา เพื่อเปรียบเทียบความต่างระดับ (Step-down)
+    พร้อมทั้งตรวจสอบเส้นแนวระนาบกล่อง (Horizontal Lines) จากภาพจริง
+    """
+    if cargo_bbox is None:
+        return "SAFE", 0, 0, 0
+        
+    x, y, w, h = cargo_bbox
+    gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    
+    # 1. ทำการคำนวณหาระยะความสูงพื้นผิว (Surface Profile) ทีละคอลัมน์จากแกน X
+    binary = (gray < 250).astype(np.uint8) * 255
+    cargo_crop = binary[y:y+h, x:x+w]
+    
+    profile = []
+    for col in range(w):
+        col_pixels = cargo_crop[:, col]
+        non_zero = np.where(col_pixels > 0)[0]
+        if len(non_zero) > 0:
+            # คำนวณความสูงขึ้นจากจุดต่ำสุดของกล่องสินค้า
+            profile.append(h - non_zero[0])
+        else:
+            profile.append(0)
             
-    return yellow_bbox, cargo_bbox
+    profile = np.array(profile)
+    
+    # 2. เปรียบเทียบความสูงเฉลี่ยฝั่งซ้าย (ช่วง 10% - 40%) และฝั่งขวา (ช่วง 60% - 90%) เพื่อเลี่ยงขอบตู้ด้านข้าง
+    left_margin = int(w * 0.1)
+    mid_left = int(w * 0.4)
+    mid_right = int(w * 0.6)
+    right_margin = int(w * 0.9)
+    
+    left_height = np.mean(profile[left_margin:mid_left]) if mid_left > left_margin else 0
+    right_height = np.mean(profile[mid_right:right_margin]) if right_margin > mid_right else 0
+    
+    height_diff = abs(left_height - right_height)
+    height_ratio_diff = height_diff / max(1, h)
+    
+    # 3. ใช้ Hough Line Transform เพื่อประเมินจำนวนแนวโครงสร้างกล่องแนวนอน
+    edges = cv2.Canny(gray[y:y+h, x:x+w], 50, 150, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=40, minLineLength=30, maxLineGap=10)
+    
+    horizontal_lines_count = 0
+    if lines is not None:
+        for line in lines:
+            x1_l, y1_l, x2_l, y2_l = line[0]
+            angle = np.abs(np.arctan2(y2_l - y1_l, x2_l - x1_l) * 180 / np.pi)
+            if angle < 10 or angle > 170:  # กรองเฉพาะเส้นนอน
+                horizontal_lines_count += 1
+                
+    # 4. วิเคราะห์รูปแบบเคสเสี่ยงโดยเปรียบเทียบกับสัดส่วนความสูงและจำนวนเส้น
+    # หากพบความสูงต่างระดับมากกว่า 18% และมีเส้นกล่องแนวนอนระบุระนาบ
+    if height_ratio_diff > 0.18:
+        if left_height < (h * 0.15):
+            return "FRONT_EMPTY_RISK", float(left_height), float(right_height), horizontal_lines_count
+        elif right_height < (h * 0.15):
+            return "REAR_EMPTY_RISK", float(left_height), float(right_height), horizontal_lines_count
+        else:
+            return "STEP_DOWN_RISK", float(left_height), float(right_height), horizontal_lines_count
+            
+    return "SAFE", float(left_height), float(right_height), horizontal_lines_count
 
 @functions_framework.http
 def process_request(request):
@@ -129,9 +181,7 @@ def process_request(request):
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         h, w, _ = img.shape
 
-        # -------------------------------------------------------------
         # สเกลสัดส่วนพื้นที่ Viewport (FRONT/BACK) ซีกซ้ายกว้าง 75%
-        # -------------------------------------------------------------
         front_y1, front_y2 = int(h * 0.12), int(h * 0.50)
         back_y1, back_y2 = int(h * 0.50), int(h * 0.92)
         crop_w_end = int(w * 0.75)
@@ -142,64 +192,86 @@ def process_request(request):
         case_type = data.get('caseType', 'SAFE')
         detected_hazards = []
 
+        # วิเคราะห์ทางกายภาพภาพจากระนาบด้านในของ FRONT และ BACK
+        f_cargo = scan_viewport_elements(front_crop)
+        b_cargo = scan_viewport_elements(back_crop)
+        
+        # ค้นหาค่าความต่างระดับเบื้องต้น
+        f_case, f_l_h, f_r_h, f_lines = analyze_cargo_height_profile(front_crop, f_cargo)
+        b_case, b_l_h, b_r_h, b_lines = analyze_cargo_height_profile(back_crop, b_cargo)
+
         if case_type != "SAFE":
+            # --- ดึงสัดส่วนการตีกรอบความเสี่ยง รองรับรูปแบบ Single Dict หรือ List of Dicts ---
+            default_f_ratio = [{'x1': 0.33, 'x2': 0.98}]
+            default_b_ratio = [{'x1': 0.02, 'x2': 0.67}]
             
-            # --- ดึงสัดส่วนการตีกรอบแบบ Dynamic จาก API Payload (ถ้าไม่มีจะใช้ค่า Default) ---
-            # การแก้ไข: ให้ API ส่งค่าสัดส่วนมาตามความเหมาะสมของเคส แทนการบังคับตีกรอบที่เดิมเสมอ
-            default_f_ratio = {'x1': 0.33, 'x2': 0.98}
-            default_b_ratio = {'x1': 0.02, 'x2': 0.67}
-            front_ratios = data.get('frontRiskRatio', default_f_ratio)
-            back_ratios = data.get('backRiskRatio', default_b_ratio)
+            raw_front_ratios = data.get('frontRiskRatios') or data.get('frontRiskRatio', default_f_ratio)
+            raw_back_ratios = data.get('backRiskRatios') or data.get('backRiskRatio', default_b_ratio)
             
-            # เช็คว่าตรวจพบกล่องสินค้าในหน้าย่อยหรือไม่
+            # แปลงให้อยู่ในรูป List เพื่อวนลูปวาดกล่องได้เสมอ
+            front_ratios_list = raw_front_ratios if isinstance(raw_front_ratios, list) else [raw_front_ratios]
+            back_ratios_list = raw_back_ratios if isinstance(raw_back_ratios, list) else [raw_back_ratios]
+            
             has_detection = False
 
-            # --- 1. ประมวลผลและตีกรอบภาพบน (FRONT VIEW) ---
-            f_yellow, f_cargo = scan_viewport_elements(front_crop)
+            # --- 1. ประมวลผลและตีกรอบรูปภาพ FRONT VIEW ตามรายการจุดเสี่ยง ---
             if f_cargo:
-                has_detection = True
                 fx, fy, fw, fh = f_cargo
-                # ใช้สัดส่วนจากตัวแปรแบบ Dynamic
-                f_x1 = int(fx + fw * front_ratios['x1'])
-                f_x2 = int(fx + fw * front_ratios['x2'])
-                f_y1 = max(0, int(fy - fh * 0.15))
-                f_y2 = min(front_crop.shape[0] - 1, int(fy + fh * 1.15))
-                
-                gx_f_x1, gy_f_y1 = f_x1, f_y1 + front_y1
-                gx_f_x2, gy_f_y2 = f_x2, f_y2 + front_y1
-                
-                cv2.rectangle(img, (gx_f_x1, gy_f_y1), (gx_f_x2, gy_f_y2), (0, 0, 255), 4)
-                cv2.putText(img, f"🚨 POINT 1: {case_type}", (gx_f_x1, gy_f_y1 - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
+                for i, ratio in enumerate(front_ratios_list):
+                    if not ratio or 'x1' not in ratio or 'x2' not in ratio:
+                        continue
+                    has_detection = True
+                    f_x1 = int(fx + fw * ratio['x1'])
+                    f_x2 = int(fx + fw * ratio['x2'])
+                    f_y1 = max(0, int(fy - fh * 0.05))
+                    f_y2 = min(front_crop.shape[0] - 1, int(fy + fh * 1.05))
+                    
+                    gx_f_x1, gy_f_y1 = f_x1, f_y1 + front_y1
+                    gx_f_x2, gy_f_y2 = f_x2, f_y2 + front_y1
+                    
+                    # วาดแบบโปร่งแสงสีแดง
+                    overlay = img.copy()
+                    cv2.rectangle(overlay, (gx_f_x1, gy_f_y1), (gx_f_x2, gy_f_y2), (0, 0, 255), -1)
+                    cv2.addWeighted(overlay, 0.2, img, 0.8, 0, img)
+                    
+                    # ขอบเส้นทึบ
+                    cv2.rectangle(img, (gx_f_x1, gy_f_y1), (gx_f_x2, gy_f_y2), (0, 0, 255), 4)
+                    cv2.putText(img, f"HAZARD #{i+1}: {case_type}", (gx_f_x1, gy_f_y1 - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
 
-            # --- 2. ประมวลผลและตีกรอบภาพล่าง (BACK VIEW) ---
-            b_yellow, b_cargo = scan_viewport_elements(back_crop)
+            # --- 2. ประมวลผลและตีกรอบรูปภาพ BACK VIEW ตามรายการจุดเสี่ยง ---
             if b_cargo:
-                has_detection = True
                 bx, by, bw, bh = b_cargo
-                # ใช้สัดส่วนจากตัวแปรแบบ Dynamic
-                b_x1 = int(bx + bw * back_ratios['x1'])
-                b_x2 = int(bx + bw * back_ratios['x2'])
-                b_y1 = max(0, int(by - bh * 0.15))
-                b_y2 = min(back_crop.shape[0] - 1, int(by + bh * 1.15))
-                
-                gx_b_x1, gy_b_y1 = b_x1, b_y1 + back_y1
-                gx_b_x2, gy_b_y2 = b_x2, b_y2 + back_y1
-                
-                cv2.rectangle(img, (gx_b_x1, gy_b_y1), (gx_b_x2, gy_b_y2), (0, 0, 255), 4)
-                cv2.putText(img, f"🚨 POINT 1: {case_type}", (gx_b_x1, gy_b_y1 - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
+                for i, ratio in enumerate(back_ratios_list):
+                    if not ratio or 'x1' not in ratio or 'x2' not in ratio:
+                        continue
+                    has_detection = True
+                    b_x1 = int(bx + bw * ratio['x1'])
+                    b_x2 = int(bx + bw * ratio['x2'])
+                    b_y1 = max(0, int(by - bh * 0.05))
+                    b_y2 = min(back_crop.shape[0] - 1, int(by + bh * 1.05))
+                    
+                    gx_b_x1, gy_b_y1 = b_x1, b_y1 + back_y1
+                    gx_b_x2, gy_b_y2 = b_x2, b_y2 + back_y1
+                    
+                    # วาดแบบโปร่งแสงสีแดง
+                    overlay = img.copy()
+                    cv2.rectangle(overlay, (gx_b_x1, gy_b_y1), (gx_b_x2, gy_b_y2), (0, 0, 255), -1)
+                    cv2.addWeighted(overlay, 0.2, img, 0.8, 0, img)
+                    
+                    # ขอบเส้นทึบ
+                    cv2.rectangle(img, (gx_b_x1, gy_b_y1), (gx_b_x2, gy_b_y2), (0, 0, 255), 4)
+                    cv2.putText(img, f"HAZARD #{i+1}: {case_type}", (gx_b_x1, gy_b_y1 - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
 
-            # --- การแก้ไข: ดึงข้อมูล Template จาก API Request แทนการ Hardcode ---
-            # เพื่อให้รายงานตรงกับไฟล์ที่วิเคราะห์จริงๆ
+            # --- จัดสรรรายงานตามตัวรับ API Payload ---
             zone_name = data.get('zoneName', 'กลางตู้สินค้าเชื่อมโยงรอยต่อระดับ')
-            direction_text = data.get('directionText', 'ตรวจพบพิกัดสอดคล้องกันทั้งภาพระนาบ FRONT และ BACK')
+            direction_text = data.get('directionText', 'สอดคล้องกันทั้งภาพระนาบ FRONT และ BACK')
             high_sku = data.get('highSku', 'ไม่ระบุ')
             low_sku = data.get('lowSku', 'ไม่ระบุ')
             high_layer = data.get('highLayer', 2)
             low_layer = data.get('lowLayer', 1)
 
-            # จัดส่งโครงสร้างสรุปรายงานข้อมูลความปลอดภัยแบบ Dynamic
             report_detail = generate_action_report(
                 case_type=case_type,
                 zone_name=zone_name,
@@ -214,15 +286,21 @@ def process_request(request):
                 "detail": report_detail
             })
             
-            # Fallback ป้องกันระบบทำงานขัดข้องเชิงกายภาพ (เมื่อตรวจหาพื้นที่กล่องไม่พบเลย)
+            # Fallback หากหาตู้สินค้าไม่เจอเลย จะใช้พิกัดมาตรฐานในอดีตมาช่วยคุ้มกันระนาบ
             if not has_detection:
                 f_x1, f_y1, f_x2, f_y2 = int(w * 0.32), int(h * 0.22), int(w * 0.58), int(h * 0.45)
                 b_x1, b_y1, b_x2, b_y2 = int(w * 0.32), int(h * 0.60), int(w * 0.58), int(h * 0.82)
+                
+                overlay = img.copy()
+                cv2.rectangle(overlay, (f_x1, f_y1), (f_x2, f_y2), (0, 0, 255), -1)
+                cv2.rectangle(overlay, (b_x1, b_y1), (b_x2, b_y2), (0, 0, 255), -1)
+                cv2.addWeighted(overlay, 0.2, img, 0.8, 0, img)
+                
                 cv2.rectangle(img, (f_x1, f_y1), (f_x2, f_y2), (0, 0, 255), 4)
                 cv2.rectangle(img, (b_x1, b_y1), (b_x2, b_y2), (0, 0, 255), 4)
 
         # -------------------------------------------------------------
-        # รวบรวมและนำส่ง Base64 กลับหน้าบ้าน
+        # รวบรวมข้อมูลและส่ง Base64 กลับ
         # -------------------------------------------------------------
         if len(detected_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(detected_hazards)} จุด)"
@@ -240,11 +318,26 @@ def process_request(request):
         processed_base64 = base64.b64encode(encoded_img).decode('utf-8')
         processed_image_url = f"data:image/png;base64,{processed_base64}"
 
+        # แนบผลการวิเคราะห์ทางวิศวกรรมภาพเพิ่มใน Response เผื่อใช้งานต่อฝั่งหน้าบ้าน
         response_data = {
             "status": status_text,
             "hazardCount": hazard_count,
             "actionRequired": action_text,
-            "processedImageUrl": processed_image_url
+            "processedImageUrl": processed_image_url,
+            "physicalAnalysis": {
+                "frontView": {
+                    "detectedCase": f_case,
+                    "leftHeightPx": f_l_h,
+                    "rightHeightPx": f_r_h,
+                    "horizontalLinesFound": f_lines
+                },
+                "backView": {
+                    "detectedCase": b_case,
+                    "leftHeightPx": b_l_h,
+                    "rightHeightPx": b_r_h,
+                    "horizontalLinesFound": b_lines
+                }
+            }
         }
 
         del open_cv_image
