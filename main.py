@@ -14,8 +14,8 @@ import io
 # ---------------------------------------------------------------------------
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
 
-# ใช้ Model ตัวล่าสุดที่รองรับ Vision (เปลี่ยนเป็น -latest เพื่อแก้ Error 404)
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+# ใช้ Model ตัวล่าสุดที่รองรับ Vision (เปลี่ยนเป็น -001 เพื่อแก้ Error 404)
+model = genai.GenerativeModel('gemini-1.5-flash-001')
 
 def generate_action_report(case_type, description):
     """
