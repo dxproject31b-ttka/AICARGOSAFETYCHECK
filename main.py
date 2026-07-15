@@ -38,8 +38,10 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
     Analyze this 3D isometric cargo loading diagram ({view_name} view).
+    วิเคราะห์ภาพตู้สินค้าจากไฟล์ PDF นี้ว่ามีการจัดวางที่เสี่ยงอันตรายหรือไม่ โดยมองหา 2 กรณี:
+    1. STEP_DOWN_RISK: สินค้าสูงต่ำไม่เท่ากัน (รอยเหลื่อม)
+    2. REAR_EMPTY_RISK: มีพื้นที่โล่งท้ายตู้ แต่สินค้าสูงขนาบข้าง
     
-    Look for HEIGHT DISCREPANCIES (step-downs) between adjacent cargo stacks.
     The cargo boxes have different colors (red, blue, green, etc.). Ignore the yellow container walls and dimension lines.
 
     Identify ALL safety risks present based on these rules:
