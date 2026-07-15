@@ -19,7 +19,7 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 
 def generate_action_report(case_type, description):
     """
-    สร้างข้อความแจ้งเตือนความปลอดภัย
+    สร้างข้อความแจ้งเตือนความปลอดภัยตาม Template เดิม
     """
     if case_type == "STEP_DOWN_RISK":
         return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับ\n{description}\n🛠️ ACTION: ติดตั้งแผงไม้กั้นขวางและรัดสาย Ratchet Strap"
@@ -28,22 +28,29 @@ def generate_action_report(case_type, description):
     elif case_type == "FRONT_EMPTY_RISK":
         return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งหัวตู้\n{description}\n🛠️ ACTION: ติดตั้งค้ำยันกั้นขวางฝั่งหัวรถ (Front Blocking)"
     else:
-        return f"🟢 [STATUS] ปกติ\n{description}"
+        return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
 def clean_json_response(text):
     """
-    ลบ Markdown tags ที่ Gemini มักจะแถมมาให้ เพื่อให้ json.loads ทำงานได้
+    ดึงเฉพาะข้อมูล Array [...] หรือ Object {...} จากข้อความที่ AI ตอบกลับ
+    ตัดข้อความขยะที่ AI อาจจะแถมมาทิ้งไปแบบเด็ดขาด
     """
     text = text.strip()
-    if text.startswith('```json'):
-        text = text[7:]
-    elif text.startswith('```'):
-        text = text[3:]
     
-    if text.endswith('```'):
-        text = text[:-3]
+    start_list = text.find('[')
+    end_list = text.rfind(']')
+    
+    start_dict = text.find('{')
+    end_dict = text.rfind('}')
+    
+    if start_list != -1 and end_list != -1:
+        if start_dict == -1 or start_list < start_dict:
+            return text[start_list:end_list+1]
+            
+    if start_dict != -1 and end_dict != -1:
+        return text[start_dict:end_dict+1]
         
-    return text.strip()
+    return text
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
@@ -55,22 +62,22 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     Focus entirely on the colored cargo blocks. Ignore the yellow container outline.
 
     CRITICAL RULES for detecting risks:
-    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks (e.g., one block stack is noticeably higher or lower than the adjacent stack), this is a STEP_DOWN_RISK. Even a small height difference between different colored blocks is a risk.
+    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks (e.g., one block stack is noticeably higher or lower than the adjacent stack), this is a STEP_DOWN_RISK.
     2. REAR_EMPTY_RISK: If there is a tall stack of cargo but the floor space behind it (towards the rear doors) is completely empty.
     3. FRONT_EMPTY_RISK: If there is a tall stack of cargo but the floor space in front of it (towards the front wall) is completely empty.
 
     OUTPUT FORMAT:
-    - You MUST return ONLY a JSON array.
+    - You MUST return ONLY a JSON array. Do not include any conversational text.
     - If the cargo is perfectly level and has no empty space risks, return an empty array: []
     - If you find risks, return them in this format:
     [
       {{
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "The blue boxes are stacked lower than the cyan boxes.",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ เช่น พบรอยเหลื่อมความสูงระหว่างกล่องสีฟ้าและสีฟ้าอ่อน",
         "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
-    - 'box_2d' must be an array of exactly 4 integers [ymin, xmin, ymax, xmax] normalized 0-1000.
+    - 'box_2d' is MANDATORY if a risk is found. It must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000 representing the bounding box of the specific problematic cargo blocks.
     """
 
     try:
@@ -95,7 +102,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         return risks
     except json.JSONDecodeError as e:
         print(f"JSON Parse Error: {e} - Raw text: {response.text}")
-        return [{"risk_type": "ERROR", "description": f"AI ส่งข้อมูลผิดรูปแบบ: {response.text[:50]}..."}]
+        return [{"risk_type": "ERROR", "description": f"AI ส่งข้อมูลผิดรูปแบบ JSON (ลองอีกครั้ง)"}]
     except Exception as e:
         print(f"AI Analysis Error: {e}")
         return [{"risk_type": "ERROR", "description": str(e)}]
@@ -162,44 +169,66 @@ def process_request(request):
                 return
                 
             for risk in risks:
-                risk_type = risk.get("risk_type", "")
+                # จัดการเผื่อ AI พิมพ์เล็ก/ใหญ่ ไม่ตรง
+                risk_type = str(risk.get("risk_type", "")).upper().strip()
                 
-                # ถ้าเจอ Error จากระบบ AI ให้นำไปแสดงที่ UI ด้วย จะได้รู้ว่าไม่ได้ SAFE จริงๆ
-                if risk_type == "ERROR":
+                # เช็ค Template ว่าเป็นความเสี่ยงรูปแบบไหน
+                if "STEP_DOWN" in risk_type:
+                    risk_type = "STEP_DOWN_RISK"
+                elif "REAR_EMPTY" in risk_type:
+                    risk_type = "REAR_EMPTY_RISK"
+                elif "FRONT_EMPTY" in risk_type:
+                    risk_type = "FRONT_EMPTY_RISK"
+                elif risk_type == "ERROR":
                     detected_hazards.append({
-                        "title": f"⚠️ AI Error ({view_name})",
-                        "detail": risk.get("description", "ไม่สามารถวิเคราะห์ข้อมูลได้")
+                        "title": f"⚠️ เกิดข้อผิดพลาดในการวิเคราะห์ ({view_name})",
+                        "detail": risk.get("description", "โปรดตรวจสอบข้อมูลอีกครั้ง")
                     })
                     continue
-                    
-                # กรองเอาเฉพาะความเสี่ยงที่เราสนใจ
-                if risk_type not in ["STEP_DOWN_RISK", "REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"]:
+                else:
+                    # ถ้าเจอคำที่ไม่รู้จัก ให้ข้ามไป
                     continue
                     
                 desc = risk.get("description", "ตรวจพบความไม่สมดุลของสินค้า")
+                
+                # ค้นหาพิกัดกรอบ (เผื่อ AI ตั้งชื่อ Key ผิด)
+                box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box2d") or risk.get("box")
+                drawn_exact = False
+                
+                # วาดกรอบสีแดง (ถ้าระบุพิกัดมา)
+                if box and isinstance(box, list) and len(box) == 4:
+                    try:
+                        # ใช้ float เผื่อ AI ส่งทศนิยมมา
+                        ymin, xmin, ymax, xmax = map(float, box)
+                        
+                        # เผื่อกรณี AI คืนค่าสเกล 0-1 แทน 0-1000
+                        if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                            
+                        abs_xmin = int(x_off + (xmin * w / 1000))
+                        abs_ymin = int(y_off + (ymin * h / 1000))
+                        abs_xmax = int(x_off + (xmax * w / 1000))
+                        abs_ymax = int(y_off + (ymax * h / 1000))
+                        
+                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
+                        drawn_exact = True
+                    except Exception as e:
+                        print(f"Drawing Error: {e}")
+                        
+                # กรณีที่ AI ไม่ยอมคืนค่าพิกัดมา (หรือคืนค่ามาผิด) วาดกรอบสีส้มคลุมภาพรวมแทน
+                if not drawn_exact:
+                    draw.rectangle([x_off, y_off, x_off + w, y_off + h], outline="orange", width=8)
+                    desc += "\n*(หมายเหตุ: ระบบตีกรอบภาพรวมสีส้ม เนื่องจาก AI ไม่สามารถระบุพิกัดย่อยได้ชัดเจน)*"
+                
                 detected_hazards.append({
                     "title": f"ตรวจพบความเสี่ยง: {risk_type}",
                     "detail": generate_action_report(risk_type, desc)
                 })
-                
-                # วาดกรอบสีแดง
-                if "box_2d" in risk and isinstance(risk["box_2d"], list) and len(risk["box_2d"]) == 4:
-                    try:
-                        # บังคับแปลงเป็น int เพื่อป้องกัน Error
-                        ymin, xmin, ymax, xmax = map(int, risk["box_2d"])
-                        abs_xmin = x_off + (xmin * w / 1000)
-                        abs_ymin = y_off + (ymin * h / 1000)
-                        abs_xmax = x_off + (xmax * w / 1000)
-                        abs_ymax = y_off + (ymax * h / 1000)
-                        
-                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
-                    except Exception as e:
-                        print(f"Drawing Error: {e}")
 
         process_and_draw(front_risks, front_x_offset, front_y_offset, front_w, front_h, "FRONT")
         process_and_draw(back_risks, back_x_offset, back_y_offset, back_w, back_h, "BACK")
 
-        # สรุปผลลัพธ์
+        # สรุปผลลัพธ์เพื่อส่งกลับไปยัง Frontend
         if len(detected_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(detected_hazards)} จุด)"
             action_text = "\n\n--------------------------------------------------\n\n".join(
@@ -208,7 +237,7 @@ def process_request(request):
             hazard_count = len(detected_hazards)
         else:
             status_text = "ปลอดภัย (SAFE)"
-            action_text = "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
+            action_text = generate_action_report("SAFE", "")
             hazard_count = 0
 
         buffered = io.BytesIO()
