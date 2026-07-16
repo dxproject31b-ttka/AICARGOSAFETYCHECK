@@ -11,7 +11,8 @@ import io
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# หมดปัญหา 404 เนื่องจากไลบรารีเก่า
+# แก้ไข URL ตัดคำว่า -latest ออก เพื่อป้องกัน Error 404 จากฝั่ง Google
+# แก้ไข Payload Key เป็น camelCase (inlineData, mimeType) เพื่อแก้ 400 Bad Request
 # ---------------------------------------------------------------------------
 
 def generate_action_report(case_type, description):
@@ -51,8 +52,7 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
-    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API (ไม่พึ่งพา SDK)
-    วิธีนี้แก้ปัญหา Error 404 รุ่นไลบรารีเก่าได้ 100%
+    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API
     """
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
@@ -87,22 +87,23 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (ใช้ 1.5-flash)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash :generateContent?key={api_key}"
+    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
             "parts": [
                 {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
+                # จุดที่แก้ไข 400 Bad Request: ต้องใช้ inlineData และ mimeType
+                {"inlineData": {"mimeType": "image/jpeg", "data": img_str}}
             ]
         }],
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
     try:
-        # ยิงข้อมูลตรงไปที่ Google (เพิ่ม timeout เป็น 60 วินาที เพื่อให้ AI ประมวลผลภาพได้ทัน)
+        # ยิงข้อมูลตรงไปที่ Google
         response = requests.post(url, headers=headers, json=payload, timeout=60) 
         
         # ถ้ามี Error 400+ หรือ 500+ จะถูกโยนเข้า except
@@ -110,7 +111,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         
         data = response.json()
         
-        # แกะกล่องเอาเฉพาะข้อความที่ AI ตอบ (มีโอกาสที่ JSON จะไม่มี key 'candidates' ถ้าโดนเซ็นเซอร์)
+        # แกะกล่องเอาเฉพาะข้อความที่ AI ตอบ 
         candidates = data.get('candidates', [])
         if not candidates:
              return [{"risk_type": "ERROR", "description": "ไม่ได้รับข้อมูลตอบกลับจาก AI (อาจโดนระบบกรองข้อมูล)"}]
