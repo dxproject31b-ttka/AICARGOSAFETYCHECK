@@ -102,8 +102,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     }
 
     try:
-        # ยิงข้อมูลตรงไปที่ Google
-        response = requests.post(url, headers=headers, json=payload, timeout=30) # ใส่ Timeout เผื่อเน็ตค้าง
+        # ยิงข้อมูลตรงไปที่ Google (เพิ่ม timeout เป็น 60 วินาที เพื่อให้ AI ประมวลผลภาพได้ทัน)
+        response = requests.post(url, headers=headers, json=payload, timeout=60) 
         
         # ถ้ามี Error 400+ หรือ 500+ จะถูกโยนเข้า except
         response.raise_for_status() 
