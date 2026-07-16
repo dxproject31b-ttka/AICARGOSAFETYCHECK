@@ -87,8 +87,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (ใช้ 1.5-flash-latest)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (ใช้ 1.5-flash)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash :generateContent?key={api_key}"
 
     headers = {'Content-Type': 'application/json'}
     payload = {
