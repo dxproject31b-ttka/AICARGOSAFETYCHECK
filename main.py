@@ -11,7 +11,7 @@ import io
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# แก้ไข URL ใช้ -latest (เพื่อแก้ 404) และใช้ Payload แบบ camelCase (เพื่อแก้ 400)
+# แก้ไข URL ตัด -latest ออก (แก้ 404) และใช้ Payload แบบ camelCase (แก้ 400)
 # ---------------------------------------------------------------------------
 
 def generate_action_report(case_type, description):
@@ -86,8 +86,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (ใช้ -latest เพื่อแก้ 404)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (จุดนี้แก้ไขให้ใช้ชื่อรุ่นที่เสถียรที่สุดเพื่อลบ 404)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
     headers = {'Content-Type': 'application/json'}
     payload = {
