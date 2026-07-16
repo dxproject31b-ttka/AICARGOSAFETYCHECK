@@ -1,21 +1,18 @@
+import requests
 import base64
 import json
 import functions_framework
 import traceback
 from pdf2image import convert_from_bytes
-import google.generativeai as genai
 import os
 import PIL.Image
 import PIL.ImageDraw
 import io
 
 # ---------------------------------------------------------------------------
-# กลับมาใช้ Google Generative AI (API Key แบบฟรีโควต้า)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
+# หมดปัญหา 404 เนื่องจากไลบรารีเก่า
 # ---------------------------------------------------------------------------
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
-
-# ใช้ Model ตัวล่าสุด
-model = genai.GenerativeModel('gemini-1.5-flash')
 
 def generate_action_report(case_type, description):
     """
@@ -54,7 +51,8 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
-    ส่งรูปภาพไปให้ Gemini AI วิเคราะห์จุดเสี่ยง พร้อมขอพิกัดตีกรอบ (Bounding Box)
+    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API (ไม่พึ่งพา SDK)
+    วิธีนี้แก้ปัญหา Error 404 รุ่นไลบรารีเก่าได้ 100%
     """
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
@@ -73,39 +71,73 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     [
       {{
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ เช่น พบรอยเหลื่อมความสูงระหว่างกล่องสีฟ้าและสีฟ้าอ่อน",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ เช่น พบรอยเหลื่อมความสูง",
         "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
-    - 'box_2d' is MANDATORY if a risk is found. It must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000 representing the bounding box of the specific problematic cargo blocks.
+    - 'box_2d' must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000.
     """
 
+    # 1. แปลงรูปภาพเป็น Base64 String 
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
+    
+    # 2. ตั้งเป้าหมายไปที่ URL ของ API ตรงๆ (ใช้ 1.5-flash-latest)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
+            ]
+        }],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
     try:
-        response = model.generate_content(
-            [prompt, image],
-            generation_config={"response_mime_type": "application/json"}
-        )
+        # ยิงข้อมูลตรงไปที่ Google
+        response = requests.post(url, headers=headers, json=payload, timeout=30) # ใส่ Timeout เผื่อเน็ตค้าง
         
-        # คลีนข้อมูลก่อนแปลงเป็น JSON
-        clean_text = clean_json_response(response.text)
+        # ถ้ามี Error 400+ หรือ 500+ จะถูกโยนเข้า except
+        response.raise_for_status() 
         
-        # ถ้า AI ตอบกลับมาเป็นค่าว่าง (ปลอดภัย)
+        data = response.json()
+        
+        # แกะกล่องเอาเฉพาะข้อความที่ AI ตอบ (มีโอกาสที่ JSON จะไม่มี key 'candidates' ถ้าโดนเซ็นเซอร์)
+        candidates = data.get('candidates', [])
+        if not candidates:
+             return [{"risk_type": "ERROR", "description": "ไม่ได้รับข้อมูลตอบกลับจาก AI (อาจโดนระบบกรองข้อมูล)"}]
+             
+        raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
+        clean_text = clean_json_response(raw_text)
+        
         if not clean_text or clean_text == '""' or clean_text == "[]":
             return []
             
-        risks = json.loads(clean_text)
-        
-        # ตรวจสอบว่าถ้าคืนค่ามาเป็น dict ตัวเดียว ให้แปลงเป็น list
-        if isinstance(risks, dict):
-            risks = [risks]
-            
-        return risks
-    except json.JSONDecodeError as e:
-        print(f"JSON Parse Error: {e} - Raw text: {response.text}")
-        return [{"risk_type": "ERROR", "description": f"AI ส่งข้อมูลผิดรูปแบบ JSON (ลองอีกครั้ง)"}]
+        try:
+             risks = json.loads(clean_text)
+             if isinstance(risks, dict):
+                 risks = [risks]
+             return risks
+        except json.JSONDecodeError:
+             print(f"JSON Parse Error - Raw Text: {raw_text}")
+             return [{"risk_type": "ERROR", "description": "วิเคราะห์สำเร็จแต่ข้อความที่ AI ส่งมาผิดรูปแบบ JSON"}]
+
+    except requests.exceptions.RequestException as e:
+        error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
+        print(f"API Request Error: {error_details}")
+        return [{"risk_type": "ERROR", "description": f"เชื่อมต่อ API ไม่สำเร็จ: {str(e)[:50]}"}]
     except Exception as e:
-        print(f"AI Analysis Error: {e}")
-        return [{"risk_type": "ERROR", "description": str(e)}]
+        print(f"General Error: {traceback.format_exc()}")
+        return [{"risk_type": "ERROR", "description": f"เกิดข้อผิดพลาดภายใน: {str(e)}"}]
+
 
 @functions_framework.http
 def process_request(request):
