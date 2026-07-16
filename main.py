@@ -11,7 +11,7 @@ import io
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# แก้ไขล่าสุด: ลบ -latest ออกจาก URL + ใช้ Payload แบบ camelCase + ใส่ .strip() ที่ API Key
+# แก้ไขล่าสุด: เพิ่มระบบ Auto-Fallback Loop ลองทุกโมเดล + ตรวจสอบ API Key
 # ---------------------------------------------------------------------------
 
 def generate_action_report(case_type, description):
@@ -51,7 +51,7 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
-    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API
+    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API พร้อมระบบ Auto-Fallback
     """
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
@@ -77,21 +77,20 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     - 'box_2d' must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000.
     """
 
-    # 1. แปลงรูปภาพเป็น Base64 String 
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    # ป้องกัน Error กรณีมีเว้นวรรคหรือช่องว่างแฝงมาจาก Cloud Run Environment
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # 2. ตั้งเป้าหมายไปที่ URL (ใช้โมเดล gemini-1.5-flash ที่ถูกต้อง ไม่มี -latest)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # แจ้งเตือนหาก Key ไม่ได้มาจาก AI Studio โดยตรง
+    key_warning = ""
+    if not api_key.startswith("AIza"):
+        key_warning = "\n(หมายเหตุ: API Key ของคุณไม่ได้ขึ้นต้นด้วย 'AIza' อาจทำให้ Google ตีกลับเป็น 404)"
 
     headers = {'Content-Type': 'application/json'}
-    # Payload ต้องเป็นรูปแบบ camelCase ตามมาตรฐานของ Google REST API
     payload = {
         "contents": [{
             "parts": [
@@ -102,40 +101,57 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
-    try:
-        # ยิงข้อมูลตรงไปที่ Google
-        response = requests.post(url, headers=headers, json=payload, timeout=60) 
-        response.raise_for_status() 
-        data = response.json()
-        
-        # แกะกล่องเอาเฉพาะข้อความที่ AI ตอบ 
-        candidates = data.get('candidates', [])
-        if not candidates:
-             return [{"risk_type": "ERROR", "description": "ไม่ได้รับข้อมูลตอบกลับจาก AI"}]
-             
-        raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
-        clean_text = clean_json_response(raw_text)
-        
-        if not clean_text or clean_text == '""' or clean_text == "[]":
-            return []
-            
-        try:
-             risks = json.loads(clean_text)
-             if isinstance(risks, dict):
-                 risks = [risks]
-             return risks
-        except json.JSONDecodeError:
-             return [{"risk_type": "ERROR", "description": "วิเคราะห์สำเร็จแต่ข้อความที่ AI ส่งมาผิดรูปแบบ JSON"}]
+    # ระบบ AUTO-FALLBACK: ลองชื่อโมเดลทุกแบบที่มีเพื่อลดโอกาสติด 404
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-001",
+        "gemini-1.5-pro-002",
+        "gemini-1.5-pro-latest"
+    ]
 
-    except requests.exceptions.RequestException as e:
-        error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
-        print(f"API Request Error: {error_details}")
-        # ดึงข้อความ Error จริงๆ มาแสดงผล เพื่อให้เรารู้สาเหตุหากเกิดปัญหาอีก
-        err_msg = str(error_details)[:150].replace('\n', ' ')
-        return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
-    except Exception as e:
-        print(f"General Error: {traceback.format_exc()}")
-        return [{"risk_type": "ERROR", "description": f"เกิดข้อผิดพลาดภายใน: {str(e)}"}]
+    last_error = ""
+
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60) 
+            response.raise_for_status() 
+            data = response.json()
+            
+            candidates = data.get('candidates', [])
+            if not candidates:
+                 last_error = "ไม่ได้รับข้อมูลตอบกลับจาก AI"
+                 continue # ลองโมเดลถัดไป
+                 
+            raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
+            clean_text = clean_json_response(raw_text)
+            
+            if not clean_text or clean_text == '""' or clean_text == "[]":
+                return []
+                
+            try:
+                 risks = json.loads(clean_text)
+                 if isinstance(risks, dict):
+                     risks = [risks]
+                 return risks # สำเร็จ! คืนค่าผลลัพธ์และออกจากการวนลูป
+            except json.JSONDecodeError:
+                 last_error = "AI ส่งข้อมูลผิดรูปแบบ JSON"
+                 continue # ลองโมเดลถัดไป
+
+        except requests.exceptions.RequestException as e:
+            error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            print(f"API Request Error for {model_name}: {error_details}")
+            last_error = error_details
+            continue # ถ้าติด 404 หรือ 400 ให้วนลูปลองโมเดลตัวต่อไปทันที!
+            
+    # ถ้าลองจนครบทุกโมเดลแล้วยังพังหมด จะดึง Error ตัวสุดท้ายมาโชว์
+    err_msg = str(last_error)[:200].replace('\n', ' ')
+    return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}{key_warning}"}]
 
 
 @functions_framework.http
