@@ -11,7 +11,7 @@ import io
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# จุดที่แก้ไขล่าสุด: ใช้ URL -latest คู่กับ payload แบบ camelCase
+# แก้ไขล่าสุด: ลบ -latest ออกจาก URL + ใช้ Payload แบบ camelCase + ใส่ .strip() ที่ API Key
 # ---------------------------------------------------------------------------
 
 def generate_action_report(case_type, description):
@@ -82,15 +82,16 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    # ป้องกัน Error กรณีมีเว้นวรรคหรือช่องว่างแฝงมาจาก Cloud Run Environment
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # 2. ตั้งเป้าหมายไปที่ URL (สำคัญมาก: ต้องมีคำว่า -latest เพื่อไม่ให้โดน 404)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+    # 2. ตั้งเป้าหมายไปที่ URL (ใช้โมเดล gemini-1.5-flash ที่ถูกต้อง ไม่มี -latest)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
     headers = {'Content-Type': 'application/json'}
-    # Payload ต้องใช้แบบ camelCase (inlineData, mimeType) เพื่อไม่ให้โดน 400
+    # Payload ต้องเป็นรูปแบบ camelCase ตามมาตรฐานของ Google REST API
     payload = {
         "contents": [{
             "parts": [
@@ -104,16 +105,13 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     try:
         # ยิงข้อมูลตรงไปที่ Google
         response = requests.post(url, headers=headers, json=payload, timeout=60) 
-        
-        # ถ้ามี Error 400+ หรือ 500+ จะถูกโยนเข้า except
         response.raise_for_status() 
-        
         data = response.json()
         
         # แกะกล่องเอาเฉพาะข้อความที่ AI ตอบ 
         candidates = data.get('candidates', [])
         if not candidates:
-             return [{"risk_type": "ERROR", "description": "ไม่ได้รับข้อมูลตอบกลับจาก AI (อาจโดนระบบกรองข้อมูล)"}]
+             return [{"risk_type": "ERROR", "description": "ไม่ได้รับข้อมูลตอบกลับจาก AI"}]
              
         raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
         clean_text = clean_json_response(raw_text)
@@ -127,13 +125,14 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
                  risks = [risks]
              return risks
         except json.JSONDecodeError:
-             print(f"JSON Parse Error - Raw Text: {raw_text}")
              return [{"risk_type": "ERROR", "description": "วิเคราะห์สำเร็จแต่ข้อความที่ AI ส่งมาผิดรูปแบบ JSON"}]
 
     except requests.exceptions.RequestException as e:
         error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
         print(f"API Request Error: {error_details}")
-        return [{"risk_type": "ERROR", "description": f"เชื่อมต่อ API ไม่สำเร็จ: {str(e)[:50]}"}]
+        # ดึงข้อความ Error จริงๆ มาแสดงผล เพื่อให้เรารู้สาเหตุหากเกิดปัญหาอีก
+        err_msg = str(error_details)[:150].replace('\n', ' ')
+        return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
     except Exception as e:
         print(f"General Error: {traceback.format_exc()}")
         return [{"risk_type": "ERROR", "description": f"เกิดข้อผิดพลาดภายใน: {str(e)}"}]
