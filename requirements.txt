@@ -1,4 +1,4 @@
 functions-framework==3.*
-pdf2image
-google-generativeai>=0.7.2
-pillow
+pdf2image==1.16.3
+Pillow>=10.0.0
+requests>=2.28.0
