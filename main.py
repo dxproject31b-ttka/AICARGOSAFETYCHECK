@@ -11,7 +11,7 @@ import io
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# แก้ไขล่าสุด: เพิ่มระบบ Auto-Fallback Loop ลองทุกโมเดล + ตรวจสอบ API Key
+# แก้ไขล่าสุด: เปลี่ยนวิธีส่ง API Key ไปที่ Headers (x-goog-api-key) เพื่อแก้ปัญหา 404 จาก Key รูปแบบใหม่
 # ---------------------------------------------------------------------------
 
 def generate_action_report(case_type, description):
@@ -85,12 +85,12 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
     
-    # แจ้งเตือนหาก Key ไม่ได้มาจาก AI Studio โดยตรง
-    key_warning = ""
-    if not api_key.startswith("AIza"):
-        key_warning = "\n(หมายเหตุ: API Key ของคุณไม่ได้ขึ้นต้นด้วย 'AIza' อาจทำให้ Google ตีกลับเป็น 404)"
-
-    headers = {'Content-Type': 'application/json'}
+    # จุดที่แก้ไข: ย้าย API Key มาไว้ใน Headers เพื่อป้องกันปัญหา URL พังจากอักขระพิเศษ
+    headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key
+    }
+    
     payload = {
         "contents": [{
             "parts": [
@@ -101,7 +101,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
-    # ระบบ AUTO-FALLBACK: ลองชื่อโมเดลทุกแบบที่มีเพื่อลดโอกาสติด 404
+    # ระบบ AUTO-FALLBACK: ลองชื่อโมเดลทุกแบบที่มี
     models_to_try = [
         "gemini-1.5-flash",
         "gemini-1.5-flash-001",
@@ -116,7 +116,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     last_error = ""
 
     for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        # ลบ ?key= ออกจาก URL เพื่อความปลอดภัยสูงสุด
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=60) 
@@ -126,7 +127,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
             candidates = data.get('candidates', [])
             if not candidates:
                  last_error = "ไม่ได้รับข้อมูลตอบกลับจาก AI"
-                 continue # ลองโมเดลถัดไป
+                 continue 
                  
             raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
             clean_text = clean_json_response(raw_text)
@@ -138,20 +139,20 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
                  risks = json.loads(clean_text)
                  if isinstance(risks, dict):
                      risks = [risks]
-                 return risks # สำเร็จ! คืนค่าผลลัพธ์และออกจากการวนลูป
+                 return risks 
             except json.JSONDecodeError:
                  last_error = "AI ส่งข้อมูลผิดรูปแบบ JSON"
-                 continue # ลองโมเดลถัดไป
+                 continue 
 
         except requests.exceptions.RequestException as e:
             error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
             print(f"API Request Error for {model_name}: {error_details}")
             last_error = error_details
-            continue # ถ้าติด 404 หรือ 400 ให้วนลูปลองโมเดลตัวต่อไปทันที!
+            continue 
             
-    # ถ้าลองจนครบทุกโมเดลแล้วยังพังหมด จะดึง Error ตัวสุดท้ายมาโชว์
+    # ดึง Error ตัวสุดท้ายมาโชว์
     err_msg = str(last_error)[:200].replace('\n', ' ')
-    return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}{key_warning}"}]
+    return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
 
 
 @functions_framework.http
@@ -163,7 +164,7 @@ def process_request(request):
         headers = {
             'Access-Control-Allow-Origin': '*', 
             'Access-Control-Allow-Methods': 'POST', 
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': 'Content-Type, x-goog-api-key',
             'Access-Control-Max-Age': '3600'
         }
         return ('', 204, headers)
