@@ -103,14 +103,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
 
     # ระบบ AUTO-FALLBACK: ลองชื่อโมเดลทุกแบบที่มี
     models_to_try = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-flash-002",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-        "gemini-1.5-pro-001",
-        "gemini-1.5-pro-002",
-        "gemini-1.5-pro-latest"
+        "gemini-2.5-flash"    
     ]
 
     last_error = ""
