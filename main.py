@@ -67,8 +67,7 @@ def clean_json_response(text):
 
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
-  """ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API พร้อมระบบ Auto-Fallback และ Auto-Retry 429."""
-  prompt = f"""
+    prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
     Analyze this 3D isometric cargo diagram ({view_name} view). 
     Focus entirely on the colored cargo blocks. Ignore the yellow container outline.
@@ -92,32 +91,29 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     - 'box_2d' must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000.
     """
 
-  buffered = io.BytesIO()
-  image.save(buffered, format="JPEG")
-  img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-  api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-  if not api_key:
-    return [{
-        "risk_type": "ERROR",
-        "description": (
-            "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"
-        ),
-    }]
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return [{"risk_type": "ERROR", "description": "ระบบหา API Key ไม่พบ โปรดตั้งค่า Environment Variables"}]
 
-  headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key
+    }
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": img_str}}
+            ]
+        }],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
 
-  payload = {
-      "contents": [{
-          "parts": [
-              {"text": prompt},
-              {"inlineData": {"mimeType": "image/jpeg", "data": img_str}},
-          ]
-      }],
-      "generationConfig": {"responseMimeType": "application/json"},
-  }
-
-  # ✅ 1. ใช้ gemini-1.5-flash เป็นหลัก
     models_to_try = [
         "gemini-1.5-flash"
     ]
@@ -125,13 +121,12 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     last_error = ""
 
     for model_name in models_to_try:
-        # ✅ 2. ปรับ URL ให้ใส่ ?key={api_key} ต่อท้ายตามที่ Google บังคับ
+        # 🚨 แก้ไขจุดสำคัญ: ใส่ ?key={api_key} ต่อท้าย URL
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=60) 
             
-            # ถ้าเจอ 429 ให้รอ 10 วินาทีแล้วลองใหม่
             if response.status_code == 429:
                 print(f"Rate Limit 429 hit for {model_name}. Retrying in 10 seconds...")
                 time.sleep(10)
@@ -139,42 +134,35 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
 
             response.raise_for_status() 
             data = response.json()
+            
+            candidates = data.get('candidates', [])
+            if not candidates:
+                 last_error = "ไม่ได้รับข้อมูลตอบกลับจาก AI"
+                 continue 
+                 
+            raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
+            clean_text = clean_json_response(raw_text)
+            
+            if not clean_text or clean_text == '""' or clean_text == "[]":
+                return []
+                
+            try:
+                 risks = json.loads(clean_text)
+                 if isinstance(risks, dict):
+                     risks = [risks]
+                 return risks 
+            except json.JSONDecodeError:
+                 last_error = "AI ส่งข้อมูลผิดรูปแบบ JSON"
+                 continue 
 
-      candidates = data.get("candidates", [])
-      if not candidates:
-        last_error = "ไม่ได้รับข้อมูลตอบกลับจาก AI"
-        continue
-
-      raw_text = (
-          candidates[0]
-          .get("content", {})
-          .get("parts", [{}])[0]
-          .get("text", "[]")
-      )
-      clean_text = clean_json_response(raw_text)
-
-      if not clean_text or clean_text == '""' or clean_text == "[]":
-        return []
-
-      try:
-        risks = json.loads(clean_text)
-        if isinstance(risks, dict):
-          risks = [risks]
-        return risks
-      except json.JSONDecodeError:
-        last_error = "AI ส่งข้อมูลผิดรูปแบบ JSON"
-        continue
-
-    except requests.exceptions.RequestException as e:
-      error_details = (
-          e.response.text if hasattr(e, "response") and e.response else str(e)
-      )
-      print(f"API Request Error for {model_name}: {error_details}")
-      last_error = error_details
-      continue
-
-  err_msg = str(last_error)[:200].replace("\n", " ")
-  return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
+        except requests.exceptions.RequestException as e:
+            error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            print(f"API Request Error for {model_name}: {error_details}")
+            last_error = error_details
+            continue 
+            
+    err_msg = str(last_error)[:200].replace('\n', ' ')
+    return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
 
 
 @functions_framework.http
