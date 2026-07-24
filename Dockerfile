@@ -4,34 +4,30 @@ FROM python:3.10-slim
 # ตั้งค่าให้ Python ไม่เขียน .pyc files และส่ง output ตรงไปยัง terminal
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
 
-# 🚨 สำคัญมาก: ต้องลง poppler-utils เพื่อให้ pdf2image ทำงานได้
+# 🚨 ติดตั้ง OS Dependencies: poppler-utils (สำหรับ pdf2image) และ OpenCV libraries
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ตั้งค่าพื้นที่ทำงานและสร้าง User เพื่อความปลอดภัย
+# สร้าง Non-root User เพื่อความปลอดภัยในการรันบน Cloud Run
+RUN adduser --disabled-password --gecos "" appuser
+
+# ตั้งค่าพื้นที่ทำงาน
 WORKDIR /app
+
+# คัดลอกและติดตั้ง Python packages (ใช้ Layer Caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-
-# เพิ่มโฟลเดอร์ .local/bin เข้าไปใน PATH ของระบบ
-# เพื่อให้ Container มองเห็นคำสั่ง functions-framework ที่ถูกติดตั้งผ่าน --user
-ENV PATH="/home/appuser/.local/bin:${PATH}"
-
-# คัดลอกแค่ requirements ก่อนเพื่อใช้ประโยชน์จาก Docker Layer Caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# คัดลอก Source code ที่เหลือ (เช่น main.py)
+# คัดลอก Source code ทั้งหมด และกำหนดสิทธิ์ให้ appuser
 COPY --chown=appuser:appuser . .
 
-# กำหนด PORT เริ่มต้นไว้ที่ 8080 (Cloud Run จะเปลี่ยนค่านี้ให้เองตอนรันจริง)
-ENV PORT=8080
+# สลับไปใช้ appuser รันแอปพลิเคชัน
+USER appuser
 
-# จุดที่แก้ไข: ใช้ exec และกำหนด --host=0.0.0.0 พร้อมกับใช้ตัวแปร $PORT 
-# (ห้ามใช้รูปแบบ Array [] เพราะมันจะไม่อ่านค่า $PORT)
-CMD ["python", "main.py"]
+# สั่งรันด้วย functions-framework (สอดคล้องกับ @functions_framework.http ใน main.py)
+CMD exec functions-framework --target=process_request --host=0.0.0.0 --port=$PORT
