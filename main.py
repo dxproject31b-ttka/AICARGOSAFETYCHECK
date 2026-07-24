@@ -3,6 +3,7 @@ import io
 import json
 import os
 import time
+import re
 import traceback
 from pdf2image import convert_from_bytes
 import PIL.Image
@@ -11,10 +12,9 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK + Clean Regex)
 # ---------------------------------------------------------------------------
 
-# ตั้งค่า API Key ให้กับ SDK
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 if api_key:
     genai.configure(api_key=api_key)
@@ -46,9 +46,6 @@ def clean_json_response(text):
     return text
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
-    """
-    ส่งรูปภาพไปให้ AI วิเคราะห์ผ่าน Official Google GenAI SDK
-    """
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ระบบหา GEMINI_API_KEY ไม่พบ โปรดตั้งค่าใน Cloud Run"}]
 
@@ -74,13 +71,15 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
 
     try:
-        # ใช้ Official Google SDK เรียกโมเดลโดยตรง
+        # 🚨 ป้องกันขีดกลางพิเศษ: ใช้ Regex ลบสัญลักษณ์แปลกปลอมออก แปลงให้เป็น ASCII 100%
+        raw_model = "gemini-1.5-flash"
+        clean_model_name = re.sub(r'[^\x00-\x7F]+', '-', raw_model).strip()
+
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name=clean_model_name,
             generation_config={"response_mime_type": "application/json"}
         )
         
-        # ส่ง Prompt และรูปภาพ PIL เข้า SDK ตรงๆ
         response = model.generate_content([prompt, image])
         
         raw_text = response.text if response and response.text else "[]"
@@ -145,13 +144,8 @@ def process_request(request):
         front_crop = img.crop((front_x_offset, front_y_offset, front_x_offset + front_w, front_y_offset + front_h))
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
-        # 1. วิเคราะห์ภาพ FRONT
         front_risks = analyze_image_with_ai(front_crop, "FRONT")
-        
-        # 🚨 2. หน่วงเวลา 4 วินาที ป้องกัน Rate Limit
         time.sleep(4)
-        
-        # 3. วิเคราะห์ภาพ BACK
         back_risks = analyze_image_with_ai(back_crop, "BACK")
 
         draw = PIL.ImageDraw.Draw(img)
