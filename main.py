@@ -77,11 +77,15 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     last_err_msg = ""
 
     for attempt in range(max_retries):
-        try:
-            model = genai.GenerativeModel(
-                model_name="gemini-flash-lastest",
-                generation_config={"response_mime_type": "application/json"}
-            )
+         try:
+        # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% เป็นไปไม่ได้ที่จะเป็นขีดอื่น
+        clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
+
+        model = genai.GenerativeModel(
+            model_name=clean_model_name,
+            generation_config={"response_mime_type": "application/json"}
+        )
+
             
             response = model.generate_content([prompt, image])
             
