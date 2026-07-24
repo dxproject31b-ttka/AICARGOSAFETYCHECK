@@ -7,18 +7,19 @@ import traceback
 from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
-import requests
 import functions_framework
+import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน REST API)
-# แก้ไขล่าสุด: รองรับ Key รูปแบบ AQ., ป้องกัน 404 จากขีดกลางพิเศษ และเพิ่ม delay ป้องกัน 429
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK)
 # ---------------------------------------------------------------------------
+
+# ตั้งค่า API Key ให้กับ SDK
+api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+if api_key:
+    genai.configure(api_key=api_key)
 
 def generate_action_report(case_type, description):
-    """
-    สร้างข้อความแจ้งเตือนความปลอดภัยตาม Template
-    """
     if case_type == "STEP_DOWN_RISK":
         return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับ\n{description}\n🛠️ ACTION: ติดตั้งแผงไม้กั้นขวางและรัดสาย Ratchet Strap"
     elif case_type == "REAR_EMPTY_RISK":
@@ -29,15 +30,9 @@ def generate_action_report(case_type, description):
         return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
 def clean_json_response(text):
-    """
-    ดึงเฉพาะข้อมูล Array [...] หรือ Object {...} จากข้อความที่ AI ตอบกลับ
-    ตัดข้อความขยะที่ AI อาจจะแถมมาทิ้งไปแบบเด็ดขาด
-    """
     text = text.strip()
-    
     start_list = text.find('[')
     end_list = text.rfind(']')
-    
     start_dict = text.find('{')
     end_dict = text.rfind('}')
     
@@ -52,115 +47,60 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
-    ส่งรูปภาพไปให้ AI วิเคราะห์ โดยใช้ HTTP Requests ยิงตรงเข้า API
-    พร้อมระบบ Auto-Sanitize Dash และ Auto-Retry 429
+    ส่งรูปภาพไปให้ AI วิเคราะห์ผ่าน Official Google GenAI SDK
     """
+    if not api_key:
+        return [{"risk_type": "ERROR", "description": "ระบบหา GEMINI_API_KEY ไม่พบ โปรดตั้งค่าใน Cloud Run"}]
+
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
     Analyze this 3D isometric cargo diagram ({view_name} view). 
     Focus entirely on the colored cargo blocks. Ignore the yellow container outline.
 
     CRITICAL RULES for detecting risks:
-    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks (e.g., one block stack is noticeably higher or lower than the adjacent stack), this is a STEP_DOWN_RISK.
-    2. REAR_EMPTY_RISK: If there is a tall stack of cargo but the floor space behind it (towards the rear doors) is completely empty.
-    3. FRONT_EMPTY_RISK: If there is a tall stack of cargo but the floor space in front of it (towards the front wall) is completely empty.
+    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks, this is a STEP_DOWN_RISK.
+    2. REAR_EMPTY_RISK: If there is a tall stack of cargo but the floor space behind it is completely empty.
+    3. FRONT_EMPTY_RISK: If there is a tall stack of cargo but the floor space in front of it is completely empty.
 
     OUTPUT FORMAT:
-    - You MUST return ONLY a JSON array. Do not include any conversational text.
-    - If the cargo is perfectly level and has no empty space risks, return an empty array: []
-    - If you find risks, return them in this format:
+    Return ONLY a JSON array.
     [
       {{
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ เช่น พบรอยเหลื่อมความสูง",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
-    - 'box_2d' must be an array of exactly 4 numbers [ymin, xmin, ymax, xmax] normalized 0-1000.
     """
 
-    buffered = io.BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        return [{"risk_type": "ERROR", "description": "ระบบหา GEMINI_API_KEY ไม่พบ โปรดตั้งค่าใน Cloud Run"}]
-
-    headers = {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': api_key
-    }
-    
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inlineData": {"mimeType": "image/jpeg", "data": img_str}}
-            ]
-        }],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
-
-    models_to_try = [
-        "gemini-1.5-flash"
-    ]
-
-    last_error = ""
-
-    for model_name in models_to_try:
-        # 🚨 ป้องกันข้อผิดพลาดจากขีดกลางพิเศษ (En-dash/Em-dash)
-        clean_model = model_name.replace('–', '-').replace('—', '-').strip()
+    try:
+        # ใช้ Official Google SDK เรียกโมเดลโดยตรง
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            generation_config={"response_mime_type": "application/json"}
+        )
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+        # ส่ง Prompt และรูปภาพ PIL เข้า SDK ตรงๆ
+        response = model.generate_content([prompt, image])
         
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60) 
+        raw_text = response.text if response and response.text else "[]"
+        clean_text = clean_json_response(raw_text)
+        
+        if not clean_text or clean_text == '""' or clean_text == "[]":
+            return []
             
-            # 🚨 ถ้าเจอ 429 ให้หน่วงเวลา 10 วินาที แล้วลองใหม่อีกครั้ง
-            if response.status_code == 429:
-                print(f"Rate Limit 429 hit for {clean_model}. Retrying in 10 seconds...")
-                time.sleep(10)
-                response = requests.post(url, headers=headers, json=payload, timeout=60)
+        risks = json.loads(clean_text)
+        if isinstance(risks, dict):
+            risks = [risks]
+        return risks
 
-            response.raise_for_status() 
-            data = response.json()
-            
-            candidates = data.get('candidates', [])
-            if not candidates:
-                 last_error = "ไม่ได้รับข้อมูลตอบกลับจาก AI"
-                 continue 
-                 
-            raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '[]')
-            clean_text = clean_json_response(raw_text)
-            
-            if not clean_text or clean_text == '""' or clean_text == "[]":
-                return []
-                
-            try:
-                 risks = json.loads(clean_text)
-                 if isinstance(risks, dict):
-                     risks = [risks]
-                 return risks 
-            except json.JSONDecodeError:
-                 last_error = "AI ส่งข้อมูลผิดรูปแบบ JSON"
-                 continue 
-
-        except requests.exceptions.RequestException as e:
-            error_details = e.response.text if hasattr(e, 'response') and e.response else str(e)
-            print(f"API Request Error for {clean_model}: {error_details}")
-            last_error = error_details
-            continue 
-            
-    err_msg = str(last_error)[:200].replace('\n', ' ')
-    return [{"risk_type": "ERROR", "description": f"API Error: {err_msg}"}]
-
+    except Exception as e:
+        err_msg = str(e)[:200].replace('\n', ' ')
+        print(f"Google SDK Error: {err_msg}")
+        return [{"risk_type": "ERROR", "description": f"SDK Error: {err_msg}"}]
 
 @functions_framework.http
 def process_request(request):
-    """
-    HTTP Webhook Endpoint สำหรับวิเคราะห์ PDF ผ่าน Cloud Functions
-    """
     if request.method == 'OPTIONS':
         headers = {
             'Access-Control-Allow-Origin': '*', 
@@ -194,7 +134,6 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
         
-        # Crop ภาพแบ่งเป็น Front และ Back
         front_x_offset, front_y_offset = 0, int(height * 0.12)
         front_w = int(width * 0.75)
         front_h = int(height * 0.50) - front_y_offset
@@ -206,13 +145,13 @@ def process_request(request):
         front_crop = img.crop((front_x_offset, front_y_offset, front_x_offset + front_w, front_y_offset + front_h))
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
-        # 1. ส่งภาพ FRONT ให้ AI วิเคราะห์
+        # 1. วิเคราะห์ภาพ FRONT
         front_risks = analyze_image_with_ai(front_crop, "FRONT")
         
-        # 🚨 2. หน่วงเวลา 4 วินาทีก่อนส่งภาพ BACK เพื่อป้องกัน Error 429 (Rate Limit)
+        # 🚨 2. หน่วงเวลา 4 วินาที ป้องกัน Rate Limit
         time.sleep(4)
         
-        # 3. ส่งภาพ BACK ให้ AI วิเคราะห์
+        # 3. วิเคราะห์ภาพ BACK
         back_risks = analyze_image_with_ai(back_crop, "BACK")
 
         draw = PIL.ImageDraw.Draw(img)
