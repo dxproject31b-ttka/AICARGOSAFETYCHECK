@@ -12,7 +12,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK + Clean Regex)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK + Dynamic ASCII Model Name)
 # ---------------------------------------------------------------------------
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -70,32 +70,46 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     ]
     """
 
-    try:
-        # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% เป็นไปไม่ได้ที่จะเป็นขีดอื่น
-        clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
+    # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% ป้องกันพิมพ์ผิดตามไฟล์ที่คุณระบุ
+    clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
 
-        model = genai.GenerativeModel(
-            model_name=clean_model_name,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        response = model.generate_content([prompt, image])
-        
-        raw_text = response.text if response and response.text else "[]"
-        clean_text = clean_json_response(raw_text)
-        
-        if not clean_text or clean_text == '""' or clean_text == "[]":
-            return []
+    max_retries = 3
+    last_err_msg = ""
+
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel(
+                model_name=clean_model_name,
+                generation_config={"response_mime_type": "application/json"}
+            )
             
-        risks = json.loads(clean_text)
-        if isinstance(risks, dict):
-            risks = [risks]
-        return risks
+            response = model.generate_content([prompt, image])
+            
+            raw_text = response.text if response and response.text else "[]"
+            clean_text = clean_json_response(raw_text)
+            
+            if not clean_text or clean_text == '""' or clean_text == "[]":
+                return []
+                
+            risks = json.loads(clean_text)
+            if isinstance(risks, dict):
+                risks = [risks]
+            return risks
 
-    except Exception as e:
-        err_msg = str(e)[:200].replace('\n', ' ')
-        print(f"Google SDK Error: {err_msg}")
-        return [{"risk_type": "ERROR", "description": f"SDK Error: {err_msg}"}]
+        except Exception as e:
+            err_str = str(e)
+            last_err_msg = err_str
+            
+            # 🚨 ดักจับ Error 429 (Rate Limit) -> รอ 12 วินาทีแล้วลองยิงใหม่อัตโนมัติ
+            if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                print(f"Hit 429 Rate Limit for {view_name}. Sleeping 12s (Attempt {attempt+1}/{max_retries})...")
+                time.sleep(12)
+            else:
+                break
+
+    err_msg = last_err_msg[:200].replace('\n', ' ')
+    print(f"Google SDK Error: {err_msg}")
+    return [{"risk_type": "ERROR", "description": f"SDK Error: {err_msg}"}]
 
 @functions_framework.http
 def process_request(request):
