@@ -79,7 +79,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     for attempt in range(max_retries):
         try:
             model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-flash-lastest",
                 generation_config={"response_mime_type": "application/json"}
             )
             
