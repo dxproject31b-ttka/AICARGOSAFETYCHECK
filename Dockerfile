@@ -6,9 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # ติดตั้ง poppler-utils สำหรับอ่านไฟล์ PDF
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y poppler-utils
 
 # ตั้งค่าพื้นที่ทำงานและสร้าง User เพื่อความปลอดภัย
 WORKDIR /app
