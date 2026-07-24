@@ -5,13 +5,18 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# ติดตั้ง poppler-utils สำหรับอ่านไฟล์ PDF
-RUN apt-get update && apt-get install -y poppler-utils
+# 🚨 สำคัญมาก: ต้องลง poppler-utils เพื่อให้ pdf2image ทำงานได้
+RUN apt-get update && apt-get install -y \
+    poppler-utils \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # ตั้งค่าพื้นที่ทำงานและสร้าง User เพื่อความปลอดภัย
 WORKDIR /app
-RUN useradd -m appuser
-USER appuser
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 
 # เพิ่มโฟลเดอร์ .local/bin เข้าไปใน PATH ของระบบ
 # เพื่อให้ Container มองเห็นคำสั่ง functions-framework ที่ถูกติดตั้งผ่าน --user
@@ -29,4 +34,4 @@ ENV PORT=8080
 
 # จุดที่แก้ไข: ใช้ exec และกำหนด --host=0.0.0.0 พร้อมกับใช้ตัวแปร $PORT 
 # (ห้ามใช้รูปแบบ Array [] เพราะมันจะไม่อ่านค่า $PORT)
-CMD exec functions-framework --target=process_request --signature-type=http --host=0.0.0.0 --port=$PORT
+CMD ["python", "main.py"]
