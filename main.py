@@ -72,7 +72,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
 
     try:
         # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% เป็นไปไม่ได้ที่จะเป็นขีดอื่น
-        clean_model_name = f"gemini{chr(45)}1.5{chr(45)}flash"
+        clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
 
         model = genai.GenerativeModel(
             model_name=clean_model_name,
