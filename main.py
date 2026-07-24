@@ -117,24 +117,28 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
       "generationConfig": {"responseMimeType": "application/json"},
   }
 
-  models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"]
+  # ✅ 1. ใช้ gemini-1.5-flash เป็นหลัก
+    models_to_try = [
+        "gemini-1.5-flash"
+    ]
 
-  last_error = ""
+    last_error = ""
 
-  for model_name in models_to_try:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    for model_name in models_to_try:
+        # ✅ 2. ปรับ URL ให้ใส่ ?key={api_key} ต่อท้ายตามที่ Google บังคับ
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60) 
+            
+            # ถ้าเจอ 429 ให้รอ 10 วินาทีแล้วลองใหม่
+            if response.status_code == 429:
+                print(f"Rate Limit 429 hit for {model_name}. Retrying in 10 seconds...")
+                time.sleep(10)
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
 
-    try:
-      response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-      # 🚨 ป้องกัน Error 429: ถ้าพบติด Rate Limit ให้หยุดรอ 10 วินาที แล้วลองยิงใหม่อีกครั้ง
-      if response.status_code == 429:
-        print(f"Rate Limit 429 hit for {model_name}. Retrying in 10 seconds...")
-        time.sleep(10)
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-      response.raise_for_status()
-      data = response.json()
+            response.raise_for_status() 
+            data = response.json()
 
       candidates = data.get("candidates", [])
       if not candidates:
