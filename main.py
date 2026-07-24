@@ -71,9 +71,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
 
     try:
-        # 🚨 ป้องกันขีดกลางพิเศษ: ใช้ Regex ลบสัญลักษณ์แปลกปลอมออก แปลงให้เป็น ASCII 100%
-        raw_model = "gemini-1.5-flash"
-        clean_model_name = re.sub(r'[^\x00-\x7F]+', '-', raw_model).strip()
+        # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% เป็นไปไม่ได้ที่จะเป็นขีดอื่น
+        clean_model_name = f"gemini{chr(45)}1.5{chr(45)}flash"
 
         model = genai.GenerativeModel(
             model_name=clean_model_name,
