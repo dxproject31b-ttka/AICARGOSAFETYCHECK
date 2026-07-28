@@ -3,6 +3,7 @@ import io
 import json
 import os
 import time
+import gc
 import traceback
 from pdf2image import convert_from_bytes
 import PIL.Image
@@ -11,7 +12,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (Single-Pass 1 Request/File)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Self-Healing Exponential Backoff)
 # ---------------------------------------------------------------------------
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -100,13 +101,15 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
                 if "404" in err_str or "not found" in err_str.lower():
                     break
                     
-                # หากติด 429 Rate Limit ให้รอ 15 วินาทีเพื่อให้ Quota Reset ตัวเอง
+                # 🚀 Smart Exponential Backoff: สลีป 10 วินาทีในรอบแรก และ 20 วินาทีในรอบสอง เพื่อรอ Token Reset
                 if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                    time.sleep(15)
+                    sleep_time = 10 * (attempt + 1)
+                    print(f"Hit 429 Rate Limit. Backoff sleeping {sleep_time}s (Attempt {attempt+1}/{max_retries})...")
+                    time.sleep(sleep_time)
                 else:
                     time.sleep(3)
 
-    return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
+    return [{"risk_type": "ERROR", "description": f"AI Error (429/Quota): {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -154,14 +157,12 @@ def process_request(request):
         front_crop = img.crop((front_x_offset, front_y_offset, front_x_offset + front_w, front_y_offset + front_h))
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
-        # 🚀 ต่อภาพ FRONT และ BACK รวมเป็น 1 รูปภาพ ( Single-Pass API Call )
         combined_w = max(front_w, back_w)
         combined_h = front_h + back_h
         combined_img = PIL.Image.new('RGB', (combined_w, combined_h), color=(255, 255, 255))
         combined_img.paste(front_crop, (0, 0))
         combined_img.paste(back_crop, (0, front_h))
 
-        # ยิง API เพียง 1 ครั้งต่อ 1 ไฟล์ PDF
         all_risks = analyze_combined_image_with_ai(combined_img)
 
         draw = PIL.ImageDraw.Draw(img)
@@ -242,9 +243,12 @@ def process_request(request):
             hazard_count = 0
 
         buffered = io.BytesIO()
-        img.save(buffered, format="JPEG", quality=85)
+        img.save(buffered, format="JPEG", quality=80)
         processed_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         processed_image_url = f"data:image/jpeg;base64,{processed_base64}"
+
+        # คืนหน่วยความจำชั่วคราว
+        gc.collect()
 
         return ({
             "status": status_text,
@@ -254,4 +258,5 @@ def process_request(request):
         }, 200, headers)
 
     except Exception as e:
+        gc.collect()
         return ({"error": str(e)}, 500, headers)
