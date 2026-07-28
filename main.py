@@ -68,7 +68,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     """
 
     # 🌟 ตั้งค่า gemini-flash-latest เป็นหลัก + รองรับชื่อเรียกสำรองกรณี API Key ปรับเปลี่ยน
-    model_candidates = ["gemini-flash-latest", "models/gemini-flash-latest", "gemini-1.5-flash"]
+    model_candidates = ["models/gemini-flash-latest", "gemini-3.6-flash"]
     
     last_error_msg = ""
 
