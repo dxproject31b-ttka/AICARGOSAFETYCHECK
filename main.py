@@ -11,7 +11,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชันความเร็วสูง gemini-1.5-flash)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน gemini-flash-latest + Multi-Fallback)
 # ---------------------------------------------------------------------------
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -67,31 +67,46 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     ]
     """
 
-    # 🚀 ใช้ชื่อโมเดลมาตรฐาน gemini-1.5-flash ที่มีความเสถียรและเร็วที่สุด
-    model_name = "gemini-1.5-flash"
+    # 🌟 ตั้งค่า gemini-flash-latest เป็นหลัก + รองรับชื่อเรียกสำรองกรณี API Key ปรับเปลี่ยน
+    model_candidates = ["gemini-flash-latest", "models/gemini-flash-latest", "gemini-1.5-flash"]
+    
+    last_error_msg = ""
 
-    try:
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        response = model.generate_content([prompt, image])
-        raw_text = response.text if response and response.text else "[]"
-        clean_text = clean_json_response(raw_text)
-        
-        if not clean_text or clean_text == '""' or clean_text == "[]":
-            return []
-            
-        risks = json.loads(clean_text)
-        if isinstance(risks, dict):
-            risks = [risks]
-        return risks
+    for model_name in model_candidates:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                response = model.generate_content([prompt, image])
+                raw_text = response.text if response and response.text else "[]"
+                clean_text = clean_json_response(raw_text)
+                
+                if not clean_text or clean_text == '""' or clean_text == "[]":
+                    return []
+                    
+                risks = json.loads(clean_text)
+                if isinstance(risks, dict):
+                    risks = [risks]
+                return risks
 
-    except Exception as e:
-        err_str = str(e)
-        if "429" in err_str or "quota" in err_str.lower():
-            return [{"risk_type": "ERROR", "description": "Gemini API Rate Limit (429) โควตาเต็มชั่วคราว"}]
-        return [{"risk_type": "ERROR", "description": f"AI Error ({model_name}): {err_str[:120]}"}]
+            except Exception as e:
+                err_str = str(e)
+                last_error_msg = err_str
+                
+                # หากติด 404 (Model Not Found) ให้ข้ามไปใช้ชื่อโมเดลสำรองถัดไปทันที
+                if "404" in err_str or "not found" in err_str.lower():
+                    break
+                    
+                # หากติด 429 (Rate Limit) ให้รอ 6 วินาที แล้วลองซ้ำในโมเดลเดิม
+                if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                    time.sleep(6)
+                else:
+                    break
+
+    return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -117,7 +132,6 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
-        # 🚀 ปรับ DPI เป็น 130 เพื่อให้แปลงภาพได้เร็วขึ้น 3 เท่า ช่วยป้องกัน GAS Timeout
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=130)
         except Exception:
