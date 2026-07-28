@@ -11,7 +11,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน gemini-flash-latest + Multi-Fallback)
+# Backend API สำหรับ AI Cargo Safety Checker (Single-Pass 1 Request/File)
 # ---------------------------------------------------------------------------
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -44,32 +44,33 @@ def clean_json_response(text):
         
     return text
 
-def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
+def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     if not api_key:
         return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEY ใน Cloud Run"}]
 
-    prompt = f"""
+    prompt = """
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D cargo diagram ({view_name} view).
+    Analyze this combined 3D cargo diagram containing TWO stacked views:
+    - TOP HALF: FRONT view of container
+    - BOTTOM HALF: BACK view of container
 
-    RULES:
+    CRITICAL RULES:
     1. STEP_DOWN_RISK: Cargo top surface is not flat across all blocks.
-    2. REAR_EMPTY_RISK: Tall cargo stack but empty floor space behind it.
-    3. FRONT_EMPTY_RISK: Tall cargo stack but empty floor space in front of it.
+    2. REAR_EMPTY_RISK: Tall cargo stack but empty space behind it.
+    3. FRONT_EMPTY_RISK: Tall cargo stack but empty space in front of it.
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
-      {{
+      {
+        "view": "FRONT",
         "risk_type": "STEP_DOWN_RISK", 
         "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
-      }}
+      }
     ]
     """
 
-    # 🌟 ตั้งค่า gemini-flash-latest เป็นหลัก + รองรับชื่อเรียกสำรองกรณี API Key ปรับเปลี่ยน
-    model_candidates = ["models/gemini-flash-latest", "gemini-3.6-flash"]
-    
+    model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
 
     for model_name in model_candidates:
@@ -80,7 +81,7 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
                     model_name=model_name,
                     generation_config={"response_mime_type": "application/json"}
                 )
-                response = model.generate_content([prompt, image])
+                response = model.generate_content([prompt, combined_image])
                 raw_text = response.text if response and response.text else "[]"
                 clean_text = clean_json_response(raw_text)
                 
@@ -96,15 +97,14 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
                 err_str = str(e)
                 last_error_msg = err_str
                 
-                # หากติด 404 (Model Not Found) ให้ข้ามไปใช้ชื่อโมเดลสำรองถัดไปทันที
                 if "404" in err_str or "not found" in err_str.lower():
                     break
                     
-                # หากติด 429 (Rate Limit) ให้รอ 6 วินาที แล้วลองซ้ำในโมเดลเดิม
+                # หากติด 429 Rate Limit ให้รอ 15 วินาทีเพื่อให้ Quota Reset ตัวเอง
                 if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                    time.sleep(6)
+                    time.sleep(15)
                 else:
-                    break
+                    time.sleep(3)
 
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
@@ -154,18 +154,23 @@ def process_request(request):
         front_crop = img.crop((front_x_offset, front_y_offset, front_x_offset + front_w, front_y_offset + front_h))
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
-        front_risks = analyze_image_with_ai(front_crop, "FRONT")
-        back_risks = analyze_image_with_ai(back_crop, "BACK")
+        # 🚀 ต่อภาพ FRONT และ BACK รวมเป็น 1 รูปภาพ ( Single-Pass API Call )
+        combined_w = max(front_w, back_w)
+        combined_h = front_h + back_h
+        combined_img = PIL.Image.new('RGB', (combined_w, combined_h), color=(255, 255, 255))
+        combined_img.paste(front_crop, (0, 0))
+        combined_img.paste(back_crop, (0, front_h))
+
+        # ยิง API เพียง 1 ครั้งต่อ 1 ไฟล์ PDF
+        all_risks = analyze_combined_image_with_ai(combined_img)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
 
-        def process_and_draw(risks, x_off, y_off, w, h, view_name):
-            if not isinstance(risks, list):
-                return
-                
-            for risk in risks:
+        if isinstance(all_risks, list):
+            for risk in all_risks:
                 risk_type = str(risk.get("risk_type", "")).upper().strip()
+                view_name = str(risk.get("view", "GENERAL")).upper()
                 
                 if "STEP_DOWN" in risk_type:
                     risk_type = "STEP_DOWN_RISK"
@@ -175,8 +180,8 @@ def process_request(request):
                     risk_type = "FRONT_EMPTY_RISK"
                 elif risk_type == "ERROR":
                     detected_hazards.append({
-                        "title": f"⚠️ ข้อผิดพลาด ({view_name})",
-                        "detail": risk.get("description", "โปรดตรวจสอบอีกครั้ง"),
+                        "title": "⚠️ ข้อผิดพลาด API",
+                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API"),
                         "is_error": True
                     })
                     continue
@@ -185,18 +190,22 @@ def process_request(request):
                     
                 desc = risk.get("description", "พบความไม่สมดุลของสินค้า")
                 box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box2d") or risk.get("box")
-                drawn_exact = False
                 
+                y_base_offset = front_y_offset if "FRONT" in view_name else back_y_offset
+                w_ref = front_w if "FRONT" in view_name else back_w
+                h_ref = front_h if "FRONT" in view_name else back_h
+                
+                drawn_exact = False
                 if box and isinstance(box, list) and len(box) == 4:
                     try:
                         ymin, xmin, ymax, xmax = map(float, box)
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        abs_xmin = int(x_off + (xmin * w / 1000))
-                        abs_ymin = int(y_off + (ymin * h / 1000))
-                        abs_xmax = int(x_off + (xmax * w / 1000))
-                        abs_ymax = int(y_off + (ymax * h / 1000))
+                        abs_xmin = int(xmin * w_ref / 1000)
+                        abs_ymin = int(y_base_offset + (ymin * h_ref / 1000))
+                        abs_xmax = int(xmax * w_ref / 1000)
+                        abs_ymax = int(y_base_offset + (ymax * h_ref / 1000))
                         
                         draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=6)
                         drawn_exact = True
@@ -204,16 +213,13 @@ def process_request(request):
                         pass
                         
                 if not drawn_exact:
-                    draw.rectangle([x_off, y_off, x_off + w, y_off + h], outline="orange", width=6)
+                    draw.rectangle([0, y_base_offset, w_ref, y_base_offset + h_ref], outline="orange", width=6)
                 
                 detected_hazards.append({
-                    "title": f"ความเสี่ยง: {risk_type}",
+                    "title": f"ความเสี่ยง ({view_name}): {risk_type}",
                     "detail": generate_action_report(risk_type, desc),
                     "is_error": False
                 })
-
-        process_and_draw(front_risks, front_x_offset, front_y_offset, front_w, front_h, "FRONT")
-        process_and_draw(back_risks, back_x_offset, back_y_offset, back_w, back_h, "BACK")
 
         real_hazards = [h for h in detected_hazards if not h.get("is_error", False)]
         has_errors = any(h.get("is_error", False) for h in detected_hazards)
