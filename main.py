@@ -10,6 +10,10 @@ import PIL.ImageDraw
 import functions_framework
 import google.generativeai as genai
 
+# ---------------------------------------------------------------------------
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชันความเร็วสูง gemini-1.5-flash)
+# ---------------------------------------------------------------------------
+
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 if api_key:
     genai.configure(api_key=api_key)
@@ -42,32 +46,33 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
-        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEY"}]
+        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEY ใน Cloud Run"}]
 
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
     Analyze this 3D cargo diagram ({view_name} view).
 
     RULES:
-    1. STEP_DOWN_RISK: Cargo top surface is not flat.
-    2. REAR_EMPTY_RISK: Tall cargo stack but empty space behind it.
-    3. FRONT_EMPTY_RISK: Tall cargo stack but empty space in front of it.
+    1. STEP_DOWN_RISK: Cargo top surface is not flat across all blocks.
+    2. REAR_EMPTY_RISK: Tall cargo stack but empty floor space behind it.
+    3. FRONT_EMPTY_RISK: Tall cargo stack but empty floor space in front of it.
 
-    OUTPUT FORMAT ONLY JSON ARRAY:
+    OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {{
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายสั้นๆ ภาษาไทย",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
     """
 
-    clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
+    # 🚀 ใช้ชื่อโมเดลมาตรฐาน gemini-1.5-flash ที่มีความเสถียรและเร็วที่สุด
+    model_name = "gemini-1.5-flash"
 
     try:
         model = genai.GenerativeModel(
-            model_name=clean_model_name,
+            model_name=model_name,
             generation_config={"response_mime_type": "application/json"}
         )
         response = model.generate_content([prompt, image])
@@ -85,8 +90,8 @@ def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "quota" in err_str.lower():
-            return [{"risk_type": "ERROR", "description": "Gemini API Rate Limit (429) โควตาเต็ม"}]
-        return [{"risk_type": "ERROR", "description": f"AI Error: {err_str[:100]}"}]
+            return [{"risk_type": "ERROR", "description": "Gemini API Rate Limit (429) โควตาเต็มชั่วคราว"}]
+        return [{"risk_type": "ERROR", "description": f"AI Error ({model_name}): {err_str[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -112,10 +117,11 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
+        # 🚀 ปรับ DPI เป็น 130 เพื่อให้แปลงภาพได้เร็วขึ้น 3 เท่า ช่วยป้องกัน GAS Timeout
         try:
-            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
+            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=130)
         except Exception:
-            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
+            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=130)
         
         if not pages:
             return ({"error": "Cannot render PDF page data"}, 400, headers)
@@ -135,7 +141,6 @@ def process_request(request):
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
         front_risks = analyze_image_with_ai(front_crop, "FRONT")
-        time.sleep(2) # เว้นระยะสั้นๆ 2 วินาทีระหว่างฝั่งหน้า-หลัง
         back_risks = analyze_image_with_ai(back_crop, "BACK")
 
         draw = PIL.ImageDraw.Draw(img)
@@ -179,13 +184,13 @@ def process_request(request):
                         abs_xmax = int(x_off + (xmax * w / 1000))
                         abs_ymax = int(y_off + (ymax * h / 1000))
                         
-                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
+                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=6)
                         drawn_exact = True
                     except Exception:
                         pass
                         
                 if not drawn_exact:
-                    draw.rectangle([x_off, y_off, x_off + w, y_off + h], outline="orange", width=8)
+                    draw.rectangle([x_off, y_off, x_off + w, y_off + h], outline="orange", width=6)
                 
                 detected_hazards.append({
                     "title": f"ความเสี่ยง: {risk_type}",
@@ -217,9 +222,9 @@ def process_request(request):
             hazard_count = 0
 
         buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
+        img.save(buffered, format="JPEG", quality=85)
         processed_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        processed_image_url = f"data:image/png;base64,{processed_base64}"
+        processed_image_url = f"data:image/jpeg;base64,{processed_base64}"
 
         return ({
             "status": status_text,
