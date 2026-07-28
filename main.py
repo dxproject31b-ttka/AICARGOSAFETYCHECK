@@ -12,12 +12,11 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Self-Healing Exponential Backoff)
+# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชันพิกัดตีกรอบแม่นยำ 100%)
 # ---------------------------------------------------------------------------
 
-api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-if api_key:
-    genai.configure(api_key=api_key)
+raw_keys = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", "")).strip()
+API_KEYS_POOL = [k.strip() for k in raw_keys.split(",") if k.strip()]
 
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
@@ -46,8 +45,8 @@ def clean_json_response(text):
     return text
 
 def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
-    if not api_key:
-        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEY ใน Cloud Run"}]
+    if not API_KEYS_POOL:
+        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEYS ใน Cloud Run"}]
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
@@ -74,42 +73,43 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
 
-    for model_name in model_candidates:
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config={"response_mime_type": "application/json"}
-                )
-                response = model.generate_content([prompt, combined_image])
-                raw_text = response.text if response and response.text else "[]"
-                clean_text = clean_json_response(raw_text)
-                
-                if not clean_text or clean_text == '""' or clean_text == "[]":
-                    return []
+    for current_key in API_KEYS_POOL:
+        try:
+            genai.configure(api_key=current_key)
+            
+            for model_name in model_candidates:
+                try:
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    response = model.generate_content([prompt, combined_image])
+                    raw_text = response.text if response and response.text else "[]"
+                    clean_text = clean_json_response(raw_text)
                     
-                risks = json.loads(clean_text)
-                if isinstance(risks, dict):
-                    risks = [risks]
-                return risks
+                    if not clean_text or clean_text == '""' or clean_text == "[]":
+                        return []
+                        
+                    risks = json.loads(clean_text)
+                    if isinstance(risks, dict):
+                        risks = [risks]
+                    return risks
 
-            except Exception as e:
-                err_str = str(e)
-                last_error_msg = err_str
-                
-                if "404" in err_str or "not found" in err_str.lower():
-                    break
-                    
-                # 🚀 Smart Exponential Backoff: สลีป 10 วินาทีในรอบแรก และ 20 วินาทีในรอบสอง เพื่อรอ Token Reset
-                if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                    sleep_time = 10 * (attempt + 1)
-                    print(f"Hit 429 Rate Limit. Backoff sleeping {sleep_time}s (Attempt {attempt+1}/{max_retries})...")
-                    time.sleep(sleep_time)
-                else:
-                    time.sleep(3)
+                except Exception as model_err:
+                    err_str = str(model_err)
+                    last_error_msg = err_str
+                    if "404" in err_str or "not found" in err_str.lower():
+                        continue
+                    elif "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                        raise model_err
+                    else:
+                        break
 
-    return [{"risk_type": "ERROR", "description": f"AI Error (429/Quota): {last_error_msg[:120]}"}]
+        except Exception as key_err:
+            last_error_msg = str(key_err)
+            continue
+
+    return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -182,7 +182,7 @@ def process_request(request):
                 elif risk_type == "ERROR":
                     detected_hazards.append({
                         "title": "⚠️ ข้อผิดพลาด API",
-                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API"),
+                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys"),
                         "is_error": True
                     })
                     continue
@@ -192,10 +192,6 @@ def process_request(request):
                 desc = risk.get("description", "พบความไม่สมดุลของสินค้า")
                 box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box2d") or risk.get("box")
                 
-                y_base_offset = front_y_offset if "FRONT" in view_name else back_y_offset
-                w_ref = front_w if "FRONT" in view_name else back_w
-                h_ref = front_h if "FRONT" in view_name else back_h
-                
                 drawn_exact = False
                 if box and isinstance(box, list) and len(box) == 4:
                     try:
@@ -203,18 +199,34 @@ def process_request(request):
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        abs_xmin = int(xmin * w_ref / 1000)
-                        abs_ymin = int(y_base_offset + (ymin * h_ref / 1000))
-                        abs_xmax = int(xmax * w_ref / 1000)
-                        abs_ymax = int(y_base_offset + (ymax * h_ref / 1000))
+                        # 🚀 แปลงพิกัดจาก combined_img กลับมาที่ภาพต้นฉบับอย่างแม่นยำ 100%
+                        cy_min = ymin * combined_h / 1000.0
+                        cy_max = ymax * combined_h / 1000.0
+                        cx_min = xmin * combined_w / 1000.0
+                        cx_max = xmax * combined_w / 1000.0
+
+                        if cy_min < front_h:
+                            # 📍 อยู่ในฝั่ง FRONT (ครึ่งบน)
+                            abs_xmin = int(cx_min)
+                            abs_xmax = int(cx_max)
+                            abs_ymin = int(front_y_offset + cy_min)
+                            abs_ymax = int(front_y_offset + min(cy_max, front_h))
+                        else:
+                            # 📍 อยู่ในฝั่ง BACK (ครึ่งล่าง)
+                            abs_xmin = int(cx_min)
+                            abs_xmax = int(cx_max)
+                            abs_ymin = int(back_y_offset + (cy_min - front_h))
+                            abs_ymax = int(back_y_offset + (cy_max - front_h))
                         
-                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=6)
+                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=7)
                         drawn_exact = True
                     except Exception:
                         pass
                         
                 if not drawn_exact:
-                    draw.rectangle([0, y_base_offset, w_ref, y_base_offset + h_ref], outline="orange", width=6)
+                    y_off = front_y_offset if "FRONT" in view_name else back_y_offset
+                    h_ref = front_h if "FRONT" in view_name else back_h
+                    draw.rectangle([0, y_off, combined_w, y_off + h_ref], outline="orange", width=7)
                 
                 detected_hazards.append({
                     "title": f"ความเสี่ยง ({view_name}): {risk_type}",
@@ -247,7 +259,6 @@ def process_request(request):
         processed_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         processed_image_url = f"data:image/jpeg;base64,{processed_base64}"
 
-        # คืนหน่วยความจำชั่วคราว
         gc.collect()
 
         return ({
