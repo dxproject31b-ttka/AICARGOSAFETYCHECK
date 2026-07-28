@@ -3,17 +3,12 @@ import io
 import json
 import os
 import time
-import re
 import traceback
 from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
 import functions_framework
 import google.generativeai as genai
-
-# ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชัน Google GenAI SDK + Dynamic ASCII Model Name)
-# ---------------------------------------------------------------------------
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 if api_key:
@@ -47,69 +42,51 @@ def clean_json_response(text):
 
 def analyze_image_with_ai(image: PIL.Image.Image, view_name: str):
     if not api_key:
-        return [{"risk_type": "ERROR", "description": "ระบบหา GEMINI_API_KEY ไม่พบ โปรดตั้งค่าใน Cloud Run"}]
+        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEY"}]
 
     prompt = f"""
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D isometric cargo diagram ({view_name} view). 
-    Focus entirely on the colored cargo blocks. Ignore the yellow container outline.
+    Analyze this 3D cargo diagram ({view_name} view).
 
-    CRITICAL RULES for detecting risks:
-    1. STEP_DOWN_RISK: Look at the top surface of all cargo blocks. If the top surface is NOT perfectly flat across all blocks, this is a STEP_DOWN_RISK.
-    2. REAR_EMPTY_RISK: If there is a tall stack of cargo but the floor space behind it is completely empty.
-    3. FRONT_EMPTY_RISK: If there is a tall stack of cargo but the floor space in front of it is completely empty.
+    RULES:
+    1. STEP_DOWN_RISK: Cargo top surface is not flat.
+    2. REAR_EMPTY_RISK: Tall cargo stack but empty space behind it.
+    3. FRONT_EMPTY_RISK: Tall cargo stack but empty space in front of it.
 
-    OUTPUT FORMAT:
-    Return ONLY a JSON array.
+    OUTPUT FORMAT ONLY JSON ARRAY:
     [
       {{
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
+        "description": "อธิบายสั้นๆ ภาษาไทย",
         "box_2d": [ymin, xmin, ymax, xmax]
       }}
     ]
     """
 
-    # 🚨 บังคับสร้างขีดกลาง (-) จากรหัส ASCII chr(45) โดยตรง 100% ป้องกันพิมพ์ผิดตามไฟล์ที่คุณระบุ
     clean_model_name = f"gemini{chr(45)}flash{chr(45)}latest"
 
-    max_retries = 3
-    last_err_msg = ""
+    try:
+        model = genai.GenerativeModel(
+            model_name=clean_model_name,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        response = model.generate_content([prompt, image])
+        raw_text = response.text if response and response.text else "[]"
+        clean_text = clean_json_response(raw_text)
+        
+        if not clean_text or clean_text == '""' or clean_text == "[]":
+            return []
+            
+        risks = json.loads(clean_text)
+        if isinstance(risks, dict):
+            risks = [risks]
+        return risks
 
-    for attempt in range(max_retries):
-        try:
-            model = genai.GenerativeModel(
-                model_name=clean_model_name,
-                generation_config={"response_mime_type": "application/json"}
-            )
-            
-            response = model.generate_content([prompt, image])
-            
-            raw_text = response.text if response and response.text else "[]"
-            clean_text = clean_json_response(raw_text)
-            
-            if not clean_text or clean_text == '""' or clean_text == "[]":
-                return []
-                
-            risks = json.loads(clean_text)
-            if isinstance(risks, dict):
-                risks = [risks]
-            return risks
-
-        except Exception as e:
-            err_str = str(e)
-            last_err_msg = err_str
-            
-            # 🚨 ดักจับ Error 429 (Rate Limit) -> รอ 12 วินาทีแล้วลองยิงใหม่อัตโนมัติ
-            if "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                print(f"Hit 429 Rate Limit for {view_name}. Sleeping 12s (Attempt {attempt+1}/{max_retries})...")
-                time.sleep(12)
-            else:
-                break
-
-    err_msg = last_err_msg[:200].replace('\n', ' ')
-    print(f"Google SDK Error: {err_msg}")
-    return [{"risk_type": "ERROR", "description": f"SDK Error: {err_msg}"}]
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "quota" in err_str.lower():
+            return [{"risk_type": "ERROR", "description": "Gemini API Rate Limit (429) โควตาเต็ม"}]
+        return [{"risk_type": "ERROR", "description": f"AI Error: {err_str[:100]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -136,9 +113,9 @@ def process_request(request):
         pdf_bytes = base64.b64decode(base64_str)
 
         try:
-            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=200)
+            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
         except Exception:
-            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=200)
+            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
         
         if not pages:
             return ({"error": "Cannot render PDF page data"}, 400, headers)
@@ -158,7 +135,7 @@ def process_request(request):
         back_crop = img.crop((back_x_offset, back_y_offset, back_x_offset + back_w, back_y_offset + back_h))
 
         front_risks = analyze_image_with_ai(front_crop, "FRONT")
-        time.sleep(4)
+        time.sleep(2) # เว้นระยะสั้นๆ 2 วินาทีระหว่างฝั่งหน้า-หลัง
         back_risks = analyze_image_with_ai(back_crop, "BACK")
 
         draw = PIL.ImageDraw.Draw(img)
@@ -179,15 +156,15 @@ def process_request(request):
                     risk_type = "FRONT_EMPTY_RISK"
                 elif risk_type == "ERROR":
                     detected_hazards.append({
-                        "title": f"⚠️ เกิดข้อผิดพลาดในการวิเคราะห์ ({view_name})",
-                        "detail": risk.get("description", "โปรดตรวจสอบข้อมูลอีกครั้ง"),
+                        "title": f"⚠️ ข้อผิดพลาด ({view_name})",
+                        "detail": risk.get("description", "โปรดตรวจสอบอีกครั้ง"),
                         "is_error": True
                     })
                     continue
                 else:
                     continue
                     
-                desc = risk.get("description", "ตรวจพบความไม่สมดุลของสินค้า")
+                desc = risk.get("description", "พบความไม่สมดุลของสินค้า")
                 box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box2d") or risk.get("box")
                 drawn_exact = False
                 
@@ -204,15 +181,14 @@ def process_request(request):
                         
                         draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
                         drawn_exact = True
-                    except Exception as e:
-                        print(f"Drawing Error: {e}")
+                    except Exception:
+                        pass
                         
                 if not drawn_exact:
                     draw.rectangle([x_off, y_off, x_off + w, y_off + h], outline="orange", width=8)
-                    desc += "\n*(หมายเหตุ: ระบบตีกรอบภาพรวมสีส้ม เนื่องจาก AI ไม่สามารถระบุพิกัดย่อยได้ชัดเจน)*"
                 
                 detected_hazards.append({
-                    "title": f"ตรวจพบความเสี่ยง: {risk_type}",
+                    "title": f"ความเสี่ยง: {risk_type}",
                     "detail": generate_action_report(risk_type, desc),
                     "is_error": False
                 })
@@ -224,7 +200,7 @@ def process_request(request):
         has_errors = any(h.get("is_error", False) for h in detected_hazards)
 
         if len(real_hazards) > 0:
-            status_text = f"พบจุดเสี่ยงอันตราย (รวมทั้งหมด {len(real_hazards)} จุด)"
+            status_text = f"พบจุดเสี่ยงอันตราย ({len(real_hazards)} จุด)"
             action_text = "\n\n--------------------------------------------------\n\n".join(
                 [f"[{h['title']}]\n{h['detail']}" for h in detected_hazards]
             )
@@ -245,19 +221,12 @@ def process_request(request):
         processed_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         processed_image_url = f"data:image/png;base64,{processed_base64}"
 
-        response_data = {
+        return ({
             "status": status_text,
             "hazardCount": hazard_count,
             "actionRequired": action_text,
-            "processedImageUrl": processed_image_url,
-            "ai_analysis": {
-                "front": front_risks,
-                "back": back_risks
-            }
-        }
-
-        return (response_data, 200, headers)
+            "processedImageUrl": processed_image_url
+        }, 200, headers)
 
     except Exception as e:
-        print(traceback.format_exc())
-        return ({"error": str(e), "trace": traceback.format_exc()}, 500, headers)
+        return ({"error": str(e)}, 500, headers)
