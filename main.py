@@ -99,8 +99,6 @@ Inspect ONLY physical height drops and floor gaps:
 
 1. REAR_EMPTY_RISK (พื้นที่ว่างท้ายตู้):
    - Unfilled floor space, gaps, or cargo height drops located at the OPEN REAR DOOR END (the side with floor grids and 2 red arrows nearby).
-   - OR a cargo height drop (step-down) facing the rear door. If the last stack of cargo near the red arrows is LOWER than the cargo behind it, THIS IS A RISK. Flag it.
-   - High risk of cargo sliding out of the container doors.
    - *CRITICAL FIX*: If you see an empty grid space (like the red box area), it is the REAR, NOT the front. This must be flagged as REAR_EMPTY_RISK.
 
 2. STEP_DOWN_RISK:
@@ -110,7 +108,6 @@ Inspect ONLY physical height drops and floor gaps:
    
 3. FRONT_EMPTY_RISK (พื้นที่ว่างหัวตู้):
    - Unfilled floor space or lower tier stacks placed DIRECTLY AGAINST THE SOLID YELLOW FRONT WALL.
-   - OR lower tier stacks (step-down) placed against the yellow wall. If the cargo touching the yellow wall is LOWER than the cargo in front of it, it creates an empty gap at the top. THIS IS A RISK. Flag it.
    - This applies ONLY to the solid wall side, never the open side.
 
 ### CRITICAL RULES:
