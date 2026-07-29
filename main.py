@@ -136,9 +136,9 @@ def process_request(request):
         pdf_bytes = base64.b64decode(base64_str)
 
         try:
-            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=130)
+            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
         except Exception:
-            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=130)
+            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
         
         if not pages:
             return ({"error": "Cannot render PDF page data"}, 400, headers)
