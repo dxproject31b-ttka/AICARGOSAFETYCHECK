@@ -72,44 +72,64 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
             "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run (กรุณาตรวจเช็คชื่อตัวแปรใน Cloud Run Variables & Secrets) | Env Vars ที่มีในระบบ: {env_keys_list[:8]}"
         }]
 
-    prompt = """
-    You are an expert Cargo Loading Safety Inspector.
-    Analyze this 3D cargo loading manifest diagram page containing container diagrams (which may be arranged Side-by-Side or Top-Bottom):
-    - VIEW LABELS: Pay attention to text labels "Front" on the PDF diagram. TOP HALF or LEFT SIDE: RIGHT view of container.
-    - VIEW LABELS: Pay attention to text labels "Back" on the PDF diagram. BOTTOM HALF or RIGHT SIDE: LEFT view of container.
+    prompt_v2 = """
+You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
 
-    CONTAINER ORIENTATION & ISOMETRIC VIEW RULES:
-    - The "Front" view and "Back" view are rotated 180 degrees opposite from each other.
-    - IN EACH INDIVIDUAL VIEW (วิเคราะห์แยกรูปอิสระ) if "Back" view:
-      * SOLID YELLOW CONTAINER WALL = FRONT OF CONTAINER (หัวตู้ฝั่งผนังสีเหลืองในรูปนั้นๆ).
-      * OPEN CONTAINER END (NO WALL) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
-    - DO NOT assume fixed left/right coordinates. Inspect the yellow wall vs open end independently for EACH view!
-    
-    MANDATORY MULTI-VIEW SCANNING RULE:
-    - You MUST inspect BOTH container diagrams on the page independently:
-      1) Inspect the FRONT view diagram.
-      2) Inspect the BACK view diagram.
-    - If hazards exist in BOTH views, you MUST return MULTIPLE JSON objects in the array (one for FRONT view, one for BACK view)! Do not stop after finding just one hazard.
-    
-    CRITICAL NO-HALLUCINATION RULE:
-    - DO NOT confuse cargo block COLORS (all colors) with height differences! 
-    - If all cargo stacks/rows have the SAME PHYSICAL HEIGHT and flat top surface across the container, classify as SAFE (return []).
+### STEP 1: LAYOUT IDENTIFICATION (MUST CHECK FIRST)
+Determine the layout arrangement of the 2 diagrams on Page 2:
+- TYPE A (Top-Bottom Layout): "Front" diagram is in the TOP HALF (Y: 0-500). "Back" diagram is in the BOTTOM HALF (Y: 500-1000). Divided by a horizontal gray line.
+- TYPE B (Side-by-Side Layout): "Front" diagram is in the LEFT HALF (X: 0-500). "Back" diagram is in the RIGHT HALF (X: 500-1000). Divided by a vertical gray line.
 
-    CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. REAR_EMPTY_RISK: Any cargo height drop, lower tier cargo stack, or empty floor space toward the OPEN CONTAINER END (away from the yellow wall in that view). Bounding box MUST be placed on the OPEN CONTAINER END in that view.
-    2. STEP_DOWN_RISK: Unbalanced cargo heights or height steps. NOTE: If the container is fully packed with NO floor gaps, ONLY flag height differences that are GREATER THAN 0 cargo layer/tier (a height drop of 1 or more layers).
-    3. FRONT_EMPTY_RISK: Empty floor space or lower tier stacks directly against the SOLID YELLOW WALL in that view. Bounding box MUST be placed on the SOLID YELLOW WALL in that view.
+### STEP 2: CONTAINER ORIENTATION RULES FOR EACH VIEW
+For EACH diagram independently:
+1. SOLID YELLOW WALL = FRONT OF CONTAINER (Head Wall).
+2. OPEN CONTAINER END (Floor grid / Red Arrows / No Wall) = REAR/DOOR OF CONTAINER.
+3. Observe cargo layout from the SOLID YELLOW WALL toward the OPEN END.
 
-    OUTPUT FORMAT ONLY A JSON ARRAY:
-    [
-      {
-        "view": "FRONT or BACK",
-        "risk_type": "REAR_EMPTY_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
-        "box_2d": [ymin, xmin, ymax, xmax]
-      }
-    ]
-    """
+### STEP 3: MANDATORY DUAL-VIEW INSPECTION
+You MUST scan BOTH diagrams independently and generate findings for each:
+- Diagram 1: "view": "FRONT"
+- Diagram 2: "view": "BACK"
+If hazards exist in both diagrams, return JSON objects for both views.
+
+### STEP 4: CARGO COLLAPSE & SLIDE RISK CRITERIA
+Inspect ONLY physical height drops and floor gaps (IGNORE COLOR DIFFERENCES BETWEEN BOXES):
+
+1. REAR_EMPTY_RISK:
+   - Cargo height drops or empty floor space exists TOWARD THE OPEN REAR DOOR END.
+   - High risk of cargo sliding or tumbling backward out of the container during transport or when doors open.
+   - Bounding box MUST target the unsupported cargo stack face or empty rear gap.
+
+2. STEP_DOWN_RISK:
+   - Unsupported height step drop GREATER THAN OR EQUAL TO 1 CARGO LAYER (>= 1 tier height difference) between adjacent cargo stacks.
+   - Example: A stack of 3 boxes placed next to a stack of 2 boxes (or 1 box) creates a 1-tier (or more) drop that must be flagged.
+   - IGNORE flat top surfaces where adjacent cargo stacks have the EXACT SAME height (even if boxes have different colors).
+   
+3. FRONT_EMPTY_RISK:
+   - Unfilled floor space or lower tier stacks placed directly against the SOLID YELLOW FRONT WALL.
+
+### CRITICAL RULES:
+- Bounding Box Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
+- If container is fully packed with a flat surface and no height drop, return an empty array [].
+- DO NOT hallucinate height drops on flat cargo surfaces.
+
+### OUTPUT FORMAT:
+Return strictly a valid JSON array of objects:
+[
+  {
+    "view": "FRONT",
+    "risk_type": "REAR_EMPTY_RISK",
+    "description": "สินค้ามีความสูงลดลงทางฝั่งประตูท้ายตู้ เสี่ยงต่อการโค่นล้มสไลด์ออกนอกตู้",
+    "box_2d": [ymin, xmin, ymax, xmax]
+  },
+  {
+    "view": "BACK",
+    "risk_type": "STEP_DOWN_RISK",
+    "description": "พบบริเวณต่างระดับของสินค้าเกิน 1 ชั้น เสี่ยงต่อการล้มเอียง",
+    "box_2d": [ymin, xmin, ymax, xmax]
+  }
+]
+"""
 
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
