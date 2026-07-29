@@ -80,9 +80,15 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     - The "Front" view and "Back" view are rotated 180 degrees opposite from each other.
     - IN EACH INDIVIDUAL VIEW (วิเคราะห์แยกรูปอิสระ):
       * SOLID YELLOW CONTAINER WALL = FRONT OF CONTAINER (หัวตู้ฝั่งผนังสีเหลืองในรูปนั้นๆ).
-      * OPEN CONTAINER END (NO WALL) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
+      * OPEN CONTAINER END (NO WALL ฝั่งประตูเปิดท้ายตู้ 3399mm/7200mm) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
     - DO NOT assume fixed left/right coordinates. Inspect the yellow wall vs open end independently for EACH view!
-
+    
+    MANDATORY MULTI-VIEW SCANNING RULE:
+    - You MUST inspect BOTH container diagrams on the page independently:
+      1) Inspect the FRONT view diagram.
+      2) Inspect the BACK view diagram.
+    - If hazards exist in BOTH views, you MUST return MULTIPLE JSON objects in the array (one for FRONT view, one for BACK view)! Do not stop after finding just one hazard.
+    
     CRITICAL NO-HALLUCINATION RULE:
     - DO NOT confuse cargo block COLORS (red, green, blue, yellow) with height differences! 
     - If all cargo stacks/rows have the SAME PHYSICAL HEIGHT and flat top surface across the container, classify as SAFE (return []).
