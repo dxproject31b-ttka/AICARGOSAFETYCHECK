@@ -12,7 +12,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (LEFT/RIGHT Isometric Views)
+# Backend API สำหรับ AI Cargo Safety Checker (Full Diagram Single-Pass Engine)
 # ---------------------------------------------------------------------------
 
 def get_api_keys_pool():
@@ -20,7 +20,6 @@ def get_api_keys_pool():
     raw_keys = ""
     found_var_name = ""
     
-    # 🔍 1. สแกนหาตัวแปรทั้งหมดในระบบที่มีคำว่า GEMINI หรือ API_KEY
     for env_k, env_v in os.environ.items():
         k_upper = env_k.upper().strip()
         if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
@@ -28,7 +27,6 @@ def get_api_keys_pool():
             found_var_name = env_k
             break
             
-    # 🔍 2. Fallback สำรอง
     if not raw_keys:
         raw_keys = os.environ.get("GEMINI_API_KEYS", 
                    os.environ.get("GEMINI_API_KEY", 
@@ -43,10 +41,10 @@ def get_api_keys_pool():
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
         return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับมากกว่า 1 ชั้น\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงสาย Ratchet Strap ป้องกันสินค้าล้มไถล"
-    elif case_type == "LEFT_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งซ้าย (LEFT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งซ้าย (Side Blocking) และรัดตรึงป้องกันสินค้าหล่น"
-    elif case_type == "RIGHT_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งขวา (RIGHT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งขวา (Side Blocking) และรัดตรึงป้องกันสินค้าหล่น"
+    elif case_type == "REAR_EMPTY_RISK":
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งท้ายตู้\n{description}\n🛠️ ACTION: ติดตั้งโครงไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าหล่น"
+    elif case_type == "FRONT_EMPTY_RISK":
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งหัวตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าหล่น"
     else:
         return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
@@ -66,7 +64,7 @@ def clean_json_response(text):
         
     return text
 
-def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
+def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     api_keys = get_api_keys_pool()
     if not api_keys:
         env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
@@ -77,23 +75,22 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this combined 3D cargo diagram containing TWO stacked views:
-    - TOP HALF: RIGHT view of container
-    - BOTTOM HALF: LEFT view of container
+    Analyze this 3D cargo loading manifest diagram page containing container diagrams (which may be arranged Side-by-Side or Top-Bottom).
 
-    CONTAINER VIEW ORIENTATION RULES:
-    - RIGHT VIEW (TOP HALF): Isometric view looking from the RIGHT side. The solid container wall represents the FRONT of the vehicle (หัวตู้ฝั่งด้านหน้า).
-    - LEFT VIEW (BOTTOM HALF): Isometric view looking from the LEFT side. The solid container wall represents the FRONT of the vehicle (หัวตู้ฝั่งด้านหน้า).
-    
+    CONTAINER ORIENTATION & STRUCTURE RULES:
+    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): This yellow wall structure ALWAYS represents the FRONT of the container/vehicle (หัวตู้ฝั่งด้านหน้า).
+    - OPEN END: Represents the REAR / BACK of the container (ฝั่งด้านท้ายตู้รถ).
+    - VIEW LABELS: Pay attention to text labels "Front" (หัวตู้) and "Back" (ท้ายตู้) on the PDF diagram.
+
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
     1. STEP_DOWN_RISK: Unbalanced cargo heights or height steps. NOTE: If the container is fully packed with NO floor gaps, ONLY flag height differences that are GREATER THAN 1 cargo layer/tier (a height drop of 2 or more layers).
-    2. LEFT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space on the LEFT side, behind, or surrounding them (risk of sliding or falling to the left).
-    3. RIGHT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space on the RIGHT side, behind, or surrounding them (risk of sliding or falling to the right).
+    2. REAR_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space behind, beside, or surrounding them toward the REAR (risk of sliding backward or sideways).
+    3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them toward the FRONT/Yellow Wall (risk of sliding forward or sideways).
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {
-        "view": "RIGHT or LEFT",
+        "view": "FRONT or BACK",
         "risk_type": "STEP_DOWN_RISK", 
         "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
@@ -115,7 +112,7 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
                             model_name=model_name,
                             generation_config={"response_mime_type": "application/json"}
                         )
-                        response = model.generate_content([prompt, combined_image])
+                        response = model.generate_content([prompt, diagram_image])
                         raw_text = response.text if response and response.text else "[]"
                         clean_text = clean_json_response(raw_text)
                         
@@ -181,24 +178,16 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
         
-        RIGHT_x_offset, RIGHT_y_offset = 0, int(height * 0.12)
-        RIGHT_w = int(width * 0.75)
-        RIGHT_h = int(height * 0.50) - RIGHT_y_offset
-        
-        LEFT_x_offset, LEFT_y_offset = 0, int(height * 0.50)
-        LEFT_w = int(width * 0.75)
-        LEFT_h = int(height * 0.92) - LEFT_y_offset
+        # 🚀 ครอบพื้นที่โซนผังตู้สินค้าทั้งหมดแบบสมบูรณ์ (ไม่ตัดหั่นภาพ)
+        crop_y_start = int(height * 0.10)
+        crop_y_end = int(height * 0.90)
+        crop_w = width
+        crop_h = crop_y_end - crop_y_start
 
-        RIGHT_crop = img.crop((RIGHT_x_offset, RIGHT_y_offset, RIGHT_x_offset + RIGHT_w, RIGHT_y_offset + RIGHT_h))
-        LEFT_crop = img.crop((LEFT_x_offset, LEFT_y_offset, LEFT_x_offset + LEFT_w, LEFT_y_offset + LEFT_h))
+        diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
 
-        combined_w = max(RIGHT_w, LEFT_w)
-        combined_h = RIGHT_h + LEFT_h
-        combined_img = PIL.Image.new('RGB', (combined_w, combined_h), color=(255, 255, 255))
-        combined_img.paste(RIGHT_crop, (0, 0))
-        combined_img.paste(LEFT_crop, (0, RIGHT_h))
-
-        all_risks = analyze_combined_image_with_ai(combined_img)
+        # ส่งภาพผังตู้เต็มแผ่นให้ AI วิเคราะห์
+        all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
@@ -210,10 +199,10 @@ def process_request(request):
                 
                 if "STEP_DOWN" in risk_type:
                     risk_type = "STEP_DOWN_RISK"
-                elif "LEFT_EMPTY" in risk_type:
-                    risk_type = "LEFT_EMPTY_RISK"
-                elif "RIGHT_EMPTY" in risk_type:
-                    risk_type = "RIGHT_EMPTY_RISK"
+                elif "REAR_EMPTY" in risk_type:
+                    risk_type = "REAR_EMPTY_RISK"
+                elif "FRONT_EMPTY" in risk_type:
+                    risk_type = "FRONT_EMPTY_RISK"
                 elif risk_type == "ERROR":
                     detected_hazards.append({
                         "title": "⚠️ ข้อผิดพลาด API",
@@ -234,31 +223,19 @@ def process_request(request):
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        cy_min = ymin * combined_h / 1000.0
-                        cy_max = ymax * combined_h / 1000.0
-                        cx_min = xmin * combined_w / 1000.0
-                        cx_max = xmax * combined_w / 1000.0
-
-                        if cy_min < RIGHT_h:
-                            abs_xmin = int(cx_min)
-                            abs_xmax = int(cx_max)
-                            abs_ymin = int(RIGHT_y_offset + cy_min)
-                            abs_ymax = int(RIGHT_y_offset + min(cy_max, RIGHT_h))
-                        else:
-                            abs_xmin = int(cx_min)
-                            abs_xmax = int(cx_max)
-                            abs_ymin = int(LEFT_y_offset + (cy_min - RIGHT_h))
-                            abs_ymax = int(LEFT_y_offset + (cy_max - RIGHT_h))
+                        # 🚀 แปลงพิกัด Bounding Box จาก diagram_crop กลับมาที่รูปต้นฉบับอย่างแม่นยำ 100%
+                        abs_xmin = int(xmin * crop_w / 1000.0)
+                        abs_xmax = int(xmax * crop_w / 1000.0)
+                        abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
+                        abs_ymax = int(crop_y_start + (ymax * crop_h / 1000.0))
                         
-                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=7)
+                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
                         drawn_exact = True
                     except Exception:
                         pass
                         
                 if not drawn_exact:
-                    y_off = RIGHT_y_offset if "RIGHT" in view_name else LEFT_y_offset
-                    h_ref = RIGHT_h if "RIGHT" in view_name else LEFT_h
-                    draw.rectangle([0, y_off, combined_w, y_off + h_ref], outline="orange", width=7)
+                    draw.rectangle([0, crop_y_start, crop_w, crop_y_end], outline="orange", width=8)
                 
                 detected_hazards.append({
                     "title": f"ความเสี่ยง ({view_name}): {risk_type}",
