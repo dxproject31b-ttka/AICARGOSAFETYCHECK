@@ -74,23 +74,27 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D cargo loading manifest diagram page containing container diagrams (Front view and Back view).
+    Analyze this 3D cargo loading manifest diagram page containing Isometric container diagrams (which may be arranged Side-by-Side or Top-Bottom):
 
-    CONTAINER ORIENTATION & STRUCTURE RULES:
-    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): This yellow wall ALWAYS represents the FRONT / HEAD of the container (หัวตู้ฝั่งด้านหน้า).
+    VIEW LABELS & ORIENTATION RULES:
+    - TOP HALF or LEFT SIDE: Represents the "Front" view (Isometric view looking toward the Front Yellow Wall). Label view as "FRONT".
+    - BOTTOM HALF or RIGHT SIDE: Represents the "Back" view (Isometric view looking toward the Rear Open Door). Label view as "BACK".
+    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): ALWAYS represents the HEAD / FRONT of the container (หัวตู้ฝั่งด้านหน้า).
     - OPEN DOOR END (ฝั่งประตูเปิดไม่มีผนัง): ALWAYS represents the REAR / BACK of the container (ฝั่งท้ายตู้ประตูเปิด).
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. REAR_EMPTY_RISK: ANY cargo height drop, lower tier stack, or empty floor space near the OPEN REAR DOOR END (away from the yellow wall). Bounding box MUST target the REAR OPEN DOOR END.
-    2. STEP_DOWN_RISK: Stepped height drops greater than 1 tier in the middle of cargo stacks.
-    3. FRONT_EMPTY_RISK: Empty floor space or lower tier stacks directly against the FRONT YELLOW WALL. Bounding box MUST target the FRONT YELLOW WALL.
+    1. STEP_DOWN_RISK: Unbalanced cargo heights forming step-down drops. 
+       - ALWAYS flag ANY height step-down drop near the OPEN REAR DOOR end (even if only 1 layer drop, as cargo can slide/fall out when doors open).
+       - In fully packed middle areas, flag height drops that are 2 or more layers steep.
+    2. REAR_EMPTY_RISK: Tall or unbraced cargo stacks with empty floor space or lower tier drops near the REAR OPEN DOOR (risk of sliding or falling backward).
+    3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them toward the FRONT/Yellow Wall (risk of sliding forward).
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {
         "view": "FRONT or BACK",
         "risk_type": "REAR_EMPTY_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงบริเวณฝั่งท้ายตู้หรือหัวตู้เป็นภาษาไทยสั้นๆ",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
       }
     ]
