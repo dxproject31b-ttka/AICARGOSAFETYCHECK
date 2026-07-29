@@ -12,17 +12,32 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker ( Dynamic 5-Keys Dynamic Pool )
+# Backend API สำหรับ AI Cargo Safety Checker ( Bulletproof Smart Env Finder )
 # ---------------------------------------------------------------------------
 
 def get_api_keys_pool():
-    """ ดึงรายชื่อ API Keys ทั้งหมดแบบ Dynamic รองรับหลายชื่อตัวแปร """
-    raw_keys = os.environ.get("GEMINI_API_KEYS", 
-               os.environ.get("GEMINI_API_KEY", 
-               os.environ.get("GEMINI_KEYS", 
-               os.environ.get("API_KEYS", "")))).strip()
+    """ ระบบค้นหา API Keys อัจฉริยะ ค้นหาทุกตัวแปรในระบบไม่สนตัวพิมพ์เล็ก-ใหญ่ """
+    raw_keys = ""
+    found_var_name = ""
     
+    # 🔍 1. สแกนหาตัวแปรทั้งหมดในระบบที่มีคำว่า GEMINI หรือ API_KEY
+    for env_k, env_v in os.environ.items():
+        k_upper = env_k.upper().strip()
+        if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
+            raw_keys = env_v.strip()
+            found_var_name = env_k
+            break
+            
+    # 🔍 2. Fallback สำรอง
+    if not raw_keys:
+        raw_keys = os.environ.get("GEMINI_API_KEYS", 
+                   os.environ.get("GEMINI_API_KEY", 
+                   os.environ.get("gemini_api_keys", 
+                   os.environ.get("gemini_api_key", "")))).strip()
+
     keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+    if keys:
+        print(f"✅ Successfully loaded {len(keys)} API keys from variable: '{found_var_name}'")
     return keys
 
 def generate_action_report(case_type, description):
@@ -54,9 +69,11 @@ def clean_json_response(text):
 def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     api_keys = get_api_keys_pool()
     if not api_keys:
+        # พ่นแสดงรายชื่อตัวแปรที่มีในระบบ เพื่อวินิจฉัยสาเหตุได้ทันที
+        env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
         return [{
             "risk_type": "ERROR", 
-            "description": "ไม่พบ GEMINI_API_KEYS ใน Cloud Run (กรุณาตั้งค่าตัวแปร GEMINI_API_KEYS ใน Cloud Run Variables & Secrets)"
+            "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run (กรุณาตรวจเช็คชื่อตัวแปรใน Cloud Run Variables & Secrets) | Env Vars ที่มีในระบบ: {env_keys_list[:8]}"
         }]
 
     prompt = """
@@ -84,7 +101,7 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
 
-    # 🚀 ระบบวนสลับ 5 Keys แบบ 2 รอบ (Pass 1 & Pass 2) ป้องกันการค้างจาก Rate Limit
+    # 🚀 วนสลับใช้ Keys ทั้งหมดที่มีในระบบ
     for pass_round in range(2):
         for current_key in api_keys:
             try:
@@ -112,22 +129,20 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
                         err_str = str(model_err)
                         last_error_msg = err_str
                         if "404" in err_str or "not found" in err_str.lower():
-                            continue # ลองโมเดลถัดไป
+                            continue
                         elif "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                            # ติด 429 ให้ข้ามไปสลับใช้ Key ถัดไปทันที
                             raise model_err
                         else:
                             break
 
             except Exception as key_err:
                 last_error_msg = str(key_err)
-                continue # สลับไป Key ถัดไปใน Pool
+                continue
         
-        # หากวนจบ Pass 1 แล้วยังติด 429 ทั้งหมด ให้สั่งรอ 10 วินาที แล้วลอง Pass 2
         if pass_round == 0:
             time.sleep(10)
 
-    return [{"risk_type": "ERROR", "description": f"AI Error (ทั้ง {len(api_keys)} Keys ติดโควตา/ข้อผิดพลาด): {last_error_msg[:120]}"}]
+    return [{"risk_type": "ERROR", "description": f"AI Error (รวมทั้ง {len(api_keys)} Keys): {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -153,7 +168,6 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
-        # 🚀 ปรับ DPI เป็น 180 เพื่อภาพคมชัดสูงในการขยายดูสินค้า
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
         except Exception:
