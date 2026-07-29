@@ -103,7 +103,8 @@ Inspect ONLY physical height drops and floor gaps:
 2. STEP_DOWN_RISK:
    - Unsupported height step drop GREATER THAN OR EQUAL TO 1 CARGO LAYER between adjacent cargo stacks.
    - IGNORE flat top surfaces where adjacent cargo stacks have the EXACT SAME height.
-   
+   - This risk can occur within adjacent inner longitudinal rows, adjacent outer longitudinal rows, or as a pocket/depression height drop at the contact interface between inner and outer rows.
+
 3. FRONT_EMPTY_RISK (พื้นที่ว่างหัวตู้):
    - Unfilled floor space or lower tier stacks placed DIRECTLY AGAINST THE SOLID YELLOW FRONT WALL.
    - This applies ONLY to the solid wall side, never the open side.
