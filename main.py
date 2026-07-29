@@ -73,8 +73,10 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
         }]
 
     prompt = """
-    You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D cargo loading manifest diagram page containing Isometric container diagrams (Front view and Back view).
+    You are an expert Cargo Loading Safety Inspector.
+    Analyze this 3D cargo loading manifest diagram page containing container diagrams (which may be arranged Side-by-Side or Top-Bottom):
+    - VIEW LABELS: Pay attention to text labels "Front" on the PDF diagram. TOP HALF or LEFT SIDE: RIGHT view of container.
+    - VIEW LABELS: Pay attention to text labels "Back" on the PDF diagram. BOTTOM HALF or RIGHT SIDE: LEFT view of container.
 
     CONTAINER ORIENTATION & ISOMETRIC VIEW RULES:
     - The "Front" view and "Back" view are rotated 180 degrees opposite from each other.
@@ -90,7 +92,7 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     - If hazards exist in BOTH views, you MUST return MULTIPLE JSON objects in the array (one for FRONT view, one for BACK view)! Do not stop after finding just one hazard.
     
     CRITICAL NO-HALLUCINATION RULE:
-    - DO NOT confuse cargo block COLORS (red, green, blue, yellow) with height differences! 
+    - DO NOT confuse cargo block COLORS (all colors) with height differences! 
     - If all cargo stacks/rows have the SAME PHYSICAL HEIGHT and flat top surface across the container, classify as SAFE (return []).
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
