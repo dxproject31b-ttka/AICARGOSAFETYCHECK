@@ -12,11 +12,10 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (Full Diagram Single-Pass Engine)
+# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision Rear/Front Engine )
 # ---------------------------------------------------------------------------
 
 def get_api_keys_pool():
-    """ ระบบค้นหา API Keys อัจฉริยะ ค้นหาทุกตัวแปรในระบบไม่สนตัวพิมพ์เล็ก-ใหญ่ """
     raw_keys = ""
     found_var_name = ""
     
@@ -40,11 +39,11 @@ def get_api_keys_pool():
 
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
-        return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับมากกว่า 1 ชั้น\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงสาย Ratchet Strap ป้องกันสินค้าล้มไถล"
+        return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับมากกว่า 1 ชั้นบริเวณกลางตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงป้องกันสินค้าล้มไถล"
     elif case_type == "REAR_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งท้ายตู้\n{description}\n🛠️ ACTION: ติดตั้งโครงไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าหล่น"
+        return f"🚨 [ALERT] พบสินค้าต่างระดับ/พื้นที่โล่งบริเวณฝั่งท้ายตู้ประตูเปิด (REAR)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าล้มไถล"
     elif case_type == "FRONT_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งฝั่งหัวตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าหล่น"
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งติดผนังหัวตู้สีเหลือง (FRONT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าล้มไถล"
     else:
         return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
@@ -75,26 +74,23 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D cargo loading manifest diagram page containing container diagrams (which may be arranged Side-by-Side or Top-Bottom).
+    Analyze this 3D cargo loading manifest diagram page containing container diagrams (Front view and Back view).
 
     CONTAINER ORIENTATION & STRUCTURE RULES:
-    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): This yellow wall structure ALWAYS represents the FRONT of the container/vehicle (หัวตู้ฝั่งด้านหน้า).
-    - OPEN END: Represents the REAR / BACK of the container (ฝั่งด้านท้ายตู้รถ).
-    - VIEW LABELS: Pay attention to text labels "Front" (หัวตู้) and "Back" (ท้ายตู้) on the PDF diagram.
+    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): This yellow wall ALWAYS represents the FRONT / HEAD of the container (หัวตู้ฝั่งด้านหน้า).
+    - OPEN DOOR END (ฝั่งประตูเปิดไม่มีผนัง): ALWAYS represents the REAR / BACK of the container (ฝั่งท้ายตู้ประตูเปิด).
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. STEP_DOWN_RISK: Unbalanced cargo heights forming step-down drops. 
-       - ALWAYS flag ANY height step-down drop near the OPEN REAR DOOR end (even if only 1 layer drop, as cargo can slide/fall out when doors open).
-       - In fully packed middle areas, flag height drops that are 1 or more layers steep.
-    2. REAR_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space behind, beside, or surrounding them toward the REAR (risk of sliding backward or sideways).
-    3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them toward the FRONT/Yellow Wall (risk of sliding forward or sideways).
+    1. REAR_EMPTY_RISK: ANY cargo height drop, lower tier stack, or empty floor space near the OPEN REAR DOOR END (away from the yellow wall). Bounding box MUST target the REAR OPEN DOOR END.
+    2. STEP_DOWN_RISK: Stepped height drops greater than 1 tier in the middle of cargo stacks.
+    3. FRONT_EMPTY_RISK: Empty floor space or lower tier stacks directly against the FRONT YELLOW WALL. Bounding box MUST target the FRONT YELLOW WALL.
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {
         "view": "FRONT or BACK",
-        "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
+        "risk_type": "REAR_EMPTY_RISK", 
+        "description": "อธิบายจุดที่พบความเสี่ยงบริเวณฝั่งท้ายตู้หรือหัวตู้เป็นภาษาไทยสั้นๆ",
         "box_2d": [ymin, xmin, ymax, xmax]
       }
     ]
@@ -180,7 +176,6 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
         
-        # 🚀 ครอบพื้นที่โซนผังตู้สินค้าทั้งหมดแบบสมบูรณ์ (ไม่ตัดหั่นภาพ)
         crop_y_start = int(height * 0.10)
         crop_y_end = int(height * 0.90)
         crop_w = width
@@ -188,7 +183,6 @@ def process_request(request):
 
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
 
-        # ส่งภาพผังตู้เต็มแผ่นให้ AI วิเคราะห์
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
         draw = PIL.ImageDraw.Draw(img)
@@ -225,7 +219,6 @@ def process_request(request):
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        # 🚀 แปลงพิกัด Bounding Box จาก diagram_crop กลับมาที่รูปต้นฉบับอย่างแม่นยำ 100%
                         abs_xmin = int(xmin * crop_w / 1000.0)
                         abs_xmax = int(xmax * crop_w / 1000.0)
                         abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
