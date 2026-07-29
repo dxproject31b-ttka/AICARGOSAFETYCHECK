@@ -80,55 +80,40 @@ Determine the layout arrangement of the 2 diagrams on Page 2:
 - TYPE A (Top-Bottom Layout): "Front" diagram is in the TOP HALF. "Back" diagram is in the BOTTOM HALF.
 - TYPE B (Side-by-Side Layout): "Front" diagram is in the LEFT HALF. "Back" diagram is in the RIGHT HALF.
 
-### STEP 2: CRITICAL CONTAINER ORIENTATION RULES (MUST READ)
+### STEP 2: CRITICAL CONTAINER ORIENTATION RULES
 WARNING: The text "Front" or "Back" printed in the corner of the diagram is merely the name of the camera view. DO NOT use it to identify the physical front or rear of the vehicle.
-
 Apply these physical rules strictly to BOTH views:
-1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall. 
-   -> ANY empty space here is the REAR of the truck.
+1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall.
 2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
-3. Observe cargo layout from the SOLID YELLOW WALL (Front) toward the OPEN END (Rear).
 
-### STEP 3: MANDATORY EXHAUSTIVE INSPECTION (MUST FIND ALL)
-You MUST scan BOTH diagrams comprehensively. 
-- It is VERY COMMON to have MULTIPLE hazards in a single view (e.g., a hazard at the front AND a hazard at the rear in the same image).
-- You MUST return a separate JSON object for EVERY single hazard you find. Do not stop at just one.
+### STEP 3: SYSTEMATIC ZONAL INSPECTION (MUST FOLLOW)
+For EACH diagram independently, you MUST check all 3 zones systematically. Do not skip any zone.
+- ZONE 1 (Head Wall): Look exactly at the solid yellow wall. Is the cargo touching it lower than the cargo behind it? Or is there an empty floor gap at the yellow wall? -> If yes, report FRONT_EMPTY_RISK.
+- ZONE 2 (Middle): Look at the center stacks. Is there a height difference of 1 or more layers between adjacent stacks? -> If yes, report STEP_DOWN_RISK.
+- ZONE 3 (Door End): Look at the red arrows/open end. Is the last cargo stack lower than the cargo inside? Or is the floor grid empty? -> If yes, report REAR_EMPTY_RISK.
 
-### STEP 4: CARGO COLLAPSE & SLIDE RISK CRITERIA
-Inspect ONLY physical height drops and floor gaps:
-
-1. REAR_EMPTY_RISK (พื้นที่ว่างท้ายตู้):
-   - Unfilled floor space, gaps, or cargo height drops located at the OPEN REAR DOOR END (the side with floor grids and 2 red arrows nearby).
-   - *CRITICAL FIX*: If you see an empty grid space (like the red box area), it is the REAR, NOT the front. This must be flagged as REAR_EMPTY_RISK.
-
-2. STEP_DOWN_RISK:
-   - Unsupported height step drop GREATER THAN OR EQUAL TO 1 CARGO LAYER between adjacent cargo stacks.
-   - IGNORE flat top surfaces where adjacent cargo stacks have the EXACT SAME height.
-   - This risk can occur within adjacent inner longitudinal rows, adjacent outer longitudinal rows, or as a pocket/depression height drop at the contact interface between inner and outer rows.
-   
-3. FRONT_EMPTY_RISK (พื้นที่ว่างหัวตู้):
-   - Unfilled floor space or lower tier stacks placed DIRECTLY AGAINST THE SOLID YELLOW FRONT WALL.
-   - This applies ONLY to the solid wall side, never the open side.
-
-### CRITICAL RULES:
+### STEP 4: STRICT BOUNDING BOX ACCURACY
 - Bounding Box Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
-- If the container is fully packed with a flat surface and no height drop, return an empty array [].
-- DO NOT hallucinate height drops on flat cargo surfaces.
+- NEVER draw boxes in the empty white background outside the container.
+- For empty floor gaps: Draw the box tightly around the visible YELLOW FLOOR GRID that is empty.
+- For height drops: Draw the box tightly around the CARGO BOXES that create the uneven step-down surface.
 
 ### OUTPUT FORMAT:
-Return strictly a valid JSON array of objects. Example of returning MULTIPLE risks:
+Return strictly a valid JSON array of objects. You MUST include a "reasoning" key to explain your visual findings BEFORE calculating the box_2d.
 [
   {
     "view": "FRONT",
     "risk_type": "FRONT_EMPTY_RISK",
+    "reasoning": "Zone 1 Check: The cargo touching the solid yellow front wall is lower than the stacks in the middle, creating a dangerous upper gap.",
     "description": "พบสินค้าเตี้ยกว่าระดับปกติวางชิดผนังหัวตู้สีเหลือง ทำให้เกิดพื้นที่ว่างด้านบน",
-    "box_2d": [200, 100, 500, 300]
+    "box_2d": [300, 150, 600, 350]
   },
   {
     "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "description": "พบสินค้าระดับเตี้ยลงทางฝั่งประตูท้ายตู้ (ด้านที่เปิดโล่ง) เสี่ยงต่อการล้มสไลด์",
-    "box_2d": [500, 700, 900, 950]
+    "reasoning": "Zone 3 Check: There is an empty floor grid visible near the red arrows at the open rear end.",
+    "description": "พบพื้นที่ว่างบนพื้นฝั่งประตูท้ายตู้ (ด้านที่มีลูกศรสีแดง) เสี่ยงต่อการล้มสไลด์",
+    "box_2d": [600, 750, 950, 950]
   }
 ]
 """
