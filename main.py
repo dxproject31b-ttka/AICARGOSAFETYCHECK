@@ -81,9 +81,9 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     CONTAINER ORIENTATION & ISOMETRIC VIEW RULES:
     - The "Front" view and "Back" view are rotated 180 degrees opposite from each other.
     - IN EACH INDIVIDUAL VIEW (วิเคราะห์แยกรูปอิสระ):
-      * SOLID YELLOW CONTAINER WALL = FRONT OF CONTAINER (หัวตู้ฝั่งผนังสีเหลืองในรูปนั้นๆ).
-      * OPEN CONTAINER END (NO WALL ฝั่งประตูเปิดท้ายตู้ 3399mm/7200mm) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
-    - DO NOT assume fixed left/right coordinates. Inspect the yellow wall vs open end independently for EACH view!
+      * SOLID YELLOW CONTAINER WALL = FRONT OF CONTAINER (หัวตู้ฝั่งผนังสีเหลืองในรูปนั้นๆ ขอบพื้นสีเหลืองด้านสี่เหลี่ยมหน้าแคบ).
+      * OPEN CONTAINER END (NO WALL) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
+    - DO NOT assume fixed left/right coordinates. Inspect the yellow wall or the yellow floor edge on the narrow rectangular side vs open end independently for EACH view!
     
     MANDATORY MULTI-VIEW SCANNING RULE:
     - You MUST inspect BOTH container diagrams on the page independently:
