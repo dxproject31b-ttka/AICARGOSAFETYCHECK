@@ -12,11 +12,18 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker (เวอร์ชันพิกัดตีกรอบแม่นยำ 100%)
+# Backend API สำหรับ AI Cargo Safety Checker ( Dynamic 5-Keys Dynamic Pool )
 # ---------------------------------------------------------------------------
 
-raw_keys = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", "")).strip()
-API_KEYS_POOL = [k.strip() for k in raw_keys.split(",") if k.strip()]
+def get_api_keys_pool():
+    """ ดึงรายชื่อ API Keys ทั้งหมดแบบ Dynamic รองรับหลายชื่อตัวแปร """
+    raw_keys = os.environ.get("GEMINI_API_KEYS", 
+               os.environ.get("GEMINI_API_KEY", 
+               os.environ.get("GEMINI_KEYS", 
+               os.environ.get("API_KEYS", "")))).strip()
+    
+    keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+    return keys
 
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
@@ -45,8 +52,12 @@ def clean_json_response(text):
     return text
 
 def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
-    if not API_KEYS_POOL:
-        return [{"risk_type": "ERROR", "description": "ไม่พบ GEMINI_API_KEYS ใน Cloud Run"}]
+    api_keys = get_api_keys_pool()
+    if not api_keys:
+        return [{
+            "risk_type": "ERROR", 
+            "description": "ไม่พบ GEMINI_API_KEYS ใน Cloud Run (กรุณาตั้งค่าตัวแปร GEMINI_API_KEYS ใน Cloud Run Variables & Secrets)"
+        }]
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
@@ -73,43 +84,50 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
 
-    for current_key in API_KEYS_POOL:
-        try:
-            genai.configure(api_key=current_key)
-            
-            for model_name in model_candidates:
-                try:
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    response = model.generate_content([prompt, combined_image])
-                    raw_text = response.text if response and response.text else "[]"
-                    clean_text = clean_json_response(raw_text)
-                    
-                    if not clean_text or clean_text == '""' or clean_text == "[]":
-                        return []
+    # 🚀 ระบบวนสลับ 5 Keys แบบ 2 รอบ (Pass 1 & Pass 2) ป้องกันการค้างจาก Rate Limit
+    for pass_round in range(2):
+        for current_key in api_keys:
+            try:
+                genai.configure(api_key=current_key)
+                
+                for model_name in model_candidates:
+                    try:
+                        model = genai.GenerativeModel(
+                            model_name=model_name,
+                            generation_config={"response_mime_type": "application/json"}
+                        )
+                        response = model.generate_content([prompt, combined_image])
+                        raw_text = response.text if response and response.text else "[]"
+                        clean_text = clean_json_response(raw_text)
                         
-                    risks = json.loads(clean_text)
-                    if isinstance(risks, dict):
-                        risks = [risks]
-                    return risks
+                        if not clean_text or clean_text == '""' or clean_text == "[]":
+                            return []
+                            
+                        risks = json.loads(clean_text)
+                        if isinstance(risks, dict):
+                            risks = [risks]
+                        return risks # ✅ ทำงานสำเร็จ คืนค่าทันที!
 
-                except Exception as model_err:
-                    err_str = str(model_err)
-                    last_error_msg = err_str
-                    if "404" in err_str or "not found" in err_str.lower():
-                        continue
-                    elif "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                        raise model_err
-                    else:
-                        break
+                    except Exception as model_err:
+                        err_str = str(model_err)
+                        last_error_msg = err_str
+                        if "404" in err_str or "not found" in err_str.lower():
+                            continue # ลองโมเดลถัดไป
+                        elif "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                            # ติด 429 ให้ข้ามไปสลับใช้ Key ถัดไปทันที
+                            raise model_err
+                        else:
+                            break
 
-        except Exception as key_err:
-            last_error_msg = str(key_err)
-            continue
+            except Exception as key_err:
+                last_error_msg = str(key_err)
+                continue # สลับไป Key ถัดไปใน Pool
+        
+        # หากวนจบ Pass 1 แล้วยังติด 429 ทั้งหมด ให้สั่งรอ 10 วินาที แล้วลอง Pass 2
+        if pass_round == 0:
+            time.sleep(10)
 
-    return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
+    return [{"risk_type": "ERROR", "description": f"AI Error (ทั้ง {len(api_keys)} Keys ติดโควตา/ข้อผิดพลาด): {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -135,6 +153,7 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
+        # 🚀 ปรับ DPI เป็น 180 เพื่อภาพคมชัดสูงในการขยายดูสินค้า
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
         except Exception:
@@ -182,7 +201,7 @@ def process_request(request):
                 elif risk_type == "ERROR":
                     detected_hazards.append({
                         "title": "⚠️ ข้อผิดพลาด API",
-                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys"),
+                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys ใน Cloud Run"),
                         "is_error": True
                     })
                     continue
@@ -199,20 +218,17 @@ def process_request(request):
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        # 🚀 แปลงพิกัดจาก combined_img กลับมาที่ภาพต้นฉบับอย่างแม่นยำ 100%
                         cy_min = ymin * combined_h / 1000.0
                         cy_max = ymax * combined_h / 1000.0
                         cx_min = xmin * combined_w / 1000.0
                         cx_max = xmax * combined_w / 1000.0
 
                         if cy_min < front_h:
-                            # 📍 อยู่ในฝั่ง FRONT (ครึ่งบน)
                             abs_xmin = int(cx_min)
                             abs_xmax = int(cx_max)
                             abs_ymin = int(front_y_offset + cy_min)
                             abs_ymax = int(front_y_offset + min(cy_max, front_h))
                         else:
-                            # 📍 อยู่ในฝั่ง BACK (ครึ่งล่าง)
                             abs_xmin = int(cx_min)
                             abs_xmax = int(cx_max)
                             abs_ymin = int(back_y_offset + (cy_min - front_h))
