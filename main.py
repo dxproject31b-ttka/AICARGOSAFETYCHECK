@@ -90,9 +90,9 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {
-        "view": "FRONT",
+        "view": "FRONT or BACK",
         "risk_type": "STEP_DOWN_RISK", 
-        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ",
+        "description": "อธิบายจุดที่พบความเสี่ยงเป็นภาษาไทยสั้นๆ ข้อพึงระวัง view: "FRONT" OR BACK" ด้านข้างที่มีผนังคือหัวตู้ฝั่งด้านหน้าเสมอมิใช่ฝั่งด้านท้ายรถ ห้ามใช้คำเรียกผิด",
         "box_2d": [ymin, xmin, ymax, xmax]
       }
     ]
