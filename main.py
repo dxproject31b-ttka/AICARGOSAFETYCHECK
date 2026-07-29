@@ -72,7 +72,7 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
             "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run (กรุณาตรวจเช็คชื่อตัวแปรใน Cloud Run Variables & Secrets) | Env Vars ที่มีในระบบ: {env_keys_list[:8]}"
         }]
 
-prompt = """
+    prompt = """
 You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
 
 ### STEP 1: LAYOUT IDENTIFICATION (MUST CHECK FIRST)
@@ -120,13 +120,13 @@ Return strictly a valid JSON array of objects:
     "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
     "description": "สินค้ามีความสูงลดลงทางฝั่งประตูท้ายตู้ เสี่ยงต่อการโค่นล้มสไลด์ออกนอกตู้",
-    "box_2d": [ymin, xmin, ymax, xmax]
+    "box_2d": [100, 200, 800, 900]
   },
   {
     "view": "BACK",
     "risk_type": "STEP_DOWN_RISK",
     "description": "พบบริเวณต่างระดับของสินค้าเกิน 1 ชั้น เสี่ยงต่อการล้มเอียง",
-    "box_2d": [ymin, xmin, ymax, xmax]
+    "box_2d": [150, 300, 750, 850]
   }
 ]
 """
