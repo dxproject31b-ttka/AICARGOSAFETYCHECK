@@ -74,20 +74,23 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 
     prompt = """
     You are an expert Cargo Loading Safety Inspector. 
-    Analyze this 3D cargo loading manifest diagram page containing Isometric container diagrams (which may be arranged Side-by-Side or Top-Bottom):
+    Analyze this 3D cargo loading manifest diagram page containing Isometric container diagrams (Front view and Back view).
 
-    VIEW LABELS & ORIENTATION RULES:
-    - TOP HALF or LEFT SIDE: Represents the "Front" view (Isometric view looking toward the Front Yellow Wall). Label view as "FRONT".
-    - BOTTOM HALF or RIGHT SIDE: Represents the "Back" view (Isometric view looking toward the Rear Open Door). Label view as "BACK".
-    - YELLOW CONTAINER WALL / FRAME (ผนังตู้สีเหลือง): ALWAYS represents the HEAD / FRONT of the container (หัวตู้ฝั่งด้านหน้า).
-    - OPEN DOOR END (ฝั่งประตูเปิดไม่มีผนัง): ALWAYS represents the REAR / BACK of the container (ฝั่งท้ายตู้ประตูเปิด).
+    CONTAINER ORIENTATION & ISOMETRIC VIEW RULES:
+    - The "Front" view and "Back" view are rotated 180 degrees opposite from each other.
+    - IN EACH INDIVIDUAL VIEW (วิเคราะห์แยกรูปอิสระ):
+      * SOLID YELLOW CONTAINER WALL = FRONT OF CONTAINER (หัวตู้ฝั่งผนังสีเหลืองในรูปนั้นๆ).
+      * OPEN CONTAINER END (NO WALL) = REAR / BACK OF CONTAINER (ฝั่งประตูเปิดท้ายตู้ในรูปนั้นๆ).
+    - DO NOT assume fixed left/right coordinates. Inspect the yellow wall vs open end independently for EACH view!
+
+    CRITICAL NO-HALLUCINATION RULE:
+    - DO NOT confuse cargo block COLORS (red, green, blue, yellow) with height differences! 
+    - If all cargo stacks/rows have the SAME PHYSICAL HEIGHT and flat top surface across the container, classify as SAFE (return []).
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. STEP_DOWN_RISK: Unbalanced cargo heights forming step-down drops. 
-       - ALWAYS flag ANY height step-down drop near the OPEN REAR DOOR end (even if only 1 layer drop, as cargo can slide/fall out when doors open).
-       - In fully packed middle areas, flag height drops that are 2 or more layers steep.
-    2. REAR_EMPTY_RISK: Tall or unbraced cargo stacks with empty floor space or lower tier drops near the REAR OPEN DOOR (risk of sliding or falling backward).
-    3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them toward the FRONT/Yellow Wall (risk of sliding forward).
+    1. REAR_EMPTY_RISK: Any cargo height drop, lower tier cargo stack, or empty floor space toward the OPEN CONTAINER END (away from the yellow wall in that view). Bounding box MUST be placed on the OPEN CONTAINER END in that view.
+    2. STEP_DOWN_RISK: Stepped physical height drops greater than 1 tier in the middle of cargo stacks.
+    3. FRONT_EMPTY_RISK: Empty floor space or lower tier stacks directly against the SOLID YELLOW WALL in that view. Bounding box MUST be placed on the SOLID YELLOW WALL in that view.
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
