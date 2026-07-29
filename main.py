@@ -83,7 +83,9 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     - VIEW LABELS: Pay attention to text labels "Front" (หัวตู้) and "Back" (ท้ายตู้) on the PDF diagram.
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. STEP_DOWN_RISK: Unbalanced cargo heights or height steps. NOTE: If the container is fully packed with NO floor gaps, ONLY flag height differences that are GREATER THAN 1 cargo layer/tier (a height drop of 2 or more layers).
+    1. STEP_DOWN_RISK: Unbalanced cargo heights forming step-down drops. 
+       - ALWAYS flag ANY height step-down drop near the OPEN REAR DOOR end (even if only 1 layer drop, as cargo can slide/fall out when doors open).
+       - In fully packed middle areas, flag height drops that are 1 or more layers steep.
     2. REAR_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space behind, beside, or surrounding them toward the REAR (risk of sliding backward or sideways).
     3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them toward the FRONT/Yellow Wall (risk of sliding forward or sideways).
 
