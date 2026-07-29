@@ -54,10 +54,10 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     - TOP HALF: FRONT view of container
     - BOTTOM HALF: BACK view of container
 
-    CRITICAL RULES:
-    1. STEP_DOWN_RISK: Cargo top surface is not flat across all blocks.
-    2. REAR_EMPTY_RISK: Tall cargo stack but empty space behind it.
-    3. FRONT_EMPTY_RISK: Tall cargo stack but empty space in front of it.
+    CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
+    1. STEP_DOWN_RISK: Unbalanced cargo heights, height steps, or uneven gaps between adjacent cargo blocks.
+    2. REAR_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space behind, beside, or surrounding them (risk of sliding backward or sideways).
+    3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them (risk of sliding forward or sideways).
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
