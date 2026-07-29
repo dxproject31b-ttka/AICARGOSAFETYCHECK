@@ -89,14 +89,17 @@ Apply these physical rules strictly to BOTH views:
 2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
 3. Observe cargo layout from the SOLID YELLOW WALL (Front) toward the OPEN END (Rear).
 
-### STEP 3: MANDATORY DUAL-VIEW INSPECTION
-Scan BOTH diagrams independently and generate findings for each ("view": "FRONT" or "view": "BACK"). If hazards exist in both, return objects for both.
+### STEP 3: MANDATORY EXHAUSTIVE INSPECTION (MUST FIND ALL)
+You MUST scan BOTH diagrams comprehensively. 
+- It is VERY COMMON to have MULTIPLE hazards in a single view (e.g., a hazard at the front AND a hazard at the rear in the same image).
+- You MUST return a separate JSON object for EVERY single hazard you find. Do not stop at just one.
 
 ### STEP 4: CARGO COLLAPSE & SLIDE RISK CRITERIA
 Inspect ONLY physical height drops and floor gaps:
 
 1. REAR_EMPTY_RISK (พื้นที่ว่างท้ายตู้):
    - Unfilled floor space, gaps, or cargo height drops located at the OPEN REAR DOOR END (the side with floor grids and 2 red arrows nearby).
+   - OR a cargo height drop (step-down) facing the rear door. If the last stack of cargo near the red arrows is LOWER than the cargo behind it, THIS IS A RISK. Flag it.
    - High risk of cargo sliding out of the container doors.
    - *CRITICAL FIX*: If you see an empty grid space (like the red box area), it is the REAR, NOT the front. This must be flagged as REAR_EMPTY_RISK.
 
@@ -104,9 +107,10 @@ Inspect ONLY physical height drops and floor gaps:
    - Unsupported height step drop GREATER THAN OR EQUAL TO 1 CARGO LAYER between adjacent cargo stacks.
    - IGNORE flat top surfaces where adjacent cargo stacks have the EXACT SAME height.
    - This risk can occur within adjacent inner longitudinal rows, adjacent outer longitudinal rows, or as a pocket/depression height drop at the contact interface between inner and outer rows.
-
+   
 3. FRONT_EMPTY_RISK (พื้นที่ว่างหัวตู้):
    - Unfilled floor space or lower tier stacks placed DIRECTLY AGAINST THE SOLID YELLOW FRONT WALL.
+   - OR lower tier stacks (step-down) placed against the yellow wall. If the cargo touching the yellow wall is LOWER than the cargo in front of it, it creates an empty gap at the top. THIS IS A RISK. Flag it.
    - This applies ONLY to the solid wall side, never the open side.
 
 ### CRITICAL RULES:
@@ -115,16 +119,22 @@ Inspect ONLY physical height drops and floor gaps:
 - DO NOT hallucinate height drops on flat cargo surfaces.
 
 ### OUTPUT FORMAT:
-Return strictly a valid JSON array of objects:
+Return strictly a valid JSON array of objects. Example of returning MULTIPLE risks:
 [
   {
     "view": "FRONT",
+    "risk_type": "FRONT_EMPTY_RISK",
+    "description": "พบสินค้าเตี้ยกว่าระดับปกติวางชิดผนังหัวตู้สีเหลือง ทำให้เกิดพื้นที่ว่างด้านบน",
+    "box_2d": [200, 100, 500, 300]
+  },
+  {
+    "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "description": "พบพื้นที่ว่างหรือสินค้ามีความสูงลดลงทางฝั่งประตูท้ายตู้ (ด้านที่เปิดโล่ง) เสี่ยงต่อการล้มสไลด์",
-    "box_2d": [100, 200, 800, 900]
+    "description": "พบสินค้าระดับเตี้ยลงทางฝั่งประตูท้ายตู้ (ด้านที่เปิดโล่ง) เสี่ยงต่อการล้มสไลด์",
+    "box_2d": [500, 700, 900, 950]
   }
 ]
-"""
+""""
 
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
