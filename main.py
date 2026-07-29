@@ -84,9 +84,9 @@ Determine the layout arrangement of the 2 diagrams on Page 2:
 WARNING: The text "Front" or "Back" printed in the corner of the diagram is merely the name of the camera view. DO NOT use it to identify the physical front or rear of the vehicle.
 
 Apply these physical rules strictly to BOTH views:
-1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, red arrows, and no wall. 
+1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall. 
    -> ANY empty space here is the REAR of the truck.
-2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall.
+2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
 3. Observe cargo layout from the SOLID YELLOW WALL (Front) toward the OPEN END (Rear).
 
 ### STEP 3: MANDATORY DUAL-VIEW INSPECTION
@@ -96,7 +96,7 @@ Scan BOTH diagrams independently and generate findings for each ("view": "FRONT"
 Inspect ONLY physical height drops and floor gaps:
 
 1. REAR_EMPTY_RISK (พื้นที่ว่างท้ายตู้):
-   - Unfilled floor space, gaps, or cargo height drops located at the OPEN REAR DOOR END (the side with floor grids and red arrows).
+   - Unfilled floor space, gaps, or cargo height drops located at the OPEN REAR DOOR END (the side with floor grids and 2 red arrows nearby).
    - High risk of cargo sliding out of the container doors.
    - *CRITICAL FIX*: If you see an empty grid space (like the red box area), it is the REAR, NOT the front. This must be flagged as REAR_EMPTY_RISK.
 
