@@ -89,7 +89,7 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
     1. REAR_EMPTY_RISK: Any cargo height drop, lower tier cargo stack, or empty floor space toward the OPEN CONTAINER END (away from the yellow wall in that view). Bounding box MUST be placed on the OPEN CONTAINER END in that view.
-    2. STEP_DOWN_RISK: Stepped physical height drops greater than 1 tier in the middle of cargo stacks.
+    2. STEP_DOWN_RISK: Unbalanced cargo heights or height steps. NOTE: If the container is fully packed with NO floor gaps, ONLY flag height differences that are GREATER THAN 1 cargo layer/tier (a height drop of 2 or more layers).
     3. FRONT_EMPTY_RISK: Empty floor space or lower tier stacks directly against the SOLID YELLOW WALL in that view. Bounding box MUST be placed on the SOLID YELLOW WALL in that view.
 
     OUTPUT FORMAT ONLY A JSON ARRAY:
