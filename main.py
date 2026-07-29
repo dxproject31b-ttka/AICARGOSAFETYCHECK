@@ -134,8 +134,8 @@ Return strictly a valid JSON array of objects. Example of returning MULTIPLE ris
     "box_2d": [500, 700, 900, 950]
   }
 ]
-""""
-
+"""
+    
     model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_error_msg = ""
 
