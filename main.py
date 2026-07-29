@@ -42,11 +42,11 @@ def get_api_keys_pool():
 
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
-        return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับ\n{description}\n🛠️ ACTION: ติดตั้งแผงไม้กั้นขวางและรัดสาย Ratchet Strap"
+        return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับ\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงป้องกันสินค้าหล่น"
     elif case_type == "REAR_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งท้ายตู้\n{description}\n🛠️ ACTION: ติดตั้งโครงไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดไขว้กากบาท"
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งท้ายตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าหล่น"
     elif case_type == "FRONT_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งหัวตู้\n{description}\n🛠️ ACTION: ติดตั้งค้ำยันกั้นขวางฝั่งหัวรถ (Front Blocking)"
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งท้ายตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าหล่น"
     else:
         return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
@@ -83,10 +83,10 @@ def analyze_combined_image_with_ai(combined_image: PIL.Image.Image):
     - BOTTOM HALF: BACK view of container
 
     CRITICAL SAFETY RULES (Detect 360-degree Cargo Collapse & Slide Hazards):
-    1. STEP_DOWN_RISK: Unbalanced cargo heights, height steps, or uneven gaps between adjacent cargo blocks.
+    1. STEP_DOWN_RISK: Unbalanced cargo heights or height steps. NOTE: If the container is fully packed with NO floor gaps, ONLY flag height differences that are GREATER THAN 1 cargo layer/tier (a height drop of 2 or more layers).
     2. REAR_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space behind, beside, or surrounding them (risk of sliding backward or sideways).
     3. FRONT_EMPTY_RISK: Tall cargo stacks with unbraced empty floor space in front of, beside, or surrounding them (risk of sliding forward or sideways).
-
+    
     OUTPUT FORMAT ONLY A JSON ARRAY:
     [
       {
