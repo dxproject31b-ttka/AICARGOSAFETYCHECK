@@ -73,42 +73,46 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
         }]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
+You are a strict Cargo Loading Safety Auditor inspecting a 3D container diagram on Page 2.
+Your goal is to inspect ALL 3 ZONES independently in both FRONT and BACK views.
 
-### STEP 1: LAYOUT IDENTIFICATION
-- TYPE A (Top-Bottom Layout): "Front" diagram is TOP HALF, "Back" diagram is BOTTOM HALF.
-- TYPE B (Side-by-Side Layout): "Front" diagram is LEFT HALF, "Back" diagram is RIGHT HALF.
+### STEP 1: LAYOUT & LANDMARK MAPPING
+- REAR DOOR (Zone 3) = Marked by TWO RED ARROWS on the floor edge.
+- FRONT HEADWALL (Zone 1) = Marked by the SOLID YELLOW WALL.
+- MIDDLE (Zone 2) = Space between Zone 1 and Zone 3.
 
-### STEP 2: PHYSICAL LANDMARK & CARGO IDENTIFICATION
-1. REAR / DOOR END (Zone 3) = Located at the pair of TWO RED ARROWS on the floor edge.
-2. FRONT / HEADWALL (Zone 1) = Located at the SOLID YELLOW WALL opposite to the red arrows.
-3. CARGO BOXES = The 3D blue or colored blocks labeled with SKU codes (e.g., ATFBA).
-4. YELLOW SCALING PANEL = The flat yellow vertical plate with dimension numbers (e.g., 3399 mm). THIS IS CONTAINER STRUCTURE/BACKGROUND, NOT CARGO! Do not mistake this yellow panel for low cargo!
+Visual Direction:
+- FRONT View Diagram: Red Arrows (Zone 3) = LEFT | Yellow Wall (Zone 1) = RIGHT.
+- BACK View Diagram: Yellow Wall (Zone 1) = LEFT | Red Arrows (Zone 3) = RIGHT.
 
-- In FRONT View Diagram: Red Arrows (Zone 3) are on the LEFT. Yellow Wall (Zone 1) is on the RIGHT.
-- In BACK View Diagram: Yellow Wall (Zone 1) is on the LEFT. Red Arrows (Zone 3) are on the RIGHT.
+### STEP 2: FORCED AUDIT PROCEDURE (MUST EVALUATE EACH ZONE)
+For EACH diagram (FRONT view and BACK view), you MUST systematically audit all 3 zones:
 
-### STEP 3: RISK EVALUATION RULES
+1. ZONE 1 AUDIT (Solid Yellow Wall):
+   - Look at the cargo stacks touching the yellow wall.
+   - Question: Is cargo in Zone 1 lower than Zone 2 (creating a top gap), or is there an empty floor space at the yellow wall?
+   - If YES -> Flag "FRONT_EMPTY_RISK" (Target cargo/gap in Zone 1).
 
-1. FRONT_EMPTY_RISK:
-   - Evaluated ONLY on actual CARGO BOXES.
-   - If the BLUE CARGO BOXES touching the Yellow Wall (Zone 1) are full height (same height as Zone 2), there is NO FRONT_EMPTY_RISK.
-   - Do NOT compare cargo height against the yellow scaling panel.
-   - Flag FRONT_EMPTY_RISK ONLY if blue cargo boxes in Zone 1 are strictly lower than Zone 2.
+2. ZONE 2 AUDIT (Middle Cargo):
+   - Look at adjacent stacks in the middle.
+   - Question: Is there a 1+ layer height step-down drop between adjacent stacks?
+   - If YES -> Flag "STEP_DOWN_RISK" (Target lower stack at drop point).
 
-2. STEP_DOWN_RISK:
-   - Uneven height drop of 1 or more layers between adjacent CARGO BOXES.
+3. ZONE 3 AUDIT (Two Red Arrows):
+   - Look at cargo stacks and floor grid near the TWO RED ARROWS.
+   - Question: Is the last cargo stack lower than inner cargo, or is there an empty floor grid visible near the red arrows?
+   - If YES -> Flag "REAR_EMPTY_RISK" (Target cargo/floor in Zone 3).
 
-3. REAR_EMPTY_RISK:
-   - Open floor grid or lower CARGO BOXES near the Two Red Arrows (Zone 3).
+### OUTPUT RULES:
+- Include ONLY zones where a genuine risk is found.
+- If a risk is found, output its view, risk_type, reasoning, description, and accurate box_2d [ymin, xmin, ymax, xmax].
 
 ### OUTPUT FORMAT:
-Return strictly a JSON array of detected risks. If no risks exist, return [].
 [
   {
     "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "reasoning": "Identified Two Red Arrows on the left (Zone 3). Detected lower cargo boxes near the red arrows.",
+    "reasoning": "Zone 3 Audit (Left side / Red Arrows): Detected an empty floor grid near the two red arrows.",
     "description": "พบพื้นที่ว่างหรือสินค้าต่างระดับบริเวณท้ายตู้ฝั่งลูกศรสีแดง (Zone 3)",
     "box_2d": [ymin, xmin, ymax, xmax]
   }
