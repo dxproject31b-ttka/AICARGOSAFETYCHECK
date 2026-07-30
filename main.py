@@ -73,80 +73,47 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
         }]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector analyzing a 3D container diagram.
-The image contains 2 diagrams (Left/Top is "Front", Right/Bottom is "Back").
+You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
 
-### MANDATORY EXHAUSTIVE CHECKLIST (DO NOT SKIP)
-To prevent AI from missing risks, you MUST evaluate 3 specific locations for EACH diagram. 
-You must return exactly 6 JSON objects (3 for Front diagram, 3 for Back diagram).
+### STEP 1: LAYOUT IDENTIFICATION
+Determine the layout arrangement of the 2 diagrams on Page 2:
+- TYPE A (Top-Bottom Layout): "Front" diagram is in the TOP HALF. "Back" diagram is in the BOTTOM HALF.
+- TYPE B (Side-by-Side Layout): "Front" diagram is in the LEFT HALF. "Back" diagram is in the RIGHT HALF.
 
-### THE 3 LOCATIONS TO CHECK:
-1. location: "YELLOW_WALL"
-   - Look at the cargo touching the solid yellow wall.
-   - Condition: Is there a gap above this cargo? (Is it lower than the stack next to it?)
-   - Warning: Ignore any text like '3399' printed on the yellow wall.
-   - If RISK found: risk_type = "FRONT_EMPTY_RISK"
-   - If NO RISK (cargo is flat against the wall): risk_type = "SAFE"
+### STEP 2: CRITICAL CONTAINER ORIENTATION RULES
+WARNING: The text "Front" or "Back" printed in the corner of the diagram is merely the name of the camera view. DO NOT use it to identify the physical front or rear of the vehicle.
+Apply these physical rules strictly to BOTH views:
+1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall.
+2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
 
-2. location: "MIDDLE_CARGO"
-   - Look at the center stacks (away from walls and doors).
-   - Condition: Is there a height drop of 1 or more layers between adjacent stacks?
-   - If RISK found: risk_type = "STEP_DOWN_RISK"
-   - If NO RISK: risk_type = "SAFE"
+### STEP 3: SYSTEMATIC ZONAL INSPECTION (MUST FOLLOW)
+For EACH diagram independently, you MUST check all 3 zones systematically. Do not skip any zone. Mistakes are often made when inspecting the TYPE B layout.
+- ZONE 1 (Head Wall): Look exactly at the solid yellow wall. Is the cargo touching it lower than the cargo behind it? Or is there a height difference of 1 or more layers between adjacent stacks? Or is there an empty floor gap at the yellow wall? -> If yes, report FRONT_EMPTY_RISK.
+- ZONE 2 (Middle): Look at the center stacks. Is there a height difference of 1 or more layers between adjacent stacks? -> If yes, report STEP_DOWN_RISK.
+- ZONE 3 (Door End): Look at the red arrows/open end. Is the last cargo stack lower than the cargo inside? Or is there a height difference of 1 or more layers between adjacent stacks? Or is the floor grid empty? -> If yes, report REAR_EMPTY_RISK.
 
-3. location: "RED_ARROWS"
-   - Look at the cargo stack immediately next to the RED ARROWS (open end).
-   - Condition: Is this stack shorter (fewer layers) than the cargo directly behind it? Or is the floor empty?
-   - If RISK found: risk_type = "REAR_EMPTY_RISK"
-   - If NO RISK: risk_type = "SAFE"
-
-### BOUNDING BOX RULES
-- Only provide a "box_2d" if risk_type is NOT "SAFE".
-- Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
-- NEVER draw a box around the yellow wall or text labels. Box the CARGO that forms the step-down.
+### STEP 4: STRICT BOUNDING BOX ACCURACY
+- Bounding Box Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
+- NEVER draw boxes in the empty white background outside the container.
+- For empty floor gaps: Draw the box tightly around the visible YELLOW FLOOR GRID that is empty.
+- For height drops: Draw the box tightly around the CARGO BOXES that create the uneven step-down surface.
 
 ### OUTPUT FORMAT:
-Return strictly a valid JSON array of objects. Example:
+Return strictly a valid JSON array of objects. You MUST include a "reasoning" key to explain your visual findings BEFORE calculating the box_2d.
 [
   {
-    "view": "FRONT_DIAGRAM",
-    "location": "YELLOW_WALL",
-    "analysis": "Cargo is stacked flat against the wall. Text on wall is ignored.",
-    "risk_type": "SAFE"
+    "view": "FRONT",
+    "risk_type": "FRONT_EMPTY_RISK",
+    "reasoning": "Zone 1 Check: The cargo touching the solid yellow front wall is lower than the stacks in the middle, creating a dangerous upper gap.",
+    "description": "พบสินค้าเตี้ยกว่าระดับปกติวางชิดผนังหัวตู้สีเหลือง ทำให้เกิดพื้นที่ว่างด้านบน",
+    "box_2d": [300, 150, 600, 350]
   },
   {
-    "view": "FRONT_DIAGRAM",
-    "location": "MIDDLE_CARGO",
-    "analysis": "All middle stacks have the same height.",
-    "risk_type": "SAFE"
-  },
-  {
-    "view": "FRONT_DIAGRAM",
-    "location": "RED_ARROWS",
-    "analysis": "The cargo at the red arrows is 1 layer lower than the cargo behind it.",
+    "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "description": "พบสินค้าระดับเตี้ยลงทางฝั่งประตูท้ายตู้ เสี่ยงต่อการล้มสไลด์",
-    "box_2d": [400, 700, 800, 950]
-  },
-  {
-    "view": "BACK_DIAGRAM",
-    "location": "YELLOW_WALL",
-    "analysis": "Cargo is flush against the wall.",
-    "risk_type": "SAFE"
-  },
-  {
-    "view": "BACK_DIAGRAM",
-    "location": "MIDDLE_CARGO",
-    "analysis": "No height drops in the middle.",
-    "risk_type": "SAFE"
-  },
-  {
-    "view": "BACK_DIAGRAM",
-    "location": "RED_ARROWS",
-    "analysis": "The cargo stack near the red arrows has fewer layers.",
-    "risk_type": "REAR_EMPTY_RISK",
-    "description": "พบสินค้าระดับเตี้ยลงทางฝั่งประตูท้ายตู้ เสี่ยงต่อการล้มสไลด์",
-    "box_2d": [500, 750, 900, 950]
+    "reasoning": "Zone 3 Check: There is an empty floor grid visible near the red arrows at the open rear end.",
+    "description": "พบพื้นที่ว่างบนพื้นฝั่งประตูท้ายตู้ (ด้านที่มีลูกศรสีแดง) เสี่ยงต่อการล้มสไลด์",
+    "box_2d": [600, 750, 950, 950]
   }
 ]
 """
