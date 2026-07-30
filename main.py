@@ -75,65 +75,69 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     prompt = """
 You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
 
+### CRITICAL RULE: DO NOT READ OR RELY ON OCR TEXT / NUMBERS
+DO NOT read or use numerical text, length dimensions (e.g., 3399, 7200, mm), or OCR text. The text in the PDF may be dirty, overlapping, or corrupt. Rely ONLY on visual geometric landmarks!
+
 ### STEP 1: LAYOUT IDENTIFICATION
 Identify layout arrangement on Page 2:
-- TYPE A (Top-Bottom Layout): "Front" diagram is in the TOP HALF. "Back" diagram is in the BOTTOM HALF.
-- TYPE B (Side-by-Side Layout): "Front" diagram is in the LEFT HALF. "Back" diagram is in the RIGHT HALF.
+- TYPE A (Top-Bottom Layout): "Front" diagram is TOP HALF, "Back" diagram is BOTTOM HALF.
+- TYPE B (Side-by-Side Layout): "Front" diagram is LEFT HALF, "Back" diagram is RIGHT HALF.
 
-### STEP 2: SPATIAL LANDMARK MAPPING RULE (CRITICAL FOR TYPE A & B)
-Camera views flip left/right orientation. You MUST map visual landmarks strictly based on the Diagram View:
+### STEP 2: ABSOLUTE VISUAL LANDMARK ANCHORS
+Locate the physical container ends using visual features ONLY:
 
-1. FRONT VIEW DIAGRAM (Left diagram in Type B / Top diagram in Type A):
-   - LEFT SIDE of cargo block = REAR / DOOR END (Red Arrows & open floor grid) -> ZONE 3
-   - CENTER of cargo block = MIDDLE ZONE -> ZONE 2
-   - RIGHT SIDE of cargo block = FRONT / HEADWALL (Solid Yellow Wall) -> ZONE 1
+1. PHYSICAL REAR (DOOR END / ZONE 3):
+   - ALWAYS identified by the PAIR OF 2 RED FLAG ARROWS / TRIANGLES located close together on the floor edge.
+   - Wherever the 2 Red Arrows are located = ZONE 3 (REAR / DOOR END).
 
-2. BACK VIEW DIAGRAM (Right diagram in Type B / Bottom diagram in Type A):
-   - LEFT SIDE of cargo block = FRONT / HEADWALL (Solid Yellow Wall) -> ZONE 1
-   - CENTER of cargo block = MIDDLE ZONE -> ZONE 2
-   - RIGHT SIDE of cargo block = REAR / DOOR END (Red Arrows & open floor grid) -> ZONE 3
+2. PHYSICAL FRONT (HEADWALL / ZONE 1):
+   - ALWAYS identified by the SOLID YELLOW WALL.
+   - Wherever the Solid Yellow Wall is located = ZONE 1 (FRONT / HEADWALL).
 
-### STEP 3: ZONAL INSPECTION & STRICT BOUNDING BOX TARGETING RULES
+3. MIDDLE ZONE (ZONE 2):
+   - The central space located between Zone 1 (Yellow Wall) and Zone 3 (Red Arrows).
 
-- ZONE 1 (FRONT / HEADWALL ZONE):
-  * Definition: Cargo stacks placed in the first 1/3 length adjacent to the Solid Yellow Wall.
-  * Risk Condition: Cargo in Zone 1 is lower than adjacent stacks in Zone 2, creating an upper empty gap near the headwall.
-  * Risk Name: FRONT_EMPTY_RISK
-  * BOUNDING BOX TARGET RULE: Draw box ONLY around the CARGO BOXES located in Zone 1 that are low/uneven, OR the empty floor space in Zone 1. NEVER draw bounding boxes around the yellow structural wall itself!
+### STEP 3: VISUAL ORIENTATION MAPPING BY DIAGRAM VIEW
 
-- ZONE 2 (MIDDLE ZONE):
-  * Definition: Cargo stacks placed in the middle 1/3 length of the container.
-  * Risk Condition: Height drop of 1 or more layers between adjacent stacks within Zone 2 or between Zone 1/2/3.
-  * Risk Name: STEP_DOWN_RISK
-  * BOUNDING BOX TARGET RULE: Draw box tightly around the lower cargo boxes creating the step drop.
+- FRONT VIEW DIAGRAM (Left image in Type B / Top image in Type A):
+  * The 2 Red Arrows are on the LEFT side -> LEFT IS ZONE 3 (REAR).
+  * The Solid Yellow Wall is on the RIGHT side -> RIGHT IS ZONE 1 (FRONT).
 
-- ZONE 3 (REAR / DOOR ZONE):
-  * Definition: Cargo stacks placed in the last 1/3 length adjacent to the open end / Red Arrows.
-  * Risk Condition: Cargo near the door is lower than inner cargo, or there is an empty floor grid visible near red arrows.
+- BACK VIEW DIAGRAM (Right image in Type B / Bottom image in Type A):
+  * The Solid Yellow Wall is on the LEFT side -> LEFT IS ZONE 1 (FRONT).
+  * The 2 Red Arrows are on the RIGHT side -> RIGHT IS ZONE 3 (REAR).
+
+### STEP 4: ZONAL RISK INSPECTION & GUARDRAILS
+
+- RULE 1: UNIFORM LOAD CHECK
+  If all cargo stacks from Zone 1 to Zone 3 have the exact same height/layers, the load is level. DO NOT flag empty space under the ceiling as a risk.
+
+- RULE 2: ZONE 3 (REAR / DOOR END) INSPECTION
+  * Look directly at the 2 RED ARROWS (Zone 3).
+  * Check if cargo near the 2 Red Arrows is lower than inner cargo, or if there is an empty floor space right at/near the 2 Red Arrows.
   * Risk Name: REAR_EMPTY_RISK
-  * BOUNDING BOX TARGET RULE: Draw box around the CARGO BOXES in Zone 3 or the EMPTY FLOOR GRID near red arrows.
+  * Bounding Box: Enclose the cargo boxes in Zone 3 or the empty floor near the 2 Red Arrows.
 
-### STEP 4: MANDATORY CHAIN-OF-THOUGHT IN REASONING
-In your "reasoning" string, you MUST explicitly state:
-1. Which view is being analyzed ("FRONT" or "BACK").
-2. Landmark position verification (e.g., "In BACK view, Solid Yellow Wall is on the LEFT [Zone 1] and Red Arrows are on the RIGHT [Zone 3]").
-3. Specific target object identified (e.g., "Targeting low cargo boxes in Zone 1, NOT the yellow wall").
+- RULE 3: ZONE 1 (FRONT / HEADWALL) INSPECTION
+  * Look directly at the SOLID YELLOW WALL (Zone 1).
+  * Check if cargo touching the Yellow Wall is lower than adjacent cargo in Zone 2.
+  * Risk Name: FRONT_EMPTY_RISK
+  * Bounding Box: Enclose the cargo boxes in Zone 1. NEVER enclose the yellow wall structure itself!
+
+### STEP 5: MANDATORY REASONING
+In "reasoning", explicitly state:
+1. Diagram View ("FRONT" or "BACK").
+2. Location of the 2 Red Arrows (Zone 3) and Solid Yellow Wall (Zone 1).
+3. Visual evaluation at Zone 3 (Red Arrows) and Zone 1 (Yellow Wall).
 
 ### OUTPUT FORMAT:
-Return strictly a valid JSON array of objects.
+Return strictly a valid JSON array.
 [
   {
     "view": "FRONT",
-    "risk_type": "FRONT_EMPTY_RISK",
-    "reasoning": "FRONT View: Solid yellow wall is on the RIGHT side (Zone 1). Cargo boxes adjacent to yellow wall are 1 layer lower than Zone 2. Bounding box targets the lower cargo boxes in Zone 1.",
-    "description": "พบสินค้าเตี้ยกว่าระดับปกติวางชิดผนังหัวตู้สีเหลือง (Zone 1) ทำให้เกิดพื้นที่ว่างด้านบน",
-    "box_2d": [ymin, xmin, ymax, xmax]
-  },
-  {
-    "view": "BACK",
     "risk_type": "REAR_EMPTY_RISK",
-    "reasoning": "BACK View: Red arrows and open door grid are on the RIGHT side (Zone 3). Empty floor grid detected near red arrows in Zone 3. Bounding box targets the empty floor grid.",
-    "description": "พบพื้นที่ว่างบนพื้นฝั่งประตูท้ายตู้ (Zone 3 ด้านที่มีลูกศรสีแดง) เสี่ยงต่อการล้มสไลด์",
+    "reasoning": "FRONT View: The 2 red arrows (Zone 3) are on the LEFT. Inspected cargo near the 2 red arrows in Zone 3.",
+    "description": "พบพื้นที่ว่างหรือสินค้าต่างระดับบริเวณท้ายตู้ฝั่งลูกศรสีแดง (Zone 3)",
     "box_2d": [ymin, xmin, ymax, xmax]
   }
 ]
