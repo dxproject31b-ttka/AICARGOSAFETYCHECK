@@ -73,51 +73,77 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
         }]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram on Page 2 of a manifest PDF.
+You are an expert Cargo Loading Safety Inspector analyzing 3D container loading diagrams on Page 2 of a MaxLoad Pro manifest PDF.
 
-### STEP 1: LAYOUT IDENTIFICATION
-Determine the layout arrangement of the 2 diagrams on Page 2:
-- TYPE A (Top-Bottom Layout): "Front" diagram is in the TOP HALF. "Back" diagram is in the BOTTOM HALF.
-- TYPE B (Side-by-Side Layout): "Front" diagram is in the LEFT HALF. "Back" diagram is in the RIGHT HALF.
+### STEP 1: DIAGRAM IDENTIFICATION
+Page 2 always contains two 3D isometric view diagrams:
+1. TOP DIAGRAM = "FRONT" view camera perspective.
+2. BOTTOM DIAGRAM = "BACK" view camera perspective.
+Analyze BOTH diagrams separately and report findings for both "FRONT" and "BACK" views.
 
-### STEP 2: CRITICAL CONTAINER ORIENTATION RULES
-WARNING: The text "Front" or "Back" printed in the corner of the diagram is merely the name of the camera view. DO NOT use it to identify the physical front or rear of the vehicle.
-Apply these physical rules strictly to BOTH views:
-1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall.
-2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
+### STEP 2: PHYSICAL CONTAINER ORIENTATION ANCHORS
+CRITICAL: The printed camera labels "Front" or "Back" do NOT represent physical vehicle front/rear. Always locate physical orientation using these visual anchors:
+- PHYSICAL REAR (DOOR END) = The side showing an OPEN container floor grid with TWO RED ARROWS.
+- PHYSICAL FRONT (HEAD WALL) = The SOLID YELLOW WALL closing the end of the container.
 
-Quick Visual Orientation Map (Left-to-Right Order):
-- In FRONT view diagram: LEFT = 2 Red Arrows nearby (Zone 3) -> CENTER = Middle (Zone 2) -> RIGHT = Solid Yellow Wall (Zone 1)
-- In BACK view diagram:  LEFT = Solid Yellow Wall (Zone 1) -> CENTER = Middle (Zone 2) -> RIGHT = 2 Red Arrows nearby (Zone 3)
+Fixed Orientation Coordinates on MaxLoad Pro Diagrams:
+- TOP DIAGRAM (FRONT View): 
+  - LEFT SIDE = Physical Rear / Door End (Red Arrows) -> Zone 3
+  - MIDDLE = Middle Container Space -> Zone 2
+  - RIGHT SIDE = Physical Front / Head Wall (Solid Yellow Wall) -> Zone 1
+- BOTTOM DIAGRAM (BACK View):
+  - LEFT SIDE = Physical Front / Head Wall (Solid Yellow Wall) -> Zone 1
+  - MIDDLE = Middle Container Space -> Zone 2
+  - RIGHT SIDE = Physical Rear / Door End (Red Arrows) -> Zone 3
 
-### STEP 3: SYSTEMATIC ZONAL INSPECTION (MUST FOLLOW) 
-For EACH diagram independently, you MUST check all 3 zones systematically. Do not skip any zone. Scan each zone and compare the gaps between zones.
-- ZONE 1 (Head Wall 35% of cargo): Look at the box contact with the solid yellow wall. Is the cargo touching it lower than the cargo behind it? Or is there a height difference of 1 or more layers between adjacent stacks? Or is there an empty floor gap at the yellow wall? -> If yes, report FRONT_EMPTY_RISK.
-- ZONE 2 (Middle 30% of cargo): Look at the center stacks. Is there a height difference of 1 or more layers between adjacent stacks? -> If yes, report STEP_DOWN_RISK.
-- ZONE 3 (Door End 35% of cargo): Look at the 2 red arrows nearby/open end. Is the last cargo stack lower than the cargo inside? Or is there a height difference of 1 or more layers between adjacent stacks? Or is the floor grid empty? -> If yes, report REAR_EMPTY_RISK.
+### STEP 3: ZONAL RISK INSPECTION RULES
+Inspect each diagram zone-by-zone (Zone 1 -> Zone 2 -> Zone 3):
 
-### STEP 4: STRICT BOUNDING BOX ACCURACY
-- Bounding Box Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
-- NEVER draw boxes in the empty white background outside the container.
-- For empty floor gaps: Draw the box tightly around the visible YELLOW FLOOR GRID that is empty.
-- For height drops: Draw the box tightly around the CARGO BOXES that create the uneven step-down surface.
+1. ZONE 1: HEAD WALL (Solid Yellow Wall)
+   - Check if there is empty floor space at the yellow wall OR if cargo touching the yellow wall is lower than cargo in Zone 2 by 1+ layers (creating a dangerous top cavity).
+   - If found -> Report "risk_type": "FRONT_EMPTY_RISK"
+   - Description (TH): "พบพื้นที่ว่างหรือสินค้าวางต่ำกว่าระดับปกติบริเวณชิดผนังหัวตู้สีเหลือง"
 
-### OUTPUT FORMAT:
-Return strictly a valid JSON array of objects. You MUST include a "reasoning" key to explain your visual findings BEFORE calculating the box_2d.
+2. ZONE 2: MIDDLE CONTAINER
+   - Check for height differences / step-downs of 1 or more layers between adjacent cargo stacks.
+   - If cargo stacks drop down forming an unbraced step -> Report "risk_type": "STEP_DOWN_RISK"
+   - Description (TH): "พบสินค้าจัดวางต่างระดับเป็นขั้นบันได เสี่ยงต่อการล้มสไลด์ระหว่างขนส่ง"
+
+3. ZONE 3: DOOR END (Open Grid / Red Arrows)
+   - Check if the floor grid near the red arrows is empty OR if the rear-most stack is lower/unsupported compared to middle stacks.
+   - If found -> Report "risk_type": "REAR_EMPTY_RISK"
+   - Description (TH): "พบพื้นที่ว่างบนพื้นตู้ฝั่งประตูท้าย (บริเวณลูกศรสีแดง) เสี่ยงต่อการเคลื่อนตัวของสินค้า"
+
+### STEP 4: BOUNDING BOX (`box_2d`) RULES
+- Coordinate format: [ymin, xmin, ymax, xmax] normalized from 0 to 1000.
+- Boundaries MUST stay strictly inside the container interior. NEVER include white background or outer margins.
+- For empty floor gaps: Tightly enclose the visible empty yellow floor grid.
+- For step-down / height drops: Tightly enclose the specific group of cargo boxes forming the uneven step.
+
+### OUTPUT FORMAT
+Return strictly a valid JSON array of objects. You MUST write a detailed "reasoning" trace before providing "box_2d":
+
 [
   {
     "view": "FRONT",
     "risk_type": "FRONT_EMPTY_RISK",
-    "reasoning": "Zone 1 Check: The cargo touching the solid yellow front wall is lower than the stacks in the middle, creating a dangerous upper gap.",
-    "description": "พบสินค้าเตี้ยกว่าระดับปกติวางชิดผนังหัวตู้สีเหลือง ทำให้เกิดพื้นที่ว่างด้านบน",
-    "box_2d": [300, 150, 600, 350]
+    "reasoning": "In Top Diagram (FRONT View), Zone 1 (Right Side - Solid Yellow Wall) shows cargo stacked only 1 layer high while Zone 2 is stacked 3 layers high, creating an upper empty gap against the head wall.",
+    "description": "พบพื้นที่ว่างหรือสินค้าวางต่ำกว่าระดับปกติบริเวณชิดผนังหัวตู้สีเหลือง",
+    "box_2d": [280, 720, 550, 920]
   },
   {
     "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "reasoning": "Zone 3 Check: There is an empty floor grid visible near the red arrows at the open rear end.",
-    "description": "พบพื้นที่ว่างบนพื้นฝั่งประตูท้ายตู้ (ด้านที่มีลูกศรสีแดง) เสี่ยงต่อการล้มสไลด์",
-    "box_2d": [600, 750, 950, 950]
+    "reasoning": "In Top Diagram (FRONT View), Zone 3 (Left Side - Red Arrows) has visible empty yellow floor grid with no cargo loaded.",
+    "description": "พบพื้นที่ว่างบนพื้นตู้ฝั่งประตูท้าย (บริเวณลูกศรสีแดง) เสี่ยงต่อการเคลื่อนตัวของสินค้า",
+    "box_2d": [580, 120, 850, 480]
+  },
+  {
+    "view": "BACK",
+    "risk_type": "STEP_DOWN_RISK",
+    "reasoning": "In Bottom Diagram (BACK View), Zone 2 shows a 2-layer drop between the middle green stack and the adjacent blue stack.",
+    "description": "พบสินค้าจัดวางต่างระดับเป็นขั้นบันได เสี่ยงต่อการล้มสไลด์ระหว่างขนส่ง",
+    "box_2d": [680, 420, 890, 680]
   }
 ]
 """
