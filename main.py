@@ -86,15 +86,15 @@ Apply these physical rules strictly to BOTH views:
 1. PHYSICAL REAR (DOOR END) = The open side showing the floor grid, 2 red arrows nearby, and no wall.
 2. PHYSICAL FRONT (HEAD WALL) = The solid yellow wall. Opposite DOOR END always.
 
-Quick Visual Orientation Map:
-- In FRONT view diagram: LEFT = 2 Red Arrows (Zone 3) | RIGHT = Solid Yellow Wall (Zone 1)
-- In BACK view diagram: LEFT = Solid Yellow Wall (Zone 1) | RIGHT = 2 Red Arrows (Zone 3)
+Quick Visual Orientation Map (Left-to-Right Order):
+- In FRONT view diagram: LEFT = 2 Red Arrows nearby (Zone 3) -> CENTER = Middle (Zone 2) -> RIGHT = Solid Yellow Wall (Zone 1)
+- In BACK view diagram:  LEFT = Solid Yellow Wall (Zone 1) -> CENTER = Middle (Zone 2) -> RIGHT = 2 Red Arrows nearby (Zone 3)
 
 ### STEP 3: SYSTEMATIC ZONAL INSPECTION (MUST FOLLOW) 
 For EACH diagram independently, you MUST check all 3 zones systematically. Do not skip any zone. Scan each zone and compare the gaps between zones.
-- ZONE 1 (Head Wall 25% of cargo): Look at the solid yellow wall. Is the cargo touching it lower than the cargo behind it? Or is there a height difference of 1 or more layers between adjacent stacks? Or is there an empty floor gap at the yellow wall? -> If yes, report FRONT_EMPTY_RISK.
-- ZONE 2 (Middle 50% of cargo): Look at the center stacks. Is there a height difference of 1 or more layers between adjacent stacks? -> If yes, report STEP_DOWN_RISK.
-- ZONE 3 (Door End 25% of cargo): Look at the red arrows/open end. Is the last cargo stack lower than the cargo inside? Or is there a height difference of 1 or more layers between adjacent stacks? Or is the floor grid empty? -> If yes, report REAR_EMPTY_RISK.
+- ZONE 1 (Head Wall 35% of cargo): Look at the box contact with the solid yellow wall. Is the cargo touching it lower than the cargo behind it? Or is there a height difference of 1 or more layers between adjacent stacks? Or is there an empty floor gap at the yellow wall? -> If yes, report FRONT_EMPTY_RISK.
+- ZONE 2 (Middle 30% of cargo): Look at the center stacks. Is there a height difference of 1 or more layers between adjacent stacks? -> If yes, report STEP_DOWN_RISK.
+- ZONE 3 (Door End 35% of cargo): Look at the 2 red arrows nearby/open end. Is the last cargo stack lower than the cargo inside? Or is there a height difference of 1 or more layers between adjacent stacks? Or is the floor grid empty? -> If yes, report REAR_EMPTY_RISK.
 
 ### STEP 4: STRICT BOUNDING BOX ACCURACY
 - Bounding Box Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
