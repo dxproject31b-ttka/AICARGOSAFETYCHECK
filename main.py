@@ -4,7 +4,6 @@ import json
 import os
 import time
 import gc
-import traceback
 from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
@@ -12,38 +11,29 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision Rear/Front Engine )
+# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision Version )
 # ---------------------------------------------------------------------------
 
 def get_api_keys_pool():
     raw_keys = ""
-    found_var_name = ""
-    
     for env_k, env_v in os.environ.items():
         k_upper = env_k.upper().strip()
         if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
             raw_keys = env_v.strip()
-            found_var_name = env_k
             break
             
     if not raw_keys:
-        raw_keys = os.environ.get("GEMINI_API_KEYS", 
-                   os.environ.get("GEMINI_API_KEY", 
-                   os.environ.get("gemini_api_keys", 
-                   os.environ.get("gemini_api_key", "")))).strip()
+        raw_keys = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", "")).strip()
 
-    keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
-    if keys:
-        print(f"✅ Successfully loaded {len(keys)} API keys from variable: '{found_var_name}'")
-    return keys
+    return [k.strip() for k in raw_keys.split(",") if k.strip()]
 
 def generate_action_report(case_type, description):
     if case_type == "STEP_DOWN_RISK":
         return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับมากกว่า 1 ชั้นบริเวณกลางตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงป้องกันสินค้าล้มไถล"
     elif case_type == "REAR_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าต่างระดับ/พื้นที่โล่งบริเวณฝั่งท้ายตู้ประตูเปิด (REAR)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าล้มไถล"
+        return f"🚨 [ALERT] พบสินค้าต่างระดับ/พื้นที่โล่งบริเวณฝั่งประตูท้ายตู้ (REAR)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าล้มไถล"
     elif case_type == "FRONT_EMPTY_RISK":
-        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งติดผนังหัวตู้สีเหลือง (FRONT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าล้มไถล"
+        return f"🚨 [ALERT] พบพื้นที่ว่างหรือสินค้าวางต่ำผิดปกติบริเวณชิดผนังหัวตู้สีเหลือง (FRONT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าล้มไถล"
     else:
         return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
@@ -51,99 +41,71 @@ def clean_json_response(text):
     text = text.strip()
     start_list = text.find('[')
     end_list = text.rfind(']')
+    if start_list != -1 and end_list != -1:
+        return text[start_list:end_list+1]
     start_dict = text.find('{')
     end_dict = text.rfind('}')
-    
-    if start_list != -1 and end_list != -1:
-        if start_dict == -1 or start_list < start_dict:
-            return text[start_list:end_list+1]
-            
     if start_dict != -1 and end_dict != -1:
         return text[start_dict:end_dict+1]
-        
     return text
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     api_keys = get_api_keys_pool()
     if not api_keys:
-        env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
-        return [{
-            "risk_type": "ERROR", 
-            "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run (กรุณาตรวจเช็คชื่อตัวแปรใน Cloud Run Variables & Secrets) | Env Vars ที่มีในระบบ: {env_keys_list[:8]}"
-        }]
+        return [{"risk_type": "ERROR", "description": "ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run"}]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector analyzing 3D container loading diagrams on Page 2 of a MaxLoad Pro manifest PDF.
+You are an expert Cargo Loading Safety Inspector analyzing a 3D container loading diagram from Page 2 of a MaxLoad Pro manifest PDF.
 
-### STEP 1: DIAGRAM IDENTIFICATION
-Page 2 always contains two 3D isometric view diagrams:
-1. TOP DIAGRAM = "FRONT" view camera perspective.
-2. BOTTOM DIAGRAM = "BACK" view camera perspective.
-Analyze BOTH diagrams separately and report findings for both "FRONT" and "BACK" views.
+### STEP 1: DETECT DIAGRAM LAYOUT
+Identify the layout arrangement on Page 2:
+- TYPE A (Stacked Layout): "FRONT" view is in TOP HALF, "BACK" view is in BOTTOM HALF.
+- TYPE B (Side-by-Side Layout): "FRONT" view is in LEFT HALF, "BACK" view is in RIGHT HALF.
 
 ### STEP 2: PHYSICAL CONTAINER ORIENTATION ANCHORS
-CRITICAL: The printed camera labels "Front" or "Back" do NOT represent physical vehicle front/rear. Always locate physical orientation using these visual anchors:
-- PHYSICAL REAR (DOOR END) = The side showing an OPEN container floor grid with TWO RED ARROWS.
-- PHYSICAL FRONT (HEAD WALL) = The SOLID YELLOW WALL closing the end of the container.
+NEVER rely on camera labels. Locate physical container ends using these visual anchors:
+1. PHYSICAL REAR (DOOR END): The side with an OPEN container floor grid and TWO RED ARROWS.
+2. PHYSICAL FRONT (HEAD WALL): The SOLID YELLOW WALL closing the container.
 
-Fixed Orientation Coordinates on MaxLoad Pro Diagrams:
-- TOP DIAGRAM (FRONT View): 
-  - LEFT SIDE = Physical Rear / Door End (Red Arrows) -> Zone 3
-  - MIDDLE = Middle Container Space -> Zone 2
-  - RIGHT SIDE = Physical Front / Head Wall (Solid Yellow Wall) -> Zone 1
-- BOTTOM DIAGRAM (BACK View):
-  - LEFT SIDE = Physical Front / Head Wall (Solid Yellow Wall) -> Zone 1
-  - MIDDLE = Middle Container Space -> Zone 2
-  - RIGHT SIDE = Physical Rear / Door End (Red Arrows) -> Zone 3
+Orientation Mapping Guidelines:
+- In "FRONT" View:
+  - DOOR END (Red Arrows) = Left Side (Zone 3)
+  - MIDDLE = Center Space (Zone 2)
+  - HEAD WALL (Yellow Wall) = Right Side (Zone 1)
+- In "BACK" View:
+  - HEAD WALL (Yellow Wall) = Left Side (Zone 1)
+  - MIDDLE = Center Space (Zone 2)
+  - DOOR END (Red Arrows) = Right Side (Zone 3)
 
-### STEP 3: ZONAL RISK INSPECTION RULES
-Inspect each diagram zone-by-zone (Zone 1 -> Zone 2 -> Zone 3):
+### STEP 3: STRICT ZONAL RISK CRITERIA
+Report a risk ONLY if there is an actual structural safety defect. If the cargo is loaded uniformly, flat, or completely full, return an EMPTY ARRAY `[]`.
 
-1. ZONE 1: HEAD WALL (Solid Yellow Wall)
-   - Check if there is empty floor space at the yellow wall OR if cargo touching the yellow wall is lower than cargo in Zone 2 by 1+ layers (creating a dangerous top cavity).
-   - If found -> Report "risk_type": "FRONT_EMPTY_RISK"
+1. FRONT_EMPTY_RISK (Zone 1 - Head Wall):
+   - Found ONLY if there is an empty floor gap at the yellow wall OR cargo touching the yellow wall is 1+ layers lower than middle cargo.
    - Description (TH): "พบพื้นที่ว่างหรือสินค้าวางต่ำกว่าระดับปกติบริเวณชิดผนังหัวตู้สีเหลือง"
 
-2. ZONE 2: MIDDLE CONTAINER
-   - Check for height differences / step-downs of 1 or more layers between adjacent cargo stacks.
-   - If cargo stacks drop down forming an unbraced step -> Report "risk_type": "STEP_DOWN_RISK"
+2. STEP_DOWN_RISK (Zone 2 - Middle Container):
+   - Found ONLY if adjacent cargo stacks have a height difference of 1 or more layers creating an unbraced step.
    - Description (TH): "พบสินค้าจัดวางต่างระดับเป็นขั้นบันได เสี่ยงต่อการล้มสไลด์ระหว่างขนส่ง"
 
-3. ZONE 3: DOOR END (Open Grid / Red Arrows)
-   - Check if the floor grid near the red arrows is empty OR if the rear-most stack is lower/unsupported compared to middle stacks.
-   - If found -> Report "risk_type": "REAR_EMPTY_RISK"
+3. REAR_EMPTY_RISK (Zone 3 - Door End):
+   - Found ONLY if the floor grid near the red arrows is empty OR the rear stack is lower/unbraced.
    - Description (TH): "พบพื้นที่ว่างบนพื้นตู้ฝั่งประตูท้าย (บริเวณลูกศรสีแดง) เสี่ยงต่อการเคลื่อนตัวของสินค้า"
 
 ### STEP 4: BOUNDING BOX (`box_2d`) RULES
-- Coordinate format: [ymin, xmin, ymax, xmax] normalized from 0 to 1000.
-- Boundaries MUST stay strictly inside the container interior. NEVER include white background or outer margins.
-- For empty floor gaps: Tightly enclose the visible empty yellow floor grid.
-- For step-down / height drops: Tightly enclose the specific group of cargo boxes forming the uneven step.
+- Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000) relative to the input image.
+- MUST be tightly drawn around the specific cargo boxes or empty yellow floor grid inside the container drawing ONLY. NEVER output coordinates outside the container drawing frame.
 
 ### OUTPUT FORMAT
-Return strictly a valid JSON array of objects. You MUST write a detailed "reasoning" trace before providing "box_2d":
-
+Return strictly a valid JSON array. If no hazards exist, return `[]`.
+Example:
 [
   {
     "view": "FRONT",
-    "risk_type": "FRONT_EMPTY_RISK",
-    "reasoning": "In Top Diagram (FRONT View), Zone 1 (Right Side - Solid Yellow Wall) shows cargo stacked only 1 layer high while Zone 2 is stacked 3 layers high, creating an upper empty gap against the head wall.",
-    "description": "พบพื้นที่ว่างหรือสินค้าวางต่ำกว่าระดับปกติบริเวณชิดผนังหัวตู้สีเหลือง",
-    "box_2d": [280, 720, 550, 920]
-  },
-  {
-    "view": "FRONT",
     "risk_type": "REAR_EMPTY_RISK",
-    "reasoning": "In Top Diagram (FRONT View), Zone 3 (Left Side - Red Arrows) has visible empty yellow floor grid with no cargo loaded.",
+    "reasoning": "In FRONT view, Zone 3 (Left side - Red Arrows) has an empty floor grid visible near the door end.",
     "description": "พบพื้นที่ว่างบนพื้นตู้ฝั่งประตูท้าย (บริเวณลูกศรสีแดง) เสี่ยงต่อการเคลื่อนตัวของสินค้า",
-    "box_2d": [580, 120, 850, 480]
-  },
-  {
-    "view": "BACK",
-    "risk_type": "STEP_DOWN_RISK",
-    "reasoning": "In Bottom Diagram (BACK View), Zone 2 shows a 2-layer drop between the middle green stack and the adjacent blue stack.",
-    "description": "พบสินค้าจัดวางต่างระดับเป็นขั้นบันได เสี่ยงต่อการล้มสไลด์ระหว่างขนส่ง",
-    "box_2d": [680, 420, 890, 680]
+    "box_2d": [550, 100, 850, 380]
   }
 ]
 """
@@ -155,7 +117,6 @@ Return strictly a valid JSON array of objects. You MUST write a detailed "reason
         for current_key in api_keys:
             try:
                 genai.configure(api_key=current_key)
-                
                 for model_name in model_candidates:
                     try:
                         model = genai.GenerativeModel(
@@ -166,32 +127,23 @@ Return strictly a valid JSON array of objects. You MUST write a detailed "reason
                         raw_text = response.text if response and response.text else "[]"
                         clean_text = clean_json_response(raw_text)
                         
-                        if not clean_text or clean_text == '""' or clean_text == "[]":
+                        if not clean_text or clean_text in ['""', "[]", "{}"]:
                             return []
                             
                         risks = json.loads(clean_text)
                         if isinstance(risks, dict):
                             risks = [risks]
                         return risks
-
                     except Exception as model_err:
-                        err_str = str(model_err)
-                        last_error_msg = err_str
-                        if "404" in err_str or "not found" in err_str.lower():
-                            continue
-                        elif "429" in err_str or "quota" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                            raise model_err
-                        else:
-                            break
-
+                        last_error_msg = str(model_err)
+                        continue
             except Exception as key_err:
                 last_error_msg = str(key_err)
                 continue
-        
         if pass_round == 0:
-            time.sleep(10)
+            time.sleep(5)
 
-    return [{"risk_type": "ERROR", "description": f"AI Error (รวมทั้ง {len(api_keys)} Keys): {last_error_msg[:120]}"}]
+    return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 @functions_framework.http
 def process_request(request):
@@ -228,12 +180,17 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
         
-        crop_y_start = int(height * 0.10)
-        crop_y_end = int(height * 0.90)
-        crop_w = width
+        # 📌 FIXสำคัญ: ครอปเฉพาะส่วนรูป 3D ตู้คอนเทนเนอร์ (ความกว้าง 0% ถึง 62%)
+        # ตัดตารางข้อความ Load Summary ฝั่งขวาออก 100% ป้องกัน Bounding Box โผล่ไปทับตาราง
+        crop_x_start = 0
+        crop_x_end = int(width * 0.62)
+        crop_y_start = int(height * 0.08)
+        crop_y_end = int(height * 0.92)
+        
+        crop_w = crop_x_end - crop_x_start
         crop_h = crop_y_end - crop_y_start
 
-        diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
+        diagram_crop = img.crop((crop_x_start, crop_y_start, crop_x_end, crop_y_end))
 
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
@@ -254,7 +211,7 @@ def process_request(request):
                 elif risk_type == "ERROR":
                     detected_hazards.append({
                         "title": "⚠️ ข้อผิดพลาด API",
-                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys ใน Cloud Run"),
+                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys"),
                         "is_error": True
                     })
                     continue
@@ -271,8 +228,8 @@ def process_request(request):
                         if max(ymin, xmin, ymax, xmax) <= 1.0 and max(ymin, xmin, ymax, xmax) > 0:
                             ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
                             
-                        abs_xmin = int(xmin * crop_w / 1000.0)
-                        abs_xmax = int(xmax * crop_w / 1000.0)
+                        abs_xmin = int(crop_x_start + (xmin * crop_w / 1000.0))
+                        abs_xmax = int(crop_x_start + (xmax * crop_w / 1000.0))
                         abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
                         abs_ymax = int(crop_y_start + (ymax * crop_h / 1000.0))
                         
@@ -282,7 +239,7 @@ def process_request(request):
                         pass
                         
                 if not drawn_exact:
-                    draw.rectangle([0, crop_y_start, crop_w, crop_y_end], outline="orange", width=8)
+                    draw.rectangle([crop_x_start, crop_y_start, crop_x_end, crop_y_end], outline="orange", width=8)
                 
                 detected_hazards.append({
                     "title": f"ความเสี่ยง ({view_name}): {risk_type}",
