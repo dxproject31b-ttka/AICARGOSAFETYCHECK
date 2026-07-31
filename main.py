@@ -111,8 +111,8 @@ Return ONLY a valid JSON object:
   "confidence": "HIGH" or "MEDIUM" or "LOW"
 }
 """
-    model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     last_err = ""
+    model_candidates = ["models/gemini-flash-latest", "gemini-flash-latest"]
     for current_key in api_keys:
         try:
             genai.configure(api_key=current_key)
@@ -279,7 +279,7 @@ Schema for each risk object:
   "view": "FRONT" | "BACK",
   "risk_type": "REAR_EMPTY_RISK" | "FRONT_EMPTY_RISK" | "STEP_DOWN_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
   "direction": "LONGITUDINAL" | "LATERAL" | "VERTICAL",
-  "zone2_baseline": "<Describe Zone 2 middle cargo height — e.g. '3 layers uniform across full width'>",
+  "zone2_baseline": "<Describe Zone 2 (middle) cargo height — e.g. '3 layers uniform across full width'>",
   "reasoning": "<Visual evidence: describe exactly what you see — which boxes, which columns, what height difference, what gap size. For FRONT/REAR risks, explicitly compare zone height vs zone2_baseline>",
   "description": "<Thai language: อธิบายตำแหน่งและลักษณะของความเสี่ยงที่พบ>",
   "box_2d": [ymin, xmin, ymax, xmax]
@@ -401,45 +401,28 @@ def process_request(request):
         # --- STEP 3: Full diagram analysis (all zones, all 6 risk types) ---
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
-        # --- STEP 4: Detect layout type from all_risks to crop Zone 3 correctly ---
-        # AI reports layout in reasoning; infer from first risk's view vs position
-        # Strategy: try both layout crops and send to rear zone analyzer
+        # --- STEP 4: Rear Zone Crop — zoom Zone 3 of each view for confirmation ---
+        diagram_half_h = crop_h // 2
 
-        # Layout A (Top-Bottom): Front=top half, Back=bottom half
-        #   → Zone 3 Front = LEFT of top half | Zone 3 Back = RIGHT of bottom half
-        # Layout B (Side-by-Side): Front=left half, Back=right half
-        #   → Zone 3 Front = LEFT of left half = leftmost 19% | Zone 3 Back = RIGHT of right half = rightmost 19%
+        # Page 2 layout: Front view = TOP half, Back view = BOTTOM half
+        # Zone 3 (door end) in Front view → LEFT side (x: 0–38%)
+        rear_crop_front = img.crop((
+            0,
+            crop_y_start,
+            int(crop_w * 0.38),
+            crop_y_start + diagram_half_h
+        ))
+        # Zone 3 (door end) in Back view → RIGHT side (x: 62–100%)
+        rear_crop_back = img.crop((
+            int(crop_w * 0.62),
+            crop_y_start + diagram_half_h,
+            crop_w,
+            crop_y_end
+        ))
 
         api_keys_for_rear = get_api_keys_pool()
-
-        # Crop Zone 3 for both layout assumptions
-        half_h = crop_h // 2
-        half_w = crop_w // 2
-
-        # Layout A crops (Top-Bottom)
-        rear_A_front = img.crop((0,                  crop_y_start,          int(crop_w*0.38), crop_y_start + half_h))
-        rear_A_back  = img.crop((int(crop_w*0.62),   crop_y_start + half_h, crop_w,           crop_y_end))
-
-        # Layout B crops (Side-by-Side)
-        rear_B_front = img.crop((0,                  crop_y_start,          int(half_w*0.38), crop_y_end))
-        rear_B_back  = img.crop((half_w + int(half_w*0.62), crop_y_start,   crop_w,           crop_y_end))
-
-        # Analyze all 4 crops — use best confidence result per view
-        def best_rear(crop_a, crop_b, api_keys):
-            ra = analyze_rear_zone_with_ai(crop_a, api_keys)
-            rb = analyze_rear_zone_with_ai(crop_b, api_keys)
-            conf_rank = {"HIGH": 2, "MEDIUM": 1, "LOW": 0, "ERROR": -1}
-            # Prefer REAR_EMPTY_RISK with higher confidence
-            if str(ra.get("rear_zone_risk","")).upper() == "REAR_EMPTY_RISK":
-                if conf_rank.get(str(ra.get("confidence","LOW")).upper(), 0) >= \
-                   conf_rank.get(str(rb.get("confidence","LOW")).upper(), 0):
-                    return ra
-            if str(rb.get("rear_zone_risk","")).upper() == "REAR_EMPTY_RISK":
-                return rb
-            return ra  # fallback to layout A result
-
-        rear_result_front = best_rear(rear_A_front, rear_B_front, api_keys_for_rear)
-        rear_result_back  = best_rear(rear_A_back,  rear_B_back,  api_keys_for_rear)
+        rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_for_rear)
+        rear_result_back  = analyze_rear_zone_with_ai(rear_crop_back,  api_keys_for_rear)
 
         # --- STEP 5: Merge rear crop findings — add only if not already found ---
         existing_rear_views = {
