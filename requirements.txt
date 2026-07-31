@@ -1,5 +1,6 @@
-functions-framework
+functions-framework==3.*
 pdf2image
 Pillow
 requests
 google-generativeai
+typing_extensions
