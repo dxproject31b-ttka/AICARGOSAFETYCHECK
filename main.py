@@ -5,6 +5,7 @@ import os
 import time
 import gc
 import traceback
+import random
 from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
@@ -35,6 +36,7 @@ def get_api_keys_pool():
 
     keys = list(set(keys))
     if keys:
+        random.shuffle(keys) # <--- เพิ่มบรรทัดนี้: สลับคีย์แบบสุ่ม เพื่อกระจายโหลดให้เฉลี่ยเท่าๆ กันทุกคีย์
         print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
         return keys
 
@@ -245,7 +247,7 @@ OUTPUT — Return ONLY this exact JSON object:
                     last_err = str(e)
                     if "404" in last_err or "not found" in last_err.lower():
                         continue
-                    break
+                    continue # <--- [แก้ตรงนี้] เปลี่ยนจาก break เป็น continue เพื่อให้ลองใช้ Key ถัดไป
         except Exception as e:
             last_err = str(e)
             continue
@@ -501,9 +503,9 @@ Example outputs (do not copy — use your actual findings):
                             continue
                         elif "429" in err_str or "quota" in err_str.lower() \
                                 or "resourceexhausted" in err_str.lower():
-                            raise model_err
+                            continue # <--- [แก้ตรงนี้] เปลี่ยนจาก raise model_err เป็น continue
                         else:
-                            break
+                            continue # <--- [แก้ตรงนี้] เปลี่ยนจาก break เป็น continue
 
             except Exception as key_err:
                 last_error_msg = str(key_err)
