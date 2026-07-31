@@ -229,6 +229,10 @@ OUTPUT — Return ONLY this exact JSON object:
 
     for current_key in api_keys:
         try:
+            # [เพิ่ม] บังคับเคลียร์ Client เก่าที่แคชไว้ เพื่อให้มันใช้ Key ใหม่จริงๆ
+            if hasattr(genai, '_client'):
+                genai._client = None
+                
             genai.configure(api_key=current_key)
             for model_name in model_candidates:
                 try:
@@ -247,7 +251,7 @@ OUTPUT — Return ONLY this exact JSON object:
                     last_err = str(e)
                     if "404" in last_err or "not found" in last_err.lower():
                         continue
-                    continue # <--- [แก้ตรงนี้] เปลี่ยนจาก break เป็น continue เพื่อให้ลองใช้ Key ถัดไป
+                    break # <--- [แก้ไข] เปลี่ยนจาก continue เป็น break เพื่อข้ามไปคีย์ถัดไปทันที
         except Exception as e:
             last_err = str(e)
             continue
@@ -477,6 +481,10 @@ Example outputs (do not copy — use your actual findings):
     for pass_round in range(2):
         for current_key in api_keys:
             try:
+                # [เพิ่ม] บังคับเคลียร์ Client เก่า 
+                if hasattr(genai, '_client'):
+                    genai._client = None
+                    
                 genai.configure(api_key=current_key)
                 for model_name in model_candidates:
                     try:
@@ -503,9 +511,9 @@ Example outputs (do not copy — use your actual findings):
                             continue
                         elif "429" in err_str or "quota" in err_str.lower() \
                                 or "resourceexhausted" in err_str.lower():
-                            continue # <--- [แก้ตรงนี้] เปลี่ยนจาก raise model_err เป็น continue
+                            break # <--- [แก้ไข] เปลี่ยนเป็น break ทิ้งคีย์ที่โควตาเต็มไปเลย
                         else:
-                            continue # <--- [แก้ตรงนี้] เปลี่ยนจาก break เป็น continue
+                            break # <--- [แก้ไข] เปลี่ยนเป็น break
 
             except Exception as key_err:
                 last_error_msg = str(key_err)
