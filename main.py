@@ -13,14 +13,12 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v3 )
-# แก้ไข:
-#   [v3] - ลด DPI 250 → 180 เพื่อประหยัด Gemini API quota
-#   [v3] - detect_page_layout(): รองรับ TOP_BOTTOM และ LEFT_RIGHT layout
-#   [v3] - Adaptive rear crop coordinates ตาม layout จริง
-#   [v3] - เพิ่ม REAR_LATERAL_IMBALANCE risk type (ท้ายตู้สูงต่ำแนวกว้าง)
-#   [v3] - แก้ color-bias false positive ใน prompt (สีกล่อง ≠ ความสูง)
-#   [v3] - Dense Cargo Rule เข้มขึ้น: ใช้เฉพาะ longitudinal perspective
+# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v4 )
+# แก้ไขจาก v3:
+#   [v4-FIX1] - _get_fallback_box(): จำกัด y ให้อยู่แค่โซน cargo จริง (ไม่ใช่ทั้งหน้า)
+#   [v4-FIX2] - ลบ duplicate analyze_diagram_image_with_ai() ออก (เรียกครั้งเดียว)
+#   [v4-FIX3] - ลบ duplicate detect_page_layout() ออก (เรียกครั้งเดียว ก่อน AI)
+#   [v4-FIX4] - box_2d จาก AI: เพิ่ม clamp + กรอง box ที่ใหญ่เกิน 80% ของภาพ
 # ---------------------------------------------------------------------------
 
 # ============================================================
@@ -34,14 +32,15 @@ def get_api_keys_pool():
         if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
             extracted_keys = [k.strip() for k in env_v.split(",") if k.strip()]
             keys.extend(extracted_keys)
-            
+
     keys = list(set(keys))
     if keys:
         print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
         return keys
-    
+
     print("❌ No Gemini API keys found.")
     return []
+
 
 # ============================================================
 # SECTION 2 — UTILITY: ACTION REPORTS (7 risk types)
@@ -96,10 +95,10 @@ def generate_action_report(case_type, description):
 
 def clean_json_response(text):
     text = text.strip()
-    start_list  = text.find('[')
-    end_list    = text.rfind(']')
-    start_dict  = text.find('{')
-    end_dict    = text.rfind('}')
+    start_list = text.find('[')
+    end_list   = text.rfind(']')
+    start_dict = text.find('{')
+    end_dict   = text.rfind('}')
 
     if start_list != -1 and end_list != -1:
         if start_dict == -1 or start_list < start_dict:
@@ -112,7 +111,7 @@ def clean_json_response(text):
 
 
 # ============================================================
-# SECTION 4 — LAYOUT DETECTOR  [NEW v3]
+# SECTION 4 — LAYOUT DETECTOR
 # ============================================================
 
 def detect_page_layout(img: PIL.Image.Image, crop_y_start: int, crop_y_end: int) -> str:
@@ -121,50 +120,43 @@ def detect_page_layout(img: PIL.Image.Image, crop_y_start: int, crop_y_end: int)
       "TOP_BOTTOM" — Front view อยู่บน, Back view อยู่ล่าง (AA02, AA05, AC05)
       "LEFT_RIGHT" — Front view อยู่ซ้าย, Back view อยู่ขวา (AC03)
 
-    วิธี: วัดความสว่างเฉลี่ยของแถบกลาง (10% ของมิติ) ทั้งแนวนอนและแนวตั้ง
+    วิธี: วัดความสว่างเฉลี่ยของแถบกลาง (8% ของมิติ) ทั้งแนวนอนและแนวตั้ง
     แถบที่สว่างกว่าคือเส้นแบ่งระหว่าง 2 view → บอก orientation ของเส้นแบ่งนั้น
-
-    เส้นแบ่งแนวนอน (horizontal band สว่าง) → layout = TOP_BOTTOM
-    เส้นแบ่งแนวตั้ง  (vertical band สว่าง)  → layout = LEFT_RIGHT
     """
     try:
         crop_w = img.size[0]
         crop_h = crop_y_end - crop_y_start
 
-        band_thickness_h = max(1, int(crop_h * 0.08))  # 8% of height
-        band_thickness_v = max(1, int(crop_w * 0.08))  # 8% of width
+        band_thickness_h = max(1, int(crop_h * 0.08))
+        band_thickness_v = max(1, int(crop_w * 0.08))
 
         center_y = crop_y_start + crop_h // 2
         center_x = crop_w // 2
 
-        # แถบแนวนอน (ตรวจ TOP_BOTTOM separator)
         h_band = img.crop((
             0,
             center_y - band_thickness_h // 2,
             crop_w,
             center_y + band_thickness_h // 2
         )).convert("L")
-        h_brightness = PIL.ImageStat.Stat(h_band).mean[0]  # 0–255
+        h_brightness = PIL.ImageStat.Stat(h_band).mean[0]
 
-        # แถบแนวตั้ง (ตรวจ LEFT_RIGHT separator)
         v_band = img.crop((
             center_x - band_thickness_v // 2,
             crop_y_start,
             center_x + band_thickness_v // 2,
             crop_y_end
         )).convert("L")
-        v_brightness = PIL.ImageStat.Stat(v_band).mean[0]  # 0–255
+        v_brightness = PIL.ImageStat.Stat(v_band).mean[0]
 
         print(f"🔍 Layout detection — H-band brightness: {h_brightness:.1f} | "
               f"V-band brightness: {v_brightness:.1f}")
 
-        # เส้นแบ่งสว่างกว่า (whitespace) ≥ 8 point margin → ถือว่าชัดเจน
         if v_brightness > h_brightness + 8:
             layout = "LEFT_RIGHT"
         elif h_brightness > v_brightness + 8:
             layout = "TOP_BOTTOM"
         else:
-            # ต่างกันน้อย → default TOP_BOTTOM (layout ที่พบบ่อยกว่า)
             layout = "TOP_BOTTOM"
 
         print(f"✅ Detected layout: {layout}")
@@ -176,14 +168,14 @@ def detect_page_layout(img: PIL.Image.Image, crop_y_start: int, crop_y_end: int)
 
 
 # ============================================================
-# SECTION 5 — AI: REAR ZONE CROP ANALYSIS  [UPGRADED v3]
+# SECTION 5 — AI: REAR ZONE CROP ANALYSIS
 # ============================================================
 
 def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list,
                                view_label: str = "UNKNOWN") -> dict:
     """
     วิเคราะห์ภาพ Crop เฉพาะ Zone ท้ายตู้ (door end) แยกต่างหาก
-    ตรวจทั้ง REAR_EMPTY_RISK และ REAR_LATERAL_IMBALANCE [v3]
+    ตรวจทั้ง REAR_EMPTY_RISK และ REAR_LATERAL_IMBALANCE
     """
     rear_prompt = f"""
 You are a Cargo Safety Inspector. This image is a ZOOMED-IN CROP of the DOOR END (REAR) zone
@@ -262,7 +254,7 @@ OUTPUT — Return ONLY this exact JSON object:
 
 
 # ============================================================
-# SECTION 6 — AI: FULL DIAGRAM ANALYSIS  [UPGRADED v3]
+# SECTION 6 — AI: FULL DIAGRAM ANALYSIS
 # ============================================================
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
@@ -275,15 +267,6 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
                            f"Env Vars: {env_keys_list[:8]}"
         }]
 
-    # ==========================================================================
-    # PROMPT v3
-    # Changes vs v2:
-    #   + RISK TYPE 7: REAR_LATERAL_IMBALANCE (ท้ายตู้สูงต่ำแนวกว้าง)
-    #   + COLOR BIAS WARNING: กล่องสีต่างกัน ≠ ความสูงต่างกัน
-    #   + Dense Cargo Rule: perspective artifact ใช้เฉพาะแนวยาว ไม่ใช้แนวกว้าง
-    #   + Zone 2 anchor rule: เพิ่มกรณี REAR_LATERAL_IMBALANCE
-    #   + Output schema: เพิ่ม "lateral_side" field
-    # ==========================================================================
     prompt = """
 You are an expert Cargo Loading Safety Inspector. Your mission is to detect ALL physical risks
 of cargo shifting, sliding, tipping, or collapsing INSIDE a container/truck — in ANY direction.
@@ -334,7 +317,7 @@ Trigger: Near the DOOR END — in the LENGTH direction:
     (measuring depth/length direction, not width direction)
   Risk: cargo slides backward and falls when door opens.
 
---- RISK TYPE 2: REAR_LATERAL_IMBALANCE ---  ← NEW
+--- RISK TYPE 2: REAR_LATERAL_IMBALANCE ---
 Trigger: Near the DOOR END — in the WIDTH direction:
   - At the door-end zone, the cargo on the LEFT wall side is clearly ≥1 FULL BOX LAYER
     taller OR shorter than the cargo on the RIGHT wall side
@@ -536,7 +519,61 @@ Example outputs (do not copy — use your actual findings):
 
 
 # ============================================================
-# SECTION 7 — MAIN CLOUD FUNCTION HANDLER  [UPGRADED v3]
+# SECTION 7 — FALLBACK BOX HELPER  [v4-FIX1]
+# ============================================================
+
+def _get_fallback_box(risk_type: str, view_label: str, layout: str,
+                      crop_w: int, crop_y_start: int, crop_h: int):
+    """
+    สร้าง bounding box โดยประมาณสำหรับ risks ที่ไม่มี box_2d (จาก rear crop)
+    จำกัดให้อยู่แค่บริเวณ door-end zone จริงๆ ไม่ใช่ทั้งครึ่งภาพ
+    คืนค่า [xmin, ymin, xmax, ymax] เป็น pixel coords บน img จริง
+    หรือ None ถ้าไม่รู้จัก key
+    """
+    vl = view_label.upper()
+
+    if layout == "TOP_BOTTOM":
+        half_h = crop_h // 2
+        # FRONT view = upper half ของ crop
+        # door end = ฝั่งซ้าย, จำกัด y เฉพาะ 50–100% ของ upper half
+        front_y0 = crop_y_start + int(half_h * 0.50)
+        front_y1 = crop_y_start + half_h
+        # BACK view = lower half ของ crop
+        # door end = ฝั่งขวา, จำกัด y เฉพาะ 50–100% ของ lower half
+        back_y0  = crop_y_start + half_h + int(half_h * 0.50)
+        back_y1  = crop_y_end
+
+        zones = {
+            ("REAR_EMPTY_RISK",        "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
+        }
+
+    else:  # LEFT_RIGHT (AC03-type)
+        # FRONT = left half, door end = LEFT 20% ของภาพ
+        # BACK  = right half, door end = RIGHT 20% ของภาพ
+        # y จำกัดที่ 30–80% ของ crop_h เพื่อไม่หลุดออก header/footer
+        y0 = crop_y_start + int(crop_h * 0.30)
+        y1 = crop_y_start + int(crop_h * 0.80)
+
+        zones = {
+            ("REAR_EMPTY_RISK",        "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
+        }
+
+    key = (risk_type, vl)
+    coords = zones.get(key)
+    if coords:
+        xmin, ymin, xmax, ymax = coords
+        return [xmin, ymin, xmax, ymax]
+    return None
+
+
+# ============================================================
+# SECTION 8 — MAIN CLOUD FUNCTION HANDLER  [v4]
 # ============================================================
 
 @functions_framework.http
@@ -564,7 +601,7 @@ def process_request(request):
         pdf_bytes = base64.b64decode(base64_str)
 
         # ------------------------------------------------------------------
-        # STEP 1: Render PDF — DPI 180 [v3: ลดจาก 250 เพื่อประหยัด quota]
+        # STEP 1: Render PDF — DPI 180
         # ------------------------------------------------------------------
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
@@ -592,24 +629,20 @@ def process_request(request):
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
 
         # ------------------------------------------------------------------
-        # STEP 3: Full diagram analysis — all zones, all 7 risk types
+        # STEP 3: Detect layout ก่อน — เรียกครั้งเดียว  [v4-FIX2, FIX3]
+        # ------------------------------------------------------------------
+        layout = detect_page_layout(img, crop_y_start, crop_y_end)
+
+        # ------------------------------------------------------------------
+        # STEP 4: Full diagram analysis — เรียกครั้งเดียว  [v4-FIX2]
         # ------------------------------------------------------------------
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
         # ------------------------------------------------------------------
-        # [FIX 2] POST-FILTER: ลบ FRONT_EMPTY_RISK ออกเมื่อ layout = LEFT_RIGHT
-        # เหตุผล: AC03-type (LEFT_RIGHT) มีสินค้าชิดหัวตู้ การที่ AI เห็น
-        #         FRONT_EMPTY เป็น perspective artifact ของ isometric view
-        #         ที่หัวตู้ทั้ง FRONT และ BACK — ตกลงกันว่าไม่นับเป็น risk
+        # STEP 4.5: POST-FILTER FRONT_EMPTY_RISK สำหรับ LEFT_RIGHT layout
+        # เหตุผล: AC03-type สินค้าชิดหัวตู้ AI เห็น FRONT_EMPTY เป็น
+        #         perspective artifact — ตกลงกันว่าไม่นับเป็น risk
         # ------------------------------------------------------------------
-        # NOTE: ต้องรัน detect_page_layout ก่อน ย้าย STEP 3.5 ขึ้นมาก่อน STEP 3
-
-        # วิธีแก้: สลับ STEP 3.5 ขึ้นมาก่อน STEP 3 แล้วเพิ่ม filter:
-
-        layout = detect_page_layout(img, crop_y_start, crop_y_end)  # ← ย้ายขึ้นมา
-
-        all_risks = analyze_diagram_image_with_ai(diagram_crop)
-
         if layout == "LEFT_RIGHT":
             before = len(all_risks)
             all_risks = [
@@ -621,29 +654,20 @@ def process_request(request):
             ]
             removed = before - len(all_risks)
             if removed:
-                print(f"🗑️ [FIX2] Removed {removed} FRONT_EMPTY_RISK(s) "
-                      f"(LEFT_RIGHT layout — head-wall risks not counted)")
-        
-        # ------------------------------------------------------------------
-        # STEP 3.5: Detect page layout  [NEW v3]
-        # ------------------------------------------------------------------
-        layout = detect_page_layout(img, crop_y_start, crop_y_end)
+                print(f"🗑️ [v4] Removed {removed} FRONT_EMPTY_RISK(s) "
+                      f"(LEFT_RIGHT layout — not counted per business rule)")
 
         # ------------------------------------------------------------------
-        # STEP 4: Rear Zone Crop — adaptive coordinates per layout  [v3]
-        # ------------------------------------------------------------------
+        # STEP 5: Rear Zone Crop — adaptive per layout
         #
-        # TOP_BOTTOM layout (AA02, AA05, AC05):
-        #   • Front view occupies TOP half  → door end = LEFT  (x: 0–38%)
-        #   • Back  view occupies BOT half  → door end = RIGHT (x: 62–100%)
+        # TOP_BOTTOM (AA02, AA05, AC05):
+        #   Front view = upper half → door end = LEFT  (x: 0–38%)
+        #   Back  view = lower half → door end = RIGHT (x: 62–100%)
         #
-        # LEFT_RIGHT layout (AC03):
-        #   • Front view occupies LEFT half  → door end = LEFT edge of left half
-        #                                       = x: 0–22% of total width, full height
-        #   • Back  view occupies RIGHT half → door end = RIGHT edge of right half
-        #                                       = x: 78–100% of total width, full height
+        # LEFT_RIGHT (AC03):
+        #   Front view = left half  → door end = LEFT  (x: 0–22%, full h)
+        #   Back  view = right half → door end = RIGHT (x: 78–100%, full h)
         # ------------------------------------------------------------------
-
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
             rear_crop_front = img.crop((
@@ -676,19 +700,18 @@ def process_request(request):
             print("🗺️ Rear crop: LEFT_RIGHT mode")
 
         # ------------------------------------------------------------------
-        # STEP 4.5: Run rear zone AI analysis (with view label for context)
+        # STEP 5.5: Rear zone AI analysis
         # ------------------------------------------------------------------
-        api_keys_for_rear  = get_api_keys_pool()
-        rear_result_front  = analyze_rear_zone_with_ai(
+        api_keys_for_rear = get_api_keys_pool()
+        rear_result_front = analyze_rear_zone_with_ai(
             rear_crop_front, api_keys_for_rear, view_label="FRONT"
         )
-        rear_result_back   = analyze_rear_zone_with_ai(
+        rear_result_back = analyze_rear_zone_with_ai(
             rear_crop_back, api_keys_for_rear, view_label="BACK"
         )
 
         # ------------------------------------------------------------------
-        # STEP 5: Merge rear crop findings into all_risks  [UPGRADED v3]
-        #   Now handles: REAR_EMPTY_RISK, REAR_LATERAL_IMBALANCE, BOTH
+        # STEP 6: Merge rear crop findings into all_risks
         # ------------------------------------------------------------------
         if not isinstance(all_risks, list):
             all_risks = []
@@ -714,7 +737,7 @@ def process_request(request):
             if confidence not in ("HIGH", "MEDIUM"):
                 continue  # skip LOW confidence and ERROR
 
-            # ---- REAR_EMPTY_RISK (from rear crop) ----
+            # ---- REAR_EMPTY_RISK ----
             if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH"):
                 if view_label not in _existing_risk_views("REAR_EMPTY"):
                     all_risks.append({
@@ -729,7 +752,7 @@ def process_request(request):
                         "box_2d":         None
                     })
 
-            # ---- REAR_LATERAL_IMBALANCE (from rear crop)  [NEW v3] ----
+            # ---- REAR_LATERAL_IMBALANCE ----
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH"):
                 if view_label not in _existing_risk_views("REAR_LATERAL"):
                     all_risks.append({
@@ -744,45 +767,8 @@ def process_request(request):
                         "box_2d":         None
                     })
 
-        # ============================================================
-        # [FIX 1] FALLBACK BOX สำหรับ rear crop risks (box_2d = None)
-        # ============================================================
-        # วางหลัง STEP 5 ก่อน STEP 6
-
-        def _get_fallback_box(risk_type: str, view_label: str, layout: str,
-                              crop_w: int, crop_y_start: int, crop_h: int) -> list | None:
-            """
-            สร้าง bounding box โดยประมาณสำหรับ risks ที่ไม่มี box_2d
-            ใช้ตำแหน่ง zone ที่รู้อยู่แล้วจาก layout
-            คืนค่าใน pixel coordinates (abs) ของ img จริง
-            """
-            if layout == "TOP_BOTTOM":
-                half_h = crop_h // 2
-                zones = {
-                    # FRONT view — ด้านบน, door end = ฝั่งซ้าย
-                    ("REAR_EMPTY_RISK",        "FRONT"): (0, crop_y_start, int(crop_w*0.40), crop_y_start + half_h),
-                    ("REAR_LATERAL_IMBALANCE", "FRONT"): (0, crop_y_start, int(crop_w*0.40), crop_y_start + half_h),
-                    # BACK view — ด้านล่าง, door end = ฝั่งขวา
-                    ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.60), crop_y_start + half_h, crop_w, crop_y_start + crop_h),
-                    ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.60), crop_y_start + half_h, crop_w, crop_y_start + crop_h),
-                }
-            else:  # LEFT_RIGHT
-                zones = {
-                    ("REAR_EMPTY_RISK",        "FRONT"): (0, crop_y_start, int(crop_w*0.24), crop_y_start + crop_h),
-                    ("REAR_LATERAL_IMBALANCE", "FRONT"): (0, crop_y_start, int(crop_w*0.24), crop_y_start + crop_h),
-                    ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.76), crop_y_start, crop_w, crop_y_start + crop_h),
-                    ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.76), crop_y_start, crop_w, crop_y_start + crop_h),
-                }
-
-            key = (risk_type, view_label.upper())
-            coords = zones.get(key)
-            if coords:
-                xmin, ymin, xmax, ymax = coords
-                return [xmin, ymin, xmax, ymax]  # pixel coords โดยตรง (ไม่ต้อง normalize)
-            return None
-                                  
         # ------------------------------------------------------------------
-        # STEP 6: Draw bounding boxes + build hazard list
+        # STEP 7: Draw bounding boxes + build hazard list
         # ------------------------------------------------------------------
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
@@ -790,7 +776,7 @@ def process_request(request):
         RISK_COLORS = {
             "STEP_DOWN_RISK":          "red",
             "REAR_EMPTY_RISK":         "orange",
-            "REAR_LATERAL_IMBALANCE":  "deeppink",   # NEW v3
+            "REAR_LATERAL_IMBALANCE":  "deeppink",
             "FRONT_EMPTY_RISK":        "yellow",
             "LATERAL_GAP_RISK":        "cyan",
             "TALL_UNSTABLE_RISK":      "magenta",
@@ -826,46 +812,72 @@ def process_request(request):
             if matched_type is None:
                 continue  # skip unknown / unrecognized
 
-            risk_type     = matched_type
-            desc          = risk.get("description", "พบความไม่สมดุลของสินค้า")
-            direction     = risk.get("direction", "")
-            lateral_side  = risk.get("lateral_side", "")
-            box           = (risk.get("box_2d") or risk.get("boundingBox")
-                             or risk.get("box2d") or risk.get("box"))
+            risk_type    = matched_type
+            desc         = risk.get("description", "พบความไม่สมดุลของสินค้า")
+            direction    = risk.get("direction", "")
+            lateral_side = risk.get("lateral_side", "")
+            box          = (risk.get("box_2d") or risk.get("boundingBox")
+                            or risk.get("box2d") or risk.get("box"))
             outline_color = RISK_COLORS.get(risk_type, "red")
 
-            # ---- Draw bounding box if valid ----
+            # ----------------------------------------------------------------
+            # Draw bounding box  [v4-FIX4: clamp + size guard]
+            # ----------------------------------------------------------------
             drawn = False
             if box and isinstance(box, list) and len(box) == 4:
                 try:
                     ymin, xmin, ymax, xmax = map(float, box)
+
+                    # Normalize 0–1 → 0–1000
                     if max(ymin, xmin, ymax, xmax) <= 1.0 \
                             and max(ymin, xmin, ymax, xmax) > 0:
                         ymin, xmin, ymax, xmax = (
                             ymin * 1000, xmin * 1000,
                             ymax * 1000, xmax * 1000
                         )
+
                     abs_xmin = int(xmin * crop_w / 1000.0)
                     abs_xmax = int(xmax * crop_w / 1000.0)
                     abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
                     abs_ymax = int(crop_y_start + (ymax * crop_h / 1000.0))
-                    draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax],
-                                   outline=outline_color, width=8)
-                    drawn = True
-                except Exception:
-                    pass
 
-            # [FIX 1] Fallback box สำหรับ risks ที่ box_2d = None
+                    # [v4-FIX4] Clamp ไม่ให้หลุดออกนอก crop zone
+                    abs_xmin = max(0,            min(abs_xmin, crop_w - 1))
+                    abs_xmax = max(abs_xmin + 1, min(abs_xmax, crop_w))
+                    abs_ymin = max(crop_y_start, min(abs_ymin, crop_y_end - 1))
+                    abs_ymax = max(abs_ymin + 1, min(abs_ymax, crop_y_end))
+
+                    # [v4-FIX4] กรองกรอบที่ใหญ่เกินสมเหตุสมผล (> 80% ของ crop)
+                    box_w_ratio = (abs_xmax - abs_xmin) / crop_w
+                    box_h_ratio = (abs_ymax - abs_ymin) / crop_h
+                    if box_w_ratio < 0.80 and box_h_ratio < 0.80:
+                        draw.rectangle(
+                            [abs_xmin, abs_ymin, abs_xmax, abs_ymax],
+                            outline=outline_color, width=8
+                        )
+                        drawn = True
+                    else:
+                        print(f"⚠️ [v4] Box too large "
+                              f"({box_w_ratio:.0%}w × {box_h_ratio:.0%}h) "
+                              f"for {risk_type} {view_name} — using fallback")
+
+                except Exception:
+                    pass  # invalid box → fall through to fallback
+
+            # [v4-FIX1] Fallback box สำหรับ risks ที่ box_2d = None
+            # หรือ AI box ใหญ่เกิน / invalid
             if not drawn:
                 fallback = _get_fallback_box(
                     risk_type, view_name, layout, crop_w, crop_y_start, crop_h
                 )
                 if fallback:
                     xmin_f, ymin_f, xmax_f, ymax_f = fallback
-                    draw.rectangle([xmin_f, ymin_f, xmax_f, ymax_f],
-                                   outline=outline_color, width=8)
+                    draw.rectangle(
+                        [xmin_f, ymin_f, xmax_f, ymax_f],
+                        outline=outline_color, width=8
+                    )
 
-            # ---- Build label ----
+            # ---- Build hazard label ----
             dir_label  = f" [{direction}]" if direction else ""
             side_label = f" ({lateral_side})" if lateral_side and lateral_side != "N/A" else ""
             detected_hazards.append({
@@ -875,7 +887,7 @@ def process_request(request):
             })
 
         # ------------------------------------------------------------------
-        # STEP 7: Build response
+        # STEP 8: Build response
         # ------------------------------------------------------------------
         real_hazards  = [h for h in detected_hazards if not h.get("is_error")]
         error_hazards = [h for h in detected_hazards if h.get("is_error")]
@@ -895,7 +907,7 @@ def process_request(request):
             hazard_count = 0
 
         # ------------------------------------------------------------------
-        # STEP 8: Encode result image and return
+        # STEP 9: Encode result image and return
         # ------------------------------------------------------------------
         buffered = io.BytesIO()
         img.save(buffered, format="JPEG", quality=80)
@@ -907,7 +919,7 @@ def process_request(request):
         return ({
             "status":            status_text,
             "hazardCount":       hazard_count,
-            "layout":            layout,          # debug info
+            "layout":            layout,
             "actionRequired":    action_text,
             "processedImageUrl": processed_image_url
         }, 200, headers)
