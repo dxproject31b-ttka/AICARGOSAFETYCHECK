@@ -12,8 +12,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v2 )
-# แก้ไข: ครอบคลุมจุดเสี่ยงการเลื่อน/ไถล/พลิกคว่ำ ทุกทิศทาง
+# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision Rear/Front Engine )
 # ---------------------------------------------------------------------------
 
 def get_api_keys_pool():
@@ -39,38 +38,14 @@ def get_api_keys_pool():
     return keys
 
 def generate_action_report(case_type, description):
-    actions = {
-        "DOOR_TALL_RISK":
-            f"🚨🚨 [CRITICAL] พบสินค้าสูงโดดเดี่ยวบริเวณปากประตู ไม่มีสินค้าค้ำด้านหลัง\n{description}\n"
-            f"🛠️ ACTION: ห้ามเปิดประตูก่อนค้ำยัน! ติดตั้ง Rear Tomming แนวดิ่งทันที + รัดตรึงกองสูงทุกจุด "
-            f"ก่อนเปิดประตูตู้สินค้าทุกครั้ง",
-
-        "STEP_DOWN_RISK":
-            f"🚨 [ALERT] พบรอยต่างระดับระหว่างกองสินค้า (Step-Down)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวาง (Void Filler / Dunnage) ระหว่างกอง และรัดตรึงให้ครบทุกจุด",
-
-        "REAR_EMPTY_RISK":
-            f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งประตูท้ายตู้ (REAR)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำแนวดิ่ง (Rear Tomming) + รัดตรึงป้องกันสินค้าไถลออกประตู",
-
-        "FRONT_EMPTY_RISK":
-            f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งผนังหัวตู้ (FRONT)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำฝั่งหัวตู้ (Front Blocking) + รัดตรึงป้องกันสินค้าไถลหน้า",
-
-        "LATERAL_GAP_RISK":
-            f"🚨 [ALERT] พบช่องว่างด้านข้างระหว่างกองสินค้า (Lateral Gap)\n{description}\n"
-            f"🛠️ ACTION: ใส่ Air Bag หรือ Void Filler ด้านข้าง + รัดตรึงป้องกันสินค้าเลื่อนตะแคง",
-
-        "TALL_UNSTABLE_RISK":
-            f"🚨 [ALERT] พบสินค้าสูงโดดเดี่ยว หรือกองสูงชันไม่มีของข้างค้ำ (Tall/Unstable)\n{description}\n"
-            f"🛠️ ACTION: ค้ำยันด้านข้างกองสูง + รัดตรึงแนวขวาง ป้องกันล้มตะแคง",
-
-        "OVERHANG_RISK":
-            f"🚨 [ALERT] พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง (Overhang)\n{description}\n"
-            f"🛠️ ACTION: จัดเรียงใหม่ให้ชั้นบนไม่ยื่นพ้นฐาน หรือใส่แผ่นรองรับและรัดตรึง",
-    }
-    return actions.get(case_type,
-        "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
+    if case_type == "STEP_DOWN_RISK":
+        return f"🚨 [ALERT] พบรอยเหลื่อมต่างระดับมากกว่า 1 ชั้นบริเวณกลางตู้\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวางและรัดตรึงป้องกันสินค้าล้มไถล"
+    elif case_type == "REAR_EMPTY_RISK":
+        return f"🚨 [ALERT] พบสินค้าต่างระดับ/พื้นที่โล่งบริเวณฝั่งท้ายตู้ประตูเปิด (REAR)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันแนวดิ่ง (Rear Tomming) และรัดตรึงป้องกันสินค้าล้มไถล"
+    elif case_type == "FRONT_EMPTY_RISK":
+        return f"🚨 [ALERT] พบสินค้าสูงขนาบพื้นที่โล่งติดผนังหัวตู้สีเหลือง (FRONT)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำยันฝั่งหัวตู้ (Front Blocking) และรัดตรึงป้องกันสินค้าล้มไถล"
+    else:
+        return "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่มีความเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
 
 def clean_json_response(text):
     text = text.strip()
@@ -88,209 +63,161 @@ def clean_json_response(text):
         
     return text
 
+def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list):
+    """
+    ส่งภาพ Crop เฉพาะ Zone 3 (ท้ายตู้) ให้ AI วิเคราะห์ซ้ำอีกรอบ
+    เพื่อยืนยัน / จับ REAR_EMPTY_RISK ที่อาจพลาดจากภาพเต็ม
+    """
+    rear_prompt = """
+You are a Cargo Safety Inspector focusing ONLY on the REAR (DOOR END) zone of a container.
+This image is a zoomed-in crop of approximately the right 35% of a 3D isometric container diagram, showing the door end area.
+
+### YOUR ONLY TASK: Assess REAR_EMPTY_RISK
+Look for these specific signals in this cropped image:
+1. Is there a visible empty yellow floor grid near the open door end?
+2. Is the last cargo stack clearly 1 or more full box layers shorter than the stacks just behind it (further inside the container)?
+3. Is there an unsupported upper gap above the last cargo stack that could cause it to topple when the door is opened?
+
+### DECISION RULE:
+- If ANY of the above signals are clearly visible → report REAR_EMPTY_RISK
+- If the cargo stacks appear uniform in height and no floor gap is visible → report SAFE
+- If perspective distortion makes it impossible to judge clearly → report SAFE (do not guess)
+
+### OUTPUT FORMAT:
+Return ONLY a valid JSON object (not an array):
+{
+  "rear_zone_risk": "REAR_EMPTY_RISK" or "SAFE",
+  "reasoning": "Describe exactly what you see — stack heights, floor gaps, unsupported gaps.",
+  "confidence": "HIGH" or "MEDIUM" or "LOW"
+}
+"""
+    last_err = ""
+    for current_key in api_keys:
+        try:
+            genai.configure(api_key=current_key)
+            model = genai.GenerativeModel(
+                model_name="gemini-flash-latest",
+                generation_config={"response_mime_type": "application/json"}
+            )
+            response = model.generate_content([rear_prompt, rear_crop])
+            raw_text = response.text if response and response.text else "{}"
+            clean_text = clean_json_response(raw_text)
+            result = json.loads(clean_text)
+            if isinstance(result, list):
+                result = result[0] if result else {}
+            return result
+        except Exception as e:
+            last_err = str(e)
+            continue
+    return {"rear_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
+
+
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     api_keys = get_api_keys_pool()
     if not api_keys:
         env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
         return [{
             "risk_type": "ERROR", 
-            "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run | Env Vars: {env_keys_list[:8]}"
+            "description": f"ไม่พบตัวแปร GEMINI_API_KEYS ใน Cloud Run (กรุณาตรวจเช็คชื่อตัวแปรใน Cloud Run Variables & Secrets) | Env Vars ที่มีในระบบ: {env_keys_list[:8]}"
         }]
 
-    # =====================================================================
-    # PROMPT v3 — ครอบคลุมจุดเสี่ยงทุกทิศทาง + Perspective Guard
-    #             ป้องกัน False Positive จาก 3D perspective distortion
-    # =====================================================================
     prompt = """
-You are an expert Cargo Loading Safety Inspector analyzing a MaxLoad Pro 3D loading diagram.
-Your mission: detect REAL physical risks of cargo shifting, sliding, tipping, or collapsing
-inside the container — in ANY direction. Precision is critical. False alarms are as harmful
-as missed risks.
+You are an expert Cargo Loading Safety Inspector analyzing a 3D isometric container loading diagram from a manifest PDF.
 
-This image is Page 2 of the manifest. It contains TWO 3D perspective diagrams of the SAME
-truck/container, viewed from different camera angles, labeled "Front" and "Back".
-These labels are CAMERA VIEW NAMES only — not the physical front or rear of the vehicle.
+---
+### STEP 1: LAYOUT IDENTIFICATION
+Identify which of 2 layout types is used on this page:
+- TYPE A (Top-Bottom): "Front" diagram = TOP HALF | "Back" diagram = BOTTOM HALF
+- TYPE B (Side-by-Side): "Front" diagram = LEFT HALF | "Back" diagram = RIGHT HALF
+Analyze EACH diagram independently. Do not mix findings between diagrams.
 
-=======================================================================
-PART 1 — PHYSICAL ORIENTATION (mandatory first step for EACH view)
-=======================================================================
+---
+### STEP 2: CRITICAL CONTAINER ORIENTATION RULES
+WARNING: Labels "Front" / "Back" are camera view names ONLY. Do NOT use them to identify physical ends.
+Use these visual landmarks instead:
+1. PHYSICAL REAR (DOOR END) = Open side with visible yellow floor grid + 2 red arrows. No wall present.
+2. PHYSICAL FRONT (HEAD WALL) = Solid yellow wall. Always opposite the door end.
 
-Identify these two physical landmarks in EACH diagram independently:
+Zone direction per diagram:
+- FRONT view: LEFT side = Zone 3 (Door/Red Arrows) | CENTER = Zone 2 | RIGHT side = Zone 1 (Yellow Wall)
+- BACK view:  LEFT side = Zone 1 (Yellow Wall) | CENTER = Zone 2 | RIGHT side = Zone 3 (Door/Red Arrows)
 
-  • DOOR END (Physical Rear of vehicle):
-    - The OPEN end — no solid wall closing it
-    - Visible YELLOW FLOOR GRID extending out
-    - TWO RED ARROWS on or near the floor at this end
-    - Cargo here is the LAST to be loaded, FIRST to unload
+---
+### STEP 3: DENSE CARGO AWARENESS (CRITICAL FOR HIGH-UTILIZATION LOADS)
+When cargo fill rate is high (approx. 70%+), boxes are tightly packed and the 3D isometric angle can create optical illusions.
+Apply these extra cautions:
+- A height difference caused purely by the 3D camera perspective (diagonal visual slope) is NOT a real step-down. Look for actual box edges that are lower than adjacent stacks.
+- If the top surface of cargo appears as one continuous diagonal slope (typical of a full load viewed at an angle), this is perspective distortion, NOT a step-down risk.
+- Only flag a risk if you can clearly count that one stack is 1 full box layer shorter than the adjacent stack.
 
-  • HEAD WALL (Physical Front of vehicle):
-    - The CLOSED end — a SOLID YELLOW/TAN WALL seals it
-    - No floor grid extension, no red arrows
-    - Cargo here is pushed all the way to this wall first
+---
+### STEP 4: ZONE 2 ANCHOR RULE (MANDATORY — prevents false positives)
+Before reporting FRONT_EMPTY_RISK or REAR_EMPTY_RISK, you MUST first assess Zone 2 (middle) as a height reference anchor.
 
-⚠️ CRITICAL PERSPECTIVE WARNING:
-These are 3D isometric/perspective drawings. Boxes that are FARTHER from the camera
-appear SMALLER and LOWER in the image, even if they are the SAME PHYSICAL HEIGHT.
-DO NOT judge cargo height from apparent pixel height alone.
-To correctly compare heights: count the NUMBER OF BOX LAYERS stacked vertically,
-not the pixel height. One layer = one box height unit, regardless of perspective.
+FRONT_EMPTY_RISK decision logic (Zone 1 vs Zone 2):
+- Measure: Is Zone 1 (head wall cargo) clearly lower than Zone 2 (middle cargo) by 1 or more full box layers?
+  - YES, Zone 1 is clearly ≥1 layer lower than Zone 2 → REPORT FRONT_EMPTY_RISK
+  - NO, Zone 1 is at same height OR only slightly lower than Zone 2 (less than 1 full layer) → DO NOT REPORT. Mark as SAFE for Zone 1.
+  - UNCERTAIN due to 3D perspective distortion → DO NOT REPORT. Err on side of caution (no false alarm).
 
-=======================================================================
-PART 2 — RISK DETECTION (scan BOTH views, all 6 risk types)
-=======================================================================
+REAR_EMPTY_RISK decision logic (Zone 3 vs Zone 2):
+- Measure: Is Zone 3 (door end cargo) clearly lower than Zone 2 (middle cargo) by 1 or more full box layers? OR is the floor grid empty at door end?
+  - YES, clearly ≥1 layer lower or floor is empty → REPORT REAR_EMPTY_RISK
+  - NO, Zone 3 is same height or slightly lower → DO NOT REPORT.
+  - UNCERTAIN → DO NOT REPORT.
 
-For each view, scan column by column along the container's length (Door→Head Wall).
-Count layers carefully using the box grid lines, not pixel size.
+STEP_DOWN_RISK decision logic (within Zone 2):
+- Is there a sudden height drop of ≥1 full box layer between adjacent stacks inside Zone 2?
+  - YES, clearly ≥1 layer difference → REPORT STEP_DOWN_RISK
+  - NO or UNCERTAIN → DO NOT REPORT.
 
---- RISK TYPE 1: REAR_EMPTY_RISK (longitudinal, toward door) ---
-UNDERSTAND THE PHYSICS FIRST:
-  The DOOR END is the last barrier before cargo falls out. ANY height mismatch here
-  is dangerous — whether the door-side column is too SHORT (unsupported above, can topple
-  inward) OR too TALL (sticks up beyond neighbors, no support behind it, falls OUT when
-  door opens). BOTH are equally dangerous.
+---
+### STEP 5: SYSTEMATIC ZONAL INSPECTION SEQUENCE (MUST FOLLOW IN ORDER)
+For EACH diagram view independently:
 
-TRIGGER — must satisfy AT LEAST ONE:
-  (a) Empty floor grid is visible at the DOOR END (red arrows side) — no boxes where
-      floor grid is exposed and additional cargo could have been placed
-  (b) The cargo column nearest the DOOR END is ≥2 layers SHORTER than the adjacent
-      interior column → unsupported gap above, inward topple risk
-  (c) *** NEW *** The cargo column nearest the DOOR END is ≥2 layers TALLER than the
-      adjacent interior column → tall column at door has NO SUPPORT BEHIND IT,
-      will fall outward when door opens. This is HIGH PRIORITY — look for this.
+[A] Identify Zone 2 height first → record as your reference baseline.
+[B] Compare Zone 1 height vs Zone 2 baseline → apply FRONT_EMPTY_RISK logic above.
+[C] Compare Zone 3 height vs Zone 2 baseline → apply REAR_EMPTY_RISK logic above.
+[D] Inspect Zone 2 internally for sudden drops → apply STEP_DOWN_RISK logic above.
+[E] If NO risk found in any zone → return SAFE entry for that view.
 
-VISUAL CUE FOR (c): In the Front/Back view, the DOOR END column sticks up above
-  the rest of the cargo like a "tower" or "spike" at the open end.
-  Example: interior columns are 2 layers, door-side column is 3-4 layers = TRIGGER.
+---
+### STEP 6: STRICT BOUNDING BOX ACCURACY
+- Format: [ymin, xmin, ymax, xmax] in normalized coordinates (0 to 1000).
+- NEVER draw bounding boxes in empty white space outside the container boundary.
+- For empty floor gaps → draw box tightly around the visible empty YELLOW FLOOR GRID only.
+- For height step-downs → draw box tightly around the cargo boxes forming the uneven edge.
+- If risk is uncertain, do not draw a box — omit the entry entirely.
 
-NOT a trigger:
-  - All columns at and near the door are the same layer count (uniform height = safe)
-  - Single-layer difference (1 layer) that is symmetric and intentional
-  - Perspective-caused apparent size difference — verify by counting actual box layers
+---
+### OUTPUT FORMAT:
+Return ONLY a valid JSON array. Each object MUST contain "reasoning" written BEFORE box_2d is calculated.
+Use this structure:
 
---- RISK TYPE 2: FRONT_EMPTY_RISK (longitudinal, toward head wall) ---
-TRIGGER — must satisfy AT LEAST ONE:
-  (a) A visible empty floor gap exists between the HEAD WALL and the first cargo column
-  (b) The cargo column touching or nearest the HEAD WALL is ≥2 layers SHORTER than
-      the column beside it (count actual box layers)
-NOT a trigger:
-  - Boxes touching or nearly touching the yellow wall at the SAME layer count as
-    their neighbors — this is SAFE, do NOT report it
-  - Perspective making far boxes look smaller — verify layer count before reporting
-
---- RISK TYPE 3: STEP_DOWN_RISK (longitudinal, middle section) ---
-TRIGGER:
-  - Any two ADJACENT columns in the MIDDLE portion differ by ≥2 box layers in height
-  - Creates an unsupported face on the taller column that can topple
-NOT a trigger:
-  - A 1-layer difference across the entire load (gradual taper is often intentional)
-  - Perspective distortion making uniform stacks appear uneven
-
---- RISK TYPE 3b: DOOR_TALL_RISK (highest priority — falls out on door open) ---
-THIS IS THE MOST DANGEROUS SCENARIO — prioritize detection above all others.
-
-PHYSICS: When the truck door opens, there is ZERO barrier behind the door-side cargo.
-A tall column at the door end that is higher than its neighbors has:
-  - No cargo support behind it (the door was the only thing holding it)
-  - Gravity + vibration will cause it to tip outward immediately
-
-TRIGGER:
-  - The column(s) at or within 1 column of the DOOR END are visibly taller (≥1 layer)
-    than the columns further inside the container
-  - The tall column at the door has empty space or missing cargo on its DOOR-FACING side
-  - Result: cargo tower at door with no rear support → falls out when door opens
-
-VISUAL SIGNATURE: Look for a "staircase going UP toward the door" — cargo gets taller
-  as you move toward the open end. This is opposite of safe loading (should taper down).
-
-NOT a trigger:
-  - All columns uniform height all the way to the door (safe)
-  - Taller column is in the MIDDLE, not at the door end
-
---- RISK TYPE 4: LATERAL_GAP_RISK (side-to-side / width direction) ---
-TRIGGER:
-  - A visible empty lane or gap runs along the WIDTH of the container (side to side)
-  - Cargo does not span full container width, leaving floor grid exposed on a side wall
-NOT a trigger:
-  - Normal spacing between individual boxes within a column (box joints, not gaps)
-  - The visual gap between two stacked rows when viewed in perspective
-
---- RISK TYPE 5: TALL_UNSTABLE_RISK (multi-directional tipping risk) ---
-TRIGGER:
-  - One column or group is ≥2 layers taller than ALL neighbors on BOTH longitudinal
-    sides AND both lateral sides — isolated tall stack with no support on multiple faces
-NOT a trigger:
-  - A tall column that is against the head wall (wall provides support on one face)
-  - A column taller on one side only (needs support on that one side, not all)
-
---- RISK TYPE 6: OVERHANG_RISK (vertical / toppling) ---
-TRIGGER:
-  - A box on the TOP of a stack visually extends beyond the footprint of the boxes
-    directly beneath it — the top layer's edge exceeds the layer below's edge
-NOT a trigger:
-  - Normal 3D perspective making top faces look offset (check actual edge alignment)
-
-=======================================================================
-PART 3 — SELF-CHECK BEFORE REPORTING (mandatory)
-=======================================================================
-
-Before adding any risk to your output, ask yourself:
-  1. Did I COUNT the actual box layers, or did I judge by pixel height? (must count)
-  2. Could perspective distortion explain this apparent height difference? (if yes → skip)
-  3. Is the cargo touching the head wall at THE SAME layer count as its neighbor?
-     (if same count → NOT FRONT_EMPTY_RISK, do not report)
-  4. Is the empty space I see actually empty floor, or just the perspective gap between
-     box rows? (must be actual uncovered floor grid → report; perspective gap → skip)
-  5. Does this risk meet the ≥2 layer threshold? (1-layer difference alone → not reportable
-     UNLESS it is combined with an actual empty floor area)
-
-=======================================================================
-PART 4 — BOUNDING BOX RULES
-=======================================================================
-
-- Format: [ymin, xmin, ymax, xmax] normalized 0–1000.
-  (0,0) = TOP-LEFT of the ENTIRE image sent to you.
-- Draw TIGHTLY around the specific cargo boxes or floor area that triggered the risk.
-- NEVER draw a box in the white margin or outside the container outline.
-- Height mismatch: box covers the taller column + shorter adjacent column together.
-- Empty floor: box covers only the visible uncovered yellow floor grid area.
-- Lateral gap: box covers the empty space between cargo groups (width direction).
-- Overhang: box covers the overhanging top layer only.
-
-=======================================================================
-OUTPUT FORMAT — Strict JSON array only. No markdown, no preamble.
-=======================================================================
-
-Return ONLY a valid JSON array. Each detected risk is one object.
-If multiple risks of the same type exist in different locations, create separate objects.
-If NO risks are found at all, return: []
-
-Schema for each risk object:
-{
-  "view": "FRONT" | "BACK",
-  "risk_type": "DOOR_TALL_RISK" | "REAR_EMPTY_RISK" | "FRONT_EMPTY_RISK" | "STEP_DOWN_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
-  "direction": "LONGITUDINAL" | "LATERAL" | "VERTICAL",
-  "reasoning": "<Visual evidence: describe exactly what you see — which boxes, which columns, what height difference, what gap size>",
-  "description": "<Thai language: อธิบายตำแหน่งและลักษณะของความเสี่ยงที่พบ>",
-  "box_2d": [ymin, xmin, ymax, xmax]
-}
-
-Example of correct output (do not copy — use your actual findings):
 [
   {
     "view": "FRONT",
-    "risk_type": "STEP_DOWN_RISK",
-    "direction": "LONGITUDINAL",
-    "reasoning": "Column at x≈0.4 has 3 layers high. Column at x≈0.55 has only 2 layers, creating a 1-layer step down toward the door end.",
-    "description": "พบสินค้าต่างระดับ 1 ชั้น บริเวณกลางตู้ มุมมอง FRONT คอลัมน์ที่ 3-4 สูงกว่าคอลัมน์ที่ 5 ทำให้เกิดแรงดันด้านข้าง",
-    "box_2d": [320, 380, 680, 620]
+    "risk_type": "FRONT_EMPTY_RISK",
+    "zone2_baseline": "Zone 2 cargo height appears to be 3 layers tall across the full width.",
+    "reasoning": "Zone 1 check: Cargo at yellow wall is visibly 2 layers tall — clearly 1 full layer shorter than Zone 2 baseline of 3 layers. Height gap is unambiguous, not a perspective artifact.",
+    "description": "พบสินค้าชิดผนังหัวตู้สีเหลืองเตี้ยกว่ากลางตู้อย่างชัดเจนมากกว่า 1 ชั้น เสี่ยงสินค้าเลื่อนไถล",
+    "box_2d": [300, 150, 600, 350]
   },
   {
     "view": "BACK",
-    "risk_type": "LATERAL_GAP_RISK",
-    "direction": "LATERAL",
-    "reasoning": "In the BACK view, cargo on the left side stops at approximately x=0.45 of the container width. The right side from x=0.45 to x=0.75 shows empty yellow floor, meaning cargo does not span full width.",
-    "description": "พบช่องว่างด้านข้างตู้ฝั่งขวา มุมมอง BACK สินค้าไม่เต็มความกว้าง เสี่ยงเลื่อนตะแคงขณะเลี้ยว",
-    "box_2d": [450, 500, 850, 750]
+    "risk_type": "REAR_EMPTY_RISK",
+    "zone2_baseline": "Zone 2 cargo height is 3 layers. Zone 3 near red arrows shows only 2 layers with empty floor grid visible.",
+    "reasoning": "Zone 3 check: Last stack near red arrows is 1 full layer lower than Zone 2 baseline. Empty yellow floor grid is visible at door end. Risk confirmed.",
+    "description": "พบสินค้าฝั่งประตูท้ายตู้ต่ำกว่ากลางตู้ 1 ชั้น และเห็นพื้นตู้โล่ง เสี่ยงสินค้าล้มออกเมื่อเปิดประตู",
+    "box_2d": [600, 750, 950, 950]
+  },
+  {
+    "view": "FRONT",
+    "risk_type": "SAFE",
+    "zone2_baseline": "Zone 2 cargo is 3 layers uniform.",
+    "reasoning": "All zones in FRONT view are at equal height. No step-down or empty gap detected. Dense load with perspective distortion confirmed but no real height difference found.",
+    "description": "ปลอดภัย ไม่พบความเสี่ยงในมุมมอง FRONT",
+    "box_2d": null
   }
 ]
 """
@@ -364,17 +291,22 @@ def process_request(request):
 
         pdf_bytes = base64.b64decode(base64_str)
 
+        # --- STEP 1: Render PDF at higher DPI for clearer layer detection ---
         try:
-            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
+            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=250)
         except Exception:
-            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
-        
+            try:
+                pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=250)
+            except Exception:
+                pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
+
         if not pages:
             return ({"error": "Cannot render PDF page data"}, 400, headers)
 
         img = pages[0]
         width, height = img.size
-        
+
+        # --- STEP 2: Crop diagram area (remove header/footer) ---
         crop_y_start = int(height * 0.10)
         crop_y_end = int(height * 0.90)
         crop_w = width
@@ -382,54 +314,88 @@ def process_request(request):
 
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
 
+        # --- STEP 3: Full diagram analysis (all zones) ---
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
+
+        # --- STEP 4: Rear Zone Crop — zoom in on Zone 3 (rightmost 35%) for confirmation ---
+        # Crop ทั้งสองครึ่ง (Front diagram และ Back diagram) ฝั่งท้ายตู้แยกกัน
+        diagram_half_h = crop_h // 2
+
+        # Front view diagram → Zone 3 อยู่ฝั่งซ้าย (x: 0–35%)
+        rear_crop_front = img.crop((
+            0,
+            crop_y_start,
+            int(crop_w * 0.38),
+            crop_y_start + diagram_half_h
+        ))
+
+        # Back view diagram → Zone 3 อยู่ฝั่งขวา (x: 62–100%)
+        rear_crop_back = img.crop((
+            int(crop_w * 0.62),
+            crop_y_start + diagram_half_h,
+            crop_w,
+            crop_y_end
+        ))
+
+        # วิเคราะห์ท้ายตู้แยกทั้งสองมุม
+        api_keys_local = get_api_keys_pool()
+        rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_local)
+        rear_result_back  = analyze_rear_zone_with_ai(rear_crop_back,  api_keys_local)
+
+        # --- STEP 5: Merge rear zone findings into all_risks ---
+        # ถ้า rear analysis พบ REAR_EMPTY_RISK และ confidence ไม่ใช่ LOW
+        # และยังไม่มีใน all_risks → เพิ่มเข้าไป (ป้องกันการพลาด)
+        existing_rear_views = {
+            str(r.get("view", "")).upper()
+            for r in (all_risks if isinstance(all_risks, list) else [])
+            if "REAR_EMPTY" in str(r.get("risk_type", "")).upper()
+        }
+
+        for view_label, rear_result in [("FRONT", rear_result_front), ("BACK", rear_result_back)]:
+            if not isinstance(rear_result, dict):
+                continue
+            rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
+            confidence     = str(rear_result.get("confidence", "LOW")).upper()
+            reasoning      = rear_result.get("reasoning", "")
+
+            if rear_zone_risk == "REAR_EMPTY_RISK" and confidence in ("HIGH", "MEDIUM"):
+                if view_label not in existing_rear_views:
+                    # เพิ่ม risk ที่พลาดจากการวิเคราะห์ภาพเต็ม
+                    all_risks.append({
+                        "view": view_label,
+                        "risk_type": "REAR_EMPTY_RISK",
+                        "zone2_baseline": "Assessed from rear zone crop independently.",
+                        "reasoning": f"[Rear Crop Confirmation] {reasoning}",
+                        "description": "พบสินค้าฝั่งประตูท้ายตู้ต่ำกว่ากลางตู้หรือเห็นพื้นโล่ง (ยืนยันจากการวิเคราะห์ภาพ Zoom ท้ายตู้)",
+                        "box_2d": None
+                    })
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
 
-        # ---- Color map ต่อ risk_type ----
-        RISK_COLORS = {
-            "DOOR_TALL_RISK":    "red",      # อันตรายสูงสุด — แดงสด
-            "STEP_DOWN_RISK":    "orangered",
-            "REAR_EMPTY_RISK":   "orange",
-            "FRONT_EMPTY_RISK":  "yellow",
-            "LATERAL_GAP_RISK":  "cyan",
-            "TALL_UNSTABLE_RISK":"magenta",
-            "OVERHANG_RISK":     "lime",
-        }
-
-        VALID_RISK_TYPES = set(RISK_COLORS.keys())
-
         if isinstance(all_risks, list):
             for risk in all_risks:
-                raw_risk_type = str(risk.get("risk_type", "")).upper().strip()
+                risk_type = str(risk.get("risk_type", "")).upper().strip()
                 view_name = str(risk.get("view", "GENERAL")).upper()
-
-                # ---- normalize risk_type ----
-                matched_type = None
-                for vrt in VALID_RISK_TYPES:
-                    if vrt.replace("_RISK","") in raw_risk_type or raw_risk_type in vrt:
-                        matched_type = vrt
-                        break
-                if matched_type is None and raw_risk_type in VALID_RISK_TYPES:
-                    matched_type = raw_risk_type
-
-                if raw_risk_type == "ERROR":
+                
+                if "STEP_DOWN" in risk_type:
+                    risk_type = "STEP_DOWN_RISK"
+                elif "REAR_EMPTY" in risk_type:
+                    risk_type = "REAR_EMPTY_RISK"
+                elif "FRONT_EMPTY" in risk_type:
+                    risk_type = "FRONT_EMPTY_RISK"
+                elif risk_type == "ERROR":
                     detected_hazards.append({
                         "title": "⚠️ ข้อผิดพลาด API",
-                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys"),
+                        "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys ใน Cloud Run"),
                         "is_error": True
                     })
                     continue
-
-                if matched_type is None:
-                    continue  # skip unknown risk types
-
-                risk_type = matched_type
+                else:
+                    continue
+                    
                 desc = risk.get("description", "พบความไม่สมดุลของสินค้า")
-                direction = risk.get("direction", "")
                 box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box2d") or risk.get("box")
-                outline_color = RISK_COLORS.get(risk_type, "red")
                 
                 drawn_exact = False
                 if box and isinstance(box, list) and len(box) == 4:
@@ -443,19 +409,16 @@ def process_request(request):
                         abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
                         abs_ymax = int(crop_y_start + (ymax * crop_h / 1000.0))
                         
-                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax],
-                                       outline=outline_color, width=8)
+                        draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline="red", width=8)
                         drawn_exact = True
                     except Exception:
                         pass
                         
                 if not drawn_exact:
-                    draw.rectangle([0, crop_y_start, crop_w, crop_y_end],
-                                   outline=outline_color, width=8)
+                    draw.rectangle([0, crop_y_start, crop_w, crop_y_end], outline="orange", width=8)
                 
-                dir_label = f" [{direction}]" if direction else ""
                 detected_hazards.append({
-                    "title": f"ความเสี่ยง ({view_name}){dir_label}: {risk_type}",
+                    "title": f"ความเสี่ยง ({view_name}): {risk_type}",
                     "detail": generate_action_report(risk_type, desc),
                     "is_error": False
                 })
@@ -466,13 +429,14 @@ def process_request(request):
         if len(real_hazards) > 0:
             status_text = f"พบจุดเสี่ยงอันตราย ({len(real_hazards)} จุด)"
             action_text = "\n\n--------------------------------------------------\n\n".join(
-                [f"[{h['title']}]\n{h['detail']}" for h in detected_hazards]
+                [f"[{h['title']}]\n{h['detail']}" for h in real_hazards]
             )
             hazard_count = len(real_hazards)
         elif has_errors:
             status_text = "เกิดข้อผิดพลาดในการวิเคราะห์ AI"
+            error_hazards = [h for h in detected_hazards if h.get("is_error", False)]
             action_text = "\n\n--------------------------------------------------\n\n".join(
-                [f"[{h['title']}]\n{h['detail']}" for h in detected_hazards]
+                [f"[{h['title']}]\n{h['detail']}" for h in error_hazards]
             )
             hazard_count = 0
         else:
