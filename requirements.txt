@@ -3,4 +3,3 @@ pdf2image
 Pillow
 requests
 google-generativeai
-typing_extensions
