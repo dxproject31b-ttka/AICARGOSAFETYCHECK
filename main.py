@@ -744,6 +744,43 @@ def process_request(request):
                         "box_2d":         None
                     })
 
+        # ============================================================
+        # [FIX 1] FALLBACK BOX สำหรับ rear crop risks (box_2d = None)
+        # ============================================================
+        # วางหลัง STEP 5 ก่อน STEP 6
+
+        def _get_fallback_box(risk_type: str, view_label: str, layout: str,
+                              crop_w: int, crop_y_start: int, crop_h: int) -> list | None:
+            """
+            สร้าง bounding box โดยประมาณสำหรับ risks ที่ไม่มี box_2d
+            ใช้ตำแหน่ง zone ที่รู้อยู่แล้วจาก layout
+            คืนค่าใน pixel coordinates (abs) ของ img จริง
+            """
+            if layout == "TOP_BOTTOM":
+                half_h = crop_h // 2
+                zones = {
+                    # FRONT view — ด้านบน, door end = ฝั่งซ้าย
+                    ("REAR_EMPTY_RISK",        "FRONT"): (0, crop_y_start, int(crop_w*0.40), crop_y_start + half_h),
+                    ("REAR_LATERAL_IMBALANCE", "FRONT"): (0, crop_y_start, int(crop_w*0.40), crop_y_start + half_h),
+                    # BACK view — ด้านล่าง, door end = ฝั่งขวา
+                    ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.60), crop_y_start + half_h, crop_w, crop_y_start + crop_h),
+                    ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.60), crop_y_start + half_h, crop_w, crop_y_start + crop_h),
+                }
+            else:  # LEFT_RIGHT
+                zones = {
+                    ("REAR_EMPTY_RISK",        "FRONT"): (0, crop_y_start, int(crop_w*0.24), crop_y_start + crop_h),
+                    ("REAR_LATERAL_IMBALANCE", "FRONT"): (0, crop_y_start, int(crop_w*0.24), crop_y_start + crop_h),
+                    ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.76), crop_y_start, crop_w, crop_y_start + crop_h),
+                    ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.76), crop_y_start, crop_w, crop_y_start + crop_h),
+                }
+
+            key = (risk_type, view_label.upper())
+            coords = zones.get(key)
+            if coords:
+                xmin, ymin, xmax, ymax = coords
+                return [xmin, ymin, xmax, ymax]  # pixel coords โดยตรง (ไม่ต้อง normalize)
+            return None
+                                  
         # ------------------------------------------------------------------
         # STEP 6: Draw bounding boxes + build hazard list
         # ------------------------------------------------------------------
