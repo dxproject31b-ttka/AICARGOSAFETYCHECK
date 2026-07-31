@@ -28,26 +28,24 @@ import google.generativeai as genai
 # ============================================================
 
 def get_api_keys_pool():
-    raw_keys = ""
-    found_var_name = ""
-
+    keys = []
+    # 1. ค้นหาจากทุก Environment Variables ที่เข้าเงื่อนไข
     for env_k, env_v in os.environ.items():
         k_upper = env_k.upper().strip()
         if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
-            raw_keys = env_v.strip()
-            found_var_name = env_k
-            break
-
-    if not raw_keys:
-        raw_keys = os.environ.get("GEMINI_API_KEYS",
-                   os.environ.get("GEMINI_API_KEY",
-                   os.environ.get("gemini_api_keys",
-                   os.environ.get("gemini_api_key", "")))).strip()
-
-    keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            # รองรับกรณีที่ตัวแปรนั้นใส่คีย์คั่นด้วยเครื่องหมายจุลภาค (,) ไว้
+            extracted_keys = [k.strip() for k in env_v.split(",") if k.strip()]
+            keys.extend(extracted_keys)
+            
+    # 2. ป้องกันคีย์ซ้ำกันในระบบ
+    keys = list(set(keys))
+    
     if keys:
-        print(f"✅ Loaded {len(keys)} API key(s) from: '{found_var_name}'")
-    return keys
+        print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
+        return keys
+    
+    print("❌ No Gemini API keys found.")
+    return []
 
 
 # ============================================================
