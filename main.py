@@ -597,6 +597,34 @@ def process_request(request):
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
         # ------------------------------------------------------------------
+        # [FIX 2] POST-FILTER: ลบ FRONT_EMPTY_RISK ออกเมื่อ layout = LEFT_RIGHT
+        # เหตุผล: AC03-type (LEFT_RIGHT) มีสินค้าชิดหัวตู้ การที่ AI เห็น
+        #         FRONT_EMPTY เป็น perspective artifact ของ isometric view
+        #         ที่หัวตู้ทั้ง FRONT และ BACK — ตกลงกันว่าไม่นับเป็น risk
+        # ------------------------------------------------------------------
+        # NOTE: ต้องรัน detect_page_layout ก่อน ย้าย STEP 3.5 ขึ้นมาก่อน STEP 3
+
+        # วิธีแก้: สลับ STEP 3.5 ขึ้นมาก่อน STEP 3 แล้วเพิ่ม filter:
+
+        layout = detect_page_layout(img, crop_y_start, crop_y_end)  # ← ย้ายขึ้นมา
+
+        all_risks = analyze_diagram_image_with_ai(diagram_crop)
+
+        if layout == "LEFT_RIGHT":
+            before = len(all_risks)
+            all_risks = [
+                r for r in all_risks
+                if not (
+                    isinstance(r, dict) and
+                    str(r.get("risk_type", "")).upper() == "FRONT_EMPTY_RISK"
+                )
+            ]
+            removed = before - len(all_risks)
+            if removed:
+                print(f"🗑️ [FIX2] Removed {removed} FRONT_EMPTY_RISK(s) "
+                      f"(LEFT_RIGHT layout — head-wall risks not counted)")
+        
+        # ------------------------------------------------------------------
         # STEP 3.5: Detect page layout  [NEW v3]
         # ------------------------------------------------------------------
         layout = detect_page_layout(img, crop_y_start, crop_y_end)
@@ -770,10 +798,10 @@ def process_request(request):
             outline_color = RISK_COLORS.get(risk_type, "red")
 
             # ---- Draw bounding box if valid ----
+            drawn = False
             if box and isinstance(box, list) and len(box) == 4:
                 try:
                     ymin, xmin, ymax, xmax = map(float, box)
-                    # Normalize 0–1 → 0–1000
                     if max(ymin, xmin, ymax, xmax) <= 1.0 \
                             and max(ymin, xmin, ymax, xmax) > 0:
                         ymin, xmin, ymax, xmax = (
@@ -784,13 +812,21 @@ def process_request(request):
                     abs_xmax = int(xmax * crop_w / 1000.0)
                     abs_ymin = int(crop_y_start + (ymin * crop_h / 1000.0))
                     abs_ymax = int(crop_y_start + (ymax * crop_h / 1000.0))
-
-                    draw.rectangle(
-                        [abs_xmin, abs_ymin, abs_xmax, abs_ymax],
-                        outline=outline_color, width=8
-                    )
+                    draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax],
+                                   outline=outline_color, width=8)
+                    drawn = True
                 except Exception:
-                    pass  # invalid box → skip drawing, still report hazard
+                    pass
+
+            # [FIX 1] Fallback box สำหรับ risks ที่ box_2d = None
+            if not drawn:
+                fallback = _get_fallback_box(
+                    risk_type, view_name, layout, crop_w, crop_y_start, crop_h
+                )
+                if fallback:
+                    xmin_f, ymin_f, xmax_f, ymax_f = fallback
+                    draw.rectangle([xmin_f, ymin_f, xmax_f, ymax_f],
+                                   outline=outline_color, width=8)
 
             # ---- Build label ----
             dir_label  = f" [{direction}]" if direction else ""
