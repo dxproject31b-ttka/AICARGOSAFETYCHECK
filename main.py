@@ -5,7 +5,8 @@ import os
 import time
 import gc
 import traceback
-from typing import TypedDict, List
+from typing import List
+from typing_extensions import TypedDict
 from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
