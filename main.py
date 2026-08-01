@@ -967,5 +967,10 @@ def process_request(request):
         }, 200, headers)
 
     except Exception as e:
+        err_trace = traceback.format_exc()
+        # [เพิ่มบรรทัดนี้] สั่งให้ Print Error ทิ้งไว้ใน Log ของ Cloud Run
+        print("🚨 CRITICAL ERROR DETAILS:")
+        print(err_trace) 
+        
         gc.collect()
-        return ({"error": str(e), "trace": traceback.format_exc()[-500:]}, 500, headers)
+        return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
