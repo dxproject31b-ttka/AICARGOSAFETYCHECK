@@ -202,36 +202,32 @@ RISK A — REAR_EMPTY_RISK (longitudinal shortage)
 =======================================================================
 Signals:
 1. Visible empty yellow floor grid near the open door (no boxes placed there)
-2. The last cargo column is clearly 1 or more FULL BOX LAYERS shorter than the columns
-   further inside the container (shorter in the depth/length direction)
-3. Unsupported upper gap above the last stack
+2. A clear PHYSICAL HEIGHT DROP (stair-step shape). The cargo stack closest to the door is physically shorter than the stack immediately behind it.
+3. Unsupported upper gap above the last stack.
 
 =======================================================================
 RISK B — REAR_LATERAL_IMBALANCE (lateral height difference at rear)
 =======================================================================
 Signals:
-1. At the door-end zone, the cargo on the LEFT side is clearly taller than the RIGHT side
-   (or vice versa) by 1 or more full box layers
-2. This is a WIDTH-direction (side-to-side) height difference, NOT a depth difference
-3. The imbalance creates risk of cargo tipping sideways when the door is opened
+1. At the door-end zone, the overall cargo block on the LEFT side is physically taller than the RIGHT side (or vice versa).
+2. This is a WIDTH-direction (side-to-side) height difference, NOT a depth difference.
+3. The imbalance creates risk of cargo tipping sideways when the door is opened.
 
 =======================================================================
-CRITICAL RULES — PREVENT FALSE POSITIVES
+CRITICAL RULES — FOCUS ON PHYSICAL HEIGHT, NOT LAYER COUNTS
 =======================================================================
-- Box COLOR (blue, green, red, etc.) indicates SKU type ONLY — it does NOT mean
-  height difference. Do NOT report a risk based on color alone.
-- A stagger/offset where boxes are shifted horizontally but remain the SAME HEIGHT
-  is NOT a risk — do not report it.
-- 3D perspective naturally makes the far side appear smaller — compensate for this.
-  Only report if height difference is clearly ≥ 1 full box layer.
-- If you cannot clearly count the difference → SAFE (do not guess).
+- DO NOT get confused by box layer counts. Different SKUs have different box sizes. Focus on the OVERALL PHYSICAL BLOCK HEIGHT of the stacks.
+- If you see a clear physical "step-down" or "cliff" in height, it IS A RISK. You do not need to count exact box layers.
+- Box COLOR indicates SKU type. Colors often change exactly where the physical height drops. Do not let color changes make you ignore a physical height drop.
+- A stagger/offset where boxes are shifted horizontally but remain the SAME PHYSICAL HEIGHT is NOT a risk.
+- If you see a physical height drop -> report the risk. Do not default to SAFE just because layers are hard to count.
 
 =======================================================================
 OUTPUT — Return ONLY this exact JSON object:
 =======================================================================
 {{
   "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
-  "reasoning": "Describe exactly what you see: stack heights, floor gaps, lateral differences.",
+  "reasoning": "Describe exactly what you see regarding overall physical stack heights (do not just count layers), floor gaps, or lateral differences.",
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }}
 """
@@ -413,66 +409,53 @@ Scan EVERY column and row in BOTH views for ALL 7 risk types below.
 --- RISK TYPE 1: REAR_EMPTY_RISK ---
 Trigger: Near the DOOR END — in the LENGTH direction:
   - Empty floor grid (no boxes where boxes could be placed)
-  - OR last cargo column is clearly ≥1 FULL BOX LAYER shorter than columns beside it
-    (measuring depth/length direction, not width direction)
+  - OR the last cargo column has a clear PHYSICAL HEIGHT DROP compared to columns beside it (stair-step shape in depth/length direction). Do not rely on box layer counts as box sizes vary.
   Risk: cargo slides backward and falls when door opens.
 
 --- RISK TYPE 2: REAR_LATERAL_IMBALANCE ---
 Trigger: Near the DOOR END — in the WIDTH direction:
-  - At the door-end zone, the cargo on the LEFT wall side is clearly ≥1 FULL BOX LAYER
-    taller OR shorter than the cargo on the RIGHT wall side
-  - This is a SIDE-TO-SIDE height difference (across the container width), NOT depth
-  - The taller side creates an unbalanced mass that can topple sideways when the door opens
+  - At the door-end zone, the cargo block on the LEFT wall side is physically taller OR shorter than the RIGHT wall side.
+  - This is a SIDE-TO-SIDE physical height difference, NOT a depth difference.
   Risk: asymmetric cargo collapses laterally the moment door constraint is removed.
-  NOTE: Only report if difference is clearly ≥1 full layer. Perspective shrinkage of far
-  side is normal — compensate for it before judging.
 
 --- RISK TYPE 3: FRONT_EMPTY_RISK ---
 Trigger: Near the HEAD WALL — in the LENGTH direction:
   - Empty floor space between wall and first cargo column
-  - OR first cargo column is clearly ≥1 FULL LAYER shorter than adjacent column
+  - OR first cargo column has a clear physical height drop compared to adjacent column.
   Risk: cargo shifts forward under braking.
 
 --- RISK TYPE 4: STEP_DOWN_RISK ---
 Trigger: In the MIDDLE section (not at either end):
-  - Adjacent cargo columns differ by ≥1 full layer in height — staircase shape
+  - Adjacent cargo columns have a clear physical height difference — staircase shape.
   Risk: taller column topples onto shorter one.
 
 --- RISK TYPE 5: LATERAL_GAP_RISK ---
 Trigger: Side-to-side (WIDTH direction), across the full container:
   - Visible empty space between cargo groups in width direction
   - OR cargo clearly does not span the full container width
-  Risk: cargo slides sideways during cornering.
 
 --- RISK TYPE 6: TALL_UNSTABLE_RISK ---
-Trigger: A cargo column is notably taller than ALL surrounding columns on
-  BOTH sides (longitudinal AND lateral):
-  - The tall stack has no neighboring cargo of similar height on ≥2 sides
-  Risk: tipping in any direction due to lack of lateral support.
+Trigger: A cargo column is physically taller than ALL surrounding columns on BOTH sides.
+  - The tall stack has no neighboring cargo of similar height on ≥2 sides.
 
 --- RISK TYPE 7: OVERHANG_RISK ---
-Trigger: A box or layer on TOP of a stack extends BEYOND the footprint
-  of the boxes directly below it (overhangs the edge in any direction).
-  Risk: upper cargo slides off or causes lower cargo to tip.
+Trigger: A box or layer on TOP of a stack extends BEYOND the footprint of the boxes below it.
 
 =======================================================================
 PART 2B — DENSE CARGO PERSPECTIVE RULE
        (Apply ONLY to longitudinal/depth direction)
 =======================================================================
 
-When the container is heavily loaded (boxes packed tightly wall-to-wall
-in the LENGTH direction), the 3D isometric camera creates a DIAGONAL
+When the container is heavily loaded, the 3D isometric camera creates a DIAGONAL
 VISUAL SLOPE across the top surface of the cargo. This slope is a
-PERSPECTIVE ARTIFACT for the LENGTH direction only — it is NOT a real
-step-down or height difference in depth.
+PERSPECTIVE ARTIFACT for the LENGTH direction only.
 
   ✅ Apply this rule to: REAR_EMPTY_RISK, FRONT_EMPTY_RISK, STEP_DOWN_RISK
-     → Only flag if you can clearly COUNT ≥1 FULL BOX LAYER difference.
+     → Only flag if you see a sharp "STAIR-STEP" or "CLIFF" physical drop.
      → A gradual slope in the lengthwise direction → DO NOT REPORT.
 
   ❌ Do NOT apply this rule to: REAR_LATERAL_IMBALANCE, LATERAL_GAP_RISK
-     → Side-to-side height differences are NOT a perspective artifact.
-     → If left side is taller than right side by 1 full layer → REPORT it.
+     → Side-to-side physical height differences are NOT a perspective artifact.
 
 =======================================================================
 PART 2C — ZONE 2 ANCHOR RULE (MANDATORY — prevents false positives)
