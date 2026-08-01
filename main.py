@@ -572,8 +572,8 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str,
     คืนค่า [xmin, ymin, xmax, ymax] เป็น pixel coords บน img จริง
     หรือ None ถ้าไม่รู้จัก key
     """
-        vl = view_label.upper()
-        crop_y_end = crop_y_start + crop_h
+    vl = view_label.upper()
+    crop_y_end = crop_y_start + crop_h
                           
     if layout == "TOP_BOTTOM":
         half_h = crop_h // 2
