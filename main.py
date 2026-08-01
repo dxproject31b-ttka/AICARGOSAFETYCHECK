@@ -191,44 +191,24 @@ def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list,
     ตรวจทั้ง REAR_EMPTY_RISK และ REAR_LATERAL_IMBALANCE
     """
     rear_prompt = f"""
-You are a Cargo Safety Inspector. This image is a ZOOMED-IN CROP of the DOOR END (REAR) zone
-of a 3D isometric container loading diagram — the side with the open door and red floor arrows.
-This is the {view_label} view of the manifest.
+You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone.
+This is the {view_label} view. The red arrows point to the floor at the open door.
 
-YOUR TASK: Detect TWO possible risks in this cropped door-end area.
+YOUR ONLY TASK: Look for a "Stair-Step" drop at the end of the cargo.
 
-=======================================================================
-RISK A — REAR_EMPTY_RISK (longitudinal shortage)
-=======================================================================
-Signals:
-1. Visible empty yellow floor grid near the open door (no boxes placed there)
-2. The last cargo column is clearly 1 or more FULL BOX LAYERS shorter than the columns
-   further inside the container (shorter in the depth/length direction)
-3. Unsupported upper gap above the last stack
+HOW TO DETECT "REAR_EMPTY_RISK":
+1. Look at the very last stack of cargo closest to the door (red arrows).
+2. Look at the stack immediately behind it (deeper inside the container).
+3. If the last stack is shorter (e.g., 2 layers high) AND the stack behind it is taller (e.g., 3 layers high), you MUST report "REAR_EMPTY_RISK".
 
-=======================================================================
-RISK B — REAR_LATERAL_IMBALANCE (lateral height difference at rear)
-=======================================================================
-Signals:
-1. At the door-end zone, the cargo on the LEFT side is clearly taller than the RIGHT side
-   (or vice versa) by 1 or more full box layers
-2. This is a WIDTH-direction (side-to-side) height difference, NOT a depth difference
-3. The imbalance creates risk of cargo tipping sideways when the door is opened
+CRITICAL RULE:
+Do not overthink 3D perspective. If you see a physical height drop (like a step down) at the end of the cargo, it is a risk. Color changes often happen exactly where the height drops — do not let colors confuse you.
 
-=======================================================================
-CRITICAL RULES — HOW TO DETECT
-=======================================================================
-- Look for a sharp "STAIR-STEP" or "CLIFF" drop in the top surface of the cargo. If the stack closest to the door is 2 layers high, but the stack immediately behind it is 3 layers high, this is a clear REAR_EMPTY_RISK.
-- A sharp vertical drop between adjacent stacks is a REAL RISK, not a 3D perspective artifact.
-- Box COLOR indicates SKU type, but height drops often happen exactly where colors change. Do not ignore a physical height drop just because the color changed. Focus purely on the structural block height.
-
-=======================================================================
-OUTPUT — Return ONLY this exact JSON object:
-=======================================================================
+Return ONLY this exact JSON format:
 {{
-  "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
-  "reasoning": "Describe exactly what you see: stack heights, floor gaps, lateral differences.",
-  "confidence": "HIGH" | "MEDIUM" | "LOW"
+  "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "SAFE",
+  "reasoning": "Explain the layer count. Example: The stack at the door is 2 layers high, but the stack behind it is 3 layers high.",
+  "confidence": "HIGH"
 }}
 """
     last_err = ""
@@ -819,7 +799,7 @@ def process_request(request):
             confidence = str(rear_result.get("confidence", "LOW")).upper()
             reasoning = rear_result.get("reasoning", "")
 
-            if confidence in ("HIGH", "MEDIUM"):
+            if confidence in ("HIGH", "MEDIUM", "LOW"):
                 if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
                     all_risks.append({
                         "view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A",
