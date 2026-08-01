@@ -280,7 +280,76 @@ OUTPUT — Return ONLY this exact JSON object:
             continue
 
     return {"rear_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
+                                   
+# ============================================================
+# SECTION 5.5 — AI: FRONT ZONE CROP ANALYSIS (ใหม่)
+# ============================================================
 
+def analyze_front_zone_with_ai(front_crop: PIL.Image.Image, api_keys: list,
+                               view_label: str = "UNKNOWN") -> dict:
+    global GLOBAL_KEY_INDEX
+    front_prompt = f"""
+You are a Cargo Safety Inspector. This image is a ZOOMED-IN CROP of the HEAD WALL (FRONT) zone
+of a 3D isometric container loading diagram — the side with the SOLID YELLOW/TAN WALL.
+This is the {view_label} view of the manifest.
+
+YOUR TASK: Detect if there is a FRONT_EMPTY_RISK in this cropped area.
+
+=======================================================================
+SIGNALS FOR FRONT_EMPTY_RISK (longitudinal shortage)
+=======================================================================
+1. Visible empty floor space between the solid yellow head wall and the first cargo column.
+2. The first cargo column touching the wall is clearly 1 or more FULL BOX LAYERS shorter
+   than the adjacent cargo columns further inside the container.
+
+OUTPUT — Return ONLY this exact JSON object:
+{{
+  "front_zone_risk": "FRONT_EMPTY_RISK" | "SAFE",
+  "reasoning": "Describe exactly what you see near the solid wall.",
+  "confidence": "HIGH" | "MEDIUM" | "LOW"
+}}
+"""
+    last_err = ""
+    model_candidates = ["gemini-3.6-flash"]
+    total_keys = len(api_keys)
+
+    if total_keys == 0:
+        return {"front_zone_risk": "ERROR", "reasoning": "No API keys", "confidence": "LOW"}
+
+    for i in range(total_keys):
+        current_index = (GLOBAL_KEY_INDEX + i) % total_keys
+        current_key = api_keys[current_index]
+        
+        try:
+            if hasattr(genai, '_client'):
+                genai._client = None
+                
+            genai.configure(api_key=current_key)
+            for model_name in model_candidates:
+                try:
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    response = model.generate_content([front_prompt, front_crop]) 
+                    raw_text = response.text if response and response.text else "{}"
+                    clean_text = clean_json_response(raw_text)
+                    result = json.loads(clean_text)
+                    if isinstance(result, list):
+                        result = result[0] if result else {}
+                        
+                    GLOBAL_KEY_INDEX = current_index 
+                    return result
+                    
+                except Exception as e:
+                    last_err = str(e)
+                    if "404" in last_err or "not found" in last_err.lower(): continue
+                    break
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    return {"front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
 # ============================================================
 # SECTION 6 — AI: FULL DIAGRAM ANALYSIS
@@ -566,45 +635,40 @@ Example outputs (do not copy — use your actual findings):
 
 def _get_fallback_box(risk_type: str, view_label: str, layout: str,
                       crop_w: int, crop_y_start: int, crop_h: int):
-    """
-    สร้าง bounding box โดยประมาณสำหรับ risks ที่ไม่มี box_2d (จาก rear crop)
-    จำกัดให้อยู่แค่บริเวณ door-end zone จริงๆ ไม่ใช่ทั้งครึ่งภาพ
-    คืนค่า [xmin, ymin, xmax, ymax] เป็น pixel coords บน img จริง
-    หรือ None ถ้าไม่รู้จัก key
-    """
     vl = view_label.upper()
     crop_y_end = crop_y_start + crop_h
                           
     if layout == "TOP_BOTTOM":
         half_h = crop_h // 2
-        # FRONT view = upper half ของ crop
-        # door end = ฝั่งซ้าย, จำกัด y เฉพาะ 50–100% ของ upper half
         front_y0 = crop_y_start + int(half_h * 0.50)
         front_y1 = crop_y_start + half_h
-        # BACK view = lower half ของ crop
-        # door end = ฝั่งขวา, จำกัด y เฉพาะ 50–100% ของ lower half
         back_y0  = crop_y_start + half_h + int(half_h * 0.50)
         back_y1  = crop_y_end
 
         zones = {
+            # ท้ายตู้ (Door)
             ("REAR_EMPTY_RISK",        "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
             ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
             ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
             ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
+            # หัวตู้ (Head Wall)
+            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.65), front_y0, crop_w,             front_y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):  (0,               back_y0,  int(crop_w * 0.35), back_y1),
         }
 
-    else:  # LEFT_RIGHT (AC03-type)
-        # FRONT = left half, door end = LEFT 20% ของภาพ
-        # BACK  = right half, door end = RIGHT 20% ของภาพ
-        # y จำกัดที่ 30–80% ของ crop_h เพื่อไม่หลุดออก header/footer
+    else:  # LEFT_RIGHT
         y0 = crop_y_start + int(crop_h * 0.30)
         y1 = crop_y_start + int(crop_h * 0.80)
 
         zones = {
+            # ท้ายตู้ (Door)
             ("REAR_EMPTY_RISK",        "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
             ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
             ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
             ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
+            # หัวตู้ (Head Wall)
+            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.80), y0, crop_w,             y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):  (0,                y0, int(crop_w * 0.20), y1),
         }
 
     key = (risk_type, vl)
@@ -613,7 +677,6 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str,
         xmin, ymin, xmax, ymax = coords
         return [xmin, ymin, xmax, ymax]
     return None
-
 
 # ============================================================
 # SECTION 8 — MAIN CLOUD FUNCTION HANDLER  [v4]
@@ -701,7 +764,7 @@ def process_request(request):
                       f"(LEFT_RIGHT layout — not counted per business rule)")
 
         # ------------------------------------------------------------------
-        # STEP 5: Rear Zone Crop — adaptive per layout
+        # STEP 5: Rear&Front Zone Crop — adaptive per layout
         #
         # TOP_BOTTOM (AA02, AA05, AC05):
         #   Front view = upper half → door end = LEFT  (x: 0–38%)
@@ -713,45 +776,33 @@ def process_request(request):
         # ------------------------------------------------------------------
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
-            rear_crop_front = img.crop((
-                0,
-                crop_y_start,
-                int(crop_w * 0.38),
-                crop_y_start + half_h
-            ))
-            rear_crop_back = img.crop((
-                int(crop_w * 0.62),
-                crop_y_start + half_h,
-                crop_w,
-                crop_y_end
-            ))
-            print("🗺️ Rear crop: TOP_BOTTOM mode")
-
+            # Rear (ท้ายตู้)
+            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.38), crop_y_start + half_h))
+            rear_crop_back = img.crop((int(crop_w * 0.62), crop_y_start + half_h, crop_w, crop_y_end))
+            # Front (หัวตู้)
+            front_crop_front = img.crop((int(crop_w * 0.62), crop_y_start, crop_w, crop_y_start + half_h))
+            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.38), crop_y_end))
         else:  # LEFT_RIGHT
-            rear_crop_front = img.crop((
-                0,
-                crop_y_start,
-                int(crop_w * 0.22),
-                crop_y_end
-            ))
-            rear_crop_back = img.crop((
-                int(crop_w * 0.78),
-                crop_y_start,
-                crop_w,
-                crop_y_end
-            ))
-            print("🗺️ Rear crop: LEFT_RIGHT mode")
+            # Rear (ท้ายตู้)
+            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.22), crop_y_end))
+            rear_crop_back = img.crop((int(crop_w * 0.78), crop_y_start, crop_w, crop_y_end))
+            # Front (หัวตู้)
+            front_crop_front = img.crop((int(crop_w * 0.78), crop_y_start, crop_w, crop_y_end))
+            front_crop_back = img.crop((0, crop_y_start, int(crop_w * 0.22), crop_y_end))
+            print("🗺️ Rear&Front crop: LEFT_RIGHT mode")
 
         # ------------------------------------------------------------------
-        # STEP 5.5: Rear zone AI analysis
+        # STEP 5.5: Rear&Front zone AI analysis
         # ------------------------------------------------------------------
-        api_keys_for_rear = get_api_keys_pool()
-        rear_result_front = analyze_rear_zone_with_ai(
-            rear_crop_front, api_keys_for_rear, view_label="FRONT"
-        )
-        rear_result_back = analyze_rear_zone_with_ai(
-            rear_crop_back, api_keys_for_rear, view_label="BACK"
-        )
+        api_keys_pool = get_api_keys_pool()
+        
+        # ตรวจท้ายตู้
+        rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
+        rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
+        
+        # ตรวจหัวตู้
+        front_result_front = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
+        front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
 
         # ------------------------------------------------------------------
         # STEP 6: Merge rear crop findings into all_risks
@@ -761,53 +812,54 @@ def process_request(request):
 
         def _existing_risk_views(risk_type_substr: str) -> set:
             return {
-                str(r.get("view", "")).upper()
-                for r in all_risks
+                str(r.get("view", "")).upper() for r in all_risks 
                 if risk_type_substr in str(r.get("risk_type", "")).upper()
             }
 
-        for view_label, rear_result in [
-            ("FRONT", rear_result_front),
-            ("BACK",  rear_result_back)
-        ]:
-            if not isinstance(rear_result, dict):
-                continue
-
+        # Merge ท้ายตู้
+        for view_label, rear_result in [("FRONT", rear_result_front), ("BACK",  rear_result_back)]:
+            if not isinstance(rear_result, dict): continue
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
-            confidence     = str(rear_result.get("confidence", "LOW")).upper()
-            reasoning      = rear_result.get("reasoning", "")
+            confidence = str(rear_result.get("confidence", "LOW")).upper()
+            reasoning = rear_result.get("reasoning", "")
 
-            if confidence not in ("HIGH", "MEDIUM"):
-                continue  # skip LOW confidence and ERROR
-
-            # ---- REAR_EMPTY_RISK ----
-            if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH"):
-                if view_label not in _existing_risk_views("REAR_EMPTY"):
+            if confidence in ("HIGH", "MEDIUM"):
+                if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
                     all_risks.append({
-                        "view":           view_label,
-                        "risk_type":      "REAR_EMPTY_RISK",
-                        "direction":      "LONGITUDINAL",
-                        "lateral_side":   "N/A",
-                        "zone2_baseline": "Assessed from rear zone crop independently.",
-                        "reasoning":      f"[Rear Crop Confirm] {reasoning}",
-                        "description":    "พบสินค้าฝั่งประตูท้ายตู้ต่ำกว่ากลางตู้ หรือเห็นพื้นโล่ง "
-                                          "(ยืนยันจากการวิเคราะห์ภาพ Zoom ท้ายตู้)",
-                        "box_2d":         None
+                        "view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A",
+                        "zone2_baseline": "Assessed from rear zone crop.",
+                        "reasoning": f"[Rear Confirm] {reasoning}",
+                        "description": "พบสินค้าฝั่งประตูท้ายตู้ต่ำกว่ากลางตู้ หรือเห็นพื้นโล่ง (วิเคราะห์จาก Zoom ท้ายตู้)",
+                        "box_2d": None
+                    })
+                if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and view_label not in _existing_risk_views("REAR_LATERAL"):
+                    all_risks.append({
+                        "view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": rear_result.get("lateral_side", "N/A"),
+                        "zone2_baseline": "Assessed from rear zone crop.",
+                        "reasoning": f"[Rear Confirm] {reasoning}",
+                        "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง (วิเคราะห์จาก Zoom ท้ายตู้)",
+                        "box_2d": None
                     })
 
-            # ---- REAR_LATERAL_IMBALANCE ----
-            if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH"):
-                if view_label not in _existing_risk_views("REAR_LATERAL"):
+        # Merge หัวตู้ (ใหม่!)
+        for view_label, front_result in [("FRONT", front_result_front), ("BACK", front_result_back)]:
+            if not isinstance(front_result, dict): continue
+            front_zone_risk = str(front_result.get("front_zone_risk", "")).upper()
+            confidence = str(front_result.get("confidence", "LOW")).upper()
+            reasoning = front_result.get("reasoning", "")
+
+            if confidence in ("HIGH", "MEDIUM") and front_zone_risk == "FRONT_EMPTY_RISK":
+                # จะเพิ่มเข้า Report ก็ต่อเมื่อภาพรวมไม่ได้หาเจออยู่แล้ว
+                if view_label not in _existing_risk_views("FRONT_EMPTY"):
                     all_risks.append({
-                        "view":           view_label,
-                        "risk_type":      "REAR_LATERAL_IMBALANCE",
-                        "direction":      "LATERAL",
-                        "lateral_side":   rear_result.get("lateral_side", "N/A"),
-                        "zone2_baseline": "Assessed from rear zone crop independently.",
-                        "reasoning":      f"[Rear Crop Confirm] {reasoning}",
-                        "description":    "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง "
-                                          "(ยืนยันจากการวิเคราะห์ภาพ Zoom ท้ายตู้)",
-                        "box_2d":         None
+                        "view": view_label,
+                        "risk_type": "FRONT_EMPTY_RISK",
+                        "direction": "LONGITUDINAL",
+                        "lateral_side": "N/A",
+                        "zone2_baseline": "Assessed from front zone crop independently.",
+                        "reasoning": f"[Front Confirm] {reasoning}",
+                        "description": "พบพื้นที่โล่งหรือสินค้าต่างระดับ ฝั่งผนังหัวตู้ (ยืนยันจากการวิเคราะห์ภาพ Zoom หัวตู้)",
+                        "box_2d": None
                     })
 
         # ------------------------------------------------------------------
