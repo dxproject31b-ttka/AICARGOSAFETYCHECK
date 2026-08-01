@@ -729,7 +729,7 @@ def process_request(request):
         # ------------------------------------------------------------------
         crop_y_start = int(height * 0.10)
         crop_y_end   = int(height * 0.90)
-        crop_w       = width
+        crop_w       = int(width * 0.72)
         crop_h       = crop_y_end - crop_y_start
 
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
