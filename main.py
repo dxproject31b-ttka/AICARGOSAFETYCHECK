@@ -216,15 +216,11 @@ Signals:
 3. The imbalance creates risk of cargo tipping sideways when the door is opened
 
 =======================================================================
-CRITICAL RULES — PREVENT FALSE POSITIVES
+CRITICAL RULES — HOW TO DETECT
 =======================================================================
-- Box COLOR (blue, green, red, etc.) indicates SKU type ONLY — it does NOT mean
-  height difference. Do NOT report a risk based on color alone.
-- A stagger/offset where boxes are shifted horizontally but remain the SAME HEIGHT
-  is NOT a risk — do not report it.
-- 3D perspective naturally makes the far side appear smaller — compensate for this.
-  Only report if height difference is clearly ≥ 1 full box layer.
-- If you cannot clearly count the difference → SAFE (do not guess).
+- Look for a sharp "STAIR-STEP" or "CLIFF" drop in the top surface of the cargo. If the stack closest to the door is 2 layers high, but the stack immediately behind it is 3 layers high, this is a clear REAR_EMPTY_RISK.
+- A sharp vertical drop between adjacent stacks is a REAL RISK, not a 3D perspective artifact.
+- Box COLOR indicates SKU type, but height drops often happen exactly where colors change. Do not ignore a physical height drop just because the color changed. Focus purely on the structural block height.
 
 =======================================================================
 OUTPUT — Return ONLY this exact JSON object:
@@ -777,11 +773,11 @@ def process_request(request):
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
             # Rear (ท้ายตู้)
-            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.38), crop_y_start + half_h))
-            rear_crop_back = img.crop((int(crop_w * 0.62), crop_y_start + half_h, crop_w, crop_y_end))
+            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.45), crop_y_start + half_h))
+            rear_crop_back = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w, crop_y_end))
             # Front (หัวตู้)
-            front_crop_front = img.crop((int(crop_w * 0.62), crop_y_start, crop_w, crop_y_start + half_h))
-            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.38), crop_y_end))
+            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start, crop_w, crop_y_start + half_h))
+            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
         else:  # LEFT_RIGHT
             # Rear (ท้ายตู้)
             rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.22), crop_y_end))
