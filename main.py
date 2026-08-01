@@ -288,7 +288,7 @@ OUTPUT — Return ONLY this exact JSON object:
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     global GLOBAL_KEY_INDEX # [เพิ่ม] เรียกใช้ตัวแปรจำตำแหน่งคีย์
-    api_keys = get_api_keys_pool()
+    
     api_keys = get_api_keys_pool()
     if not api_keys:
         env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
@@ -502,7 +502,7 @@ Example outputs (do not copy — use your actual findings):
 
     model_candidates = ["gemini-3.6-flash"]
     last_error_msg = ""
-total_keys = len(api_keys)
+    total_keys = len(api_keys)
 
     for pass_round in range(2):
         for i in range(total_keys):
