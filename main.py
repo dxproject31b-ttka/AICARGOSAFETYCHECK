@@ -573,7 +573,9 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str,
     หรือ None ถ้าไม่รู้จัก key
     """
     vl = view_label.upper()
-
+    # [เพิ่มบรรทัดนี้] คำนวณ crop_y_end ด้วยตัวเอง จะได้ไม่เกิด Error ครับ
+    crop_y_end = crop_y_start + crop_h
+                          
     if layout == "TOP_BOTTOM":
         half_h = crop_h // 2
         # FRONT view = upper half ของ crop
