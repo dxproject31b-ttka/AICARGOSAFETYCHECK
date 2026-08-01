@@ -520,7 +520,7 @@ Example outputs (do not copy — use your actual findings):
                 continue
 
         if pass_round == 0:
-            time.sleep(10)
+            time.sleep(2)
 
     return [{
         "risk_type": "ERROR",
