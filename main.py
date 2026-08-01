@@ -627,31 +627,32 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str,
         front_y1 = crop_y_start + half_h
         back_y0  = crop_y_start + half_h + int(half_h * 0.50)
         back_y1  = crop_y_end
-
+        margin_left = int(crop_w * 0.15)
+        
         zones = {
             # ท้ายตู้ (Door)
-            ("REAR_EMPTY_RISK",        "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,               front_y0, int(crop_w * 0.35), front_y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.65), back_y0,  crop_w,             back_y1),
-            # หัวตู้ (Head Wall)
-            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.65), front_y0, crop_w,             front_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (0,               back_y0,  int(crop_w * 0.35), back_y1),
+            ("REAR_EMPTY_RISK",        "FRONT"): (margin_left, front_y0, int(crop_w * 0.40), front_y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (margin_left, front_y0, int(crop_w * 0.40), front_y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.65), back_y0, crop_w, back_y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.65), back_y0, crop_w, back_y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.65), front_y0, crop_w, front_y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):  (margin_left, back_y0, int(crop_w * 0.40), back_y1),
         }
 
     else:  # LEFT_RIGHT
         y0 = crop_y_start + int(crop_h * 0.30)
         y1 = crop_y_start + int(crop_h * 0.80)
-
+        margin_left = int(crop_w * 0.10)
+        margin_right = int(crop_w * 0.90)
         zones = {
             # ท้ายตู้ (Door)
-            ("REAR_EMPTY_RISK",        "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (0,                y0, int(crop_w * 0.20), y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.80), y0, crop_w,             y1),
+            ("REAR_EMPTY_RISK",        "FRONT"): (margin_left, y0, int(crop_w * 0.30), y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (margin_left, y0, int(crop_w * 0.30), y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w*0.70), y0, margin_right, y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w*0.70), y0, margin_right, y1),
             # หัวตู้ (Head Wall)
-            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.80), y0, crop_w,             y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (0,                y0, int(crop_w * 0.20), y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w*0.70), y0, margin_right, y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):  (margin_left, y0, int(crop_w * 0.30), y1),
         }
 
     key = (risk_type, vl)
