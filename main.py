@@ -191,24 +191,48 @@ def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list,
     ตรวจทั้ง REAR_EMPTY_RISK และ REAR_LATERAL_IMBALANCE
     """
     rear_prompt = f"""
-You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone.
-This is the {view_label} view. The red arrows point to the floor at the open door.
+You are a Cargo Safety Inspector. This image is a ZOOMED-IN CROP of the DOOR END (REAR) zone
+of a 3D isometric container loading diagram — the side with the open door and red floor arrows.
+This is the {view_label} view of the manifest.
 
-YOUR ONLY TASK: Look for a "Stair-Step" drop at the end of the cargo.
+YOUR TASK: Detect TWO possible risks in this cropped door-end area.
 
-HOW TO DETECT "REAR_EMPTY_RISK":
-1. Look at the very last stack of cargo closest to the door (red arrows).
-2. Look at the stack immediately behind it (deeper inside the container).
-3. If the last stack is shorter (e.g., 2 layers high) AND the stack behind it is taller (e.g., 3 layers high), you MUST report "REAR_EMPTY_RISK".
+=======================================================================
+RISK A — REAR_EMPTY_RISK (longitudinal shortage)
+=======================================================================
+Signals:
+1. Visible empty yellow floor grid near the open door (no boxes placed there)
+2. The last cargo column is clearly 1 or more FULL BOX LAYERS shorter than the columns
+   further inside the container (shorter in the depth/length direction)
+3. Unsupported upper gap above the last stack
 
-CRITICAL RULE:
-Do not overthink 3D perspective. If you see a physical height drop (like a step down) at the end of the cargo, it is a risk. Color changes often happen exactly where the height drops — do not let colors confuse you.
+=======================================================================
+RISK B — REAR_LATERAL_IMBALANCE (lateral height difference at rear)
+=======================================================================
+Signals:
+1. At the door-end zone, the cargo on the LEFT side is clearly taller than the RIGHT side
+   (or vice versa) by 1 or more full box layers
+2. This is a WIDTH-direction (side-to-side) height difference, NOT a depth difference
+3. The imbalance creates risk of cargo tipping sideways when the door is opened
 
-Return ONLY this exact JSON format:
+=======================================================================
+CRITICAL RULES — PREVENT FALSE POSITIVES
+=======================================================================
+- Box COLOR (blue, green, red, etc.) indicates SKU type ONLY — it does NOT mean
+  height difference. Do NOT report a risk based on color alone.
+- A stagger/offset where boxes are shifted horizontally but remain the SAME HEIGHT
+  is NOT a risk — do not report it.
+- 3D perspective naturally makes the far side appear smaller — compensate for this.
+  Only report if height difference is clearly ≥ 1 full box layer.
+- If you cannot clearly count the difference → SAFE (do not guess).
+
+=======================================================================
+OUTPUT — Return ONLY this exact JSON object:
+=======================================================================
 {{
-  "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "SAFE",
-  "reasoning": "Explain the layer count. Example: The stack at the door is 2 layers high, but the stack behind it is 3 layers high.",
-  "confidence": "HIGH"
+  "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
+  "reasoning": "Describe exactly what you see: stack heights, floor gaps, lateral differences.",
+  "confidence": "HIGH" | "MEDIUM" | "LOW"
 }}
 """
     last_err = ""
@@ -705,7 +729,7 @@ def process_request(request):
         # ------------------------------------------------------------------
         crop_y_start = int(height * 0.10)
         crop_y_end   = int(height * 0.90)
-        crop_w       = int(width * 0.72)
+        crop_w       = width
         crop_h       = crop_y_end - crop_y_start
 
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
@@ -753,11 +777,11 @@ def process_request(request):
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
             # Rear (ท้ายตู้)
-            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.45), crop_y_start + half_h))
-            rear_crop_back = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w, crop_y_end))
+            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.38), crop_y_start + half_h))
+            rear_crop_back = img.crop((int(crop_w * 0.62), crop_y_start + half_h, crop_w, crop_y_end))
             # Front (หัวตู้)
-            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start, crop_w, crop_y_start + half_h))
-            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
+            front_crop_front = img.crop((int(crop_w * 0.62), crop_y_start, crop_w, crop_y_start + half_h))
+            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.38), crop_y_end))
         else:  # LEFT_RIGHT
             # Rear (ท้ายตู้)
             rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.22), crop_y_end))
@@ -799,7 +823,7 @@ def process_request(request):
             confidence = str(rear_result.get("confidence", "LOW")).upper()
             reasoning = rear_result.get("reasoning", "")
 
-            if confidence in ("HIGH", "MEDIUM", "LOW"):
+            if confidence in ("HIGH", "MEDIUM"):
                 if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
                     all_risks.append({
                         "view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A",
