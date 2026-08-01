@@ -23,10 +23,19 @@ import google.generativeai as genai
 # ---------------------------------------------------------------------------
 
 # ============================================================
-# SECTION 1 — UTILITY: API KEYS
+# SECTION 1 — UTILITY: API KEYS (ปรับปรุงให้จำสถานะ Global)
 # ============================================================
 
+# [เพิ่ม] ตัวแปร Global 
+GLOBAL_API_KEYS = []
+GLOBAL_KEY_INDEX = 0
+
 def get_api_keys_pool():
+    global GLOBAL_API_KEYS
+    # หากดึงคีย์และสลับตำแหน่งไว้แล้ว ให้ใช้รายการเดิม (เพื่อไม่ให้ Index คลาดเคลื่อน)
+    if GLOBAL_API_KEYS:
+        return GLOBAL_API_KEYS
+
     keys = []
     for env_k, env_v in os.environ.items():
         k_upper = env_k.upper().strip()
@@ -36,9 +45,10 @@ def get_api_keys_pool():
 
     keys = list(set(keys))
     if keys:
-        random.shuffle(keys) # <--- เพิ่มบรรทัดนี้: สลับคีย์แบบสุ่ม เพื่อกระจายโหลดให้เฉลี่ยเท่าๆ กันทุกคีย์
+        random.shuffle(keys)
         print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
-        return keys
+        GLOBAL_API_KEYS = keys
+        return GLOBAL_API_KEYS
 
     print("❌ No Gemini API keys found.")
     return []
@@ -175,6 +185,7 @@ def detect_page_layout(img: PIL.Image.Image, crop_y_start: int, crop_y_end: int)
 
 def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list,
                                view_label: str = "UNKNOWN") -> dict:
+    global GLOBAL_KEY_INDEX # [เพิ่ม] เรียกใช้ตัวแปรจำตำแหน่งคีย์
     """
     วิเคราะห์ภาพ Crop เฉพาะ Zone ท้ายตู้ (door end) แยกต่างหาก
     ตรวจทั้ง REAR_EMPTY_RISK และ REAR_LATERAL_IMBALANCE
@@ -226,10 +237,17 @@ OUTPUT — Return ONLY this exact JSON object:
 """
     last_err = ""
     model_candidates = ["gemini-3.6-flash"]
+    total_keys = len(api_keys)
 
-    for current_key in api_keys:
+    if total_keys == 0:
+        return {"rear_zone_risk": "ERROR", "reasoning": "No API keys", "confidence": "LOW"}
+
+    for i in range(total_keys):
+        # [เพิ่ม] คำนวณหา Index ปัจจุบัน (เริ่มจากคีย์ล่าสุดที่ใช้ได้)
+        current_index = (GLOBAL_KEY_INDEX + i) % total_keys
+        current_key = api_keys[current_index]
+        
         try:
-            # [เพิ่ม] บังคับเคลียร์ Client เก่าที่แคชไว้ เพื่อให้มันใช้ Key ใหม่จริงๆ
             if hasattr(genai, '_client'):
                 genai._client = None
                 
@@ -240,18 +258,23 @@ OUTPUT — Return ONLY this exact JSON object:
                         model_name=model_name,
                         generation_config={"response_mime_type": "application/json"}
                     )
-                    response = model.generate_content([rear_prompt, rear_crop])
+                    # ใช้ prompt ที่คุณตั้งไว้ (rear_prompt)
+                    response = model.generate_content([rear_prompt, rear_crop]) 
                     raw_text = response.text if response and response.text else "{}"
                     clean_text = clean_json_response(raw_text)
                     result = json.loads(clean_text)
                     if isinstance(result, list):
                         result = result[0] if result else {}
+                        
+                    # [เพิ่ม] วิเคราะห์ผ่านแล้ว! อัปเดตตำแหน่งคีย์ล่าสุด
+                    GLOBAL_KEY_INDEX = current_index 
                     return result
+                    
                 except Exception as e:
                     last_err = str(e)
                     if "404" in last_err or "not found" in last_err.lower():
                         continue
-                    break # <--- [แก้ไข] เปลี่ยนจาก continue เป็น break เพื่อข้ามไปคีย์ถัดไปทันที
+                    break # เจอโควตาเต็ม (429) ให้เบรกเพื่อเปลี่ยนคีย์ทันที
         except Exception as e:
             last_err = str(e)
             continue
@@ -264,6 +287,8 @@ OUTPUT — Return ONLY this exact JSON object:
 # ============================================================
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
+    global GLOBAL_KEY_INDEX # [เพิ่ม] เรียกใช้ตัวแปรจำตำแหน่งคีย์
+    api_keys = get_api_keys_pool()
     api_keys = get_api_keys_pool()
     if not api_keys:
         env_keys_list = [k for k in os.environ.keys() if not k.startswith("NIX_")]
@@ -477,11 +502,15 @@ Example outputs (do not copy — use your actual findings):
 
     model_candidates = ["gemini-3.6-flash"]
     last_error_msg = ""
+total_keys = len(api_keys)
 
     for pass_round in range(2):
-        for current_key in api_keys:
+        for i in range(total_keys):
+            # [เพิ่ม] คำนวณหา Index เริ่มจากคีย์ที่ทำงานได้ล่าสุด
+            current_index = (GLOBAL_KEY_INDEX + i) % total_keys
+            current_key = api_keys[current_index]
+            
             try:
-                # [เพิ่ม] บังคับเคลียร์ Client เก่า 
                 if hasattr(genai, '_client'):
                     genai._client = None
                     
@@ -502,6 +531,9 @@ Example outputs (do not copy — use your actual findings):
                         risks = json.loads(clean_text)
                         if isinstance(risks, dict):
                             risks = [risks]
+                            
+                        # [เพิ่ม] วิเคราะห์สำเร็จ อัปเดตตำแหน่งคีย์ล่าสุด
+                        GLOBAL_KEY_INDEX = current_index
                         return risks
 
                     except Exception as model_err:
@@ -511,16 +543,16 @@ Example outputs (do not copy — use your actual findings):
                             continue
                         elif "429" in err_str or "quota" in err_str.lower() \
                                 or "resourceexhausted" in err_str.lower():
-                            break # <--- [แก้ไข] เปลี่ยนเป็น break ทิ้งคีย์ที่โควตาเต็มไปเลย
+                            break 
                         else:
-                            break # <--- [แก้ไข] เปลี่ยนเป็น break
+                            break 
 
             except Exception as key_err:
                 last_error_msg = str(key_err)
                 continue
 
         if pass_round == 0:
-            time.sleep(2)
+            time.sleep(2) # ใช้ 2 วินาทีพอเพื่อลดโอกาสเกิด Timeout 500
 
     return [{
         "risk_type": "ERROR",
