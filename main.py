@@ -335,39 +335,51 @@ Schema:
 
 def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int, crop_y_start: int, crop_h: int):
     vl = view_label.upper()
-    crop_y_end = crop_y_start + crop_h
                           
     if layout == "TOP_BOTTOM":
         half_h = crop_h // 2
-        front_y0 = crop_y_start + int(half_h * 0.50)
-        front_y1 = crop_y_start + half_h
-        back_y0  = crop_y_start + half_h + int(half_h * 0.50)
-        back_y1  = crop_y_end
+        # [แก้ไข AB01] ขยับแกน Y ขึ้นไปด้านบน และให้ขอบล่างชนมุมตู้พอดี (25% ถึง 75% ของความสูง)
+        front_y0 = crop_y_start + int(half_h * 0.25)
+        front_y1 = crop_y_start + int(half_h * 0.75)
+        back_y0  = crop_y_start + half_h + int(half_h * 0.25)
+        back_y1  = crop_y_start + half_h + int(half_h * 0.75)
 
-        margin_left = int(crop_w * 0.10)
-        margin_right = int(crop_w * 0.90)
+        # [แก้ไข AB01] บีบแกน X เข้าหาตัวสินค้า ไม่ให้ออกไปลอยอยู่ขอบกระดาษ
+        left_x0, left_x1 = int(crop_w * 0.20), int(crop_w * 0.45)
+        right_x0, right_x1 = int(crop_w * 0.55), int(crop_w * 0.80)
 
         zones = {
-            ("REAR_EMPTY_RISK",        "FRONT"): (margin_left, front_y0, int(crop_w * 0.45), front_y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (margin_left, front_y0, int(crop_w * 0.45), front_y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w * 0.55), back_y0, margin_right, back_y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w * 0.55), back_y0, margin_right, back_y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w * 0.55), front_y0, margin_right, front_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (margin_left, back_y0, int(crop_w * 0.45), back_y1),
+            # FRONT View (Top) - ประตูอยู่ซ้าย, ผนังอยู่ขวา
+            ("REAR_EMPTY_RISK",        "FRONT"): (left_x0, front_y0, left_x1, front_y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (left_x0, front_y0, left_x1, front_y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"): (right_x0, front_y0, right_x1, front_y1),
+            
+            # BACK View (Bottom) - ผนังอยู่ซ้าย, ประตูอยู่ขวา
+            ("FRONT_EMPTY_RISK",       "BACK"):  (left_x0, back_y0, left_x1, back_y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (right_x0, back_y0, right_x1, back_y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (right_x0, back_y0, right_x1, back_y1),
         }
     else:  # LEFT_RIGHT
-        y0 = crop_y_start + int(crop_h * 0.30)
-        y1 = crop_y_start + int(crop_h * 0.80)
-        margin_left = int(crop_w * 0.10)
-        margin_right = int(crop_w * 0.90)
+        # [แก้ไข] ขยับแกน Y ขึ้นเช่นเดียวกัน
+        y0 = crop_y_start + int(crop_h * 0.25)
+        y1 = crop_y_start + int(crop_h * 0.75)
+        
+        # [แก้ไข] แบ่งพื้นที่ครึ่งซ้าย-ขวา แล้วบีบพิกัดเข้าหาตู้สินค้า
+        f_door_x0, f_door_x1 = int(crop_w * 0.10), int(crop_w * 0.25) # Front ซ้ายสุด
+        f_wall_x0, f_wall_x1 = int(crop_w * 0.25), int(crop_w * 0.45) # Front ขวา (ติดแกนกลาง)
+        b_wall_x0, b_wall_x1 = int(crop_w * 0.55), int(crop_w * 0.75) # Back ซ้าย (ติดแกนกลาง)
+        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.90) # Back ขวาสุด
 
         zones = {
-            ("REAR_EMPTY_RISK",        "FRONT"): (margin_left, y0, int(crop_w * 0.35), y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (margin_left, y0, int(crop_w * 0.35), y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (int(crop_w * 0.65), y0, margin_right, y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (int(crop_w * 0.65), y0, margin_right, y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"): (int(crop_w * 0.65), y0, margin_right, y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (margin_left, y0, int(crop_w * 0.35), y1),
+            # FRONT View (Left half)
+            ("REAR_EMPTY_RISK",        "FRONT"): (f_door_x0, y0, f_door_x1, y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (f_door_x0, y0, f_door_x1, y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"): (f_wall_x0, y0, f_wall_x1, y1),
+            
+            # BACK View (Right half)
+            ("FRONT_EMPTY_RISK",       "BACK"):  (b_wall_x0, y0, b_wall_x1, y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (b_door_x0, y0, b_door_x1, y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (b_door_x0, y0, b_door_x1, y1),
         }
 
     return zones.get((risk_type, vl))
@@ -437,17 +449,21 @@ def process_request(request):
         # ------------------------------------------------------------------
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
-            # ขยายระยะการซูมเป็น 45% (จากเดิม 38%)
             rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.45), crop_y_start + half_h))
             rear_crop_back = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w, crop_y_end))
             front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start, crop_w, crop_y_start + half_h))
             front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
         else:  # LEFT_RIGHT
-            # ปรับสัดส่วนซูมให้สัมพันธ์กัน
-            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.35), crop_y_end))
-            rear_crop_back = img.crop((int(crop_w * 0.65), crop_y_start, crop_w, crop_y_end))
-            front_crop_front = img.crop((int(crop_w * 0.65), crop_y_start, crop_w, crop_y_end))
-            front_crop_back = img.crop((0, crop_y_start, int(crop_w * 0.35), crop_y_end))
+            # [แก้ไข AC03] แบ่งครึ่งกระดาษแนวตั้ง แล้ว Crop ให้ตรงฝั่งของแต่ละภาพ
+            half_w = crop_w // 2
+            
+            # Front View (รูปซ้าย): ประตูอยู่ซ้ายสุด, ผนังอยู่ขวา(ชิดแกนกลาง)
+            rear_crop_front = img.crop((0, crop_y_start, int(half_w * 0.65), crop_y_end))
+            front_crop_front = img.crop((int(half_w * 0.35), crop_y_start, half_w, crop_y_end))
+            
+            # Back View (รูปขวา): ผนังอยู่ซ้าย(ชิดแกนกลาง), ประตูอยู่ขวาสุด
+            front_crop_back = img.crop((half_w, crop_y_start, half_w + int(half_w * 0.65), crop_y_end))
+            rear_crop_back = img.crop((half_w + int(half_w * 0.35), crop_y_start, crop_w, crop_y_end))
 
         # ------------------------------------------------------------------
         # 6. Zone AI analysis
