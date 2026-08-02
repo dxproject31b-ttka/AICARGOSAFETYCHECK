@@ -3,3 +3,4 @@ pdf2image
 Pillow
 requests
 google-generativeai
+PyMuPDF==1.23.8
