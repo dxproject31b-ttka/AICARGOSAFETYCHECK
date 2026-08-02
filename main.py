@@ -256,6 +256,7 @@ PART 0 — CRITICAL RULES (read FIRST, apply ALWAYS)
 =======================================================================
 ⛔ COLOR RULE — Box color = SKU type. Color alone is NOT a risk. HOWEVER, physical height drops often occur exactly where box colors change. Do NOT ignore a physical height drop just because the color changed. Focus purely on the PHYSICAL BLOCK HEIGHT.
 ⛔ STAGGER/OFFSET RULE — Boxes that are offset horizontally but remain at the SAME PHYSICAL HEIGHT are NOT a risk.
+🔥 STRICT CLIFF RULE (MANDATORY) — If you see a stark height difference (a cliff or step-down) between two adjacent stacks anywhere in the container, IT IS ALWAYS A RISK. Do not excuse it. You MUST report it.
 
 =======================================================================
 PART 1 — IDENTIFY PHYSICAL ORIENTATION
@@ -264,7 +265,7 @@ PART 1 — IDENTIFY PHYSICAL ORIENTATION
 • HEAD WALL (Physical Front): SOLID YELLOW/TAN WALL.
 
 =======================================================================
-PART 2 — SYSTEMATIC RISK SCAN (Focus on Physical Heights, not box counts)
+PART 2 — SYSTEMATIC RISK SCAN (Focus on Physical Heights)
 =======================================================================
 --- RISK 1: REAR_EMPTY_RISK ---
 Trigger: Near the DOOR END. A clear physical height drop (stair-step) where the last stack is shorter than the stack behind it, OR visible empty floor.
@@ -275,8 +276,11 @@ Trigger: Near the DOOR END. The cargo block on the LEFT side is physically talle
 --- RISK 3: FRONT_EMPTY_RISK ---
 Trigger: Near the HEAD WALL. Visible empty floor space OR a physical height drop at the wall.
 
---- RISK 4: STEP_DOWN_RISK ---
-Trigger: In the MIDDLE section. A clear physical height drop (staircase/cliff shape) between adjacent columns.
+--- RISK 4: STEP_DOWN_RISK (CRITICAL HAZARD) ---
+Trigger: ANYWHERE in the middle sections of the cargo.
+- You MUST look for a "cliff" or a steep "stair-step" between adjacent cargo columns.
+- Example: If a tall stack (e.g., 5 blocks high) is placed directly next to a shorter stack (e.g., 3 blocks high) longitudinally, it creates a dangerous unsupported cliff.
+- DO NOT IGNORE THIS. If you see a physical cliff/step-down between adjacent stacks, YOU MUST REPORT "STEP_DOWN_RISK". Do not assume dense packing makes it safe.
 
 --- RISK 5: LATERAL_GAP_RISK ---
 Trigger: Side-to-side (WIDTH direction). Visible empty space between cargo groups in width direction.
@@ -298,7 +302,7 @@ Schema:
   "risk_type": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "FRONT_EMPTY_RISK" | "STEP_DOWN_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
   "direction": "LONGITUDINAL" | "LATERAL" | "VERTICAL",
   "lateral_side": "LEFT_HIGHER" | "RIGHT_HIGHER" | "N/A",
-  "reasoning": "Describe the PHYSICAL height drop or gap you see.",
+  "reasoning": "Describe the PHYSICAL height drop or gap you see. (e.g., Found a steep cliff where cargo drops from very tall to very short).",
   "description": "<Thai language: อธิบายความเสี่ยง>",
   "box_2d": [ymin, xmin, ymax, xmax]
 }
