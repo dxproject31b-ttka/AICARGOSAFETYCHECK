@@ -159,7 +159,21 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     if not api_keys: return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector...
+You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
+
+CRITICAL DEFINITIONS & RULES:
+1. STEP_DOWN_RISK: Refers ONLY to significant height drops BETWEEN cargo stacks inside the container. 
+2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That area must be evaluated for REAR_EMPTY_RISK instead.
+
+YOUR TASK:
+Find all safety risks and return them in this exact JSON array format:
+[
+  {
+    "risk_type": "STEP_DOWN_RISK" | "REAR_EMPTY_RISK" | "...",
+    "box_2d": [ymin, xmin, ymax, xmax],
+    ...
+  }
+]
 (MANDATORY JSON ARRAY RETURN)
 """
     last_error_msg = ""
