@@ -9,6 +9,7 @@ import random
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageStat
+import PIL.PngImagePlugin
 import fitz  # PyMuPDF สำหรับหาคำว่า "Back"
 import functions_framework
 import google.generativeai as genai
