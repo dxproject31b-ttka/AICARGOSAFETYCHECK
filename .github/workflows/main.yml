@@ -35,3 +35,4 @@ jobs:
           entry_point: 'process_request' # ชื่อฟังก์ชันหลักในไฟล์ main.py ของคุณ
           env_vars: 'GEMINI_API_KEY=${{ secrets.GEMINI_API_KEYS }}'
           memory_mb: 2048                # กำหนด RAM 2GB เพื่อให้ประมวลผลรูปภาพได้ราบรื่น
+          timeout: 540
