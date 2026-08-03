@@ -137,7 +137,13 @@ def _call_gemini_json(prompt, image, api_keys):
         current_index = (GLOBAL_KEY_INDEX + i) % total_keys
         current_key = api_keys[current_index]
         try:
-            if hasattr(genai, '_client'): genai._client = None
+            # 🛑 1. เพิ่มโค้ด 3 บรรทัดนี้ เพื่อบังคับล้างการเชื่อมต่อเก่าทิ้งให้เกลี้ยง
+            if hasattr(genai, '_client'): 
+                genai._client = None
+            if hasattr(genai, 'client') and hasattr(genai.client, '_client'): 
+                genai.client._client = None
+            
+            # 2. ตั้งค่า Key ใหม่ (มันจะบังคับสร้างท่อการเชื่อมต่อใหม่ด้วย Key นี้)
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel(model_name="gemini-3.6-flash")
             response = model.generate_content([prompt, image]) 
@@ -148,11 +154,9 @@ def _call_gemini_json(prompt, image, api_keys):
             return result
         except Exception as e:
             last_err = str(e)
-            print(f"⚠️ API Key index {current_index} failed in zoom analysis: {last_err[:100]}")
-            
-            # เมื่อเจอ Error (เช่น 429, 500) ให้ใช้ continue เพื่อวนลูปใช้ Key ตัวถัดไป
-            # (ลบเงื่อนไข if 404 แล้ว break ทิ้งไปเลยครับ ให้มันหมุนไปเรื่อยๆ จนครบ)
-            continue
+            print(f"⚠️ API Key index {current_index} failed: {last_err[:100]}")
+            time.sleep(1) # หน่วงเวลา 1 วินาทีก่อนหมุน Key ถัดไป
+            continue # หมุนไปใช้ Key ถัดไป
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
@@ -185,7 +189,12 @@ Find all safety risks and return them in this exact JSON array format:
             current_index = (GLOBAL_KEY_INDEX + i) % len(api_keys)
             current_key = api_keys[current_index]
             try:
-                if hasattr(genai, '_client'): genai._client = None
+                # 🛑 ทำแบบเดียวกันในฟังก์ชันนี้
+                if hasattr(genai, '_client'): 
+                    genai._client = None
+                if hasattr(genai, 'client') and hasattr(genai.client, '_client'): 
+                    genai.client._client = None
+                
                 genai.configure(api_key=current_key)
                 model = genai.GenerativeModel(model_name="gemini-3.6-flash")
                 response = model.generate_content([prompt, diagram_image])
@@ -198,7 +207,7 @@ Find all safety risks and return them in this exact JSON array format:
             except Exception as e:
                 last_error_msg = str(e)
                 print(f"⚠️ API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
-                # เปลี่ยนจาก break เป็น continue เพื่อให้ไปใช้ Key ถัดไป
+                time.sleep(1)
                 continue 
         if pass_round == 0: time.sleep(2)
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
