@@ -145,7 +145,7 @@ def _call_gemini_json(prompt, image, api_keys):
             
             # 2. ตั้งค่า Key ใหม่ (มันจะบังคับสร้างท่อการเชื่อมต่อใหม่ด้วย Key นี้)
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(model_name="gemini-3.6-flash")
+            model = genai.GenerativeModel(model_name="gemini-1.5-flash")
             response = model.generate_content([prompt, image]) 
             clean_text = clean_json_response(response.text if response.text else "{}")
             result = json.loads(clean_text)
@@ -196,7 +196,7 @@ Find all safety risks and return them in this exact JSON array format:
                     genai.client._client = None
                 
                 genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(model_name="gemini-3.6-flash")
+                model = genai.GenerativeModel(model_name="gemini-1.5-flash")
                 response = model.generate_content([prompt, diagram_image])
                 clean_text = clean_json_response(response.text if response.text else "[]")
                 if not clean_text or clean_text in ('""', '[]'): return []
