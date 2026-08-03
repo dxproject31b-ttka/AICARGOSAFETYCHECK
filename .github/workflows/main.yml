@@ -1,4 +1,4 @@
-name: Deploy to Google Cloud Run
+name: Deploy to Google Cloud Functions
 
 # ทำงานทุกครั้งที่มีการกด Push โค้ดเข้า branch 'main'
 on:
@@ -8,9 +8,7 @@ on:
 env:
   # กำหนดตัวแปรสภาพแวดล้อม
   REGION: asia-southeast1
-  REPO_NAME: cargo-repo
-  SERVICE_NAME: cargo-safety-api
-  IMAGE_NAME: cargo-safety-app
+  FUNCTION_NAME: ai-cargo-safety-fn  # ชื่อฟังก์ชันที่จะแสดงบน Google Cloud
 
 jobs:
   build-and-deploy:
@@ -26,30 +24,14 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      # 3. ตั้งค่า Google Cloud SDK
-      - name: Setup Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      # 4. ล็อกอินเข้า Artifact Registry
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-
-      # 5. Build Docker Image
-      - name: Build Docker Image
-        run: docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
-
-      # 6. Push Docker Image ขึ้น Artifact Registry
-      - name: Push Docker Image
-        run: docker push ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-      # 7. สั่ง Deploy ขึ้น Cloud Run
-      - name: Deploy to Cloud Run
-        uses: google-github-actions/deploy-cloudrun@v2
+      # 3. สั่ง Deploy ขึ้น Cloud Functions โดยตรง (ไม่ต้อง Build Docker)
+      - name: 'Deploy to Cloud Functions'
+        uses: 'google-github-actions/deploy-cloud-functions@v2'
         with:
-          service: ${{ env.SERVICE_NAME }}
-          region: ${{ env.REGION }}
-          image: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          # เพิ่มบรรทัด env_vars นี้เข้าไป:
-          env_vars: |
-            GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
-          flags: '--allow-unauthenticated --memory=2Gi --cpu=1 --port=8080'
+          name: ${{ env.FUNCTION_NAME }}
+          runtime: 'python310'           # ใช้ Python เวอร์ชัน 3.10
+          region: ${{ env.REGION }}      # โซนเดียวกับที่ระบุใน env
+          source_dir: '.'                # ดึงโค้ดจากโฟลเดอร์หลัก
+          entry_point: 'process_request' # ชื่อฟังก์ชันหลักในไฟล์ main.py ของคุณ
+          env_vars: 'GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}'
+          memory_mb: 2048                # กำหนด RAM 2GB เพื่อให้ประมวลผลรูปภาพได้ราบรื่น
