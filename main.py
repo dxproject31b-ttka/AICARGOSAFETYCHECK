@@ -26,19 +26,18 @@ def get_api_keys_pool():
     if GLOBAL_API_KEYS:
         return GLOBAL_API_KEYS
 
-    keys = []
-    for env_k, env_v in os.environ.items():
-        k_upper = env_k.upper().strip()
-        if ("GEMINI" in k_upper or "API_KEY" in k_upper) and env_v and env_v.strip():
-            extracted_keys = [k.strip() for k in env_v.split(",") if k.strip()]
-            keys.extend(extracted_keys)
-
-    keys = list(set(keys))
-    if keys:
-        random.shuffle(keys)
-        print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
-        GLOBAL_API_KEYS = keys
-        return GLOBAL_API_KEYS
+    # อ่านค่าจากตัวแปรชื่อนี้ตัวเดียวเท่านั้น
+    env_value = os.environ.get('GEMINI_API_KEYS', '')
+    
+    if env_value:
+        # ตัดด้วยคอมมา และกรองค่าว่างออก
+        keys = [k.strip() for k in env_value.split(",") if k.strip()]
+        
+        if keys:
+            random.shuffle(keys)
+            print(f"✅ Loaded {len(keys)} unique API key(s) into the pool.")
+            GLOBAL_API_KEYS = keys
+            return GLOBAL_API_KEYS
 
     print("❌ No Gemini API keys found.")
     return []
