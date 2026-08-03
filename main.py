@@ -16,17 +16,7 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v5 )
-# [อัปเดตล่าสุด]
-# 1. ใช้ PyMuPDF หาพิกัดคำว่า "Back" เพื่อระบุ Layout (TOP_BOTTOM / LEFT_RIGHT) อย่างแม่นยำ
-# 2. ตัดตารางข้อความ (Load Summary) ทิ้งก่อนวิเคราะห์ ป้องกัน AI สับสน
-# 3. แก้ไข Prompt เลิกบังคับให้ AI นับชั้น (Layer) เน้นหา Physical Height Drop (ขั้นบันได)
-# 4. ลบกฎ Perspective / ห้ามดูสี ที่ตึงเกินไปออก
-# 5. ขยายระยะ Crop ท้ายตู้ให้กว้างขึ้น และเพิ่มขอบ Margin ให้ Fallback Box
 # ---------------------------------------------------------------------------
-
-# ============================================================
-# SECTION 1 — UTILITY: API KEYS 
-# ============================================================
 
 GLOBAL_API_KEYS = []
 GLOBAL_KEY_INDEX = 0
@@ -53,51 +43,17 @@ def get_api_keys_pool():
     print("❌ No Gemini API keys found.")
     return []
 
-# ============================================================
-# SECTION 2 — UTILITY: ACTION REPORTS 
-# ============================================================
-
 def generate_action_report(case_type, description):
     actions = {
-        "STEP_DOWN_RISK":
-            f"🚨 [ALERT] พบรอยต่างระดับระหว่างกองสินค้า (Step-Down)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวาง (Void Filler / Dunnage) ระหว่างกอง "
-            f"และรัดตรึงให้ครบทุกจุด",
-
-        "REAR_EMPTY_RISK":
-            f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งประตูท้ายตู้ (REAR EMPTY)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำแนวดิ่ง (Rear Tomming) + "
-            f"รัดตรึงป้องกันสินค้าไถลออกประตู",
-
-        "REAR_LATERAL_IMBALANCE":
-            f"🚨 [ALERT] พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง (Rear Lateral Imbalance)\n"
-            f"{description}\n"
-            f"🛠️ ACTION: เสริมด้านที่ต่ำกว่าด้วย Void Filler / Dunnage ให้ระดับเท่ากัน "
-            f"+ รัดตรึงขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู",
-
-        "FRONT_EMPTY_RISK":
-            f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งผนังหัวตู้ (FRONT EMPTY)\n{description}\n"
-            f"🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำฝั่งหัวตู้ (Front Blocking) + "
-            f"รัดตรึงป้องกันสินค้าไถลหน้าเมื่อเบรก",
-
-        "LATERAL_GAP_RISK":
-            f"🚨 [ALERT] พบช่องว่างด้านข้างระหว่างกองสินค้า (Lateral Gap)\n{description}\n"
-            f"🛠️ ACTION: ใส่ Air Bag หรือ Void Filler ด้านข้าง + "
-            f"รัดตรึงป้องกันสินค้าเลื่อนตะแคงขณะเลี้ยว",
-
-        "TALL_UNSTABLE_RISK":
-            f"🚨 [ALERT] พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำ (Tall / Unstable)\n{description}\n"
-            f"🛠️ ACTION: ค้ำยันด้านข้างกองสูง + รัดตรึงแนวขวาง ป้องกันล้มตะแคง",
-
-        "OVERHANG_RISK":
-            f"🚨 [ALERT] พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง (Overhang)\n{description}\n"
-            f"🛠️ ACTION: จัดเรียงใหม่ให้ชั้นบนไม่ยื่นพ้นฐาน "
-            f"หรือใส่แผ่นรองรับและรัดตรึง",
+        "STEP_DOWN_RISK": f"🚨 [ALERT] พบรอยต่างระดับระหว่างกองสินค้า (Step-Down)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้กั้นขวาง (Void Filler / Dunnage) ระหว่างกอง และรัดตรึงให้ครบทุกจุด",
+        "REAR_EMPTY_RISK": f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งประตูท้ายตู้ (REAR EMPTY)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำแนวดิ่ง (Rear Tomming) + รัดตรึงป้องกันสินค้าไถลออกประตู",
+        "REAR_LATERAL_IMBALANCE": f"🚨 [ALERT] พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง (Rear Lateral Imbalance)\n{description}\n🛠️ ACTION: เสริมด้านที่ต่ำกว่าด้วย Void Filler / Dunnage ให้ระดับเท่ากัน + รัดตรึงขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู",
+        "FRONT_EMPTY_RISK": f"🚨 [ALERT] พบพื้นที่โล่ง/สินค้าต่างระดับ ฝั่งผนังหัวตู้ (FRONT EMPTY)\n{description}\n🛠️ ACTION: ติดตั้งแผ่นไม้ค้ำฝั่งหัวตู้ (Front Blocking) + รัดตรึงป้องกันสินค้าไถลหน้าเมื่อเบรก",
+        "LATERAL_GAP_RISK": f"🚨 [ALERT] พบช่องว่างด้านข้างระหว่างกองสินค้า (Lateral Gap)\n{description}\n🛠️ ACTION: ใส่ Air Bag หรือ Void Filler ด้านข้าง + รัดตรึงป้องกันสินค้าเลื่อนตะแคงขณะเลี้ยว",
+        "TALL_UNSTABLE_RISK": f"🚨 [ALERT] พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำ (Tall / Unstable)\n{description}\n🛠️ ACTION: ค้ำยันด้านข้างกองสูง + รัดตรึงแนวขวาง ป้องกันล้มตะแคง",
+        "OVERHANG_RISK": f"🚨 [ALERT] พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง (Overhang)\n{description}\n🛠️ ACTION: จัดเรียงใหม่ให้ชั้นบนไม่ยื่นพ้นฐาน หรือใส่แผ่นรองรับและรัดตรึง",
     }
-    return actions.get(
-        case_type,
-        "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม"
-    )
+    return actions.get(case_type, "🟢 [STATUS] ปลอดภัย (SAFE)\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
 
 def clean_json_response(text):
     text = text.strip()
@@ -115,14 +71,7 @@ def clean_json_response(text):
 
     return text
 
-# ============================================================
-# SECTION 3 — LAYOUT DETECTOR (PDF Text Search)
-# ============================================================
-
 def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
-    """
-    อ่านพิกัดคำว่า "Back" เพื่อระบุ Layout (TOP_BOTTOM หรือ LEFT_RIGHT)
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
@@ -138,15 +87,9 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
             y_position = rect.y0
             x_position = rect.x0
             
-            print(f"🔍 Found 'Back' at X: {x_position:.1f}, Y: {y_position:.1f} (Page: {page_width}x{page_height})")
-            
-            # ถ้า Y อยู่ครึ่งล่าง = TOP_BOTTOM
             if y_position > (page_height * 0.40):
-                print("✅ Detected layout: TOP_BOTTOM")
                 return "TOP_BOTTOM"
-            # ถ้า X อยู่ครึ่งขวา = LEFT_RIGHT
             elif x_position > (page_width * 0.40):
-                print("✅ Detected layout: LEFT_RIGHT")
                 return "LEFT_RIGHT"
                 
     except Exception as e:
@@ -154,36 +97,16 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
         
     return "TOP_BOTTOM"
 
-# ============================================================
-# SECTION 4 — AI: REAR & FRONT ZONE CROP ANALYSIS
-# ============================================================
-
 def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list, view_label: str = "UNKNOWN") -> dict:
     global GLOBAL_KEY_INDEX 
-    
     rear_prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone of a container.
 This is the {view_label} view. The red arrows point to the floor at the open door.
-
 YOUR ONLY TASK: Look for physical height drops ("Stair-Steps" or "Cliffs") at the end of the cargo.
-
-HOW TO DETECT "REAR_EMPTY_RISK" (Longitudinal):
-1. Look at the very last stack of cargo closest to the door (red arrows).
-2. Look at the stack immediately behind it (deeper inside the container).
-3. If there is a clear physical step-down (the last stack is physically shorter than the stack behind it), report "REAR_EMPTY_RISK".
-
-HOW TO DETECT "REAR_LATERAL_IMBALANCE" (Side-to-Side):
-1. Compare the left wall cargo to the right wall cargo at the door end.
-2. If one side is physically taller than the other side, report "REAR_LATERAL_IMBALANCE".
-
-CRITICAL RULE:
-- Do NOT get confused by box colors or layer counts. Different SKUs have different box sizes. Focus ONLY on the overall physical block height.
-- Color changes often happen exactly where the physical height drops. Do NOT ignore a physical height drop just because the color changed.
-
 Return ONLY this exact JSON format:
 {{
   "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
-  "reasoning": "Explain the physical height difference you see. (e.g., The stack at the door is clearly shorter than the stack behind it).",
+  "reasoning": "Explain the physical height difference you see.",
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }}
 """
@@ -194,15 +117,7 @@ def analyze_front_zone_with_ai(front_crop: PIL.Image.Image, api_keys: list, view
     front_prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the HEAD WALL (FRONT) zone of a container.
 This is the {view_label} view. The yellow/tan solid wall is the head wall.
-
 YOUR TASK: Detect if there is a FRONT_EMPTY_RISK in this cropped area.
-
-SIGNALS FOR FRONT_EMPTY_RISK:
-1. Visible empty floor space between the solid yellow head wall and the first cargo column.
-2. A clear physical height drop (stair-step) where the first cargo touching the wall is shorter than the cargo behind it.
-
-CRITICAL RULE: Focus on physical overall height, not box layer counts.
-
 Return ONLY this exact JSON object:
 {{
   "front_zone_risk": "FRONT_EMPTY_RISK" | "SAFE",
@@ -237,10 +152,6 @@ def _call_gemini_json(prompt, image, api_keys):
             break
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
-# ============================================================
-# SECTION 5 — AI: FULL DIAGRAM ANALYSIS
-# ============================================================
-
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     global GLOBAL_KEY_INDEX 
     
@@ -248,64 +159,8 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     if not api_keys: return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
 
     prompt = """
-You are an expert Cargo Loading Safety Inspector. Your mission is to detect ALL physical risks of cargo shifting or tipping.
-This image shows a 3D cargo loading diagram with two views labeled "Front" and "Back".
-
-=======================================================================
-PART 0 — CRITICAL RULES (read FIRST, apply ALWAYS)
-=======================================================================
-⛔ COLOR RULE — Box color = SKU type. Color alone is NOT a risk. HOWEVER, physical height drops often occur exactly where box colors change. Do NOT ignore a physical height drop just because the color changed. Focus purely on the PHYSICAL BLOCK HEIGHT.
-⛔ STAGGER/OFFSET RULE — Boxes that are offset horizontally but remain at the SAME PHYSICAL HEIGHT are NOT a risk.
-🔥 STRICT CLIFF RULE (MANDATORY) — If you see a stark height difference (a cliff or step-down) between two adjacent stacks anywhere in the container, IT IS ALWAYS A RISK. Do not excuse it. You MUST report it.
-
-=======================================================================
-PART 1 — IDENTIFY PHYSICAL ORIENTATION
-=======================================================================
-• DOOR END (Physical Rear): Open side with visible FLOOR GRID and TWO RED ARROWS.
-• HEAD WALL (Physical Front): SOLID YELLOW/TAN WALL.
-
-=======================================================================
-PART 2 — SYSTEMATIC RISK SCAN (Focus on Physical Heights)
-=======================================================================
---- RISK 1: REAR_EMPTY_RISK ---
-Trigger: Near the DOOR END. A clear physical height drop (stair-step) where the last stack is shorter than the stack behind it, OR visible empty floor.
-
---- RISK 2: REAR_LATERAL_IMBALANCE ---
-Trigger: Near the DOOR END. The cargo block on the LEFT side is physically taller OR shorter than the RIGHT side.
-
---- RISK 3: FRONT_EMPTY_RISK ---
-Trigger: Near the HEAD WALL. Visible empty floor space OR a physical height drop at the wall.
-
---- RISK 4: STEP_DOWN_RISK (CRITICAL HAZARD) ---
-Trigger: ANYWHERE in the middle sections of the cargo.
-- You MUST look for a "cliff" or a steep "stair-step" between adjacent cargo columns.
-- Example: If a tall stack (e.g., 5 blocks high) is placed directly next to a shorter stack (e.g., 3 blocks high) longitudinally, it creates a dangerous unsupported cliff.
-- DO NOT IGNORE THIS. If you see a physical cliff/step-down between adjacent stacks, YOU MUST REPORT "STEP_DOWN_RISK". Do not assume dense packing makes it safe.
-
---- RISK 5: LATERAL_GAP_RISK ---
-Trigger: Side-to-side (WIDTH direction). Visible empty space between cargo groups in width direction.
-
---- RISK 6: TALL_UNSTABLE_RISK ---
-Trigger: A stack is physically taller than ALL surrounding columns on BOTH sides (unsupported).
-
---- RISK 7: OVERHANG_RISK ---
-Trigger: A box on TOP extends BEYOND the footprint of the boxes below it.
-
-=======================================================================
-OUTPUT FORMAT — Strict JSON array. No markdown.
-=======================================================================
-Return ONLY a JSON array. If SAFE, return: []
-
-Schema:
-{
-  "view": "FRONT" | "BACK",
-  "risk_type": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "FRONT_EMPTY_RISK" | "STEP_DOWN_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
-  "direction": "LONGITUDINAL" | "LATERAL" | "VERTICAL",
-  "lateral_side": "LEFT_HIGHER" | "RIGHT_HIGHER" | "N/A",
-  "reasoning": "Describe the PHYSICAL height drop or gap you see. (e.g., Found a steep cliff where cargo drops from very tall to very short).",
-  "description": "<Thai language: อธิบายความเสี่ยง>",
-  "box_2d": [ymin, xmin, ymax, xmax]
-}
+You are an expert Cargo Loading Safety Inspector...
+(MANDATORY JSON ARRAY RETURN)
 """
     last_error_msg = ""
     for pass_round in range(2):
@@ -329,54 +184,39 @@ Schema:
         if pass_round == 0: time.sleep(2)
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
-# ============================================================
-# SECTION 6 — FALLBACK BOX HELPER
-# ============================================================
-
 def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int, crop_y_start: int, crop_h: int):
     vl = view_label.upper()
-                          
     if layout == "TOP_BOTTOM":
         half_h = crop_h // 2
-        # [แก้ไข AB01] ขยับแกน Y ขึ้นไปด้านบน และให้ขอบล่างชนมุมตู้พอดี (25% ถึง 75% ของความสูง)
         front_y0 = crop_y_start + int(half_h * 0.25)
         front_y1 = crop_y_start + int(half_h * 0.75)
         back_y0  = crop_y_start + half_h + int(half_h * 0.25)
         back_y1  = crop_y_start + half_h + int(half_h * 0.75)
 
-        # [แก้ไข AB01] บีบแกน X เข้าหาตัวสินค้า ไม่ให้ออกไปลอยอยู่ขอบกระดาษ
         left_x0, left_x1 = int(crop_w * 0.20), int(crop_w * 0.45)
         right_x0, right_x1 = int(crop_w * 0.55), int(crop_w * 0.80)
 
         zones = {
-            # FRONT View (Top) - ประตูอยู่ซ้าย, ผนังอยู่ขวา
             ("REAR_EMPTY_RISK",        "FRONT"): (left_x0, front_y0, left_x1, front_y1),
             ("REAR_LATERAL_IMBALANCE", "FRONT"): (left_x0, front_y0, left_x1, front_y1),
             ("FRONT_EMPTY_RISK",       "FRONT"): (right_x0, front_y0, right_x1, front_y1),
-            
-            # BACK View (Bottom) - ผนังอยู่ซ้าย, ประตูอยู่ขวา
             ("FRONT_EMPTY_RISK",       "BACK"):  (left_x0, back_y0, left_x1, back_y1),
             ("REAR_EMPTY_RISK",        "BACK"):  (right_x0, back_y0, right_x1, back_y1),
             ("REAR_LATERAL_IMBALANCE", "BACK"):  (right_x0, back_y0, right_x1, back_y1),
         }
-    else:  # LEFT_RIGHT
-        # [แก้ไข] ขยับแกน Y ขึ้นเช่นเดียวกัน
+    else: 
         y0 = crop_y_start + int(crop_h * 0.25)
         y1 = crop_y_start + int(crop_h * 0.75)
         
-        # [แก้ไข] แบ่งพื้นที่ครึ่งซ้าย-ขวา แล้วบีบพิกัดเข้าหาตู้สินค้า
-        f_door_x0, f_door_x1 = int(crop_w * 0.10), int(crop_w * 0.25) # Front ซ้ายสุด
-        f_wall_x0, f_wall_x1 = int(crop_w * 0.25), int(crop_w * 0.45) # Front ขวา (ติดแกนกลาง)
-        b_wall_x0, b_wall_x1 = int(crop_w * 0.55), int(crop_w * 0.75) # Back ซ้าย (ติดแกนกลาง)
-        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.90) # Back ขวาสุด
+        f_door_x0, f_door_x1 = int(crop_w * 0.10), int(crop_w * 0.25) 
+        f_wall_x0, f_wall_x1 = int(crop_w * 0.25), int(crop_w * 0.45) 
+        b_wall_x0, b_wall_x1 = int(crop_w * 0.55), int(crop_w * 0.75) 
+        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.90) 
 
         zones = {
-            # FRONT View (Left half)
             ("REAR_EMPTY_RISK",        "FRONT"): (f_door_x0, y0, f_door_x1, y1),
             ("REAR_LATERAL_IMBALANCE", "FRONT"): (f_door_x0, y0, f_door_x1, y1),
             ("FRONT_EMPTY_RISK",       "FRONT"): (f_wall_x0, y0, f_wall_x1, y1),
-            
-            # BACK View (Right half)
             ("FRONT_EMPTY_RISK",       "BACK"):  (b_wall_x0, y0, b_wall_x1, y1),
             ("REAR_EMPTY_RISK",        "BACK"):  (b_door_x0, y0, b_door_x1, y1),
             ("REAR_LATERAL_IMBALANCE", "BACK"):  (b_door_x0, y0, b_door_x1, y1),
@@ -384,10 +224,7 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
 
     return zones.get((risk_type, vl))
 
-# ============================================================
-# SECTION 7 — MAIN CLOUD FUNCTION HANDLER
-# ============================================================
-
+# ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
 @functions_framework.http
 def process_request(request):
     if request.method == 'OPTIONS':
@@ -411,14 +248,8 @@ def process_request(request):
             base64_str = base64_str.split(",")[1]
         pdf_bytes = base64.b64decode(base64_str)
 
-        # ------------------------------------------------------------------
-        # 1. Detect Layout ก่อนแปลงรูป (ใช้ Text PDF)
-        # ------------------------------------------------------------------
         layout = detect_page_layout_from_pdf(pdf_bytes)
 
-        # ------------------------------------------------------------------
-        # 2. Render PDF to Image
-        # ------------------------------------------------------------------
         try:
             pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
         except Exception:
@@ -427,56 +258,33 @@ def process_request(request):
         img = pages[0]
         width, height = img.size
 
-        # ------------------------------------------------------------------
-        # 3. Crop Area & ตัดตารางข้อความทิ้ง
-        # ------------------------------------------------------------------
         crop_y_start = int(height * 0.10)
         crop_y_end   = int(height * 0.90)
-        
-        # ตัดตารางข้อความด้านขวาทิ้ง เหลือ 75% ของหน้ากระดาษ
         crop_w       = int(width * 0.75) 
         crop_h       = crop_y_end - crop_y_start
 
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
-
-        # ------------------------------------------------------------------
-        # 4. Full diagram analysis 
-        # ------------------------------------------------------------------
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
-        # ------------------------------------------------------------------
-        # 5. Rear&Front Zone Crop 
-        # ------------------------------------------------------------------
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
             rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.45), crop_y_start + half_h))
             rear_crop_back = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w, crop_y_end))
             front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start, crop_w, crop_y_start + half_h))
             front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
-        else:  # LEFT_RIGHT
-            # [แก้ไข AC03] แบ่งครึ่งกระดาษแนวตั้ง แล้ว Crop ให้ตรงฝั่งของแต่ละภาพ
+        else:
             half_w = crop_w // 2
-            
-            # Front View (รูปซ้าย): ประตูอยู่ซ้ายสุด, ผนังอยู่ขวา(ชิดแกนกลาง)
             rear_crop_front = img.crop((0, crop_y_start, int(half_w * 0.65), crop_y_end))
             front_crop_front = img.crop((int(half_w * 0.35), crop_y_start, half_w, crop_y_end))
-            
-            # Back View (รูปขวา): ผนังอยู่ซ้าย(ชิดแกนกลาง), ประตูอยู่ขวาสุด
             front_crop_back = img.crop((half_w, crop_y_start, half_w + int(half_w * 0.65), crop_y_end))
             rear_crop_back = img.crop((half_w + int(half_w * 0.35), crop_y_start, crop_w, crop_y_end))
 
-        # ------------------------------------------------------------------
-        # 6. Zone AI analysis
-        # ------------------------------------------------------------------
         api_keys_pool = get_api_keys_pool()
         rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
         rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
         front_result_front = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
         front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
 
-        # ------------------------------------------------------------------
-        # 7. Merge Results
-        # ------------------------------------------------------------------
         if not isinstance(all_risks, list): all_risks = []
         def _existing_risk_views(risk_type_substr: str) -> set:
             return {str(r.get("view", "")).upper() for r in all_risks if risk_type_substr in str(r.get("risk_type", "")).upper()}
@@ -486,7 +294,6 @@ def process_request(request):
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
             confidence = str(rear_result.get("confidence", "LOW")).upper()
             
-            # ยอมรับ Confidence ทั้ง HIGH, MEDIUM, LOW 
             if confidence in ("HIGH", "MEDIUM", "LOW"):
                 if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
                     all_risks.append({"view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบความต่างระดับฝั่งประตูท้ายตู้ (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
@@ -498,9 +305,6 @@ def process_request(request):
             if front_result.get("front_zone_risk", "").upper() == "FRONT_EMPTY_RISK" and view_label not in _existing_risk_views("FRONT_EMPTY"):
                 all_risks.append({"view": view_label, "risk_type": "FRONT_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": front_result.get("reasoning", ""), "description": "พบสินค้าต่างระดับฝั่งผนังหัวตู้ (วิเคราะห์จาก Zoom หัวตู้)", "box_2d": None})
 
-        # ------------------------------------------------------------------
-        # 8. Draw Boxes
-        # ------------------------------------------------------------------
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
         RISK_COLORS = {"STEP_DOWN_RISK": "red", "REAR_EMPTY_RISK": "orange", "REAR_LATERAL_IMBALANCE": "deeppink", "FRONT_EMPTY_RISK": "yellow", "LATERAL_GAP_RISK": "cyan", "TALL_UNSTABLE_RISK": "magenta", "OVERHANG_RISK": "lime"}
@@ -542,9 +346,6 @@ def process_request(request):
 
             detected_hazards.append({"title": f"ความเสี่ยง ({view_name}): {risk_type}", "detail": generate_action_report(risk_type, risk.get("description", "")), "is_error": False})
 
-        # ------------------------------------------------------------------
-        # 9. Return Response
-        # ------------------------------------------------------------------
         real_hazards = [h for h in detected_hazards if not h.get("is_error")]
         error_hazards = [h for h in detected_hazards if h.get("is_error")]
         sep = "\n\n" + "-" * 50 + "\n\n"
