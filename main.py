@@ -148,8 +148,11 @@ def _call_gemini_json(prompt, image, api_keys):
             return result
         except Exception as e:
             last_err = str(e)
-            if "404" in last_err or "not found" in last_err.lower(): continue
-            break
+            print(f"⚠️ API Key index {current_index} failed in zoom analysis: {last_err[:100]}")
+            
+            # เมื่อเจอ Error (เช่น 429, 500) ให้ใช้ continue เพื่อวนลูปใช้ Key ตัวถัดไป
+            # (ลบเงื่อนไข if 404 แล้ว break ทิ้งไปเลยครับ ให้มันหมุนไปเรื่อยๆ จนครบ)
+            continue
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
@@ -194,7 +197,9 @@ Find all safety risks and return them in this exact JSON array format:
                 return risks
             except Exception as e:
                 last_error_msg = str(e)
-                if "429" in last_error_msg.lower() or "quota" in last_error_msg.lower(): break 
+                print(f"⚠️ API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
+                # เปลี่ยนจาก break เป็น continue เพื่อให้ไปใช้ Key ถัดไป
+                continue 
         if pass_round == 0: time.sleep(2)
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
@@ -338,7 +343,16 @@ def process_request(request):
 
         if not isinstance(all_risks, list): all_risks = []
         def _existing_risk_views(risk_type_substr: str) -> set:
-            return {str(r.get("view", "")).upper() for r in all_risks if risk_type_substr in str(r.get("risk_type", "")).upper()}
+            # ดึงมุมมองทั้งหมดที่เคยเจอความเสี่ยงนี้ รวมถึงมองว่าการที่ไม่มี view (หรือ GENERAL) คือครอบคลุมไปแล้ว
+            views = set()
+            for r in all_risks:
+                if risk_type_substr in str(r.get("risk_type", "")).upper():
+                    view = str(r.get("view", "")).upper()
+                    views.add(view)
+                    if view == "" or view == "GENERAL":
+                        # ถ้า GENERAL เจอแล้ว ให้ถือว่าคลุมทั้ง FRONT และ BACK ไปเลย
+                        views.update(["FRONT", "BACK"]) 
+            return views
 
         for view_label, rear_result in [("FRONT", rear_result_front), ("BACK",  rear_result_back)]:
             if not isinstance(rear_result, dict): continue
@@ -393,7 +407,13 @@ def process_request(request):
 
             if not drawn:
                 fallback = _get_fallback_box(risk_type, view_name, layout, crop_w, crop_y_start, crop_h)
-                if fallback: draw.rectangle(fallback, outline=outline_color, width=8)
+                if fallback: 
+                    draw.rectangle(fallback, outline=outline_color, width=8)
+                    drawn = True  # บอกระบบว่าวาดกล่องสำรองสำเร็จแล้ว
+
+            # 🛑 ป้องกันการรายงานเกิน: ถ้าวาดกล่องไม่ได้เลย (ไม่มีพิกัด และไม่มี fallback) ให้ข้ามไปเลย
+            if not drawn:
+                continue
 
             detected_hazards.append({"title": f"ความเสี่ยง ({view_name}): {risk_type}", "detail": generate_action_report(risk_type, risk.get("description", "")), "is_error": False})
 
