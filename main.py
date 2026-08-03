@@ -205,21 +205,37 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
             ("REAR_LATERAL_IMBALANCE", "BACK"):  (right_x0, back_y0, right_x1, back_y1),
         }
     else: 
-        y0 = crop_y_start + int(crop_h * 0.25)
-        y1 = crop_y_start + int(crop_h * 0.75)
+        # ปรับแก้พิกัดให้เข้ากับมุมมอง 3D (Isometric) ของ Layout แบบ LEFT_RIGHT
         
-        f_door_x0, f_door_x1 = int(crop_w * 0.10), int(crop_w * 0.25) 
-        f_wall_x0, f_wall_x1 = int(crop_w * 0.25), int(crop_w * 0.45) 
-        b_wall_x0, b_wall_x1 = int(crop_w * 0.55), int(crop_w * 0.75) 
-        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.90) 
+        # 1. ภาพด้านซ้าย (Front View)
+        # ประตูท้ายตู้อยู่ ซ้ายล่าง
+        f_door_y0 = crop_y_start + int(crop_h * 0.50)
+        f_door_y1 = crop_y_start + int(crop_h * 0.85)
+        f_door_x0, f_door_x1 = int(crop_w * 0.05), int(crop_w * 0.25)
+        
+        # ผนังหัวตู้อยู่ ขวาบน
+        f_wall_y0 = crop_y_start + int(crop_h * 0.15)
+        f_wall_y1 = crop_y_start + int(crop_h * 0.50)
+        f_wall_x0, f_wall_x1 = int(crop_w * 0.30), int(crop_w * 0.50)
+        
+        # 2. ภาพด้านขวา (Back View)
+        # ผนังหัวตู้อยู่ ซ้ายล่าง
+        b_wall_y0 = crop_y_start + int(crop_h * 0.50)
+        b_wall_y1 = crop_y_start + int(crop_h * 0.85)
+        b_wall_x0, b_wall_x1 = int(crop_w * 0.50), int(crop_w * 0.70)
+        
+        # ประตูท้ายตู้อยู่ ขวาบน
+        b_door_y0 = crop_y_start + int(crop_h * 0.15)
+        b_door_y1 = crop_y_start + int(crop_h * 0.50)
+        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.95)
 
         zones = {
-            ("REAR_EMPTY_RISK",        "FRONT"): (f_door_x0, y0, f_door_x1, y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (f_door_x0, y0, f_door_x1, y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"): (f_wall_x0, y0, f_wall_x1, y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (b_wall_x0, y0, b_wall_x1, y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (b_door_x0, y0, b_door_x1, y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (b_door_x0, y0, b_door_x1, y1),
+            ("REAR_EMPTY_RISK",        "FRONT"): (f_door_x0, f_door_y0, f_door_x1, f_door_y1),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"): (f_door_x0, f_door_y0, f_door_x1, f_door_y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"): (f_wall_x0, f_wall_y0, f_wall_x1, f_wall_y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):  (b_wall_x0, b_wall_y0, b_wall_x1, b_wall_y1),
+            ("REAR_EMPTY_RISK",        "BACK"):  (b_door_x0, b_door_y0, b_door_x1, b_door_y1),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):  (b_door_x0, b_door_y0, b_door_x1, b_door_y1),
         }
 
     return zones.get((risk_type, vl))
