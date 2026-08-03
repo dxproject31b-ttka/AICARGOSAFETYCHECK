@@ -255,6 +255,7 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
     return zones.get((risk_type, vl))
 
 # ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
+# ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
 @functions_framework.http
 def process_request(request):
     if request.method == 'OPTIONS':
@@ -269,13 +270,28 @@ def process_request(request):
     headers = {'Access-Control-Allow-Origin': '*'}
 
     try:
-        data = request.get_json(silent=True) or {}
+        # 1. พยายามดึง JSON ด้วยคำสั่งมาตรฐาน
+        data = request.get_json(silent=True)
+        
+        # 2. ถ้าดึงไม่ได้ (data เป็น None) ให้บังคับแปลงจากข้อความดิบ (Raw Data)
+        if data is None:
+            import json
+            raw_data = request.get_data(as_text=True)
+            if raw_data:
+                data = json.loads(raw_data)
+            else:
+                data = {}
+                
+        # 3. ตรวจสอบว่าได้ข้อมูล base64 มาหรือไม่
         if not data or 'base64' not in data:
+            # พ่น Log ข้อความ 500 ตัวอักษรแรกที่รับมา เพื่อตรวจสอบว่าเกิดอะไรขึ้น
+            print("🚨 DEBUG - RECEIVED DATA:", request.get_data(as_text=True)[:500])
             return ({"error": "No base64 data provided"}, 400, headers)
 
         base64_str = data.get('base64')
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
+            
         pdf_bytes = base64.b64decode(base64_str)
 
         layout = detect_page_layout_from_pdf(pdf_bytes)
