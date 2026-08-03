@@ -6,7 +6,6 @@ import time
 import gc
 import traceback
 import random
-from pdf2image import convert_from_bytes
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageStat
