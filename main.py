@@ -139,7 +139,7 @@ def _call_gemini_json(prompt, image, api_keys):
         try:
             if hasattr(genai, '_client'): genai._client = None
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(model_name="gemini-3.6-flash", generation_config={"response_mime_type": "application/json"})
+            model = genai.GenerativeModel(model_name="gemini-3.6-flash")
             response = model.generate_content([prompt, image]) 
             clean_text = clean_json_response(response.text if response.text else "{}")
             result = json.loads(clean_text)
@@ -184,7 +184,7 @@ Find all safety risks and return them in this exact JSON array format:
             try:
                 if hasattr(genai, '_client'): genai._client = None
                 genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(model_name="gemini-3.6-flash", generation_config={"response_mime_type": "application/json"})
+                model = genai.GenerativeModel(model_name="gemini-3.6-flash")
                 response = model.generate_content([prompt, diagram_image])
                 clean_text = clean_json_response(response.text if response.text else "[]")
                 if not clean_text or clean_text in ('""', '[]'): return []
