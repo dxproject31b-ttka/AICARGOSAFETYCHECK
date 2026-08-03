@@ -296,12 +296,17 @@ def process_request(request):
 
         layout = detect_page_layout_from_pdf(pdf_bytes)
 
-        try:
-            pages = convert_from_bytes(pdf_bytes, first_page=2, last_page=2, dpi=180)
-        except Exception:
-            pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=180)
-
-        img = pages[0]
+        # ใช้ PyMuPDF (fitz) แปลง PDF เป็นรูปภาพแทน pdf2image
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # เลือกหน้าที่ 2 (index 1) ถ้ามี ถ้าไม่มีให้ใช้หน้าที่ 1 (index 0)
+        page_index = 1 if len(doc) >= 2 else 0 
+        page = doc[page_index]
+        
+        # เรนเดอร์หน้า PDF เป็นภาพความละเอียด 180 DPI
+        pix = page.get_pixmap(dpi=180)
+        mode = "RGBA" if pix.alpha else "RGB"
+        img = PIL.Image.frombytes(mode, [pix.width, pix.height], pix.samples)
         width, height = img.size
 
         crop_y_start = int(height * 0.10)
