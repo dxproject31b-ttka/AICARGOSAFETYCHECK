@@ -31,7 +31,7 @@ def get_api_keys_pool():
     
     if env_value:
         # ตัดด้วยคอมมา และกรองค่าว่างออก
-        keys = [k.strip() for k in env_value.split(",") if k.strip()]
+        keys = [k.strip() for k in env_value.split("|") if k.strip()]
         
         if keys:
             random.shuffle(keys)
