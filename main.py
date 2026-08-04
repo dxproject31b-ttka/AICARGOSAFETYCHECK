@@ -242,7 +242,7 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
         back_y1  = crop_y_start + half_h + int(half_h * 0.75)
 
         left_x0, left_x1   = int(crop_w * 0.20), int(crop_w * 0.45)
-        right_x0, right_x1 = int(crop_w * 0.55), int(crop_w * 0.80)
+        right_x0, right_x1 = int(crop_w * 0.60), int(crop_w * 0.92)
 
         # FIX A: แยก REAR_EMPTY vs REAR_LATERAL ไม่ให้ซ้อนทับกัน
         #        REAR_EMPTY  → ครึ่งบนของโซน (ประตูท้าย)
@@ -275,7 +275,8 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
         # Layout แบบ LEFT_RIGHT (Isometric)
 
         # Front View (ซ้ายของภาพ)
-        f_door_y0,  f_door_y1  = crop_y_start + int(crop_h * 0.50), crop_y_start + int(crop_h * 0.85)
+        # Front View (ซ้ายของภาพ)
+        f_door_y0,  f_door_y1  = crop_y_start + int(crop_h * 0.25), crop_y_start + int(crop_h * 0.65)
         f_door_x0,  f_door_x1  = int(crop_w * 0.05), int(crop_w * 0.25)
         f_wall_y0,  f_wall_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
         f_wall_x0,  f_wall_x1  = int(crop_w * 0.30), int(crop_w * 0.50)
@@ -501,6 +502,16 @@ def process_request(request):
                     abs_xmax = max(abs_xmin + 1, min(int(xmax * crop_w / 1000.0), crop_w))
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
+                    # ✅ เพิ่มตรงนี้ — validate ก่อนวาด
+                    box_center_x = (abs_xmin + abs_xmax) / 2
+                    box_center_y = (abs_ymin + abs_ymax) / 2
+                    cargo_zone_xmax = crop_w * 0.80   # สินค้าอยู่ใน 80% ซ้ายของ crop
+                    cargo_zone_ymin = crop_y_start + crop_h * 0.05
+                    cargo_zone_ymax = crop_y_end   - crop_h * 0.05
+
+                    if box_center_x > cargo_zone_xmax or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
+                         print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — falling back to fallback box for {risk_type}")
+                         raise ValueError("box out of cargo zone")  # กระโดดไป except → drawn=False → ใช้ fallback
 
                     box_w_ratio = (abs_xmax - abs_xmin) / crop_w
                     box_h_ratio = (abs_ymax - abs_ymin) / crop_h
