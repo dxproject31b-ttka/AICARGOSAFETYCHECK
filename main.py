@@ -351,17 +351,34 @@ def process_request(request):
         all_risks = analyze_diagram_image_with_ai(diagram_crop)
 
         if layout == "TOP_BOTTOM":
+            # TOP_BOTTOM: ภาพ Front อยู่ครึ่งบน, Back อยู่ครึ่งล่าง
+            # ในแต่ละครึ่ง: ประตูท้าย = ซ้าย, หัวตู้ = ขวา
             half_h = crop_h // 2
-            rear_crop_front = img.crop((0, crop_y_start, int(crop_w * 0.45), crop_y_start + half_h))
-            rear_crop_back = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w, crop_y_end))
-            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start, crop_w, crop_y_start + half_h))
-            front_crop_back = img.crop((0, crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
+            rear_crop_front  = img.crop((0,                  crop_y_start,          int(crop_w * 0.45), crop_y_start + half_h))
+            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start,          crop_w,             crop_y_start + half_h))
+            front_crop_back  = img.crop((0,                  crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
+            rear_crop_back   = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w,             crop_y_end))
         else:
+            # LEFT_RIGHT: ภาพ Front อยู่ซีกซ้าย, Back อยู่ซีกขวา
+            # มุมมอง 3D Isometric จริง:
+            #   Front view (ซ้าย): ประตูท้ายตู้ = มุมซ้ายล่าง | หัวตู้ = มุมขวาบน
+            #   Back view  (ขวา):  หัวตู้        = มุมซ้ายล่าง | ประตูท้ายตู้ = มุมขวาบน
             half_w = crop_w // 2
-            rear_crop_front = img.crop((0, crop_y_start, int(half_w * 0.65), crop_y_end))
-            front_crop_front = img.crop((int(half_w * 0.35), crop_y_start, half_w, crop_y_end))
-            front_crop_back = img.crop((half_w, crop_y_start, half_w + int(half_w * 0.65), crop_y_end))
-            rear_crop_back = img.crop((half_w + int(half_w * 0.35), crop_y_start, crop_w, crop_y_end))
+            mid_h  = crop_y_start + int(crop_h * 0.50)  # เส้นแบ่งแนวนอนกลางภาพ
+
+            # Front view — ซีกซ้าย
+            rear_crop_front  = img.crop((0,                         mid_h,        int(half_w * 0.55),        crop_y_end))   # ประตูท้าย: มุมซ้ายล่าง
+            front_crop_front = img.crop((int(half_w * 0.45),        crop_y_start, half_w,                   mid_h))        # หัวตู้:    มุมขวาบน
+
+            # Back view — ซีกขวา
+            front_crop_back  = img.crop((half_w,                    mid_h,        half_w + int(half_w * 0.55), crop_y_end)) # หัวตู้:    มุมซ้ายล่าง
+            rear_crop_back   = img.crop((half_w + int(half_w * 0.45), crop_y_start, crop_w,                  mid_h))       # ประตูท้าย: มุมขวาบน
+
+            print(f"📐 LEFT_RIGHT crop — "
+                  f"rear_F=({0},{mid_h},{int(half_w*0.55)},{crop_y_end}) | "
+                  f"front_F=({int(half_w*0.45)},{crop_y_start},{half_w},{mid_h}) | "
+                  f"front_B=({half_w},{mid_h},{half_w+int(half_w*0.55)},{crop_y_end}) | "
+                  f"rear_B=({half_w+int(half_w*0.45)},{crop_y_start},{crop_w},{mid_h})")
 
         api_keys_pool = get_api_keys_pool()
         rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
