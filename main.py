@@ -442,12 +442,15 @@ def process_request(request):
 
         if layout == "TOP_BOTTOM":
             # TOP_BOTTOM: ภาพ Front อยู่ครึ่งบน, Back อยู่ครึ่งล่าง
-            # ในแต่ละครึ่ง: ประตูท้าย = ซ้าย, หัวตู้ = ขวา
+            # Front view (บน) : ประตูท้าย = ซ้าย | หัวตู้ = ขวา
+            # Back  view (ล่าง): ประตูท้าย = ขวา  | หัวตู้ = ซ้าย  ← กลับด้าน!
             half_h = crop_h // 2
-            rear_crop_front  = img.crop((0,                  crop_y_start,          int(crop_w * 0.45), crop_y_start + half_h))
-            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start,          crop_w,             crop_y_start + half_h))
-            front_crop_back  = img.crop((0,                  crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))
-            rear_crop_back   = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w,             crop_y_end))
+            # --- Front (บน) ---
+            rear_crop_front  = img.crop((0,                  crop_y_start,          int(crop_w * 0.45), crop_y_start + half_h))  # ประตูท้าย = ซ้าย
+            front_crop_front = img.crop((int(crop_w * 0.55), crop_y_start,          crop_w,             crop_y_start + half_h))  # หัวตู้    = ขวา
+            # --- Back (ล่าง) — ทิศกลับด้าน ---
+            rear_crop_back   = img.crop((int(crop_w * 0.55), crop_y_start + half_h, crop_w,             crop_y_end))             # ประตูท้าย = ขวา
+            front_crop_back  = img.crop((0,                  crop_y_start + half_h, int(crop_w * 0.45), crop_y_end))             # หัวตู้    = ซ้าย
         else:
             # LEFT_RIGHT: ภาพ Front อยู่ซีกซ้าย, Back อยู่ซีกขวา
             # มุมมอง 3D Isometric จริง:
