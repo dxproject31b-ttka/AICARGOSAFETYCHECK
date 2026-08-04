@@ -71,29 +71,50 @@ def clean_json_response(text):
     return text
 
 def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
+    """
+    ตรวจจับรูปแบบการวางภาพในหน้า manifest:
+      LEFT_RIGHT  = ภาพ Front (ซ้าย) และ Back (ขวา) วางเคียงกัน → พบใน PDF แนวนอน (Landscape)
+      TOP_BOTTOM  = ภาพ Front (บน)   และ Back (ล่าง) วางซ้อนกัน → พบใน PDF แนวตั้ง (Portrait)
+
+    หลักการ:
+      1. ถ้าหน้า PDF เป็น Landscape (กว้าง > สูง) → LEFT_RIGHT เสมอ
+         เหตุผล: manifest ที่ export แนวนอนจะวาง 2 view ซ้าย-ขวาเสมอ
+                 ตำแหน่ง label "Back" อาจอยู่ซ้ายล่างของภาพขวา (x น้อย)
+                 จึงไม่สามารถใช้ x > 40% เป็นเกณฑ์ได้
+      2. ถ้า Portrait → ใช้ตำแหน่ง y ของ "Back" เป็น fallback (TOP_BOTTOM)
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
         page = doc[page_index]
-        
-        page_width = page.rect.width
+
+        page_width  = page.rect.width
         page_height = page.rect.height
-        
+        is_landscape = page_width > page_height
+
+        print(f"📄 Page size: {page_width:.0f}x{page_height:.0f} | Landscape={is_landscape}")
+
+        # กฎหลัก: Landscape → LEFT_RIGHT เสมอ
+        if is_landscape:
+            print("📐 Layout detected: LEFT_RIGHT (Landscape page)")
+            return "LEFT_RIGHT"
+
+        # Portrait: ใช้ตำแหน่ง "Back" label เป็น fallback
         text_instances = page.search_for("Back")
-        
         if text_instances:
             rect = text_instances[0]
-            y_position = rect.y0
-            x_position = rect.x0
-            
-            if y_position > (page_height * 0.40):
-                return "TOP_BOTTOM"
-            elif x_position > (page_width * 0.40):
+            x_ratio = rect.x0 / page_width
+            y_ratio = rect.y0 / page_height
+            print(f"📍 Back label: x_ratio={x_ratio:.2f}, y_ratio={y_ratio:.2f}")
+
+            if x_ratio > 0.40:
+                print("📐 Layout detected: LEFT_RIGHT (Back label right half)")
                 return "LEFT_RIGHT"
-                
+
     except Exception as e:
         print(f"⚠️ Layout detection failed ({e}), defaulting to TOP_BOTTOM")
-        
+
+    print("📐 Layout detected: TOP_BOTTOM (default)")
     return "TOP_BOTTOM"
 
 def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list, view_label: str = "UNKNOWN") -> dict:
