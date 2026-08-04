@@ -123,6 +123,12 @@ def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list, view_l
 You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone of a container.
 This is the {view_label} view. The red arrows point to the floor at the open door.
 YOUR ONLY TASK: Look for physical height drops ("Stair-Steps" or "Cliffs") at the end of the cargo.
+
+CRITICAL RULES:
+- Compare only CARGO heights. Do NOT include the container wall (solid yellow/tan panel) in your height comparison. The head wall is a fixed structure, not cargo.
+- For REAR_LATERAL_IMBALANCE: only flag if cargo stacks on the LEFT side and RIGHT side of the door opening are visibly different heights. If cargo appears level across the width, it is SAFE.
+- Consider total stack height (all tiers combined) when comparing left vs right sides.
+
 Return ONLY this exact JSON format:
 {{
   "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
@@ -136,8 +142,15 @@ def analyze_front_zone_with_ai(front_crop: PIL.Image.Image, api_keys: list, view
     global GLOBAL_KEY_INDEX
     front_prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the HEAD WALL (FRONT) zone of a container.
-This is the {view_label} view. The yellow/tan solid wall is the head wall.
+This is the {view_label} view. The yellow/tan solid panel is the container's head wall (a fixed structure).
 YOUR TASK: Detect if there is a FRONT_EMPTY_RISK in this cropped area.
+
+CRITICAL RULES:
+- FRONT_EMPTY_RISK means there is a visible empty gap or significant height difference between the cargo and the head wall — cargo that could slide forward and hit the wall during braking.
+- Do NOT flag the head wall itself as a risk. Only flag if cargo is clearly NOT touching or braced against the wall, leaving a dangerous void.
+- If cargo fills the space up to the head wall evenly (even if the top surface of cargo is lower than the wall top), it is SAFE — no sliding risk.
+- The yellow/tan colored solid panel IS the head wall. Do not mistake it for cargo height imbalance.
+
 Return ONLY this exact JSON object:
 {{
   "front_zone_risk": "FRONT_EMPTY_RISK" | "SAFE",
@@ -195,7 +208,10 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
 
 CRITICAL DEFINITIONS & RULES:
-1. STEP_DOWN_RISK: Refers ONLY to significant height drops BETWEEN cargo stacks inside the container. 
+1. STEP_DOWN_RISK: Refers ONLY to significant height drops BETWEEN cargo stacks inside the container.
+   - IMPORTANT: When comparing stack heights, always count the TOTAL height of the entire stack including ALL layers/tiers stacked on top of each other. A stack that has cargo on top of another cargo must have its COMBINED height compared to adjacent stacks.
+   - If stack A appears shorter at the base but has additional cargo layers on top that bring its total height equal to or close to adjacent stack B, it is NOT a STEP_DOWN_RISK.
+   - Only flag STEP_DOWN_RISK when the total combined height of one stack is clearly and significantly lower than an adjacent stack, with no cargo bridging the gap.
 2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That area must be evaluated for REAR_EMPTY_RISK instead.
 
 YOUR TASK:
@@ -303,7 +319,8 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
         f_door_y0,  f_door_y1  = crop_y_start + int(crop_h * 0.25), crop_y_start + int(crop_h * 0.65)
         f_door_x0,  f_door_x1  = int(crop_w * 0.05), int(crop_w * 0.25)
         f_wall_y0,  f_wall_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
-        f_wall_x0,  f_wall_x1  = int(crop_w * 0.30), int(crop_w * 0.50)
+        # FIX: x1 ไม่เกิน 0.46 เพื่อไม่ให้กล่องหลุดออกไปฝั่งขวาของ Front view
+        f_wall_x0,  f_wall_x1  = int(crop_w * 0.28), int(crop_w * 0.46)
         f_door_mid_y = f_door_y0 + (f_door_y1 - f_door_y0) // 2
 
         # Back View (ขวาของภาพ)
@@ -544,7 +561,8 @@ def process_request(request):
                     # ✅ เพิ่มตรงนี้ — validate ก่อนวาด
                     box_center_x = (abs_xmin + abs_xmax) / 2
                     box_center_y = (abs_ymin + abs_ymax) / 2
-                    cargo_zone_xmax = crop_w * 0.97 if layout == "LEFT_RIGHT" else crop_w * 0.95
+                    # LEFT_RIGHT: Front view อยู่ซีกซ้าย (< 50%) ป้องกันกล่องหลุดไปซีกขวา
+                    cargo_zone_xmax = crop_w * 0.50 if layout == "LEFT_RIGHT" else crop_w * 0.95
                     cargo_zone_ymin = crop_y_start + crop_h * 0.05
                     cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
