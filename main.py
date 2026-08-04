@@ -215,12 +215,23 @@ CRITICAL DEFINITIONS & RULES:
 2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That area must be evaluated for REAR_EMPTY_RISK instead.
 
 YOUR TASK:
-Find all safety risks and return them in this exact JSON array format:
+Find all safety risks in the image and return them in this exact JSON array format.
+The image may show TWO views side by side (Front left, Back right) OR stacked (Front top, Back bottom).
+
+BOUNDING BOX RULES:
+- box_2d must use [ymin, xmin, ymax, xmax] format with values 0–1000 (normalized to image size).
+- box_2d must tightly surround only the AFFECTED cargo area, NOT the entire image.
+- The box must have a reasonable size: width between 5%–70% of image width, height between 5%–70% of image height.
+- For STEP_DOWN_RISK: draw the box across the height-step boundary between two adjacent stacks.
+- NEVER draw a box that covers more than 70% of the image in either dimension.
+
+Return ONLY a JSON array — no explanation, no markdown:
 [
   {
-    "risk_type": "STEP_DOWN_RISK" | "REAR_EMPTY_RISK" | "...",
+    "risk_type": "STEP_DOWN_RISK" | "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "FRONT_EMPTY_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
+    "view": "FRONT" | "BACK" | "GENERAL",
     "box_2d": [ymin, xmin, ymax, xmax],
-    ...
+    "description": "brief description of the risk"
   }
 ]
 (MANDATORY JSON ARRAY RETURN)
@@ -325,9 +336,10 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
 
         # Back View (ขวาของภาพ)
         b_wall_y0,  b_wall_y1  = crop_y_start + int(crop_h * 0.50), crop_y_start + int(crop_h * 0.85)
-        b_wall_x0,  b_wall_x1  = int(crop_w * 0.50), int(crop_w * 0.70)
-        b_door_y0,  b_door_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
-        b_door_x0,  b_door_x1  = int(crop_w * 0.75), int(crop_w * 0.95)
+        b_wall_x0,  b_wall_x1  = int(crop_w * 0.50), int(crop_w * 0.68)
+        # FIX: b_door_x1 ≤ 0.88 ป้องกันกล่องหลุดออกนอก crop_w (crop_w = 75% ของ width)
+        b_door_y0,  b_door_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.55)
+        b_door_x0,  b_door_x1  = int(crop_w * 0.72), int(crop_w * 0.88)
         b_door_mid_y = b_door_y0 + (b_door_y1 - b_door_y0) // 2
 
         zones = {
@@ -343,9 +355,10 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
             ("REAR_EMPTY_RISK",        "GENERAL"): (f_door_x0, f_door_y0,    f_door_x1, f_door_mid_y),
             ("REAR_LATERAL_IMBALANCE", "GENERAL"): (f_door_x0, f_door_mid_y, f_door_x1, f_door_y1),
             ("FRONT_EMPTY_RISK",       "GENERAL"): (f_wall_x0, f_wall_y0,    f_wall_x1, f_wall_y1),
-            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
-            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
-            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.80)),
+            # STEP_DOWN: วาดกลางภาพ ครอบคลุม 2 views เพราะ step อาจอยู่ที่ใดก็ได้
+            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.88), crop_y_start + int(crop_h * 0.78)),
+            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.78)),
+            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.88), crop_y_start + int(crop_h * 0.78)),
             # ✅ เพิ่มใหม่
             ("LATERAL_GAP_RISK",       "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
             ("LATERAL_GAP_RISK",       "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
@@ -558,22 +571,35 @@ def process_request(request):
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
                     
-                    # ✅ เพิ่มตรงนี้ — validate ก่อนวาด
+                    # ✅ validate ก่อนวาด — แยก xmax ตาม risk_type + view
                     box_center_x = (abs_xmin + abs_xmax) / 2
                     box_center_y = (abs_ymin + abs_ymax) / 2
-                    # LEFT_RIGHT: Front view อยู่ซีกซ้าย (< 50%) ป้องกันกล่องหลุดไปซีกขวา
-                    cargo_zone_xmax = crop_w * 0.50 if layout == "LEFT_RIGHT" else crop_w * 0.95
                     cargo_zone_ymin = crop_y_start + crop_h * 0.05
                     cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
+                    if layout == "LEFT_RIGHT":
+                        # FRONT_EMPTY_RISK ของ Front view → ต้องอยู่ซีกซ้าย x < 50%
+                        # STEP_DOWN / REAR / LATERAL → คลุมทั้งภาพ ไม่จำกัด x
+                        if risk_type == "FRONT_EMPTY_RISK" and view_name in ("FRONT", "GENERAL"):
+                            cargo_zone_xmax = crop_w * 0.50
+                        else:
+                            cargo_zone_xmax = crop_w * 0.97
+                    else:
+                        cargo_zone_xmax = crop_w * 0.95
+
                     if box_center_x > cargo_zone_xmax or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
-                        print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — falling back to fallback box for {risk_type}")
-                        raise ValueError("box out of cargo zone")  # กระโดดไป except → drawn=False → ใช้ fallback
+                        print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — fallback for {risk_type}")
+                        raise ValueError("box out of cargo zone")
 
                     box_w_ratio = (abs_xmax - abs_xmin) / crop_w
                     box_h_ratio = (abs_ymax - abs_ymin) / crop_h
 
-                    if box_w_ratio < 0.80 and box_h_ratio < 0.80:
+                    # ขนาดกล่องต้องสมเหตุสมผล: ไม่เล็กเกิน 3% และไม่ใหญ่เกิน 80%
+                    box_w_ratio = (abs_xmax - abs_xmin) / crop_w
+                    box_h_ratio = (abs_ymax - abs_ymin) / crop_h
+                    box_too_small = box_w_ratio < 0.03 or box_h_ratio < 0.03
+
+                    if not box_too_small and box_w_ratio < 0.80 and box_h_ratio < 0.80:
                         # กล่องขนาดปกติ — วาดตามพิกัดจริงจาก Gemini
                         draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline=outline_color, width=8)
                         drawn = True
