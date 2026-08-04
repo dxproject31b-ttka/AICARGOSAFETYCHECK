@@ -151,7 +151,8 @@ def _call_gemini_json(prompt, image, api_keys):
     global GLOBAL_KEY_INDEX
     last_err = ""
     total_keys = len(api_keys)
-    if total_keys == 0: return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": "No API keys", "confidence": "LOW"}
+    if total_keys == 0:
+        return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": "No API keys", "confidence": "LOW"}
 
     for i in range(total_keys):
         current_index = (GLOBAL_KEY_INDEX + i) % total_keys
@@ -169,7 +170,10 @@ def _call_gemini_json(prompt, image, api_keys):
             response = model.generate_content([prompt, image]) 
             clean_text = clean_json_response(response.text if response.text else "{}")
             result = json.loads(clean_text)
-            if isinstance(result, list): result = result[0] if result else {}
+            
+            if isinstance(result, list):
+                result = result[0] if result else {}
+                
             GLOBAL_KEY_INDEX = current_index 
             return result
         except Exception as e:
@@ -177,13 +181,15 @@ def _call_gemini_json(prompt, image, api_keys):
             print(f"⚠️ API Key index {current_index} failed: {last_err[:100]}")
             time.sleep(1) # หน่วงเวลา 1 วินาทีก่อนหมุน Key ถัดไป
             continue # หมุนไปใช้ Key ถัดไป
+            
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
 def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
     global GLOBAL_KEY_INDEX 
     
     api_keys = get_api_keys_pool()
-    if not api_keys: return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
+    if not api_keys:
+        return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
 
     prompt = """
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
@@ -219,9 +225,14 @@ Find all safety risks and return them in this exact JSON array format:
                 model = genai.GenerativeModel(model_name="gemini-3.6-flash")
                 response = model.generate_content([prompt, diagram_image])
                 clean_text = clean_json_response(response.text if response.text else "[]")
-                if not clean_text or clean_text in ('""', '[]'): return []
+                
+                if not clean_text or clean_text in ('""', '[]'):
+                    return []
+                    
                 risks = json.loads(clean_text)
-                if isinstance(risks, dict): risks = [risks]
+                if isinstance(risks, dict):
+                    risks = [risks]
+                    
                 GLOBAL_KEY_INDEX = current_index
                 return risks
             except Exception as e:
@@ -229,7 +240,10 @@ Find all safety risks and return them in this exact JSON array format:
                 print(f"⚠️ API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
                 time.sleep(1)
                 continue 
-        if pass_round == 0: time.sleep(2)
+                
+        if pass_round == 0:
+            time.sleep(2)
+            
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int, crop_y_start: int, crop_h: int):
@@ -309,7 +323,6 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
 
     return zones.get((risk_type, vl))
 
-# ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
 # ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
 @functions_framework.http
 def process_request(request):
@@ -408,7 +421,8 @@ def process_request(request):
         front_result_front = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
         front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
 
-        if not isinstance(all_risks, list): all_risks = []
+        if not isinstance(all_risks, list):
+            all_risks = []
 
         # ---------------------------------------------------------------------------
         # FIX 1: normalize view และ dedup โดยใช้ risk_type เป็นหลัก
@@ -438,7 +452,9 @@ def process_request(request):
         # FIX 2: กรอง LOW confidence ออก — เฉพาะ HIGH/MEDIUM เท่านั้นที่ผ่าน
         # ---------------------------------------------------------------------------
         for view_label, rear_result in [("FRONT", rear_result_front), ("BACK", rear_result_back)]:
-            if not isinstance(rear_result, dict): continue
+            if not isinstance(rear_result, dict):
+                continue
+                
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
             confidence = str(rear_result.get("confidence", "LOW")).upper()
 
@@ -452,7 +468,9 @@ def process_request(request):
                 all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
 
         for view_label, front_result in [("FRONT", front_result_front), ("BACK", front_result_back)]:
-            if not isinstance(front_result, dict): continue
+            if not isinstance(front_result, dict):
+                continue
+                
             confidence = str(front_result.get("confidence", "LOW")).upper()
 
             if confidence not in ("HIGH", "MEDIUM"):
@@ -502,6 +520,7 @@ def process_request(request):
                     abs_xmax = max(abs_xmin + 1, min(int(xmax * crop_w / 1000.0), crop_w))
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
+                    
                     # ✅ เพิ่มตรงนี้ — validate ก่อนวาด
                     box_center_x = (abs_xmin + abs_xmax) / 2
                     box_center_y = (abs_ymin + abs_ymax) / 2
@@ -510,8 +529,8 @@ def process_request(request):
                     cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
                     if box_center_x > cargo_zone_xmax or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
-                         print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — falling back to fallback box for {risk_type}")
-                         raise ValueError("box out of cargo zone")  # กระโดดไป except → drawn=False → ใช้ fallback
+                        print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — falling back to fallback box for {risk_type}")
+                        raise ValueError("box out of cargo zone")  # กระโดดไป except → drawn=False → ใช้ fallback
 
                     box_w_ratio = (abs_xmax - abs_xmin) / crop_w
                     box_h_ratio = (abs_ymax - abs_ymin) / crop_h
@@ -529,6 +548,7 @@ def process_request(request):
                         clamped_xmax = min(abs_xmax, crop_w - pad_x)
                         clamped_ymin = max(abs_ymin, crop_y_start + pad_y)
                         clamped_ymax = min(abs_ymax, crop_y_start + crop_h - pad_y)
+                        
                         if clamped_xmax > clamped_xmin and clamped_ymax > clamped_ymin:
                             draw.rectangle([clamped_xmin, clamped_ymin, clamped_xmax, clamped_ymax], outline=outline_color, width=8)
                             drawn = True
