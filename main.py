@@ -283,7 +283,17 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
             ("FRONT_EMPTY_RISK",       "GENERAL"): (right_x0, gen_y0,     right_x1, gen_y1),
             ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.20), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.75), crop_y_start + int(crop_h * 0.80)),
             ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_y1),
-            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_y1),
+            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.15), back_y0,  int(crop_w * 0.85), back_y1),
+            # ✅ เพิ่มใหม่
+            ("LATERAL_GAP_RISK",       "GENERAL"): (int(crop_w * 0.20), gen_y0,   int(crop_w * 0.75), gen_y1),
+            ("LATERAL_GAP_RISK",       "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_y1),
+            ("LATERAL_GAP_RISK",       "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_y1),
+            ("TALL_UNSTABLE_RISK",     "GENERAL"): (int(crop_w * 0.25), gen_y0,   int(crop_w * 0.65), gen_y1),
+            ("TALL_UNSTABLE_RISK",     "FRONT"):   (int(crop_w * 0.25), front_y0, int(crop_w * 0.65), front_y1),
+            ("TALL_UNSTABLE_RISK",     "BACK"):    (int(crop_w * 0.25), back_y0,  int(crop_w * 0.65), back_y1),
+            ("OVERHANG_RISK",          "GENERAL"): (int(crop_w * 0.20), gen_y0,   int(crop_w * 0.75), gen_y0 + (gen_y1 - gen_y0) // 2),
+            ("OVERHANG_RISK",          "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_mid_y),
+            ("OVERHANG_RISK",          "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_mid_y),
         }
     else:
         # Layout แบบ LEFT_RIGHT (Isometric)
@@ -319,6 +329,16 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
             ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
             ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
             ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.80)),
+            # ✅ เพิ่มใหม่
+            ("LATERAL_GAP_RISK",       "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
+            ("LATERAL_GAP_RISK",       "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
+            ("LATERAL_GAP_RISK",       "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.80)),
+            ("TALL_UNSTABLE_RISK",     "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.60)),
+            ("TALL_UNSTABLE_RISK",     "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.60)),
+            ("TALL_UNSTABLE_RISK",     "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.60)),
+            ("OVERHANG_RISK",          "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.45)),
+            ("OVERHANG_RISK",          "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.45)),
+            ("OVERHANG_RISK",          "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.45)),
         }
 
     return zones.get((risk_type, vl))
@@ -524,7 +544,7 @@ def process_request(request):
                     # ✅ เพิ่มตรงนี้ — validate ก่อนวาด
                     box_center_x = (abs_xmin + abs_xmax) / 2
                     box_center_y = (abs_ymin + abs_ymax) / 2
-                    cargo_zone_xmax = crop_w * 0.80   # สินค้าอยู่ใน 80% ซ้ายของ crop
+                    cargo_zone_xmax = crop_w * 0.97 if layout == "LEFT_RIGHT" else crop_w * 0.95
                     cargo_zone_ymin = crop_y_start + crop_h * 0.05
                     cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
