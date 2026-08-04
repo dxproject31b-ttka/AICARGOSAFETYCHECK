@@ -121,18 +121,20 @@ def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list, view_l
     global GLOBAL_KEY_INDEX 
     rear_prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone of a container.
-This is the {view_label} view. The red arrows point to the floor at the open door.
-YOUR ONLY TASK: Look for physical height drops ("Stair-Steps" or "Cliffs") at the end of the cargo.
+This is the {view_label} view.
+YOUR ONLY TASK: Determine if there is a GENUINE safety risk at the door end.
 
-CRITICAL RULES:
-- Compare only CARGO heights. Do NOT include the container wall (solid yellow/tan panel) in your height comparison. The head wall is a fixed structure, not cargo.
-- For REAR_LATERAL_IMBALANCE: only flag if cargo stacks on the LEFT side and RIGHT side of the door opening are visibly different heights. If cargo appears level across the width, it is SAFE.
-- Consider total stack height (all tiers combined) when comparing left vs right sides.
+STRICT RULES — read carefully:
+1. REAR_EMPTY_RISK: Flag ONLY if there is a visibly significant empty floor space (no cargo) near the container door, OR if cargo drops sharply (cliff-like) leaving a gap of more than 20% of container height. Minor height differences are NOT a risk.
+2. REAR_LATERAL_IMBALANCE: Flag ONLY if cargo on the LEFT side is clearly and significantly taller than cargo on the RIGHT side (or vice versa) at the door zone — the difference must be obvious (more than 1 full box height). If cargo looks roughly even across the width, return SAFE.
+3. Do NOT flag the container wall (solid yellow/tan/brown panel) as cargo. It is a fixed structure.
+4. If cargo fills the rear area reasonably well and is roughly level across the width → return SAFE.
+5. When in doubt, return SAFE. Only flag when you are highly confident.
 
 Return ONLY this exact JSON format:
 {{
   "rear_zone_risk": "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "BOTH" | "SAFE",
-  "reasoning": "Explain the physical height difference you see.",
+  "reasoning": "Describe exactly what you see — is there empty space, or are heights uneven? By how much?",
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }}
 """
@@ -142,19 +144,20 @@ def analyze_front_zone_with_ai(front_crop: PIL.Image.Image, api_keys: list, view
     global GLOBAL_KEY_INDEX
     front_prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the HEAD WALL (FRONT) zone of a container.
-This is the {view_label} view. The yellow/tan solid panel is the container's head wall (a fixed structure).
-YOUR TASK: Detect if there is a FRONT_EMPTY_RISK in this cropped area.
+This is the {view_label} view. The solid yellow/tan/brown panel on one side IS the container head wall — it is NOT cargo.
+YOUR TASK: Determine if there is a genuine FRONT_EMPTY_RISK.
 
-CRITICAL RULES:
-- FRONT_EMPTY_RISK means there is a visible empty gap or significant height difference between the cargo and the head wall — cargo that could slide forward and hit the wall during braking.
-- Do NOT flag the head wall itself as a risk. Only flag if cargo is clearly NOT touching or braced against the wall, leaving a dangerous void.
-- If cargo fills the space up to the head wall evenly (even if the top surface of cargo is lower than the wall top), it is SAFE — no sliding risk.
-- The yellow/tan colored solid panel IS the head wall. Do not mistake it for cargo height imbalance.
+STRICT RULES — read carefully:
+1. FRONT_EMPTY_RISK means there is a clearly visible, large empty gap between the front-most cargo and the head wall — enough space that cargo could slide forward dangerously during braking (typically more than half a box width of empty space).
+2. If cargo is stacked against or very close to the head wall, even if not perfectly flush — it is SAFE.
+3. If cargo heights vary but cargo is still present and touching (or nearly touching) the wall — it is SAFE.
+4. The yellow/tan solid panel = head wall. Its presence is normal. Do NOT flag it as a risk.
+5. When in doubt, return SAFE. Only flag FRONT_EMPTY_RISK when the gap is obvious and dangerous.
 
 Return ONLY this exact JSON object:
 {{
   "front_zone_risk": "FRONT_EMPTY_RISK" | "SAFE",
-  "reasoning": "Describe exactly what you see near the solid wall.",
+  "reasoning": "Describe the gap you see (or why it is safe). How large is the empty space?",
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }}
 """
@@ -208,11 +211,13 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image):
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
 
 CRITICAL DEFINITIONS & RULES:
-1. STEP_DOWN_RISK: Refers ONLY to significant height drops BETWEEN cargo stacks inside the container.
-   - IMPORTANT: When comparing stack heights, always count the TOTAL height of the entire stack including ALL layers/tiers stacked on top of each other. A stack that has cargo on top of another cargo must have its COMBINED height compared to adjacent stacks.
-   - If stack A appears shorter at the base but has additional cargo layers on top that bring its total height equal to or close to adjacent stack B, it is NOT a STEP_DOWN_RISK.
-   - Only flag STEP_DOWN_RISK when the total combined height of one stack is clearly and significantly lower than an adjacent stack, with no cargo bridging the gap.
-2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That area must be evaluated for REAR_EMPTY_RISK instead.
+1. STEP_DOWN_RISK: Flag ONLY when there is a sudden, sharp height drop between two ADJACENT cargo stacks that creates an UNSTABLE cliff — cargo from the tall stack could topple onto the short stack.
+   - Count TOTAL height of each stack (all tiers combined) before comparing.
+   - The height difference must be MORE than 1 full standard box height (roughly >40cm or >1 tier) to be flagged.
+   - If the shorter stack is intentionally shorter by design (e.g., lighter goods), or if the step is gradual across multiple positions, it is NOT a STEP_DOWN_RISK.
+   - Typical loading where tall stacks taper down toward the doors is NOT a STEP_DOWN_RISK.
+   - When in doubt, do NOT flag STEP_DOWN_RISK.
+2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That is REAR_EMPTY_RISK territory.
 
 YOUR TASK:
 Find all safety risks in the image and return them in this exact JSON array format.
@@ -508,14 +513,22 @@ def process_request(request):
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
             confidence = str(rear_result.get("confidence", "LOW")).upper()
 
-            if confidence not in ("HIGH", "MEDIUM"):
-                print(f"⚠️ Skipping rear zoom ({view_label}) — confidence={confidence}")
-                continue
+            # REAR_EMPTY_RISK: HIGH หรือ MEDIUM ผ่าน
+            # REAR_LATERAL_IMBALANCE: HIGH เท่านั้น (false positive สูง)
+            rear_empty_min = ("HIGH", "MEDIUM")
+            rear_lateral_min = ("HIGH",)
 
-            if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
-                all_risks.append({"view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบความต่างระดับฝั่งประตูท้ายตู้ (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
-            if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and view_label not in _existing_risk_views("REAR_LATERAL"):
-                all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+            if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH"):
+                if confidence in rear_empty_min and view_label not in _existing_risk_views("REAR_EMPTY"):
+                    all_risks.append({"view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบความต่างระดับฝั่งประตูท้ายตู้ (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                else:
+                    print(f"⚠️ Skipping REAR_EMPTY ({view_label}) — confidence={confidence}")
+
+            if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH"):
+                if confidence in rear_lateral_min and view_label not in _existing_risk_views("REAR_LATERAL"):
+                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                else:
+                    print(f"⚠️ Skipping REAR_LATERAL ({view_label}) — confidence={confidence}")
 
         for view_label, front_result in [("FRONT", front_result_front), ("BACK", front_result_back)]:
             if not isinstance(front_result, dict):
@@ -523,8 +536,9 @@ def process_request(request):
                 
             confidence = str(front_result.get("confidence", "LOW")).upper()
 
-            if confidence not in ("HIGH", "MEDIUM"):
-                print(f"⚠️ Skipping front zoom ({view_label}) — confidence={confidence}")
+            # FRONT_EMPTY_RISK: HIGH confidence เท่านั้น (false positive สูงมาก)
+            if confidence != "HIGH":
+                print(f"⚠️ Skipping front zoom ({view_label}) — confidence={confidence} (need HIGH)")
                 continue
 
             if front_result.get("front_zone_risk", "").upper() == "FRONT_EMPTY_RISK" and view_label not in _existing_risk_views("FRONT_EMPTY"):
