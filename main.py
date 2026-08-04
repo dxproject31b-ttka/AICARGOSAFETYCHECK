@@ -220,49 +220,69 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
         back_y0  = crop_y_start + half_h + int(half_h * 0.25)
         back_y1  = crop_y_start + half_h + int(half_h * 0.75)
 
-        left_x0, left_x1 = int(crop_w * 0.20), int(crop_w * 0.45)
+        left_x0, left_x1   = int(crop_w * 0.20), int(crop_w * 0.45)
         right_x0, right_x1 = int(crop_w * 0.55), int(crop_w * 0.80)
 
-        zones = {
-            ("REAR_EMPTY_RISK",        "FRONT"): (left_x0, front_y0, left_x1, front_y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (left_x0, front_y0, left_x1, front_y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"): (right_x0, front_y0, right_x1, front_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (left_x0, back_y0, left_x1, back_y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (right_x0, back_y0, right_x1, back_y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (right_x0, back_y0, right_x1, back_y1),
-        }
-    else: 
-        # ปรับแก้พิกัดให้เข้ากับมุมมอง 3D (Isometric) ของ Layout แบบ LEFT_RIGHT
-        
-        # 1. ภาพด้านซ้าย (Front View)
-        # ประตูท้ายตู้อยู่ ซ้ายล่าง
-        f_door_y0 = crop_y_start + int(crop_h * 0.50)
-        f_door_y1 = crop_y_start + int(crop_h * 0.85)
-        f_door_x0, f_door_x1 = int(crop_w * 0.05), int(crop_w * 0.25)
-        
-        # ผนังหัวตู้อยู่ ขวาบน
-        f_wall_y0 = crop_y_start + int(crop_h * 0.15)
-        f_wall_y1 = crop_y_start + int(crop_h * 0.50)
-        f_wall_x0, f_wall_x1 = int(crop_w * 0.30), int(crop_w * 0.50)
-        
-        # 2. ภาพด้านขวา (Back View)
-        # ผนังหัวตู้อยู่ ซ้ายล่าง
-        b_wall_y0 = crop_y_start + int(crop_h * 0.50)
-        b_wall_y1 = crop_y_start + int(crop_h * 0.85)
-        b_wall_x0, b_wall_x1 = int(crop_w * 0.50), int(crop_w * 0.70)
-        
-        # ประตูท้ายตู้อยู่ ขวาบน
-        b_door_y0 = crop_y_start + int(crop_h * 0.15)
-        b_door_y1 = crop_y_start + int(crop_h * 0.50)
-        b_door_x0, b_door_x1 = int(crop_w * 0.75), int(crop_w * 0.95)
+        # FIX A: แยก REAR_EMPTY vs REAR_LATERAL ไม่ให้ซ้อนทับกัน
+        #        REAR_EMPTY  → ครึ่งบนของโซน (ประตูท้าย)
+        #        REAR_LATERAL → ครึ่งล่างของโซน (ด้านข้างประตู)
+        front_mid_y = front_y0 + (front_y1 - front_y0) // 2
+        back_mid_y  = back_y0  + (back_y1  - back_y0)  // 2
+
+        # FIX B: เพิ่ม GENERAL — วาดคลุมทั้ง FRONT และ BACK zone รวมกัน
+        gen_y0 = crop_y_start + int(crop_h * 0.15)
+        gen_y1 = crop_y_start + int(crop_h * 0.85)
 
         zones = {
-            ("REAR_EMPTY_RISK",        "FRONT"): (f_door_x0, f_door_y0, f_door_x1, f_door_y1),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"): (f_door_x0, f_door_y0, f_door_x1, f_door_y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"): (f_wall_x0, f_wall_y0, f_wall_x1, f_wall_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):  (b_wall_x0, b_wall_y0, b_wall_x1, b_wall_y1),
-            ("REAR_EMPTY_RISK",        "BACK"):  (b_door_x0, b_door_y0, b_door_x1, b_door_y1),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):  (b_door_x0, b_door_y0, b_door_x1, b_door_y1),
+            # FRONT view (ครึ่งบนของภาพ)
+            ("REAR_EMPTY_RISK",        "FRONT"):   (left_x0,  front_y0,   left_x1,  front_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"):   (left_x0,  front_mid_y, left_x1, front_y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"):   (right_x0, front_y0,   right_x1, front_y1),
+            # BACK view (ครึ่งล่างของภาพ)
+            ("REAR_EMPTY_RISK",        "BACK"):    (right_x0, back_y0,    right_x1, back_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):    (right_x0, back_mid_y, right_x1, back_y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):    (left_x0,  back_y0,    left_x1,  back_y1),
+            # GENERAL — คลุมทั้งภาพในแนว Y แต่จำกัดแนว X ตามประเภท
+            ("REAR_EMPTY_RISK",        "GENERAL"): (left_x0,  gen_y0,     left_x1,  gen_y0 + (gen_y1 - gen_y0) // 2),
+            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (left_x0,  gen_y0 + (gen_y1 - gen_y0) // 2, left_x1, gen_y1),
+            ("FRONT_EMPTY_RISK",       "GENERAL"): (right_x0, gen_y0,     right_x1, gen_y1),
+            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.20), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.75), crop_y_start + int(crop_h * 0.80)),
+            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_y1),
+            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_y1),
+        }
+    else:
+        # Layout แบบ LEFT_RIGHT (Isometric)
+
+        # Front View (ซ้ายของภาพ)
+        f_door_y0,  f_door_y1  = crop_y_start + int(crop_h * 0.50), crop_y_start + int(crop_h * 0.85)
+        f_door_x0,  f_door_x1  = int(crop_w * 0.05), int(crop_w * 0.25)
+        f_wall_y0,  f_wall_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
+        f_wall_x0,  f_wall_x1  = int(crop_w * 0.30), int(crop_w * 0.50)
+        f_door_mid_y = f_door_y0 + (f_door_y1 - f_door_y0) // 2
+
+        # Back View (ขวาของภาพ)
+        b_wall_y0,  b_wall_y1  = crop_y_start + int(crop_h * 0.50), crop_y_start + int(crop_h * 0.85)
+        b_wall_x0,  b_wall_x1  = int(crop_w * 0.50), int(crop_w * 0.70)
+        b_door_y0,  b_door_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
+        b_door_x0,  b_door_x1  = int(crop_w * 0.75), int(crop_w * 0.95)
+        b_door_mid_y = b_door_y0 + (b_door_y1 - b_door_y0) // 2
+
+        zones = {
+            # FRONT view
+            ("REAR_EMPTY_RISK",        "FRONT"):   (f_door_x0, f_door_y0,    f_door_x1, f_door_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "FRONT"):   (f_door_x0, f_door_mid_y, f_door_x1, f_door_y1),
+            ("FRONT_EMPTY_RISK",       "FRONT"):   (f_wall_x0, f_wall_y0,    f_wall_x1, f_wall_y1),
+            # BACK view
+            ("REAR_EMPTY_RISK",        "BACK"):    (b_door_x0, b_door_y0,    b_door_x1, b_door_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "BACK"):    (b_door_x0, b_door_mid_y, b_door_x1, b_door_y1),
+            ("FRONT_EMPTY_RISK",       "BACK"):    (b_wall_x0, b_wall_y0,    b_wall_x1, b_wall_y1),
+            # GENERAL
+            ("REAR_EMPTY_RISK",        "GENERAL"): (f_door_x0, f_door_y0,    f_door_x1, f_door_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (f_door_x0, f_door_mid_y, f_door_x1, f_door_y1),
+            ("FRONT_EMPTY_RISK",       "GENERAL"): (f_wall_x0, f_wall_y0,    f_wall_x1, f_wall_y1),
+            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
+            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.10), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
+            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.80)),
         }
 
     return zones.get((risk_type, vl))
@@ -350,53 +370,89 @@ def process_request(request):
         front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
 
         if not isinstance(all_risks, list): all_risks = []
+
+        # ---------------------------------------------------------------------------
+        # FIX 1: normalize view และ dedup โดยใช้ risk_type เป็นหลัก
+        # GENERAL ที่มาจาก analyze_diagram ถือว่าครอบคลุม FRONT+BACK ของ risk นั้นแล้ว
+        # ---------------------------------------------------------------------------
+        def _normalize_view(v: str) -> str:
+            v = str(v).upper().strip()
+            return "GENERAL" if v in ("", "GENERAL") else v
+
+        def _existing_risk_types() -> set:
+            """คืน set ของ risk_type ที่มีอยู่แล้วใน all_risks (ไม่สนใจ view)"""
+            return {str(r.get("risk_type", "")).upper().strip() for r in all_risks}
+
         def _existing_risk_views(risk_type_substr: str) -> set:
-            # ดึงมุมมองทั้งหมดที่เคยเจอความเสี่ยงนี้ รวมถึงมองว่าการที่ไม่มี view (หรือ GENERAL) คือครอบคลุมไปแล้ว
+            """คืน set ของ view ที่มีอยู่แล้วสำหรับ risk_type นั้น
+            ถ้า GENERAL เจอแล้ว → ถือว่าครอบคลุม FRONT และ BACK ไปเลย"""
             views = set()
             for r in all_risks:
                 if risk_type_substr in str(r.get("risk_type", "")).upper():
-                    view = str(r.get("view", "")).upper()
-                    views.add(view)
-                    if view == "" or view == "GENERAL":
-                        # ถ้า GENERAL เจอแล้ว ให้ถือว่าคลุมทั้ง FRONT และ BACK ไปเลย
-                        views.update(["FRONT", "BACK"]) 
+                    v = _normalize_view(r.get("view", ""))
+                    views.add(v)
+                    if v == "GENERAL":
+                        views.update(["FRONT", "BACK"])
             return views
 
-        for view_label, rear_result in [("FRONT", rear_result_front), ("BACK",  rear_result_back)]:
+        # ---------------------------------------------------------------------------
+        # FIX 2: กรอง LOW confidence ออก — เฉพาะ HIGH/MEDIUM เท่านั้นที่ผ่าน
+        # ---------------------------------------------------------------------------
+        for view_label, rear_result in [("FRONT", rear_result_front), ("BACK", rear_result_back)]:
             if not isinstance(rear_result, dict): continue
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
             confidence = str(rear_result.get("confidence", "LOW")).upper()
-            
-            if confidence in ("HIGH", "MEDIUM", "LOW"):
-                if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
-                    all_risks.append({"view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบความต่างระดับฝั่งประตูท้ายตู้ (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
-                if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and view_label not in _existing_risk_views("REAR_LATERAL"):
-                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+
+            if confidence not in ("HIGH", "MEDIUM"):
+                print(f"⚠️ Skipping rear zoom ({view_label}) — confidence={confidence}")
+                continue
+
+            if rear_zone_risk in ("REAR_EMPTY_RISK", "BOTH") and view_label not in _existing_risk_views("REAR_EMPTY"):
+                all_risks.append({"view": view_label, "risk_type": "REAR_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบความต่างระดับฝั่งประตูท้ายตู้ (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+            if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and view_label not in _existing_risk_views("REAR_LATERAL"):
+                all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
 
         for view_label, front_result in [("FRONT", front_result_front), ("BACK", front_result_back)]:
             if not isinstance(front_result, dict): continue
+            confidence = str(front_result.get("confidence", "LOW")).upper()
+
+            if confidence not in ("HIGH", "MEDIUM"):
+                print(f"⚠️ Skipping front zoom ({view_label}) — confidence={confidence}")
+                continue
+
             if front_result.get("front_zone_risk", "").upper() == "FRONT_EMPTY_RISK" and view_label not in _existing_risk_views("FRONT_EMPTY"):
                 all_risks.append({"view": view_label, "risk_type": "FRONT_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": front_result.get("reasoning", ""), "description": "พบสินค้าต่างระดับฝั่งผนังหัวตู้ (วิเคราะห์จาก Zoom หัวตู้)", "box_2d": None})
 
+        # ---------------------------------------------------------------------------
+        # วาดกล่องและสร้าง report
+        # หลักการ:
+        #   - dedup ด้วย risk_type อย่างเดียว (GENERAL/FRONT/BACK ของ risk เดิม = 1 รายการ)
+        #   - วาดกล่องทุกจุดที่ทำได้ (อาจมีหลายกล่องต่อ risk_type)
+        #   - append hazard เสมอ ไม่ขึ้นกับว่าวาดกล่องได้หรือไม่
+        # ---------------------------------------------------------------------------
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
+        reported_risk_types = set()  # FIX 3: dedup report ด้วย risk_type เพียงอย่างเดียว
+
         RISK_COLORS = {"STEP_DOWN_RISK": "red", "REAR_EMPTY_RISK": "orange", "REAR_LATERAL_IMBALANCE": "deeppink", "FRONT_EMPTY_RISK": "yellow", "LATERAL_GAP_RISK": "cyan", "TALL_UNSTABLE_RISK": "magenta", "OVERHANG_RISK": "lime"}
         VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
         for risk in all_risks:
             raw_risk_type = str(risk.get("risk_type", "")).upper().strip()
-            view_name = str(risk.get("view", "GENERAL")).upper()
+            view_name = _normalize_view(risk.get("view", "GENERAL"))
             matched_type = next((vrt for vrt in VALID_RISK_TYPES if vrt.replace("_RISK", "") in raw_risk_type or raw_risk_type in vrt), None)
 
             if raw_risk_type == "ERROR":
                 detected_hazards.append({"title": "⚠️ ข้อผิดพลาด API", "detail": risk.get("description", "โปรดตรวจสอบโควตา Gemini API Keys"), "is_error": True})
                 continue
-            if not matched_type: continue
+            if not matched_type:
+                continue
 
             risk_type = matched_type
-            box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box")
             outline_color = RISK_COLORS.get(risk_type, "red")
+            box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box")
 
+            # --- วาดกล่อง (แยกออกจาก logic report) ---
             drawn = False
             if box and isinstance(box, list) and len(box) == 4:
                 try:
@@ -408,22 +464,47 @@ def process_request(request):
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
 
-                    if (abs_xmax - abs_xmin) / crop_w < 0.80 and (abs_ymax - abs_ymin) / crop_h < 0.80:
+                    box_w_ratio = (abs_xmax - abs_xmin) / crop_w
+                    box_h_ratio = (abs_ymax - abs_ymin) / crop_h
+
+                    if box_w_ratio < 0.80 and box_h_ratio < 0.80:
+                        # กล่องขนาดปกติ — วาดตามพิกัดจริงจาก Gemini
                         draw.rectangle([abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline=outline_color, width=8)
                         drawn = True
-                except Exception: pass
+                    else:
+                        # FIX 4: กล่องใหญ่เกิน 80% — clamp ให้แคบลงแต่ยังอยู่ในบริเวณที่ Gemini ชี้
+                        # แทนที่จะ reject ทิ้ง ให้ clamp และวาด
+                        pad_x = int(crop_w * 0.10)
+                        pad_y = int(crop_h * 0.10)
+                        clamped_xmin = max(abs_xmin, pad_x)
+                        clamped_xmax = min(abs_xmax, crop_w - pad_x)
+                        clamped_ymin = max(abs_ymin, crop_y_start + pad_y)
+                        clamped_ymax = min(abs_ymax, crop_y_start + crop_h - pad_y)
+                        if clamped_xmax > clamped_xmin and clamped_ymax > clamped_ymin:
+                            draw.rectangle([clamped_xmin, clamped_ymin, clamped_xmax, clamped_ymax], outline=outline_color, width=8)
+                            drawn = True
+                            print(f"📦 Clamped oversized box for {risk_type} ({view_name})")
+                except Exception:
+                    pass
 
             if not drawn:
+                # ใช้ fallback zone ตามตำแหน่งที่กำหนดไว้
                 fallback = _get_fallback_box(risk_type, view_name, layout, crop_w, crop_y_start, crop_h)
-                if fallback: 
+                if fallback:
                     draw.rectangle(fallback, outline=outline_color, width=8)
-                    drawn = True  # บอกระบบว่าวาดกล่องสำรองสำเร็จแล้ว
+                    drawn = True
 
-            # 🛑 ป้องกันการรายงานเกิน: ถ้าวาดกล่องไม่ได้เลย (ไม่มีพิกัด และไม่มี fallback) ให้ข้ามไปเลย
             if not drawn:
-                continue
+                print(f"⚠️ Could not draw box for {risk_type} ({view_name}) — no valid coords or fallback")
 
-            detected_hazards.append({"title": f"ความเสี่ยง ({view_name}): {risk_type}", "detail": generate_action_report(risk_type, risk.get("description", "")), "is_error": False})
+            # --- FIX 3: append report ครั้งเดียวต่อ risk_type (ไม่ขึ้นกับ view และไม่ขึ้นกับ drawn) ---
+            if risk_type not in reported_risk_types:
+                reported_risk_types.add(risk_type)
+                detected_hazards.append({
+                    "title": f"ความเสี่ยง: {risk_type}",
+                    "detail": generate_action_report(risk_type, risk.get("description", "")),
+                    "is_error": False
+                })
 
         real_hazards = [h for h in detected_hazards if not h.get("is_error")]
         error_hazards = [h for h in detected_hazards if h.get("is_error")]
