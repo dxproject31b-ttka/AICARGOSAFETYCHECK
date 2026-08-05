@@ -42,68 +42,64 @@ def get_api_keys_pool():
     print("❌ No Gemini API keys found.")
     return []
 
-def generate_action_report(case_type, description):
-    # description มาจาก AI — ใช้ระบุชื่อสินค้าในข้อความแจ้งเตือน
-    cargo_note = f"\n📦 บริเวณที่พบ: {description}" if description else ""
+def generate_action_report(case_type, description, sku_list=""):
+    # สร้างบรรทัดแสดงชื่อสินค้าที่พบ (ถ้ามี)
+    sku_line = f"\n   สินค้าที่พบบริเวณนี้: {sku_list}" if sku_list else ""
+
     actions = {
         "STEP_DOWN_RISK": (
-            f"🚨 แจ้งเตือน: กองสินค้าสูงต่ำไม่เท่ากัน มีรอยต่างระดับชัดเจน"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
-            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
+            f"แจ้งเตือน: พบรอยต่างระดับระหว่างกองสินค้า{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • ติดตั้งแผ่นไม้กั้นขวางระหว่างกองสินค้าที่ต่างระดับ\n"
+            f"  • รัดตรึงสินค้าให้ครบทุกจุด ป้องกันการล้มตะแคง"
         ),
         "REAR_EMPTY_RISK": (
-            f"🚨 แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
+            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
             f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
             f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
             f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
         ),
         "REAR_LATERAL_IMBALANCE": (
-            f"🚨 แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้ ด้านซ้ายกับด้านขวาสูงไม่เท่ากัน"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
-            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
+            f"แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • เสริมด้านที่ต่ำกว่าด้วยแผ่นรองหรือไม้อัดให้ระดับเท่ากัน\n"
+            f"  • รัดตรึงแนวขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
         ),
         "FRONT_EMPTY_RISK": (
-            f"🚨 แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
+            f"แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
             f"  • นำไม้อัดกั้นวางชิดผนังหัวตู้ เพื่ออุดช่องว่างระหว่างสินค้ากับผนัง\n"
             f"  • ตรวจสอบว่าสินค้าแต่ละกองชิดกันแน่น ไม่มีช่องให้สินค้าเลื่อน\n"
             f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
         ),
         "LATERAL_GAP_RISK": (
-            f"🚨 แจ้งเตือน: มีช่องว่างระหว่างกองสินค้าในแนวขวาง สินค้าอาจเลื่อนตะแคงได้"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
-            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
+            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • ใส่ถุงลมหรือแผ่นรองกั้นด้านข้างระหว่างกองสินค้า\n"
+            f"  • รัดตรึงป้องกันสินค้าเลื่อนตะแคงขณะเลี้ยว"
         ),
         "TALL_UNSTABLE_RISK": (
-            f"🚨 แจ้งเตือน: มีกองสินค้าที่สูงมาก และไม่มีสินค้าข้างค้ำไว้ เสี่ยงล้ม"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
-            f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
+            f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • ค้ำยันด้านข้างกองสูงด้วยไม้อัดหรือแผ่นรอง\n"
+            f"  • รัดตรึงแนวขวาง ป้องกันล้มตะแคงระหว่างขนส่ง"
         ),
         "OVERHANG_RISK": (
-            f"🚨 แจ้งเตือน: สินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง เสี่ยงตกหล่น"
-            f"{cargo_note}\n"
-            f"🛠️ วิธีแก้ไข:\n"
-            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
-            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"
+            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
+            f"บริเวณที่พบ: {description}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • จัดเรียงใหม่ให้สินค้าชั้นบนไม่ยื่นพ้นฐานชั้นล่าง\n"
+            f"  • ใส่แผ่นรองรับและรัดตรึงให้มั่นคง"
         ),
     }
-    return actions.get(case_type, "🟢 ปลอดภัย — ไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
+    return actions.get(case_type, "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
 
 def clean_json_response(text):
     text = text.strip()
@@ -167,6 +163,54 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
 
     print("📐 Layout detected: TOP_BOTTOM (default)")
     return "TOP_BOTTOM"
+
+def extract_sku_from_pdf(pdf_bytes):
+    """
+    ดึงชื่อ SKU จาก Load Summary ใน PDF (หน้าที่ 2 ถ้ามี)
+    คืนค่าเป็น list ของ SKU prefix เช่น ['TBASK', 'TRASK', 'DAJWG']
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_index = 1 if len(doc) >= 2 else 0
+        page = doc[page_index]
+        full_text = page.get_text("text")
+
+        skus = set()
+        in_load_summary = False
+        for line in full_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # เริ่มจับ SKU เมื่อเจอ Load Summary
+            if "Load Summary" in line or "load summary" in line.lower():
+                in_load_summary = True
+                continue
+            # หยุดเมื่อเจอ Cut List หรือหมดส่วน
+            if in_load_summary and ("Cut List" in line or "cut list" in line.lower()):
+                break
+            if in_load_summary:
+                # SKU จะเป็น token แรกของบรรทัด เช่น "TBASK   _722EBBU ..."
+                # หรืออาจอยู่ในรูป "TBASK_722EBBU_..." — ดึงแค่ prefix ตัวอักษรต้น
+                parts = line.split()
+                if parts:
+                    token = parts[0]
+                    import re
+                    # SKU prefix: ตัวอักษร+ตัวเลข เช่น ATFBA, MSFTA, VCS1A, TBASK
+                    # ต้องมีความยาว >= 4 และไม่ใช่คำทั่วไป เช่น SKU, Total, Cut
+                    match = re.match(r'^([A-Z][A-Z0-9]{3,7})', token)
+                    if match:
+                        prefix = match.group(1)
+                        # กรองคำที่ไม่ใช่ SKU จริง
+                        exclude = {'SKU', 'TOTAL', 'CUT', 'LIST', 'LOAD', 'PRIOR', 'QTY', 'PAGE', 'DATE'}
+                        if prefix not in exclude:
+                            skus.add(prefix)
+
+        sku_list = sorted(skus)
+        print(f"📦 SKU extracted: {sku_list}")
+        return sku_list
+    except Exception as e:
+        print(f"⚠️ SKU extraction failed: {e}")
+        return []
 
 def analyze_rear_zone_with_ai(rear_crop: PIL.Image.Image, api_keys: list, view_label: str = "UNKNOWN") -> dict:
     global GLOBAL_KEY_INDEX 
@@ -270,9 +314,25 @@ CRITICAL DEFINITIONS & RULES:
    - When in doubt, do NOT flag STEP_DOWN_RISK.
 2. DO NOT label the height drop at the very end of the cargo near the container doors as STEP_DOWN_RISK. That is REAR_EMPTY_RISK territory.
 
+VIEW IDENTIFICATION RULES (MANDATORY):
+- The image shows TWO views: FRONT view and BACK view.
+  * Layout A (LEFT_RIGHT): FRONT view is on the LEFT half, BACK view is on the RIGHT half.
+  * Layout B (TOP_BOTTOM): FRONT view is on the TOP half, BACK view is on the BOTTOM half.
+- The RED ARROW (▶) marker always points to the REAR (door end) of the container.
+- REAR of container (door end) = The red arrow located at the highest position among all red arrows.
+- FRONT of container (wall end) = The opposite horizontal side (left or right) of the highest red arrow.
+
+CRITICAL BOX PLACEMENT RULES:
+- REAR_EMPTY_RISK = empty space near the DOOR end (The red arrow located at the highest position among all red arrows).
+  * In FRONT view (LEFT half or TOP half): box must be on the LEFT side of that view (door side).
+  * In BACK view (RIGHT half or BOTTOM half): box must be on the LEFT side of that view (door side).
+- FRONT_EMPTY_RISK = empty space near the WALL end (The opposite horizontal side (left or right) of the highest red arrow).
+  * In FRONT view (LEFT half or TOP half): box must be on the RIGHT side of that view (wall side).
+  * In BACK view (RIGHT half or BOTTOM half): box must be on the RIGHT side of that view (wall side).
+- NEVER place a REAR_EMPTY_RISK box on the wall side, or FRONT_EMPTY_RISK box on the door side.
+
 YOUR TASK:
 Find all safety risks in the image and return them in this exact JSON array format.
-The image may show TWO views side by side (Front left, Back right) OR stacked (Front top, Back bottom).
 
 BOUNDING BOX RULES:
 - box_2d must use [ymin, xmin, ymax, xmax] format with values 0–1000 (normalized to image size).
@@ -281,11 +341,14 @@ BOUNDING BOX RULES:
 - For STEP_DOWN_RISK: draw the box across the height-step boundary between two adjacent stacks.
 - NEVER draw a box that covers more than 70% of the image in either dimension.
 
+MANDATORY: "view" field MUST be either "FRONT" or "BACK" only. NEVER use "GENERAL".
+If a risk spans both views, create TWO separate entries — one for FRONT and one for BACK.
+
 Return ONLY a JSON array — no explanation, no markdown:
 [
   {
     "risk_type": "STEP_DOWN_RISK" | "REAR_EMPTY_RISK" | "REAR_LATERAL_IMBALANCE" | "FRONT_EMPTY_RISK" | "LATERAL_GAP_RISK" | "TALL_UNSTABLE_RISK" | "OVERHANG_RISK",
-    "view": "FRONT" | "BACK" | "GENERAL",
+    "view": "FRONT" | "BACK",
     "box_2d": [ymin, xmin, ymax, xmax],
     "description": "brief description of the risk"
   }
@@ -407,10 +470,12 @@ def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int,
             ("REAR_EMPTY_RISK",        "BACK"):    (b_door_x0, b_door_y0,    b_door_x1, b_door_mid_y),
             ("REAR_LATERAL_IMBALANCE", "BACK"):    (b_door_x0, b_door_mid_y, b_door_x1, b_door_y1),
             ("FRONT_EMPTY_RISK",       "BACK"):    (b_wall_x0, b_wall_y0,    b_wall_x1, b_wall_y1),
-            # GENERAL
-            ("REAR_EMPTY_RISK",        "GENERAL"): (f_door_x0, f_door_y0,    f_door_x1, f_door_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (f_door_x0, f_door_mid_y, f_door_x1, f_door_y1),
-            ("FRONT_EMPTY_RISK",       "GENERAL"): (f_wall_x0, f_wall_y0,    f_wall_x1, f_wall_y1),
+            # GENERAL — ใช้ทั้ง Front view และ Back view รวมกัน ตามนิยาม:
+            #   REAR_EMPTY_RISK  = ท้ายตู้ (ประตู) → Front view ซีกซ้าย (f_door) + Back view ซีกซ้าย (b_door ซีกขวา)
+            #   FRONT_EMPTY_RISK = หัวตู้ (ผนัง)  → Front view ซีกขวา (f_wall) + Back view ซีกขวา (b_wall)
+            ("REAR_EMPTY_RISK",        "GENERAL"): (f_door_x0, f_door_y0,    b_door_x1, b_door_mid_y),
+            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (f_door_x0, f_door_mid_y, b_door_x1, b_door_y1),
+            ("FRONT_EMPTY_RISK",       "GENERAL"): (f_wall_x0, f_wall_y0,    b_wall_x1, b_wall_y1),
             # STEP_DOWN: วาดกลางภาพ ครอบคลุม 2 views เพราะ step อาจอยู่ที่ใดก็ได้
             ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.88), crop_y_start + int(crop_h * 0.78)),
             ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.78)),
@@ -469,6 +534,8 @@ def process_request(request):
         pdf_bytes = base64.b64decode(base64_str)
 
         layout = detect_page_layout_from_pdf(pdf_bytes)
+        sku_list = extract_sku_from_pdf(pdf_bytes)
+        sku_str = ", ".join(sku_list) if sku_list else ""
 
         # ใช้ PyMuPDF (fitz) แปลง PDF เป็นรูปภาพแทน pdf2image
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -646,16 +713,46 @@ def process_request(request):
                     cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
                     if layout == "LEFT_RIGHT":
-                        # FRONT_EMPTY_RISK ของ Front view → ต้องอยู่ซีกซ้าย x < 50%
-                        # STEP_DOWN / REAR / LATERAL → คลุมทั้งภาพ ไม่จำกัด x
-                        if risk_type == "FRONT_EMPTY_RISK" and view_name in ("FRONT", "GENERAL"):
-                            cargo_zone_xmax = crop_w * 0.50
+                        # ถ้า Gemini ส่ง GENERAL มา → resolve เป็น FRONT/BACK จากตำแหน่ง box จริง
+                        resolved_view = view_name
+                        if view_name == "GENERAL":
+                            resolved_view = "FRONT" if box_center_x < crop_w * 0.50 else "BACK"
+                            print(f"🔄 GENERAL → resolved to {resolved_view} (box_center_x={box_center_x:.0f})")
+
+                        # นิยาม: FRONT_EMPTY_RISK = หัวตู้, REAR_EMPTY_RISK = ท้ายตู้
+                        # LEFT_RIGHT: ธงแดง (ท้ายตู้) = ซ้ายล่าง Front / ขวาบน Back
+                        if risk_type == "FRONT_EMPTY_RISK":
+                            if resolved_view == "FRONT":
+                                # หัวตู้ใน Front view = ซีกขวาบน
+                                cargo_zone_xmin = crop_w * 0.28
+                                cargo_zone_xmax = crop_w * 0.50
+                            elif resolved_view == "BACK":
+                                # หัวตู้ใน Back view = ซีกซ้ายล่าง
+                                cargo_zone_xmin = crop_w * 0.50
+                                cargo_zone_xmax = crop_w * 0.75
+                            else:
+                                cargo_zone_xmin = 0
+                                cargo_zone_xmax = crop_w * 0.97
+                        elif risk_type == "REAR_EMPTY_RISK":
+                            if resolved_view == "FRONT":
+                                # ท้ายตู้ใน Front view = ซีกซ้ายล่าง (ธงแดง)
+                                cargo_zone_xmin = 0
+                                cargo_zone_xmax = crop_w * 0.28
+                            elif resolved_view == "BACK":
+                                # ท้ายตู้ใน Back view = ซีกขวาบน (ธงแดง)
+                                cargo_zone_xmin = crop_w * 0.72
+                                cargo_zone_xmax = crop_w * 0.97
+                            else:
+                                cargo_zone_xmin = 0
+                                cargo_zone_xmax = crop_w * 0.97
                         else:
+                            cargo_zone_xmin = 0
                             cargo_zone_xmax = crop_w * 0.97
                     else:
+                        cargo_zone_xmin = 0
                         cargo_zone_xmax = crop_w * 0.95
 
-                    if box_center_x > cargo_zone_xmax or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
+                    if not (cargo_zone_xmin <= box_center_x <= cargo_zone_xmax) or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
                         print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — fallback for {risk_type}")
                         raise ValueError("box out of cargo zone")
 
@@ -703,7 +800,7 @@ def process_request(request):
                 reported_risk_types.add(risk_type)
                 detected_hazards.append({
                     "title": f"ความเสี่ยง: {risk_type}",
-                    "detail": generate_action_report(risk_type, risk.get("description", "")),
+                    "detail": generate_action_report(risk_type, risk.get("description", ""), sku_str),
                     "is_error": False
                 })
 
