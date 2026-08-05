@@ -17,29 +17,6 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v11
-#
-# v11 - แก้ 2 ปัญหาหลักที่พบจากการทดสอบจริง:
-#
-#   ปัญหา 1: "กรอบกับความเสี่ยงไม่สัมพันธ์กัน" (กรอบ FRONT/REAR_EMPTY_RISK ลอย
-#   อยู่กลางพื้นที่ว่าง ไม่ตรงกับตำแหน่งสินค้าจริง) - เกิดจากเดิมใช้ "เปอร์เซ็นต์
-#   คงที่" ในการวาดกรอบ โดยไม่สนใจว่าสินค้าจริงกองอยู่ตรงไหน เมื่อสินค้ามีน้อย
-#   (เช่น cargo cube 5.7%) เปอร์เซ็นต์คงที่จึงไปตกอยู่กลางอากาศ
-#   วิธีแก้: เพิ่มฟังก์ชัน detect_cargo_extent_per_view() ที่ตรวจจับ "ขอบเขตกล่อง
-#   สินค้าจริง" ด้วย HSV saturation (สีสินค้าสด/อิ่มตัวสูง ต่างจากสีผนัง/พื้นตู้ที่
-#   มักเป็นโทนสีหม่นกว่าแม้จะเป็นเฉดใกล้เคียงกัน) แล้วคำนวณกรอบ FRONT/REAR_EMPTY
-#   จาก "ช่องว่างจริงที่วัดได้" ระหว่างขอบสินค้ากับผนัง/ประตู แทนเปอร์เซ็นต์เดา
-#
-#   ปัญหา 2: "มีความเสี่ยงแต่ไม่พบจุดเสี่ยง" (พลาด STEP_DOWN_RISK ที่เห็นชัดเจน
-#   ด้วยตา) - เกิดจาก prompt เดิม (v10) เข้มงวดเกินไปในการลด false-positive
-#   จนกลายเป็น false-negative แทน
-#   วิธีแก้: ปรับ prompt ให้มีเกณฑ์เชิงตัวเลขชัดเจน (ต่างระดับเกิน ~50% ของความสูง
-#   กองที่สูงกว่า = ต้องflag เสมอ) แทนคำสั่งกว้างๆ แบบ "เมื่อไม่แน่ใจให้ปลอดภัยไว้ก่อน"
-#   อย่างเดียว ซึ่งทำให้ AI overcautious จนมองข้ามกรณีชัดเจน
-#
-# v10 - ใช้กฎตายตัว (HARDCODED_REAR_SIDE) แทนการตรวจจับลูกศร ไม่มี mirror อีกต่อไป
-#       + จำกัดไม่ให้เชื่อ box_2d จาก Gemini สำหรับ zone-based risks
-# v9  - รวม risk ที่อยู่บริเวณเดียวกันเป็น COMBINED_AREA_RISK วาดกรอบเดียว 2 สี
-# v6  - deterministic container-boundary detection
 # ---------------------------------------------------------------------------
 
 GLOBAL_API_KEYS = []
@@ -71,8 +48,6 @@ BOX_BASED_RISK_TYPES = {
     "OVERHANG_RISK",
 }
 
-# กฎตายตัว (HARDCODED) เรื่องตำแหน่ง REAR/FRONT ของแต่ละ view - ยืนยันแล้วจากภาพ
-# ตัวอย่างจริงทุกไฟล์ - ไม่เปลี่ยนแปลงตามการตรวจจับใดๆ (ดู v10 changelog)
 HARDCODED_REAR_SIDE = {
     "FRONT": "LEFT",
     "BACK": "RIGHT",
@@ -88,73 +63,9 @@ def get_api_keys_pool():
         keys = [k.strip() for k in env_value.split("|") if k.strip()]
         if keys:
             random.shuffle(keys)
-            print(f"Loaded {len(keys)} unique API key(s) into the pool.")
             GLOBAL_API_KEYS = keys
             return GLOBAL_API_KEYS
-    print("No Gemini API keys found.")
     return []
-
-
-def generate_action_report(case_type, description="", sku_list=""):
-    sku_line = f"\n   สินค้าที่พบบริเวณนี้: {sku_list}" if sku_list else ""
-    actions = {
-        "STEP_DOWN_RISK": (
-            f"แจ้งเตือน: พบรอยต่างระดับระหว่างกองสินค้า{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
-            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
-        ),
-        "REAR_EMPTY_RISK": (
-            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
-            f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
-        ),
-        "REAR_LATERAL_IMBALANCE": (
-            f"แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
-            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
-        ),
-        "REAR_COMBINED_RISK": (
-            f"แจ้งเตือน: บริเวณประตูท้ายตู้พบทั้งพื้นที่ว่างหน้าประตู และสินค้าสูงต่ำไม่เท่ากันในแนวกว้างในจุดเดียวกัน{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
-            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
-        ),
-        "FRONT_EMPTY_RISK": (
-            f"แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-             f"  • นำไม้อัดกั้นวางชิดผนังหัวตู้ เพื่ออุดช่องว่างระหว่างสินค้ากับผนัง\n"
-            f"  • ตรวจสอบว่าสินค้าแต่ละกองชิดกันแน่น ไม่มีช่องให้สินค้าเลื่อน\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
-        ),
-        "LATERAL_GAP_RISK": (
-            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
-            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
-        ),
-        "TALL_UNSTABLE_RISK": (
-            f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
-            f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
-        ),
-        "OVERHANG_RISK": (
-            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
-            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"        ),
-    }
-    return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
 
 
 def clean_json_response(text):
@@ -172,35 +83,90 @@ def clean_json_response(text):
 
 
 def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
+    """
+    ตรวจจับ layout ของแผนภาพ (diagram) ในหน้า manifest ว่าเป็น TOP_BOTTOM
+    (Front บน, Back ล่าง) หรือ LEFT_RIGHT (Front ซ้าย, Back ขวา)
+
+    *** สำคัญมาก (แก้บั๊กที่พบจากไฟล์ RD04/EC16-07-May) ***
+    เดิมใช้ page.rect.width > page.rect.height (page aspect ratio) เป็นตัวตัดสินหลัก
+    แต่พบว่า "ไม่น่าเชื่อถือ" เพราะหน้า PDF อาจกว้างกว่าสูงได้จากการมี "sidebar" (แผง
+    Load Summary ด้านขวา) แม้ว่าตัวแผนภาพเองจะจัดวางแบบ TOP_BOTTOM (Front บน/Back ล่าง)
+    ก็ตาม - พบเคสจริงที่ page เป็น Landscape (792x612) แต่ diagram เป็น TOP_BOTTOM ทำให้
+    ระบบเข้าใจผิดเป็น LEFT_RIGHT และ crop ภาพผิดพลาดทั้งหมด (กรอบยืดพาดขวางทั้งภาพ)
+
+    วิธีแก้: ตรวจสอบตำแหน่งจริงของ label "Front" และ "Back" ทั้งคู่เสมอเป็นหลัก
+    (ทั้งพิกัด x และ y) แทนการอาศัย page aspect ratio เพียงอย่างเดียว:
+      - ถ้าเจอทั้ง "Front" และ "Back": เทียบว่าต่างกันในแนวตั้ง (y) มากกว่า หรือแนวนอน (x)
+        มากกว่า - แนวไหนต่างกันมากกว่าคือทิศทางการจัดวางจริง
+      - ถ้าเจอแค่ "Back" อย่างเดียว (บางไฟล์ไม่มี label "Front" แยก): ใช้ตำแหน่ง y ของ
+        "Back" เทียบกับกึ่งกลางหน้า (แนวตั้ง) เป็นหลัก ไม่ใช่ x อีกต่อไป เพราะ xอาจเพี้ยน
+        จาก sidebar ได้ - ถ้า Back อยู่ค่อนล่างของหน้า (y_ratio > 0.5) แสดงว่าเป็น
+        TOP_BOTTOM แน่นอน (Back label จะอยู่แถวบนของ Back view ซึ่งอยู่ครึ่งล่างของหน้า)
+      - page aspect ratio ใช้เป็นแค่ fallback สุดท้ายเมื่อหา label ไม่เจอเลยเท่านั้น
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
         page = doc[page_index]
         page_width = page.rect.width
         page_height = page.rect.height
-        is_landscape = page_width > page_height
-        print(f"Page size: {page_width:.0f}x{page_height:.0f} | Landscape={is_landscape}")
-        if is_landscape:
-            print("Layout detected: LEFT_RIGHT (Landscape page)")
-            return "LEFT_RIGHT"
-        text_instances = page.search_for("Back")
-        if text_instances:
-            rect = text_instances[0]
-            x_ratio = rect.x0 / page_width
-            print(f"Back label: x_ratio={x_ratio:.2f}")
-            if x_ratio > 0.40:
-                print("Layout detected: LEFT_RIGHT (Back label right half)")
+        print(f"Page size (rendered/rotated space): {page_width:.0f}x{page_height:.0f} | rotation={page.rotation}")
+
+        # ---------------------------------------------------------------------------
+        # สำคัญมาก: page.search_for() คืนพิกัดใน "mediabox space" (ก่อนหมุนหน้า) เสมอ
+        # แต่ page.rect คือขนาดหน้า "หลังหมุนแล้ว" (ค่าที่ใช้ตอน render ภาพจริงด้วย
+        # get_pixmap()) ถ้าหน้า PDF มีการ rotate (พบเคสจริงที่ rotation=90 กับไฟล์
+        # RD04/EC16-07-May) พิกัดจาก search_for() จะอยู่คนละระบบพิกัดกับ page.rect ทันที
+        # ทำให้เทียบตำแหน่งกันผิดพลาดโดยสิ้นเชิง (ค่า y เกินขอบเขตที่ควรจะเป็น)
+        #
+        # วิธีแก้: ใช้ page.rotation_matrix แปลงพิกัดจาก mediabox space ให้เป็น
+        # "rotated/rendered space" เดียวกับ page.rect ก่อนนำไปคำนวณอัตราส่วนตำแหน่งเสมอ
+        # ---------------------------------------------------------------------------
+        rot_matrix = page.rotation_matrix
+
+        def _to_rendered_rect(rect):
+            return rect * rot_matrix
+
+        front_instances = page.search_for("Front")
+        back_instances = page.search_for("Back")
+
+        if front_instances and back_instances:
+            front_rect = _to_rendered_rect(front_instances[0])
+            back_rect = _to_rendered_rect(back_instances[0])
+            dy = abs(back_rect.y0 - front_rect.y0)
+            dx = abs(back_rect.x0 - front_rect.x0)
+            print(f"Front label (rendered space): {front_rect} | Back label (rendered space): {back_rect} | dx={dx:.0f} dy={dy:.0f}")
+            if dy > dx:
+                print("Layout detected: TOP_BOTTOM (Front/Back differ mainly in Y position)")
+                return "TOP_BOTTOM"
+            else:
+                print("Layout detected: LEFT_RIGHT (Front/Back differ mainly in X position)")
                 return "LEFT_RIGHT"
+
+        if back_instances:
+            back_rect = _to_rendered_rect(back_instances[0])
+            y_ratio = back_rect.y0 / page_height
+            x_ratio = back_rect.x0 / page_width
+            print(f"Back label only (rendered space): {back_rect} | x_ratio={x_ratio:.2f} y_ratio={y_ratio:.2f}")
+            # ถ้า Back label อยู่ค่อนล่างของหน้า (เกินครึ่งลงมา) แสดงว่า diagram เป็น
+            # TOP_BOTTOM แน่นอน ไม่ว่าค่า x_ratio จะเป็นเท่าไหร่ก็ตาม
+            if y_ratio > 0.55:
+                print("Layout detected: TOP_BOTTOM (Back label in lower half of page)")
+                return "TOP_BOTTOM"
+            if x_ratio > 0.55:
+                print("Layout detected: LEFT_RIGHT (Back label in right portion, same row as Front)")
+                return "LEFT_RIGHT"
+
+        # Fallback สุดท้าย: ใช้ page aspect ratio เฉพาะเมื่อหา label ไม่เจอเลยจริงๆ
+        is_landscape = page_width > page_height
+        print(f"No reliable Front/Back label found - falling back to page aspect ratio (Landscape={is_landscape})")
+        if is_landscape:
+            return "LEFT_RIGHT"
     except Exception as e:
         print(f"Layout detection failed ({e}), defaulting to TOP_BOTTOM")
     print("Layout detected: TOP_BOTTOM (default)")
     return "TOP_BOTTOM"
 
-
-# ---------------------------------------------------------------------------
-# Container boundary detection (deterministic, pixel-based) - หาขอบเขต "ทั้ง
-# โครงสร้างตู้" (ผนัง+พื้น+สินค้า รวมกัน) ยังคงใช้เป็น reference frame หลัก
-# ---------------------------------------------------------------------------
 
 def _is_saturated_color(rgb):
     r, g, b = rgb
@@ -213,8 +179,6 @@ def _is_saturated_color(rgb):
 
 
 def detect_container_bbox(img, min_run_width=25, min_run_height=25):
-    """หาขอบเขตตู้/สินค้ารวมกันในภาพ (โครงสร้าง+สินค้า) ด้วย 2D solid-block filter
-    กรองเส้นขอบ annotation บาง/เส้นบอกระยะ/ตัวอักษรออก เหลือแต่บล็อกทึบขนาดใหญ่"""
     w, h = img.size
     px = img.convert("RGB").load()
     row_mask = bytearray(w * h)
@@ -258,8 +222,6 @@ def detect_container_bbox(img, min_run_width=25, min_run_height=25):
 
 
 def detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start=0):
-    """หาขอบเขตตู้คอนเทนเนอร์ (โครงสร้างรวมสินค้า) แยกสำหรับ FRONT และ BACK view
-    Returns พิกัดสัมบูรณ์เทียบกับภาพเต็ม (บวก crop_y_start ให้แล้ว)"""
     result = {"FRONT": None, "BACK": None}
     try:
         if layout == "TOP_BOTTOM":
@@ -282,26 +244,11 @@ def detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_
                 result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
             if bb:
                 result["BACK"] = {"xmin": bb[0] + half_w, "ymin": bb[1] + crop_y_start, "xmax": bb[2] + half_w, "ymax": bb[3] + crop_y_start}
-        for view_name in ("FRONT", "BACK"):
-            if result[view_name]:
-                b = result[view_name]
-                print(f"Container bounds detected for {view_name}: x=[{b['xmin']}-{b['xmax']}] y=[{b['ymin']}-{b['ymax']}]")
-            else:
-                print(f"WARNING: Could not detect container bounds for {view_name}")
         return result
     except Exception as e:
         print(f"WARNING: Container bounds detection failed ({e})")
         return {"FRONT": None, "BACK": None}
 
-
-# ---------------------------------------------------------------------------
-# v11 NEW: Cargo extent detection - หาขอบเขต "เฉพาะกล่องสินค้าจริง" แยกออกจาก
-# ผนัง/พื้นตู้ (ที่เป็นสีทึบแต่ความอิ่มตัวของสีต่ำกว่าสินค้าจริงชัดเจน แม้เป็นโทน
-# สีใกล้เคียงกัน เช่น ผนังสีเหลืองหม่น vs กล่องสินค้าสีเหลืองสด)
-# ทดสอบยืนยันแล้วว่าแม่นยำทั้งกรณีสินค้าน้อย (EC16) และสินค้าเต็มตู้ (EB74, ED87,
-# EE10-01/02) - ใช้ HSV saturation >= 0.75 เป็นเกณฑ์แยก + กรอง noise/label เล็กๆ
-# ด้วย min_run_width/height=20
-# ---------------------------------------------------------------------------
 
 def _is_arrow_color(rgb):
     r, g, b = rgb
@@ -326,8 +273,6 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
 
 
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
-    """หาขอบเขตของ 'กล่องสินค้าจริง' (สีอิ่มตัวสูง) แยกจากผนัง/พื้นตู้ (สีหม่นกว่า)
-    Returns (xmin, ymin, xmax, ymax) relative กับภาพ img หรือ None ถ้าไม่พบ"""
     w, h = img.size
     px = img.convert("RGB").load()
     row_mask = bytearray(w * h)
@@ -371,7 +316,6 @@ def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_hei
 
 
 def detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start=0):
-    """หาขอบเขตกล่องสินค้าจริง แยกสำหรับ FRONT และ BACK view (พิกัดสัมบูรณ์เทียบภาพเต็ม)"""
     result = {"FRONT": None, "BACK": None}
     try:
         if layout == "TOP_BOTTOM":
@@ -394,21 +338,74 @@ def detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_st
                 result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
             if bb:
                 result["BACK"] = {"xmin": bb[0] + half_w, "ymin": bb[1] + crop_y_start, "xmax": bb[2] + half_w, "ymax": bb[3] + crop_y_start}
-        for view_name in ("FRONT", "BACK"):
-            if result[view_name]:
-                b = result[view_name]
-                print(f"Cargo extent detected for {view_name}: x=[{b['xmin']}-{b['xmax']}] y=[{b['ymin']}-{b['ymax']}]")
-            else:
-                print(f"WARNING: Could not detect cargo extent for {view_name}")
         return result
     except Exception as e:
         print(f"WARNING: Cargo extent detection failed ({e})")
         return {"FRONT": None, "BACK": None}
 
 
-# ---------------------------------------------------------------------------
-# PDF text helpers
-# ---------------------------------------------------------------------------
+def generate_action_report(case_type, description="", sku_list=""):
+    sku_line = f"\n   สินค้าที่พบบริเวณนี้: {sku_list}" if sku_list else ""
+    actions = {
+        "STEP_DOWN_RISK": (
+            f"แจ้งเตือน: พบรอยต่างระดับระหว่างกองสินค้า{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
+            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
+        ),
+        "REAR_EMPTY_RISK": (
+            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
+            f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
+        ),
+        "REAR_LATERAL_IMBALANCE": (
+            f"แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
+            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
+        ),
+        "REAR_COMBINED_RISK": (
+            f"แจ้งเตือน: บริเวณประตูท้ายตู้พบทั้งพื้นที่ว่างหน้าประตู และสินค้าสูงต่ำไม่เท่ากันในแนวกว้างในจุดเดียวกัน{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
+            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
+        ),
+        "FRONT_EMPTY_RISK": (
+            f"แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางชิดผนังหัวตู้ เพื่ออุดช่องว่างระหว่างสินค้ากับผนัง\n"
+            f"  • ตรวจสอบว่าสินค้าแต่ละกองชิดกันแน่น ไม่มีช่องให้สินค้าเลื่อน\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
+        ),
+        "LATERAL_GAP_RISK": (
+            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
+            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
+        ),
+        "TALL_UNSTABLE_RISK": (
+            f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
+            f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
+        ),
+        "OVERHANG_RISK": (
+            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
+            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"
+        ),
+    }
+    return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
+
 
 def extract_sku_from_pdf(pdf_bytes):
     try:
@@ -443,10 +440,6 @@ def extract_sku_from_pdf(pdf_bytes):
         print(f"SKU extraction failed: {e}")
         return []
 
-
-# ---------------------------------------------------------------------------
-# Gemini calls
-# ---------------------------------------------------------------------------
 
 def _reset_genai_client():
     if hasattr(genai, "_client"):
@@ -528,11 +521,6 @@ Return ONLY this exact JSON:
 
 
 def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM"):
-    """
-    วิเคราะห์ภาพรวม (main diagram) หาความเสี่ยงประเภท box-based เป็นหลัก
-    (STEP_DOWN_RISK, LATERAL_GAP_RISK, TALL_UNSTABLE_RISK, OVERHANG_RISK)
-    ระบุตำแหน่ง REAR/FRONT ด้วยกฎตายตัว (hardcoded)
-    """
     global GLOBAL_KEY_INDEX
     api_keys = get_api_keys_pool()
     if not api_keys:
@@ -563,12 +551,9 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
 - STEP_DOWN_RISK: a sudden height drop between two ADJACENT cargo stacks (not at the very door
   end). APPLY THIS NUMERIC RULE STRICTLY: if one stack is shorter than its immediate neighbor by
   MORE than approximately 40-50% of the taller stack's height, this IS a STEP_DOWN_RISK - flag it
-  even if you are generally trying to be conservative. A height difference of roughly half a box
-  or more between touching/adjacent stacks is a REAL, VISIBLE, MEASURABLE hazard, not a borderline
-  case - do not talk yourself out of flagging it. Only skip flagging when the height difference is
-  small (a minor, gradual variation, well under 40% of stack height) or when tall stacks gradually
-  taper down over multiple positions toward the doors (that gradual tapering is normal, not a
-  STEP_DOWN_RISK).
+  even if you are generally trying to be conservative. Only skip flagging when the height
+  difference is small, or when tall stacks gradually taper down over multiple positions toward
+  the doors (that gradual tapering is normal, not a STEP_DOWN_RISK).
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
 - OVERHANG_RISK: upper-tier cargo clearly overhanging past the edge of the cargo below it.
@@ -579,9 +564,8 @@ obvious height mismatch between neighboring stacks as described above, you MUST 
 
 BOUNDING BOX RULES:
 - box_2d must use [ymin, xmin, ymax, xmax] format, values 0-1000 normalized to image size.
-- box_2d must tightly surround only the affected area (the two adjacent stacks and the boundary
-  between them for STEP_DOWN_RISK), and MUST stay entirely within the half of the image belonging
-  to its "view" (never cross from FRONT half into BACK half or vice versa).
+- box_2d must tightly surround only the affected area, and MUST stay entirely within the half of
+  the image belonging to its "view" (never cross from FRONT half into BACK half or vice versa).
 - Box width and height must each be between 5% and 55% of that view's dimensions.
 - "view" must be exactly "FRONT" or "BACK" - never "GENERAL".
 
@@ -618,33 +602,16 @@ Return ONLY a JSON array (empty array if no genuine risks found):
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 
-# ---------------------------------------------------------------------------
-# v11: Fallback zone boxes - ใช้กฎตายตัว (HARDCODED_REAR_SIDE) + วัดช่องว่างจริง
-# จาก cargo_extent เทียบกับ container_bounds (แทนเปอร์เซ็นต์เดาแบบเดิม)
-# ---------------------------------------------------------------------------
-
 def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_h,
                        container_bounds=None, cargo_extent=None):
-    """
-    คำนวณกรอบสำหรับ risk_type + view โดยใช้กฎตายตัว (HARDCODED_REAR_SIDE) เพื่อระบุ
-    ฝั่ง REAR/FRONT อย่างแน่นอน แล้ววัดตำแหน่งกรอบจาก 'ช่องว่างจริง' ระหว่างขอบเขต
-    สินค้าจริง (cargo_extent) กับขอบเขตโครงสร้างตู้ (container_bounds) แทนการเดา
-    เปอร์เซ็นต์คงที่ - ทำให้กรอบตรงกับตำแหน่งช่องว่างจริงเสมอ ไม่ว่าสินค้าจะเยอะ
-    หรือน้อยแค่ไหน (แก้ปัญหา "กรอบลอยไม่สัมพันธ์กับความเสี่ยง")
-
-    ถ้าตรวจจับ cargo_extent ไม่ได้ (fallback) จะใช้เปอร์เซ็นต์คงที่แบบเดิมเป็นทางเลือกสุดท้าย
-    """
     vl = str(view_label).upper().strip()
     if vl not in ("FRONT", "BACK"):
         vl = "FRONT"
-    rear_side = HARDCODED_REAR_SIDE[vl]  # กฎตายตัว
+    rear_side = HARDCODED_REAR_SIDE[vl]
 
     view_container = container_bounds.get(vl) if container_bounds else None
     view_cargo = cargo_extent.get(vl) if cargo_extent else None
 
-    # ---------------------------------------------------------------------------
-    # วิธีที่ 1 (แม่นยำที่สุด): ใช้ระยะห่างจริงระหว่างขอบเขตสินค้ากับขอบเขตโครงสร้าง
-    # ---------------------------------------------------------------------------
     if risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "REAR_COMBINED_RISK") and view_container and view_cargo:
         c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
         g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
@@ -653,19 +620,16 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
         y_pad = (y1 - y0) * 0.05
         box_y0, box_y1 = y0 - y_pad, y1 + y_pad
 
-        MIN_GAP_WIDTH = max(20, (c_xmax - c_xmin) * 0.05)  # กันกรอบแคบเกินไปจนมองไม่เห็น
+        MIN_GAP_WIDTH = max(20, (c_xmax - c_xmin) * 0.05)
 
         if risk_type == "FRONT_EMPTY_RISK":
-            # หัวตู้/ผนัง อยู่ฝั่งตรงข้ามกับ REAR เสมอ
             if rear_side == "LEFT":
-                # ผนังอยู่ขวา -> ช่องว่างคือระหว่างขอบขวาของสินค้ากับขอบขวาของโครงสร้าง
                 gap_x0 = g_xmax
                 gap_x1 = c_xmax
             else:
                 gap_x0 = c_xmin
                 gap_x1 = g_xmin
             if gap_x1 - gap_x0 < MIN_GAP_WIDTH:
-                # ไม่มีช่องว่างจริงที่วัดได้ -> ใช้แถบบางที่ขอบจริงแทน (ดีกว่าลอยกลางอากาศ)
                 if rear_side == "LEFT":
                     gap_x0, gap_x1 = max(c_xmin, c_xmax - MIN_GAP_WIDTH), c_xmax
                 else:
@@ -673,8 +637,7 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             box = (gap_x0, box_y0, gap_x1, box_y1)
             print(f"Measured FRONT_EMPTY_RISK gap for {vl}: cargo=[{g_xmin}-{g_xmax}] container=[{c_xmin}-{c_xmax}] -> box_x=[{gap_x0}-{gap_x1}]")
             return tuple(map(int, box))
-
-        else:  # REAR_EMPTY_RISK or REAR_COMBINED_RISK
+        else:
             if rear_side == "LEFT":
                 gap_x0 = c_xmin
                 gap_x1 = g_xmin
@@ -690,10 +653,6 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             print(f"Measured {risk_type} gap for {vl}: cargo=[{g_xmin}-{g_xmax}] container=[{c_xmin}-{c_xmax}] -> box_x=[{gap_x0}-{gap_x1}]")
             return tuple(map(int, box))
 
-    # ---------------------------------------------------------------------------
-    # วิธีที่ 2 (fallback): ไม่มีข้อมูล cargo_extent หรือ risk_type อื่นๆ - ใช้เปอร์เซ็นต์
-    # คงที่แบบเดิม โดยอ้างอิง container_bounds ถ้ามี ไม่งั้นอิงจากขนาด crop ทั้งหมด
-    # ---------------------------------------------------------------------------
     if view_container:
         origin_x = view_container["xmin"]
         origin_y = view_container["ymin"]
@@ -817,7 +776,6 @@ def _risk_area_key(r):
 
 
 def _merge_same_area_risks(all_risks):
-    """รวม risk ที่อยู่บริเวณเดียวกันเป็น COMBINED_AREA_RISK เดียว วาดกรอบเดียว 2 สี"""
     groups = []
     for i, r in enumerate(all_risks):
         rt = str(r.get("risk_type", "")).upper().strip()
@@ -904,10 +862,6 @@ def _draw_single_or_dual_rectangle(draw, coords, outline_color, draw_colors=None
         draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
 
-# ---------------------------------------------------------------------------
-# Main HTTP handler
-# ---------------------------------------------------------------------------
-
 @functions_framework.http
 def process_request(request):
     if request.method == "OPTIONS":
@@ -942,6 +896,8 @@ def process_request(request):
         pix = page.get_pixmap(dpi=180)
         mode = "RGBA" if pix.alpha else "RGB"
         img = PIL.Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+        if mode == "RGBA":
+            img = img.convert("RGB")
         width, height = img.size
 
         crop_y_start = int(height * 0.10)
@@ -950,7 +906,6 @@ def process_request(request):
         crop_h = crop_y_end - crop_y_start
         diagram_crop = img.crop((0, crop_y_start, crop_w, crop_y_end))
 
-        # ตรวจจับขอบเขตโครงสร้างตู้ (ผนัง+พื้น+สินค้า) และขอบเขตสินค้าจริง (v11 ใหม่)
         container_bounds = detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
         cargo_extent = detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
 
