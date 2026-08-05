@@ -9,6 +9,8 @@ import random
 import re
 import PIL.Image
 import PIL.ImageDraw
+import PIL.ImageStat
+import PIL.PngImagePlugin
 import fitz  # PyMuPDF
 import functions_framework
 import google.generativeai as genai
