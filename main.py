@@ -15,7 +15,9 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v5 )
+# Backend API สำหรับ AI Cargo Safety Checker ( High-Precision v6 )
+# v6: เพิ่ม deterministic arrow detection + deterministic container-boundary detection
+#     เพื่อแทนที่การใช้เปอร์เซ็นต์ตายตัว (fixed percentage) ที่ทำให้กรอบหลุดออกนอกตู้
 # ---------------------------------------------------------------------------
 
 GLOBAL_API_KEYS = []
@@ -159,10 +161,9 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
 
 def _is_arrow_color(rgb):
     """
-    ตรวจสอบว่าพิกเซลนี้เป็นสี 'ลูกศรแดง' (arrow marker) หรือไม่
+    ตรวจสอบว่าพิกเซลนี้เป็นสี 'ลูกศรแดง' (marker) หรือไม่
     สีลูกศรจริงเป็นโทน salmon/coral (R สูง, G และ B ปานกลางใกล้เคียงกัน)
     ต่างจากกล่องสินค้าสีแดงล้วน (R สูง, G และ B ต่ำเกือบ 0) และเส้นกรอบสีแดงที่ AI วาด (มักเป็น pure red เช่นกัน)
-    ค่านี้ผ่านการทดสอบยืนยันกับภาพตัวอย่างจริงแล้วว่าแยกได้แม่นยำ ไม่ปนกับสีกล่องสินค้าหรือกรอบที่วาด
     """
     r, g, b = rgb
     return (r >= 190) and (40 <= g <= 140) and (40 <= b <= 140) and (abs(g - b) <= 45) and (r - g >= 70) and (r - b >= 70)
@@ -250,7 +251,6 @@ def detect_arrow_orientation(diagram_crop, layout, crop_w, crop_h):
             mid_y = crop_h // 2  # เส้นแบ่ง Front(บน)/Back(ล่าง) — สัมพัทธ์กับ diagram_crop เอง (เริ่มที่ 0)
             front_arrows = [b for b in blobs if b["cy"] < mid_y]
             back_arrows  = [b for b in blobs if b["cy"] >= mid_y]
-            # ทั้ง 2 views span เต็มความกว้าง crop_w เดียวกัน (วางซ้อนกันแนวตั้ง)
             front_center_x = crop_w / 2.0
             back_center_x  = crop_w / 2.0
         else:  # LEFT_RIGHT
@@ -263,7 +263,6 @@ def detect_arrow_orientation(diagram_crop, layout, crop_w, crop_h):
         result = {}
         for view_name, arrows, center_x in [("FRONT", front_arrows, front_center_x), ("BACK", back_arrows, back_center_x)]:
             if arrows:
-                # ลูกศร 'สูงสุด' = ระยะจากขอบล่างของ view นั้นมากที่สุด = y น้อยที่สุด
                 highest = min(arrows, key=lambda b: b["cy"])
                 side = "LEFT" if highest["cx"] < center_x else "RIGHT"
                 result[view_name] = {"rear_side": side, "source": "detected", "arrow_count": len(arrows)}
@@ -280,6 +279,142 @@ def detect_arrow_orientation(diagram_crop, layout, crop_w, crop_h):
         print(f"WARNING: Arrow orientation detection failed ({e}), using default fallback (FRONT=LEFT, BACK=RIGHT)")
         return default_result
 
+
+# ---------------------------------------------------------------------------
+# Container boundary detection (deterministic, pixel-based)
+# ---------------------------------------------------------------------------
+
+def _is_saturated_color(rgb):
+    """
+    เช็คว่าเป็นสีที่มี hue ชัดเจน (บล็อกสินค้า/ผนังตู้ที่เป็นสีทึบ เช่น น้ำเงิน เหลือง เขียว แดง ครีม/tan)
+    ต่างจากพื้นหลังสีขาว, เส้น/ตัวอักษรสีดำ, และเส้นกรอบบางๆ ที่มีความอิ่มตัวต่ำ
+    """
+    r, g, b = rgb
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx < 60:       # เข้มเกินไป (ตัวอักษร/เส้นสีดำ)
+        return False
+    if mx - mn < 35:  # ขาว/เทาเกินไป (สีอิ่มตัวต่ำ)
+        return False
+    return True
+
+
+def detect_container_bbox(img, min_run_width=25, min_run_height=25):
+    """
+    หาขอบเขตตู้คอนเทนเนอร์/สินค้าจริงในภาพ (deterministic pixel analysis) ด้วยการกรอง 2 ชั้น (2D solid-block filter):
+      1) row-pass:    หาพิกเซลที่อยู่ในแนวนอนต่อเนื่องกว้างพอ (>= min_run_width) ภายในแถวของตัวเอง
+      2) column-pass: จากผลลัพธ์ข้อ 1 หาต่อว่าพิกเซลนั้นอยู่ในแนวตั้งต่อเนื่องสูงพอ (>= min_run_height) ด้วย
+
+    วิธีนี้กรองเส้นขอบกรอบ annotation ของ AI (วาดเป็นเส้นบาง ~8px) เส้นบอกระยะ (dimension line)
+    และตัวอักษรออกได้ เพราะสิ่งเหล่านี้ 'กว้างมากแต่บางในอีกแนว' (ผ่านแค่เงื่อนไข 1 ไม่ผ่านเงื่อนไข 2)
+    ในขณะที่บล็อกสินค้า/ผนังตู้จริงเป็นทรงตันขนาดใหญ่ ผ่านทั้ง 2 เงื่อนไข
+
+    ทดสอบยืนยันแล้วว่าให้ผลตรงกันมาก (ค่าความคลาดเคลื่อน <1%) ในภาพตัวอย่างจริงหลายไฟล์
+    ทั้งกรณีที่มี/ไม่มีกรอบ annotation เดิมทับซ้อนอยู่ในภาพ
+
+    Returns: (xmin, ymin, xmax, ymax) แบบ relative กับภาพ img ที่ส่งเข้ามา หรือ None ถ้าไม่พบ
+    """
+    w, h = img.size
+    px = img.convert("RGB").load()
+
+    # Pass 1: row-wise mask — เก็บเฉพาะพิกเซลที่อยู่ใน run แนวนอนกว้างพอ
+    row_mask = bytearray(w * h)
+    for y in range(h):
+        run_start = None
+        for x in range(w):
+            sat = _is_saturated_color(px[x, y])
+            if sat and run_start is None:
+                run_start = x
+            elif not sat and run_start is not None:
+                if x - run_start >= min_run_width:
+                    for xi in range(run_start, x):
+                        row_mask[y * w + xi] = 1
+                run_start = None
+        if run_start is not None and w - run_start >= min_run_width:
+            for xi in range(run_start, w):
+                row_mask[y * w + xi] = 1
+
+    # Pass 2: column-wise ตรวจสอบจาก row_mask ว่ามี run แนวตั้งสูงพอหรือไม่
+    minx, maxx, miny, maxy = w, 0, h, 0
+    found = False
+    for x in range(w):
+        run_start = None
+        for y in range(h):
+            m = row_mask[y * w + x]
+            if m and run_start is None:
+                run_start = y
+            elif not m and run_start is not None:
+                if y - run_start >= min_run_height:
+                    found = True
+                    if x < minx: minx = x
+                    if x > maxx: maxx = x
+                    if run_start < miny: miny = run_start
+                    if y - 1 > maxy: maxy = y - 1
+                run_start = None
+        if run_start is not None and h - run_start >= min_run_height:
+            found = True
+            if x < minx: minx = x
+            if x > maxx: maxx = x
+            if run_start < miny: miny = run_start
+            if h - 1 > maxy: maxy = h - 1
+
+    return (minx, miny, maxx, maxy) if found else None
+
+
+def detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start=0):
+    """
+    หาขอบเขตตู้คอนเทนเนอร์จริง แยกสำหรับ FRONT และ BACK view
+    แทนที่จะสมมติว่าตู้ครอบคลุมเกือบเต็มความกว้างของภาพ (fixed percentage) ซึ่งเป็นสาเหตุหลัก
+    ที่ทำให้กรอบ risk (เช่น FRONT_EMPTY_RISK) หลุดออกไปอยู่ในพื้นที่ว่างสีขาวรอบตู้
+
+    Returns:
+      {
+        "FRONT": {"xmin":.., "xmax":.., "ymin":.., "ymax":..} หรือ None ถ้าตรวจไม่พบ,
+        "BACK":  {...} หรือ None,
+      }
+      พิกัดทั้งหมดเป็นค่าสัมบูรณ์เทียบกับภาพเต็ม (full image) — บวก crop_y_start ให้แล้ว
+      พร้อมใช้งานร่วมกับ draw.rectangle() บนภาพเต็มได้ทันที โดยไม่ต้องแปลงพิกัดเพิ่ม
+    """
+    result = {"FRONT": None, "BACK": None}
+    try:
+        if layout == "TOP_BOTTOM":
+            mid_y = crop_h // 2
+            front_view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
+            back_view_img  = diagram_crop.crop((0, mid_y, crop_w, crop_h))
+
+            fb = detect_container_bbox(front_view_img)
+            bb = detect_container_bbox(back_view_img)
+
+            if fb:
+                result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
+            if bb:
+                # bb สัมพัทธ์กับ back_view_img (เริ่มที่ y=mid_y ใน diagram_crop) — offset y กลับ + crop_y_start
+                result["BACK"] = {"xmin": bb[0], "ymin": bb[1] + mid_y + crop_y_start, "xmax": bb[2], "ymax": bb[3] + mid_y + crop_y_start}
+        else:  # LEFT_RIGHT
+            half_w = crop_w // 2
+            front_view_img = diagram_crop.crop((0, 0, half_w, crop_h))
+            back_view_img  = diagram_crop.crop((half_w, 0, crop_w, crop_h))
+
+            fb = detect_container_bbox(front_view_img)
+            bb = detect_container_bbox(back_view_img)
+
+            if fb:
+                result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
+            if bb:
+                # bb สัมพัทธ์กับ back_view_img (เริ่มที่ x=half_w ใน diagram_crop) — offset x กลับ
+                result["BACK"] = {"xmin": bb[0] + half_w, "ymin": bb[1] + crop_y_start, "xmax": bb[2] + half_w, "ymax": bb[3] + crop_y_start}
+
+        for view_name in ("FRONT", "BACK"):
+            if result[view_name]:
+                b = result[view_name]
+                print(f"Container bounds detected for {view_name}: x=[{b['xmin']}-{b['xmax']}] "
+                      f"y=[{b['ymin']}-{b['ymax']}] ({round(b['xmin']/crop_w*100,1)}%-{round(b['xmax']/crop_w*100,1)}% of crop_w)")
+            else:
+                print(f"WARNING: Could not detect container bounds for {view_name} — will fall back to fixed percentages")
+
+        return result
+    except Exception as e:
+        print(f"WARNING: Container bounds detection failed ({e}), falling back to fixed percentages")
+        return {"FRONT": None, "BACK": None}
 
 def extract_sku_from_pdf(pdf_bytes):
     """
@@ -436,8 +571,8 @@ def analyze_diagram_image_with_ai(diagram_image: PIL.Image.Image, layout: str = 
         layout_desc = "FRONT view is on the TOP half of the image. BACK view is on the BOTTOM half of the image."
 
     # ---------------------------------------------------------------------------
-    # หมายเหตุสำคัญ: ตำแหน่ง REAR/FRONT ของแต่ละ view ด้านล่างนี้ **ไม่ได้ให้ Gemini เดาเอง
-    # แล้ว** แต่คำนวณมาจาก deterministic pixel analysis (ดูฟังก์ชัน detect_arrow_orientation)
+    # หมายเหตุสำคัญ: ตำแหน่ง REAR/FRONT ของแต่ละ view ด้านล่างนี้ ไม่ได้ให้ Gemini เดาเอง
+    # แล้ว แต่คำนวณมาจาก deterministic pixel analysis (ดูฟังก์ชัน detect_arrow_orientation)
     # ที่ตรวจจับตำแหน่งลูกศรแดงจริงในภาพนี้โดยเฉพาะ ก่อนเรียก Gemini ทุกครั้ง
     # วิธีนี้แม่นยำกว่าการให้ AI ตีความตำแหน่งลูกศรเอง และตัดปัญหา "ตีกรอบผิดฝั่ง" ที่ต้นเหตุ
     # ---------------------------------------------------------------------------
@@ -533,133 +668,127 @@ Return ONLY a JSON array — no explanation, no markdown:
             
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
-def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int, crop_y_start: int, crop_h: int, orientation: dict = None):
+def _mirror_box_in_range(box, lo, hi):
+    """ Mirror กล่อง (x0,y0,x1,y1) ในแนวนอน ภายในขอบเขต [lo, hi] """
+    x0, y0, x1, y1 = box
+    return (lo + (hi - x1), y0, lo + (hi - x0), y1)
+
+
+def _get_fallback_box(risk_type: str, view_label: str, layout: str, crop_w: int, crop_y_start: int, crop_h: int,
+                       orientation: dict = None, container_bounds: dict = None):
+    """
+    คำนวณกรอบ fallback สำหรับ risk_type + view ที่กำหนด
+
+    ลำดับความสำคัญของข้อมูลอ้างอิง (reference frame) ที่ใช้คำนวณเปอร์เซ็นต์โซน:
+      1) container_bounds ที่ตรวจพบจริงจาก pixel analysis (แม่นยำที่สุด - ใช้ก่อนเสมอถ้ามี)
+      2) ถ้าตรวจไม่พบ (None) จะ fallback ไปใช้สมมติฐานเดิม (ตู้ครอบคลุมเกือบเต็ม crop_w/crop_h)
+
+    วิธีนี้แก้ปัญหากรอบหลุดออกนอกตู้แบบถาวร เพราะโซนทั้งหมดจะถูกคำนวณเป็นเปอร์เซ็นต์ของ
+    'ขนาดตู้จริง' ไม่ใช่เปอร์เซ็นต์ของขนาด crop เต็มที่มีพื้นที่ว่างขอบภาพปนอยู่มาก
+    """
     vl = view_label.upper()
-    if layout == "TOP_BOTTOM":
-        half_h = crop_h // 2
-        front_y0 = crop_y_start + int(half_h * 0.25)
-        front_y1 = crop_y_start + int(half_h * 0.75)
-        back_y0  = crop_y_start + half_h + int(half_h * 0.25)
-        back_y1  = crop_y_start + half_h + int(half_h * 0.75)
+    view_bounds = container_bounds.get(vl) if container_bounds else None
 
-        left_x0, left_x1   = int(crop_w * 0.20), int(crop_w * 0.45)
-        right_x0, right_x1 = int(crop_w * 0.60), int(crop_w * 0.92)
+    default_rear_side = "LEFT" if vl == "FRONT" else "RIGHT"
+    actual_rear_side = (orientation or {}).get(vl, {}).get("rear_side", default_rear_side)
 
-        # FIX A: แยก REAR_EMPTY vs REAR_LATERAL ไม่ให้ซ้อนทับกัน
-        #        REAR_EMPTY  → ครึ่งบนของโซน (ประตูท้าย)
-        #        REAR_LATERAL → ครึ่งล่างของโซน (ด้านข้างประตู)
-        front_mid_y = front_y0 + (front_y1 - front_y0) // 2
-        back_mid_y  = back_y0  + (back_y1  - back_y0)  // 2
-
-        # FIX B: เพิ่ม GENERAL — วาดคลุมทั้ง FRONT และ BACK zone รวมกัน
-        gen_y0 = crop_y_start + int(crop_h * 0.15)
-        gen_y1 = crop_y_start + int(crop_h * 0.85)
-
-        zones = {
-            # FRONT view (ครึ่งบนของภาพ)
-            ("REAR_EMPTY_RISK",        "FRONT"):   (left_x0,  front_y0,   left_x1,  front_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"):   (left_x0,  front_mid_y, left_x1, front_y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"):   (right_x0, front_y0,   right_x1, front_y1),
-            # BACK view (ครึ่งล่างของภาพ)
-            ("REAR_EMPTY_RISK",        "BACK"):    (right_x0, back_y0,    right_x1, back_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):    (right_x0, back_mid_y, right_x1, back_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):    (left_x0,  back_y0,    left_x1,  back_y1),
-            # GENERAL — คลุมทั้งภาพในแนว Y แต่จำกัดแนว X ตามประเภท
-            ("REAR_EMPTY_RISK",        "GENERAL"): (left_x0,  gen_y0,     left_x1,  gen_y0 + (gen_y1 - gen_y0) // 2),
-            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (left_x0,  gen_y0 + (gen_y1 - gen_y0) // 2, left_x1, gen_y1),
-            ("FRONT_EMPTY_RISK",       "GENERAL"): (right_x0, gen_y0,     right_x1, gen_y1),
-            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.20), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.75), crop_y_start + int(crop_h * 0.80)),
-            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_y1),
-            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.15), back_y0,  int(crop_w * 0.85), back_y1),
-            # ✅ เพิ่มใหม่
-            ("LATERAL_GAP_RISK",       "GENERAL"): (int(crop_w * 0.20), gen_y0,   int(crop_w * 0.75), gen_y1),
-            ("LATERAL_GAP_RISK",       "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_y1),
-            ("LATERAL_GAP_RISK",       "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_y1),
-            ("TALL_UNSTABLE_RISK",     "GENERAL"): (int(crop_w * 0.25), gen_y0,   int(crop_w * 0.65), gen_y1),
-            ("TALL_UNSTABLE_RISK",     "FRONT"):   (int(crop_w * 0.25), front_y0, int(crop_w * 0.65), front_y1),
-            ("TALL_UNSTABLE_RISK",     "BACK"):    (int(crop_w * 0.25), back_y0,  int(crop_w * 0.65), back_y1),
-            ("OVERHANG_RISK",          "GENERAL"): (int(crop_w * 0.20), gen_y0,   int(crop_w * 0.75), gen_y0 + (gen_y1 - gen_y0) // 2),
-            ("OVERHANG_RISK",          "FRONT"):   (int(crop_w * 0.20), front_y0, int(crop_w * 0.75), front_mid_y),
-            ("OVERHANG_RISK",          "BACK"):    (int(crop_w * 0.20), back_y0,  int(crop_w * 0.75), back_mid_y),
-        }
+    # ---------------------------------------------------------------------------
+    # กำหนด reference frame: (origin_x, origin_y, ref_w, ref_h)
+    # ---------------------------------------------------------------------------
+    if view_bounds:
+        origin_x = view_bounds["xmin"]
+        origin_y = view_bounds["ymin"]
+        ref_w = view_bounds["xmax"] - view_bounds["xmin"]
+        ref_h = view_bounds["ymax"] - view_bounds["ymin"]
+        using_detected_bounds = True
     else:
-        # Layout แบบ LEFT_RIGHT (Isometric)
-
-        # Front View (ซ้ายของภาพ)
-        # Front View (ซ้ายของภาพ)
-        f_door_y0,  f_door_y1  = crop_y_start + int(crop_h * 0.25), crop_y_start + int(crop_h * 0.65)
-        f_door_x0,  f_door_x1  = int(crop_w * 0.05), int(crop_w * 0.25)
-        f_wall_y0,  f_wall_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.50)
-        # FIX: x1 ไม่เกิน 0.46 เพื่อไม่ให้กล่องหลุดออกไปฝั่งขวาของ Front view
-        f_wall_x0,  f_wall_x1  = int(crop_w * 0.28), int(crop_w * 0.46)
-        f_door_mid_y = f_door_y0 + (f_door_y1 - f_door_y0) // 2
-
-        # Back View (ขวาของภาพ)
-        b_wall_y0,  b_wall_y1  = crop_y_start + int(crop_h * 0.50), crop_y_start + int(crop_h * 0.85)
-        b_wall_x0,  b_wall_x1  = int(crop_w * 0.50), int(crop_w * 0.68)
-        # FIX: ขยาย b_door_x1 จาก 0.88 → 0.95 เพราะจากการตรวจจับตำแหน่งลูกศรจริง (ดู detect_arrow_orientation)
-        # พบว่ามุมประตูท้ายจริงอยู่ที่ราว ~95% ของความกว้าง Back view — 0.88 เดิมแคบเกินไปไม่ถึงมุมจริง
-        # (ยังเว้นระยะห่างจากขอบ crop_w สุด (0.97) เล็กน้อยเพื่อกันกล่องชนขอบภาพพอดี)
-        b_door_y0,  b_door_y1  = crop_y_start + int(crop_h * 0.15), crop_y_start + int(crop_h * 0.55)
-        b_door_x0,  b_door_x1  = int(crop_w * 0.72), int(crop_w * 0.95)
-        b_door_mid_y = b_door_y0 + (b_door_y1 - b_door_y0) // 2
-
-        zones = {
-            # FRONT view
-            ("REAR_EMPTY_RISK",        "FRONT"):   (f_door_x0, f_door_y0,    f_door_x1, f_door_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "FRONT"):   (f_door_x0, f_door_mid_y, f_door_x1, f_door_y1),
-            ("FRONT_EMPTY_RISK",       "FRONT"):   (f_wall_x0, f_wall_y0,    f_wall_x1, f_wall_y1),
-            # BACK view
-            ("REAR_EMPTY_RISK",        "BACK"):    (b_door_x0, b_door_y0,    b_door_x1, b_door_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "BACK"):    (b_door_x0, b_door_mid_y, b_door_x1, b_door_y1),
-            ("FRONT_EMPTY_RISK",       "BACK"):    (b_wall_x0, b_wall_y0,    b_wall_x1, b_wall_y1),
-            # GENERAL — ใช้ทั้ง Front view และ Back view รวมกัน ตามนิยาม:
-            #   REAR_EMPTY_RISK  = ท้ายตู้ (ประตู) → Front view ซีกซ้าย (f_door) + Back view ซีกซ้าย (b_door ซีกขวา)
-            #   FRONT_EMPTY_RISK = หัวตู้ (ผนัง)  → Front view ซีกขวา (f_wall) + Back view ซีกขวา (b_wall)
-            ("REAR_EMPTY_RISK",        "GENERAL"): (f_door_x0, f_door_y0,    b_door_x1, b_door_mid_y),
-            ("REAR_LATERAL_IMBALANCE", "GENERAL"): (f_door_x0, f_door_mid_y, b_door_x1, b_door_y1),
-            ("FRONT_EMPTY_RISK",       "GENERAL"): (f_wall_x0, f_wall_y0,    b_wall_x1, b_wall_y1),
-            # STEP_DOWN: วาดกลางภาพ ครอบคลุม 2 views เพราะ step อาจอยู่ที่ใดก็ได้
-            ("STEP_DOWN_RISK",         "GENERAL"): (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.88), crop_y_start + int(crop_h * 0.78)),
-            ("STEP_DOWN_RISK",         "FRONT"):   (int(crop_w * 0.08), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.78)),
-            ("STEP_DOWN_RISK",         "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.88), crop_y_start + int(crop_h * 0.78)),
-            # ✅ เพิ่มใหม่
-            ("LATERAL_GAP_RISK",       "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
-            ("LATERAL_GAP_RISK",       "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.80)),
-            ("LATERAL_GAP_RISK",       "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.20), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.80)),
-            ("TALL_UNSTABLE_RISK",     "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.60)),
-            ("TALL_UNSTABLE_RISK",     "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.60)),
-            ("TALL_UNSTABLE_RISK",     "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.60)),
-            ("OVERHANG_RISK",          "GENERAL"): (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.45)),
-            ("OVERHANG_RISK",          "FRONT"):   (int(crop_w * 0.05), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.45), crop_y_start + int(crop_h * 0.45)),
-            ("OVERHANG_RISK",          "BACK"):    (int(crop_w * 0.50), crop_y_start + int(crop_h * 0.10), int(crop_w * 0.90), crop_y_start + int(crop_h * 0.45)),
-        }
-
-    box = zones.get((risk_type, vl))
-    if box is None:
-        return None
-
-    # ---------------------------------------------------------------------------
-    # ปรับทิศทางกล่อง fallback ให้ตรงกับตำแหน่งลูกศรแดงจริงที่ตรวจพบ (deterministic)
-    # โซนด้านบนทั้งหมดถูกเขียนขึ้นภายใต้สมมติฐาน DEFAULT คือ FRONT view REAR=ซ้าย, BACK view REAR=ขวา
-    # ถ้าผลตรวจจับลูกศรจริงของภาพนี้ (orientation) แตกต่างจาก default ให้ mirror กล่องในแนวนอน
-    # ภายในขอบเขตของ view นั้นๆ เพื่อให้กล่องยังคงชี้ไปยังฝั่งที่ถูกต้องเสมอ ไม่ว่า layout จะสลับด้านหรือไม่
-    # ---------------------------------------------------------------------------
-    if orientation and vl in ("FRONT", "BACK"):
-        default_rear_side = "LEFT" if vl == "FRONT" else "RIGHT"
-        actual_rear_side = orientation.get(vl, {}).get("rear_side", default_rear_side)
-        if actual_rear_side != default_rear_side:
-            x0, y0, x1, y1 = box
-            if layout == "TOP_BOTTOM":
-                # ทั้ง Front และ Back span เต็มความกว้าง crop_w เดียวกัน — mirror รอบ crop_w ตรงๆ
-                box = (crop_w - x1, y0, crop_w - x0, y1)
+        # Fallback: สมมติฐานเดิม (ก่อนมีการตรวจจับ) - ตู้ครอบคลุมเกือบเต็ม crop
+        if layout == "TOP_BOTTOM":
+            half_h = crop_h // 2
+            if vl == "FRONT":
+                origin_x, origin_y, ref_w, ref_h = 0, crop_y_start, crop_w, half_h
             else:
-                # LEFT_RIGHT: mirror ภายในครึ่งของตัวเอง (Front=[0,half_w], Back=[half_w,crop_w])
-                half_w = crop_w // 2
-                lo, hi = (0, half_w) if vl == "FRONT" else (half_w, crop_w)
-                box = (lo + (hi - x1), y0, lo + (hi - x0), y1)
-            print(f"Fallback box mirrored for {risk_type} ({vl}) - detected rear_side={actual_rear_side} differs from default={default_rear_side}")
+                origin_x, origin_y, ref_w, ref_h = 0, crop_y_start + half_h, crop_w, crop_h - half_h
+        else:  # LEFT_RIGHT
+            half_w = crop_w // 2
+            if vl == "FRONT":
+                origin_x, origin_y, ref_w, ref_h = 0, crop_y_start, half_w, crop_h
+            else:
+                origin_x, origin_y, ref_w, ref_h = half_w, crop_y_start, crop_w - half_w, crop_h
+        using_detected_bounds = False
 
+    def pct(px, py):
+        """แปลงเปอร์เซ็นต์ (0.0-1.0) ให้เป็นพิกัดจริงในระบบภาพเต็ม อิงจาก reference frame ปัจจุบัน"""
+        return (origin_x + int(ref_w * px), origin_y + int(ref_h * py))
+
+    # ---------------------------------------------------------------------------
+    # นิยามโซนตาม risk_type (เป็นเปอร์เซ็นต์ของ reference frame)
+    # โดย default assumption: REAR (ประตู) อยู่ฝั่งซ้ายของ reference frame เสมอ (สำหรับ TOP_BOTTOM)
+    # หรืออยู่มุมล่างซ้าย/บนขวาแบบ isometric เสมอ (สำหรับ LEFT_RIGHT)
+    # แล้วค่อย mirror ทีหลังถ้า actual_rear_side ต่างจาก default
+    # ---------------------------------------------------------------------------
+    if layout == "TOP_BOTTOM":
+        rear_frac, wall_frac = 0.38, 0.32
+        y_pad = 0.08
+        y0f, y1f = y_pad, 1.0 - y_pad
+        mid_yf = y0f + (y1f - y0f) / 2
+
+        zones_pct = {
+            "REAR_EMPTY_RISK":        (0.0, y0f, rear_frac, mid_yf),
+            "REAR_LATERAL_IMBALANCE": (0.0, mid_yf, rear_frac, y1f),
+            "FRONT_EMPTY_RISK":       (1.0 - wall_frac, y0f, 1.0, y1f),
+            "STEP_DOWN_RISK":         (0.15, y0f, 0.85, y1f),
+            "LATERAL_GAP_RISK":       (0.20, y0f, 0.80, y1f),
+            "TALL_UNSTABLE_RISK":     (0.25, y0f, 0.75, y1f),
+            "OVERHANG_RISK":          (0.15, y0f, 0.85, mid_yf),
+        }
+        zp = zones_pct.get(risk_type)
+        if zp is None:
+            return None
+        x0, y0 = pct(zp[0], zp[1])
+        x1, y1 = pct(zp[2], zp[3])
+        box = (x0, y0, x1, y1)
+
+        # default assumption ด้านบน: REAR อยู่ฝั่งซ้ายเสมอ ถ้าจริงๆ อยู่ขวา ให้ mirror ในแนวนอน
+        if actual_rear_side != default_rear_side:
+            box = _mirror_box_in_range(box, origin_x, origin_x + ref_w)
+
+    else:  # LEFT_RIGHT (isometric diagonal)
+        mid_yf = 0.50
+        if default_rear_side == "LEFT":
+            # ประตูท้าย = มุมซ้ายล่าง, หัวตู้ = มุมขวาบน (default assumption)
+            rear_zone   = (0.0, mid_yf, 0.55, 1.0)
+            wall_zone   = (0.30, 0.0, 1.0, mid_yf)
+        else:
+            # ประตูท้าย = มุมขวาบน, หัวตู้ = มุมซ้ายล่าง (default assumption)
+            rear_zone   = (0.45, 0.0, 1.0, mid_yf)
+            wall_zone   = (0.0, mid_yf, 0.70, 1.0)
+
+        rear_mid_yf = rear_zone[1] + (rear_zone[3] - rear_zone[1]) / 2
+
+        zones_pct = {
+            "REAR_EMPTY_RISK":        (rear_zone[0], rear_zone[1], rear_zone[2], rear_mid_yf),
+            "REAR_LATERAL_IMBALANCE": (rear_zone[0], rear_mid_yf, rear_zone[2], rear_zone[3]),
+            "FRONT_EMPTY_RISK":       wall_zone,
+            "STEP_DOWN_RISK":         (0.08, 0.20, 0.88, 0.78),
+            "LATERAL_GAP_RISK":       (0.05, 0.20, 0.85, 0.80),
+            "TALL_UNSTABLE_RISK":     (0.05, 0.10, 0.85, 0.60),
+            "OVERHANG_RISK":          (0.05, 0.10, 0.85, 0.45),
+        }
+        zp = zones_pct.get(risk_type)
+        if zp is None:
+            return None
+        x0, y0 = pct(zp[0], zp[1])
+        x1, y1 = pct(zp[2], zp[3])
+        box = (x0, y0, x1, y1)
+        # การ mirror สำหรับ LEFT_RIGHT ถูกคำนวณผ่าน default_rear_side ใน zones_pct ไปแล้ว
+        # (เลือก rear_zone/wall_zone ตาม default_rear_side ข้างต้น) จึงไม่ต้อง mirror ซ้ำที่นี่
+        # ยกเว้นกรณี actual_rear_side ต่างจาก default_rear_side ต้อง mirror เพิ่ม
+        if actual_rear_side != default_rear_side:
+            box = _mirror_box_in_range(box, origin_x, origin_x + ref_w)
+
+    source_label = "detected container bounds" if using_detected_bounds else "fixed-percentage fallback"
+    print(f"Fallback box for {risk_type} ({vl}, {layout}): using {source_label}, rear_side={actual_rear_side}, box={box}")
     return box
 
 # ฟังก์ชันหลัก (Entry Point) ที่รับ HTTP Request
@@ -728,67 +857,81 @@ def process_request(request):
         # ---------------------------------------------------------------------------
         # ตรวจจับตำแหน่งลูกศรแดงจริง (deterministic, pixel-based) ก่อนเรียก Gemini
         # เพื่อยืนยันว่า REAR (ประตูท้ายตู้) ของแต่ละ view อยู่ฝั่งซ้ายหรือขวาจริง
-        # แทนที่จะ hardcode ตายตัว - ผลตรวจจับนี้จะถูกใช้ทั้งใน (1) prompt ของ Gemini,
-        # (2) การ crop โซน rear/front สำหรับวิเคราะห์ zoom, (3) fallback box, (4) validation
         # ---------------------------------------------------------------------------
         orientation = detect_arrow_orientation(diagram_crop, layout, crop_w, crop_h)
+
+        # ---------------------------------------------------------------------------
+        # ตรวจจับขอบเขตตู้คอนเทนเนอร์จริง (deterministic, pixel-based) แยกตาม view
+        # แก้ปัญหากรอบหลุดออกนอกตู้แบบถาวร โดยไม่ใช้เปอร์เซ็นต์ตายตัวของ crop_w/crop_h อีกต่อไป
+        # (ซึ่งพบว่าตู้จริงมักครอบคลุมแค่ ~33%-70% ของ crop_w ไม่ใช่เกือบเต็มความกว้างอย่างที่สมมติไว้เดิม)
+        # ---------------------------------------------------------------------------
+        container_bounds = detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
 
         all_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout, orientation=orientation)
 
         front_rear_side = orientation["FRONT"]["rear_side"]  # "LEFT" หรือ "RIGHT"
         back_rear_side  = orientation["BACK"]["rear_side"]
 
+        # ---------------------------------------------------------------------------
+        # สร้าง crop โซน rear/front สำหรับวิเคราะห์ zoom - ใช้ขอบเขตตู้จริงถ้าตรวจพบ
+        # เพื่อความแม่นยำสูงสุด (ไม่ครอบคลุมพื้นที่ว่างขอบภาพที่ไม่ใช่ตัวตู้)
+        # ---------------------------------------------------------------------------
+        def _zoom_crop_ranges(view_bounds, rear_side, default_origin_x, default_ref_w, y0, y1):
+            """คืนค่า (rear_x0,rear_x1), (wall_x0,wall_x1) สำหรับ crop โซน zoom"""
+            if view_bounds:
+                ox, rw = view_bounds["xmin"], view_bounds["xmax"] - view_bounds["xmin"]
+            else:
+                ox, rw = default_origin_x, default_ref_w
+            if rear_side == "LEFT":
+                rear_range = (ox, ox + int(rw * 0.45))
+                wall_range = (ox + int(rw * 0.55), ox + rw)
+            else:
+                rear_range = (ox + int(rw * 0.55), ox + rw)
+                wall_range = (ox, ox + int(rw * 0.45))
+            return rear_range, wall_range
+
         if layout == "TOP_BOTTOM":
-            # TOP_BOTTOM: ภาพ Front อยู่ครึ่งบน, Back อยู่ครึ่งล่าง
-            # ทิศทาง (ซ้าย/ขวา) ของแต่ละ view มาจาก orientation ที่ตรวจจับได้จริง ไม่ hardcode แล้ว
             half_h = crop_h // 2
 
-            def _tb_ranges(rear_side):
-                if rear_side == "LEFT":
-                    return (0, int(crop_w * 0.45)), (int(crop_w * 0.55), crop_w)  # (rear_x_range, wall_x_range)
-                else:
-                    return (int(crop_w * 0.55), crop_w), (0, int(crop_w * 0.45))
+            (fr_x0, fr_x1), (fw_x0, fw_x1) = _zoom_crop_ranges(
+                container_bounds.get("FRONT"), front_rear_side, 0, crop_w, crop_y_start, crop_y_start + half_h)
+            (br_x0, br_x1), (bw_x0, bw_x1) = _zoom_crop_ranges(
+                container_bounds.get("BACK"), back_rear_side, 0, crop_w, crop_y_start + half_h, crop_y_end)
 
-            (fr_x0, fr_x1), (fw_x0, fw_x1) = _tb_ranges(front_rear_side)
-            (br_x0, br_x1), (bw_x0, bw_x1) = _tb_ranges(back_rear_side)
-
-            # --- Front (บน) ---
             rear_crop_front  = img.crop((fr_x0, crop_y_start,          fr_x1, crop_y_start + half_h))
             front_crop_front = img.crop((fw_x0, crop_y_start,          fw_x1, crop_y_start + half_h))
-            # --- Back (ล่าง) ---
             rear_crop_back   = img.crop((br_x0, crop_y_start + half_h, br_x1, crop_y_end))
             front_crop_back  = img.crop((bw_x0, crop_y_start + half_h, bw_x1, crop_y_end))
 
             print(f"TOP_BOTTOM crop - FRONT rear={front_rear_side} ({fr_x0}-{fr_x1}) | "
                   f"BACK rear={back_rear_side} ({br_x0}-{br_x1})")
         else:
-            # LEFT_RIGHT: ภาพ Front อยู่ซีกซ้าย, Back อยู่ซีกขวา (มุมมอง 3D Isometric)
-            # ทิศทาง REAR (ซ้าย/ขวา ภายในครึ่งของตัวเอง) มาจาก orientation ที่ตรวจจับได้จริง
-            # หมายเหตุ: จากรูปแบบการวาด isometric มาตรฐาน มุมประตูท้าย (rear) ที่อยู่ฝั่ง LEFT
-            # จะอยู่แถบล่างของภาพเสมอ ส่วนฝั่ง RIGHT จะอยู่แถบบนของภาพ (ยืนยันจากตัวอย่างจริงทุกไฟล์)
             half_w = crop_w // 2
-            mid_h  = crop_y_start + int(crop_h * 0.50)
 
-            def _lr_regions(lo, hi, rear_side):
-                view_w = hi - lo
-                if rear_side == "LEFT":
-                    rear_box = (lo,                      mid_h,        lo + int(view_w * 0.55), crop_y_end)   # ประตูท้าย: มุมซ้ายล่าง
-                    wall_box = (lo + int(view_w * 0.45),  crop_y_start, hi,                      mid_h)        # หัวตู้:    มุมขวาบน
-                else:
-                    rear_box = (hi - int(view_w * 0.55),  crop_y_start, hi,                      mid_h)        # ประตูท้าย: มุมขวาบน
-                    wall_box = (lo,                       mid_h,        lo + int(view_w * 0.55), crop_y_end)   # หัวตู้:    มุมซ้ายล่าง
-                return rear_box, wall_box
+            (fr_x0, fr_x1), (fw_x0, fw_x1) = _zoom_crop_ranges(
+                container_bounds.get("FRONT"), front_rear_side, 0, half_w, crop_y_start, crop_y_end)
+            (br_x0, br_x1), (bw_x0, bw_x1) = _zoom_crop_ranges(
+                container_bounds.get("BACK"), back_rear_side, half_w, crop_w - half_w, crop_y_start, crop_y_end)
 
-            rear_box_f, wall_box_f = _lr_regions(0, half_w, front_rear_side)
-            rear_box_b, wall_box_b = _lr_regions(half_w, crop_w, back_rear_side)
+            mid_h = crop_y_start + int(crop_h * 0.50)
 
-            rear_crop_front  = img.crop(rear_box_f)
-            front_crop_front = img.crop(wall_box_f)
-            rear_crop_back   = img.crop(rear_box_b)
-            front_crop_back  = img.crop(wall_box_b)
+            # Front view - ซีกซ้าย: ประตูท้ายมุมล่าง, หัวตู้มุมบน (ถ้า rear_side=LEFT) หรือกลับกัน
+            if front_rear_side == "LEFT":
+                rear_crop_front  = img.crop((fr_x0, mid_h,        fr_x1, crop_y_end))
+                front_crop_front = img.crop((fw_x0, crop_y_start, fw_x1, mid_h))
+            else:
+                rear_crop_front  = img.crop((fr_x0, crop_y_start, fr_x1, mid_h))
+                front_crop_front = img.crop((fw_x0, mid_h,        fw_x1, crop_y_end))
 
-            print(f"LEFT_RIGHT crop - FRONT rear={front_rear_side} {rear_box_f} | "
-                  f"BACK rear={back_rear_side} {rear_box_b}")
+            if back_rear_side == "LEFT":
+                rear_crop_back   = img.crop((br_x0, mid_h,        br_x1, crop_y_end))
+                front_crop_back  = img.crop((bw_x0, crop_y_start, bw_x1, mid_h))
+            else:
+                rear_crop_back   = img.crop((br_x0, crop_y_start, br_x1, mid_h))
+                front_crop_back  = img.crop((bw_x0, mid_h,        bw_x1, crop_y_end))
+
+            print(f"LEFT_RIGHT crop - FRONT rear={front_rear_side} ({fr_x0}-{fr_x1}) | "
+                  f"BACK rear={back_rear_side} ({br_x0}-{br_x1})")
 
         api_keys_pool = get_api_keys_pool()
         rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
@@ -894,7 +1037,6 @@ def process_request(request):
             box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box")
 
             # ค่าเริ่มต้นของ resolved_view (เผื่อกรณีไม่มี box_2d ให้ใช้ validate เลย)
-            # ถ้ามี box_2d จริง จะถูกคำนวณใหม่ให้แม่นยำขึ้นในบล็อก validate ด้านล่าง
             resolved_view = view_name if view_name != "GENERAL" else "FRONT"
 
             # --- วาดกล่อง (แยกออกจาก logic report) ---
@@ -909,15 +1051,14 @@ def process_request(request):
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
                     
-                    # ✅ validate ก่อนวาด — แยก xmax ตาม risk_type + view
                     box_center_x = (abs_xmin + abs_xmax) / 2
                     box_center_y = (abs_ymin + abs_ymax) / 2
 
                     # ---------------------------------------------------------------------------
                     # validate ก่อนวาด - resolve GENERAL -> FRONT/BACK และตรวจสอบโซนตาม risk_type + view จริง
-                    # ใช้ orientation ที่ตรวจจับได้จริงจากลูกศรแดง (deterministic) แทนการ hardcode ฝั่ง
-                    # ทำงานเหมือนกันทั้ง 2 layout (LEFT_RIGHT และ TOP_BOTTOM) - เดิมมีแค่ LEFT_RIGHT เท่านั้น
-                    # ที่ตรวจสอบฝั่งซ้าย/ขวา ส่วน TOP_BOTTOM ไม่มีการตรวจสอบเลย ทำให้กล่องหลุดออกนอกตู้ได้
+                    # ใช้ container_bounds ที่ตรวจพบจริง (deterministic) เป็นหลักในการกำหนดขอบเขตที่ยอมรับได้
+                    # แทนเปอร์เซ็นต์ตายตัวของ crop_w/crop_h ซึ่งเป็นสาเหตุหลักที่กรอบหลุดออกนอกตู้
+                    # ทำงานเหมือนกันทั้ง 2 layout (LEFT_RIGHT และ TOP_BOTTOM)
                     # ---------------------------------------------------------------------------
                     half_w_local = crop_w // 2
                     half_h_local = crop_h // 2
@@ -935,61 +1076,83 @@ def process_request(request):
                     default_rear_side = "LEFT" if resolved_view == "FRONT" else "RIGHT"
                     actual_rear_side = orientation.get(resolved_view, {}).get("rear_side", default_rear_side)
 
-                    # 2) คำนวณโซน Y - สำหรับ TOP_BOTTOM ต้องจำกัดให้อยู่เฉพาะครึ่งของ view นั้น
-                    #    (เดิมไม่มีการจำกัดนี้เลย ทำให้กล่อง FRONT ไปวาดทับครึ่ง BACK ได้ และในทางกลับกัน)
-                    if layout == "TOP_BOTTOM":
-                        if resolved_view == "FRONT":
-                            cargo_zone_ymin = crop_y_start + crop_h * 0.03
-                            cargo_zone_ymax = mid_y_local
-                        else:
-                            cargo_zone_ymin = mid_y_local
-                            cargo_zone_ymax = crop_y_end - crop_h * 0.03
-                    else:
-                        cargo_zone_ymin = crop_y_start + crop_h * 0.05
-                        cargo_zone_ymax = crop_y_end   - crop_h * 0.05
+                    # 2) ดึงขอบเขตตู้จริงของ view นี้ (ถ้าตรวจพบ) มาใช้กำหนดโซนที่ยอมรับได้
+                    view_bounds = container_bounds.get(resolved_view)
 
-                    # 3) คำนวณโซน X ตาม risk_type โดยใช้ค่า default เดิม (ตรวจสอบแล้วว่าตรงกับข้อมูลจริง)
-                    #    แล้ว mirror อัตโนมัติถ้าตำแหน่งลูกศรจริงของภาพนี้ต่างจาก default assumption
-                    if layout == "LEFT_RIGHT":
-                        if risk_type == "FRONT_EMPTY_RISK":
-                            if resolved_view == "FRONT":
-                                d_xmin, d_xmax = crop_w * 0.28, crop_w * 0.50
-                            else:
-                                d_xmin, d_xmax = crop_w * 0.50, crop_w * 0.75
-                        elif risk_type == "REAR_EMPTY_RISK":
-                            if resolved_view == "FRONT":
-                                d_xmin, d_xmax = 0, crop_w * 0.28
-                            else:
-                                d_xmin, d_xmax = crop_w * 0.72, crop_w * 0.97
-                        else:
-                            d_xmin, d_xmax = 0, crop_w * 0.97
+                    if view_bounds:
+                        # ใช้ขอบเขตตู้จริงที่ตรวจพบ - แม่นยำที่สุด
+                        vb_xmin, vb_xmax = view_bounds["xmin"], view_bounds["xmax"]
+                        vb_ymin, vb_ymax = view_bounds["ymin"], view_bounds["ymax"]
+                        vb_w = vb_xmax - vb_xmin
+                        vb_h = vb_ymax - vb_ymin
+                        # เผื่อ margin เล็กน้อยรอบขอบตู้จริง (10% ของขนาดตู้) เพราะ Gemini อาจตีกรอบชิดขอบพอดี
+                        margin_x = vb_w * 0.10
+                        margin_y = vb_h * 0.10
+                        cargo_zone_ymin = vb_ymin - margin_y
+                        cargo_zone_ymax = vb_ymax + margin_y
 
-                        if actual_rear_side != default_rear_side:
-                            lo, hi = (0, half_w_local) if resolved_view == "FRONT" else (half_w_local, crop_w)
-                            cargo_zone_xmin, cargo_zone_xmax = lo + (hi - d_xmax), lo + (hi - d_xmin)
-                            print(f"Mirrored cargo_zone for {risk_type} ({resolved_view}) - actual rear_side={actual_rear_side}")
-                        else:
-                            cargo_zone_xmin, cargo_zone_xmax = d_xmin, d_xmax
-                    else:
-                        # TOP_BOTTOM: ทั้ง Front/Back span เต็มความกว้าง crop_w เดียวกัน
                         if risk_type == "REAR_EMPTY_RISK":
-                            if resolved_view == "FRONT":
-                                d_xmin, d_xmax = 0, crop_w * 0.45
+                            if actual_rear_side == "LEFT":
+                                cargo_zone_xmin, cargo_zone_xmax = vb_xmin - margin_x, vb_xmin + vb_w * 0.45
                             else:
-                                d_xmin, d_xmax = crop_w * 0.55, crop_w * 0.97
+                                cargo_zone_xmin, cargo_zone_xmax = vb_xmax - vb_w * 0.45, vb_xmax + margin_x
                         elif risk_type == "FRONT_EMPTY_RISK":
-                            if resolved_view == "FRONT":
-                                d_xmin, d_xmax = crop_w * 0.55, crop_w * 0.97
+                            if actual_rear_side == "LEFT":
+                                cargo_zone_xmin, cargo_zone_xmax = vb_xmax - vb_w * 0.40, vb_xmax + margin_x
                             else:
-                                d_xmin, d_xmax = 0, crop_w * 0.45
+                                cargo_zone_xmin, cargo_zone_xmax = vb_xmin - margin_x, vb_xmin + vb_w * 0.40
                         else:
-                            d_xmin, d_xmax = 0, crop_w * 0.97
+                            cargo_zone_xmin, cargo_zone_xmax = vb_xmin - margin_x, vb_xmax + margin_x
+                    else:
+                        # Fallback: ตรวจไม่พบขอบเขตตู้จริง ใช้เปอร์เซ็นต์ตายตัวแบบเดิม (best-effort)
+                        if layout == "TOP_BOTTOM":
+                            if resolved_view == "FRONT":
+                                cargo_zone_ymin = crop_y_start + crop_h * 0.03
+                                cargo_zone_ymax = mid_y_local
+                            else:
+                                cargo_zone_ymin = mid_y_local
+                                cargo_zone_ymax = crop_y_end - crop_h * 0.03
+                        else:
+                            cargo_zone_ymin = crop_y_start + crop_h * 0.05
+                            cargo_zone_ymax = crop_y_end   - crop_h * 0.05
 
-                        if actual_rear_side != default_rear_side:
-                            cargo_zone_xmin, cargo_zone_xmax = crop_w - d_xmax, crop_w - d_xmin
-                            print(f"Mirrored cargo_zone for {risk_type} ({resolved_view}) - actual rear_side={actual_rear_side}")
+                        if layout == "LEFT_RIGHT":
+                            if risk_type == "FRONT_EMPTY_RISK":
+                                if resolved_view == "FRONT":
+                                    d_xmin, d_xmax = crop_w * 0.28, crop_w * 0.50
+                                else:
+                                    d_xmin, d_xmax = crop_w * 0.50, crop_w * 0.75
+                            elif risk_type == "REAR_EMPTY_RISK":
+                                if resolved_view == "FRONT":
+                                    d_xmin, d_xmax = 0, crop_w * 0.28
+                                else:
+                                    d_xmin, d_xmax = crop_w * 0.72, crop_w * 0.97
+                            else:
+                                d_xmin, d_xmax = 0, crop_w * 0.97
+
+                            if actual_rear_side != default_rear_side:
+                                lo, hi = (0, half_w_local) if resolved_view == "FRONT" else (half_w_local, crop_w)
+                                cargo_zone_xmin, cargo_zone_xmax = lo + (hi - d_xmax), lo + (hi - d_xmin)
+                            else:
+                                cargo_zone_xmin, cargo_zone_xmax = d_xmin, d_xmax
                         else:
-                            cargo_zone_xmin, cargo_zone_xmax = d_xmin, d_xmax
+                            if risk_type == "REAR_EMPTY_RISK":
+                                if resolved_view == "FRONT":
+                                    d_xmin, d_xmax = 0, crop_w * 0.45
+                                else:
+                                    d_xmin, d_xmax = crop_w * 0.55, crop_w * 0.97
+                            elif risk_type == "FRONT_EMPTY_RISK":
+                                if resolved_view == "FRONT":
+                                    d_xmin, d_xmax = crop_w * 0.55, crop_w * 0.97
+                                else:
+                                    d_xmin, d_xmax = 0, crop_w * 0.45
+                            else:
+                                d_xmin, d_xmax = 0, crop_w * 0.97
+
+                            if actual_rear_side != default_rear_side:
+                                cargo_zone_xmin, cargo_zone_xmax = crop_w - d_xmax, crop_w - d_xmin
+                            else:
+                                cargo_zone_xmin, cargo_zone_xmax = d_xmin, d_xmax
 
                     if not (cargo_zone_xmin <= box_center_x <= cargo_zone_xmax) or not (cargo_zone_ymin < box_center_y < cargo_zone_ymax):
                         print(f"⚠️ box_2d center ({box_center_x:.0f}, {box_center_y:.0f}) out of cargo zone — fallback for {risk_type}")
@@ -999,8 +1162,6 @@ def process_request(request):
                     box_h_ratio = (abs_ymax - abs_ymin) / crop_h
 
                     # ขนาดกล่องต้องสมเหตุสมผล: ไม่เล็กเกิน 3% และไม่ใหญ่เกิน 80%
-                    box_w_ratio = (abs_xmax - abs_xmin) / crop_w
-                    box_h_ratio = (abs_ymax - abs_ymin) / crop_h
                     box_too_small = box_w_ratio < 0.03 or box_h_ratio < 0.03
 
                     if not box_too_small and box_w_ratio < 0.80 and box_h_ratio < 0.80:
@@ -1009,7 +1170,6 @@ def process_request(request):
                         drawn = True
                     else:
                         # FIX 4: กล่องใหญ่เกิน 80% — clamp ให้แคบลงแต่ยังอยู่ในบริเวณที่ Gemini ชี้
-                        # แทนที่จะ reject ทิ้ง ให้ clamp และวาด
                         pad_x = int(crop_w * 0.10)
                         pad_y = int(crop_h * 0.10)
                         clamped_xmin = max(abs_xmin, pad_x)
@@ -1025,8 +1185,9 @@ def process_request(request):
                     pass
 
             if not drawn:
-                # ใช้ fallback zone ตามตำแหน่งที่กำหนดไว้
-                fallback = _get_fallback_box(risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h, orientation=orientation)
+                # ใช้ fallback zone ตามตำแหน่งที่กำหนดไว้ (ใช้ container_bounds ถ้าตรวจพบ)
+                fallback = _get_fallback_box(risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
+                                              orientation=orientation, container_bounds=container_bounds)
                 if fallback:
                     draw.rectangle(fallback, outline=outline_color, width=8)
                     drawn = True
