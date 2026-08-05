@@ -16,7 +16,31 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v11
+# AI Cargo Safety Checker - High Precision v12
+#
+# v12 - แก้ปัญหา "กรอบ REAR_LATERAL_IMBALANCE/FRONT_EMPTY_RISK หลุดไปอยู่พื้นที่ว่าง
+# ไม่ตรงกับจุดสูงต่ำจริง" (พบจากไฟล์ EE10-02, EB74, RD04):
+#   เดิม (v10-v11) zone-based risks (REAR_EMPTY/FRONT_EMPTY/REAR_LATERAL) ถูกบังคับ
+#   ให้ใช้ fallback percentage zone เสมอ ไม่เคยใช้ box_2d จาก Gemini เลย เพราะรอบก่อน
+#   เจอปัญหา box_2d ที่ Gemini ให้มามีขนาด/ตำแหน่งผิดปกติรุนแรง แต่ผลข้างเคียงคือกรอบ
+#   fallback (คำนวณจากเปอร์เซ็นต์คงที่ของ container_bounds ทั้งโซน) ไม่รู้ตำแหน่งจุดที่
+#   สูงต่ำต่างกันจริง บางครั้งจึงไปตกที่พื้นที่ว่างหรือกองที่สูงเท่ากันแทน
+#
+#   วิธีแก้ (2 ชั้น):
+#   1) ให้ analyze_rear_zone_with_ai / analyze_front_zone_with_ai ส่ง box_2d ชี้ตำแหน่ง
+#      จุดที่เห็นปัญหาจริงกลับมาด้วย (ในพิกัดของภาพ zoom-crop เอง) แล้ว validate ว่า
+#      พิกัดนั้นทับซ้อนกับสินค้าจริง (cargo_extent) เพียงพอหรือไม่ก่อนใช้งาน
+#   2) ถ้าไม่มี box_2d หรือไม่ผ่าน validation -> fallback โดยใช้ cargo_extent (ขอบเขต
+#      สินค้าจริงที่ตรวจจับด้วย pixel) เป็น reference frame แทน container_bounds เดิม
+#      เพื่อรับประกันว่ากรอบจะอยู่ในขอบเขตที่มีสินค้าจริงเสมอ ไม่มีทางลอยไปพื้นที่ว่าง
+#
+# v11 - เพิ่ม detect_cargo_extent_per_view() (HSV saturation) + วัดช่องว่างจริงระหว่าง
+#       สินค้ากับผนัง/ประตูสำหรับ FRONT/REAR_EMPTY_RISK + ปรับ prompt ให้จับ
+#       STEP_DOWN_RISK ที่ชัดเจนได้แม่นยำขึ้น
+# v10 - แก้บั๊ก layout detection ที่มี page rotation (ใช้ page.rotation_matrix) +
+#       ใช้กฎตายตัว HARDCODED_REAR_SIDE แทนการตรวจจับลูกศร
+# v9  - รวม risk ที่อยู่บริเวณเดียวกันเป็น COMBINED_AREA_RISK วาดกรอบเดียว 2 สี
+# v6  - deterministic container-boundary detection
 # ---------------------------------------------------------------------------
 
 GLOBAL_API_KEYS = []
@@ -63,9 +87,74 @@ def get_api_keys_pool():
         keys = [k.strip() for k in env_value.split("|") if k.strip()]
         if keys:
             random.shuffle(keys)
+            print(f"Loaded {len(keys)} unique API key(s) into the pool.")
             GLOBAL_API_KEYS = keys
             return GLOBAL_API_KEYS
+    print("No Gemini API keys found.")
     return []
+
+
+def generate_action_report(case_type, description="", sku_list=""):
+    sku_line = f"\n   สินค้าที่พบบริเวณนี้: {sku_list}" if sku_list else ""
+    actions = {
+        "STEP_DOWN_RISK": (
+            f"แจ้งเตือน: พบรอยต่างระดับระหว่างกองสินค้า{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
+            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
+        ),
+        "REAR_EMPTY_RISK": (
+            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
+            f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
+        ),
+        "REAR_LATERAL_IMBALANCE": (
+            f"แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
+            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
+        ),
+        "REAR_COMBINED_RISK": (
+            f"แจ้งเตือน: บริเวณประตูท้ายตู้พบทั้งพื้นที่ว่างหน้าประตู และสินค้าสูงต่ำไม่เท่ากันในแนวกว้างในจุดเดียวกัน{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
+            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
+        ),
+        "FRONT_EMPTY_RISK": (
+            f"แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นวางชิดผนังหัวตู้ เพื่ออุดช่องว่างระหว่างสินค้ากับผนัง\n"
+            f"  • ตรวจสอบว่าสินค้าแต่ละกองชิดกันแน่น ไม่มีช่องให้สินค้าเลื่อน\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
+        ),
+        "LATERAL_GAP_RISK": (
+            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
+            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
+        ),
+        "TALL_UNSTABLE_RISK": (
+            f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
+            f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
+        ),
+        "OVERHANG_RISK": (
+            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
+            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"
+        ),
+    }
+    return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
 
 
 def clean_json_response(text):
@@ -87,22 +176,10 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
     ตรวจจับ layout ของแผนภาพ (diagram) ในหน้า manifest ว่าเป็น TOP_BOTTOM
     (Front บน, Back ล่าง) หรือ LEFT_RIGHT (Front ซ้าย, Back ขวา)
 
-    *** สำคัญมาก (แก้บั๊กที่พบจากไฟล์ RD04/EC16-07-May) ***
-    เดิมใช้ page.rect.width > page.rect.height (page aspect ratio) เป็นตัวตัดสินหลัก
-    แต่พบว่า "ไม่น่าเชื่อถือ" เพราะหน้า PDF อาจกว้างกว่าสูงได้จากการมี "sidebar" (แผง
-    Load Summary ด้านขวา) แม้ว่าตัวแผนภาพเองจะจัดวางแบบ TOP_BOTTOM (Front บน/Back ล่าง)
-    ก็ตาม - พบเคสจริงที่ page เป็น Landscape (792x612) แต่ diagram เป็น TOP_BOTTOM ทำให้
-    ระบบเข้าใจผิดเป็น LEFT_RIGHT และ crop ภาพผิดพลาดทั้งหมด (กรอบยืดพาดขวางทั้งภาพ)
-
-    วิธีแก้: ตรวจสอบตำแหน่งจริงของ label "Front" และ "Back" ทั้งคู่เสมอเป็นหลัก
-    (ทั้งพิกัด x และ y) แทนการอาศัย page aspect ratio เพียงอย่างเดียว:
-      - ถ้าเจอทั้ง "Front" และ "Back": เทียบว่าต่างกันในแนวตั้ง (y) มากกว่า หรือแนวนอน (x)
-        มากกว่า - แนวไหนต่างกันมากกว่าคือทิศทางการจัดวางจริง
-      - ถ้าเจอแค่ "Back" อย่างเดียว (บางไฟล์ไม่มี label "Front" แยก): ใช้ตำแหน่ง y ของ
-        "Back" เทียบกับกึ่งกลางหน้า (แนวตั้ง) เป็นหลัก ไม่ใช่ x อีกต่อไป เพราะ xอาจเพี้ยน
-        จาก sidebar ได้ - ถ้า Back อยู่ค่อนล่างของหน้า (y_ratio > 0.5) แสดงว่าเป็น
-        TOP_BOTTOM แน่นอน (Back label จะอยู่แถวบนของ Back view ซึ่งอยู่ครึ่งล่างของหน้า)
-      - page aspect ratio ใช้เป็นแค่ fallback สุดท้ายเมื่อหา label ไม่เจอเลยเท่านั้น
+    *** สำคัญ: page.search_for() คืนพิกัดใน mediabox space (ก่อนหมุนหน้า) เสมอ แต่
+    page.rect คือขนาดหน้าหลังหมุนแล้ว (ค่าที่ใช้ตอน render จริงด้วย get_pixmap())
+    ถ้าหน้า PDF มีการ rotate พิกัดจาก search_for() จะอยู่คนละระบบพิกัดกับ page.rect
+    ทันที ต้องใช้ page.rotation_matrix แปลงพิกัดให้ตรงกันก่อนคำนวณเสมอ
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -112,16 +189,6 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
         page_height = page.rect.height
         print(f"Page size (rendered/rotated space): {page_width:.0f}x{page_height:.0f} | rotation={page.rotation}")
 
-        # ---------------------------------------------------------------------------
-        # สำคัญมาก: page.search_for() คืนพิกัดใน "mediabox space" (ก่อนหมุนหน้า) เสมอ
-        # แต่ page.rect คือขนาดหน้า "หลังหมุนแล้ว" (ค่าที่ใช้ตอน render ภาพจริงด้วย
-        # get_pixmap()) ถ้าหน้า PDF มีการ rotate (พบเคสจริงที่ rotation=90 กับไฟล์
-        # RD04/EC16-07-May) พิกัดจาก search_for() จะอยู่คนละระบบพิกัดกับ page.rect ทันที
-        # ทำให้เทียบตำแหน่งกันผิดพลาดโดยสิ้นเชิง (ค่า y เกินขอบเขตที่ควรจะเป็น)
-        #
-        # วิธีแก้: ใช้ page.rotation_matrix แปลงพิกัดจาก mediabox space ให้เป็น
-        # "rotated/rendered space" เดียวกับ page.rect ก่อนนำไปคำนวณอัตราส่วนตำแหน่งเสมอ
-        # ---------------------------------------------------------------------------
         rot_matrix = page.rotation_matrix
 
         def _to_rendered_rect(rect):
@@ -148,8 +215,6 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
             y_ratio = back_rect.y0 / page_height
             x_ratio = back_rect.x0 / page_width
             print(f"Back label only (rendered space): {back_rect} | x_ratio={x_ratio:.2f} y_ratio={y_ratio:.2f}")
-            # ถ้า Back label อยู่ค่อนล่างของหน้า (เกินครึ่งลงมา) แสดงว่า diagram เป็น
-            # TOP_BOTTOM แน่นอน ไม่ว่าค่า x_ratio จะเป็นเท่าไหร่ก็ตาม
             if y_ratio > 0.55:
                 print("Layout detected: TOP_BOTTOM (Back label in lower half of page)")
                 return "TOP_BOTTOM"
@@ -157,7 +222,6 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
                 print("Layout detected: LEFT_RIGHT (Back label in right portion, same row as Front)")
                 return "LEFT_RIGHT"
 
-        # Fallback สุดท้าย: ใช้ page aspect ratio เฉพาะเมื่อหา label ไม่เจอเลยจริงๆ
         is_landscape = page_width > page_height
         print(f"No reliable Front/Back label found - falling back to page aspect ratio (Landscape={is_landscape})")
         if is_landscape:
@@ -167,6 +231,11 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
     print("Layout detected: TOP_BOTTOM (default)")
     return "TOP_BOTTOM"
 
+
+# ---------------------------------------------------------------------------
+# Container boundary detection (deterministic, pixel-based) - ขอบเขต "ทั้ง
+# โครงสร้างตู้" (ผนัง+พื้น+สินค้า รวมกัน)
+# ---------------------------------------------------------------------------
 
 def _is_saturated_color(rgb):
     r, g, b = rgb
@@ -244,11 +313,22 @@ def detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_
                 result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
             if bb:
                 result["BACK"] = {"xmin": bb[0] + half_w, "ymin": bb[1] + crop_y_start, "xmax": bb[2] + half_w, "ymax": bb[3] + crop_y_start}
+        for view_name in ("FRONT", "BACK"):
+            if result[view_name]:
+                b = result[view_name]
+                print(f"Container bounds detected for {view_name}: x=[{b['xmin']}-{b['xmax']}] y=[{b['ymin']}-{b['ymax']}]")
+            else:
+                print(f"WARNING: Could not detect container bounds for {view_name}")
         return result
     except Exception as e:
         print(f"WARNING: Container bounds detection failed ({e})")
         return {"FRONT": None, "BACK": None}
 
+
+# ---------------------------------------------------------------------------
+# Cargo extent detection - หาขอบเขต "เฉพาะกล่องสินค้าจริง" แยกออกจากผนัง/พื้นตู้
+# ด้วย HSV saturation (สินค้าสีสด vs ผนัง/พื้นสีหม่นกว่าแม้เฉดใกล้เคียงกัน)
+# ---------------------------------------------------------------------------
 
 def _is_arrow_color(rgb):
     r, g, b = rgb
@@ -338,74 +418,49 @@ def detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_st
                 result["FRONT"] = {"xmin": fb[0], "ymin": fb[1] + crop_y_start, "xmax": fb[2], "ymax": fb[3] + crop_y_start}
             if bb:
                 result["BACK"] = {"xmin": bb[0] + half_w, "ymin": bb[1] + crop_y_start, "xmax": bb[2] + half_w, "ymax": bb[3] + crop_y_start}
+        for view_name in ("FRONT", "BACK"):
+            if result[view_name]:
+                b = result[view_name]
+                print(f"Cargo extent detected for {view_name}: x=[{b['xmin']}-{b['xmax']}] y=[{b['ymin']}-{b['ymax']}]")
+            else:
+                print(f"WARNING: Could not detect cargo extent for {view_name}")
         return result
     except Exception as e:
         print(f"WARNING: Cargo extent detection failed ({e})")
         return {"FRONT": None, "BACK": None}
 
 
-def generate_action_report(case_type, description="", sku_list=""):
-    sku_line = f"\n   สินค้าที่พบบริเวณนี้: {sku_list}" if sku_list else ""
-    actions = {
-        "STEP_DOWN_RISK": (
-            f"แจ้งเตือน: พบรอยต่างระดับระหว่างกองสินค้า{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
-            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
-        ),
-        "REAR_EMPTY_RISK": (
-            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
-            f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
-        ),
-        "REAR_LATERAL_IMBALANCE": (
-            f"แจ้งเตือน: สินค้าบริเวณประตูท้ายตู้สูงต่ำไม่เท่ากันในแนวกว้าง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
-            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
-        ),
-        "REAR_COMBINED_RISK": (
-            f"แจ้งเตือน: บริเวณประตูท้ายตู้พบทั้งพื้นที่ว่างหน้าประตู และสินค้าสูงต่ำไม่เท่ากันในแนวกว้างในจุดเดียวกัน{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นเสริมด้านที่ต่ำกว่า เพื่อปรับความสูงให้เสมอกันทั้งสองด้าน\n"
-            f"  • ตรวจสอบระดับความสูงซ้าย-ขวาให้เท่ากันก่อนปิดประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าล้มตะแคงเมื่อเปิดประตู"
-        ),
-        "FRONT_EMPTY_RISK": (
-            f"แจ้งเตือน: บริเวณผนังหัวตู้มีช่องว่าง สินค้าวางไม่ชิดผนัง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางชิดผนังหัวตู้ เพื่ออุดช่องว่างระหว่างสินค้ากับผนัง\n"
-            f"  • ตรวจสอบว่าสินค้าแต่ละกองชิดกันแน่น ไม่มีช่องให้สินค้าเลื่อน\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
-        ),
-        "LATERAL_GAP_RISK": (
-            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
-            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
-        ),
-        "TALL_UNSTABLE_RISK": (
-            f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
-            f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
-        ),
-        "OVERHANG_RISK": (
-            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
-            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"
-        ),
-    }
-    return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
+def _cargo_pixel_ratio_in_box(img, box):
+    """
+    คำนวณสัดส่วนพิกเซล 'สินค้าสีสด' (vivid cargo color) ภายในกรอบ box ที่กำหนด
+    เทียบกับพื้นที่ทั้งหมดของกรอบ - ใช้ตรวจสอบว่า box_2d ที่ Gemini ให้มา
+    ทับซ้อนกับสินค้าจริงเพียงพอหรือไม่ (ไม่ใช่ลอยอยู่ในพื้นที่ว่างเปล่า)
+    """
+    x0, y0, x1, y1 = [int(v) for v in box]
+    x0 = max(0, x0); y0 = max(0, y0)
+    x1 = min(img.width, x1); y1 = min(img.height, y1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    crop = img.crop((x0, y0, x1, y1))
+    px = crop.convert("RGB").load()
+    w, h = crop.size
+    total = w * h
+    if total == 0:
+        return 0.0
+    step = max(1, min(w, h) // 60)  # sample for speed on large boxes
+    count = 0
+    sampled = 0
+    for yy in range(0, h, step):
+        for xx in range(0, w, step):
+            sampled += 1
+            if _is_vivid_cargo_color(px[xx, yy]):
+                count += 1
+    return count / sampled if sampled > 0 else 0.0
 
+
+# ---------------------------------------------------------------------------
+# PDF text helpers
+# ---------------------------------------------------------------------------
 
 def extract_sku_from_pdf(pdf_bytes):
     try:
@@ -440,6 +495,10 @@ def extract_sku_from_pdf(pdf_bytes):
         print(f"SKU extraction failed: {e}")
         return []
 
+
+# ---------------------------------------------------------------------------
+# Gemini calls
+# ---------------------------------------------------------------------------
 
 def _reset_genai_client():
     if hasattr(genai, "_client"):
@@ -493,8 +552,15 @@ RULES (numeric thresholds - apply consistently, do not be overly cautious):
 3. The container wall/floor/frame structure itself is NOT cargo - never flag it.
 4. If cargo reasonably fills the rear area and both sides are close in height (within ~1 small tier) -> SAFE.
 
+IMPORTANT - if you flag a risk, you MUST also provide "box_2d" pinpointing EXACTLY where the
+problem is visible in THIS image (the specific stack, or the boundary between the two stacks with
+different heights). Use [ymin, xmin, ymax, xmax] format with values 0-1000 normalized to this
+image's own size. The box must tightly enclose the actual shorter stack (or the height-mismatch
+boundary) - not the whole image, not empty background.
+
 Return ONLY this exact JSON:
-{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any","confidence":"HIGH"|"MEDIUM"|"LOW"}}
+{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
+(box_2d is required whenever rear_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, rear_crop, api_keys)
 
@@ -514,8 +580,13 @@ RULES:
    packing are normal) -> SAFE.
 3. When the gap is ambiguous or very small -> SAFE.
 
+IMPORTANT - if you flag FRONT_EMPTY_RISK, you MUST also provide "box_2d" pinpointing EXACTLY where
+the empty gap is visible in THIS image. Use [ymin, xmin, ymax, xmax] format with values 0-1000
+normalized to this image's own size. The box should cover the actual gap area between cargo and wall.
+
 Return ONLY this exact JSON:
-{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM"|"LOW"}}
+{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
+(box_2d is required whenever front_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, front_crop, api_keys)
 
@@ -602,6 +673,12 @@ Return ONLY a JSON array (empty array if no genuine risks found):
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 
+# ---------------------------------------------------------------------------
+# v12: Fallback zone boxes - ใช้กฎตายตัว (HARDCODED_REAR_SIDE) + วัดช่องว่างจริง
+# จาก cargo_extent เทียบกับ container_bounds (สำหรับ EMPTY_RISK) หรือ clamp เข้าไป
+# อยู่ในขอบเขต cargo_extent เสมอ (สำหรับ LATERAL_IMBALANCE ที่ไม่มีจุดวัดชัดเจน)
+# ---------------------------------------------------------------------------
+
 def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_h,
                        container_bounds=None, cargo_extent=None):
     vl = str(view_label).upper().strip()
@@ -612,6 +689,11 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
     view_container = container_bounds.get(vl) if container_bounds else None
     view_cargo = cargo_extent.get(vl) if cargo_extent else None
 
+    # ---------------------------------------------------------------------------
+    # REAR_EMPTY_RISK / FRONT_EMPTY_RISK / REAR_COMBINED_RISK: วัดช่องว่างจริง
+    # ระหว่างขอบเขตสินค้ากับขอบเขตโครงสร้าง (แม่นยำที่สุด เพราะสองอย่างนี้ "มีช่องว่าง
+    # จริง" ให้วัดได้ตรงไปตรงมา)
+    # ---------------------------------------------------------------------------
     if risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "REAR_COMBINED_RISK") and view_container and view_cargo:
         c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
         g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
@@ -653,12 +735,22 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             print(f"Measured {risk_type} gap for {vl}: cargo=[{g_xmin}-{g_xmax}] container=[{c_xmin}-{c_xmax}] -> box_x=[{gap_x0}-{gap_x1}]")
             return tuple(map(int, box))
 
-    if view_container:
-        origin_x = view_container["xmin"]
-        origin_y = view_container["ymin"]
-        ref_w = max(1, view_container["xmax"] - view_container["xmin"])
-        ref_h = max(1, view_container["ymax"] - view_container["ymin"])
-        source_label = "detected container bounds (percentage fallback)"
+    # ---------------------------------------------------------------------------
+    # v12 FIX: สำหรับ REAR_LATERAL_IMBALANCE (หรือกรณีอื่นที่ไม่มีจุดวัดชัดเจน) -
+    # เดิมใช้เปอร์เซ็นต์ของ container_bounds (ซึ่งอาจรวมพื้นที่ว่างขนาดใหญ่) ทำให้กรอบ
+    # ลอยไปอยู่พื้นที่ว่างได้ ตอนนี้เปลี่ยนมาใช้ cargo_extent เป็น reference frame หลัก
+    # แทนถ้ามีข้อมูล - รับประกันว่ากรอบจะอยู่ในขอบเขตที่มีสินค้าจริงเสมอ ไม่มีทางลอย
+    # ไปพื้นที่ว่างเปล่าอีกต่อไป (แม้จะไม่แม่นยำเป๊ะว่าจุดไหนคือรอยต่อจริง แต่อย่างน้อย
+    # ก็อยู่บนตัวสินค้า ไม่ใช่อากาศว่างเหมือนก่อน)
+    # ---------------------------------------------------------------------------
+    reference_bounds = view_cargo if view_cargo else view_container
+
+    if reference_bounds:
+        origin_x = reference_bounds["xmin"]
+        origin_y = reference_bounds["ymin"]
+        ref_w = max(1, reference_bounds["xmax"] - reference_bounds["xmin"])
+        ref_h = max(1, reference_bounds["ymax"] - reference_bounds["ymin"])
+        source_label = "cargo extent (v12 fix - prevents floating in empty space)" if view_cargo else "detected container bounds (percentage fallback)"
     else:
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
@@ -672,7 +764,7 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             origin_y = crop_y_start
             ref_w = half_w if vl == "FRONT" else crop_w - half_w
             ref_h = crop_h
-        source_label = "fixed-percentage fallback (no container bounds)"
+        source_label = "fixed-percentage fallback (no container/cargo bounds)"
 
     def pct(px, py):
         return origin_x + int(ref_w * px), origin_y + int(ref_h * py)
@@ -682,8 +774,8 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
     mid_yf = y0f + (y1f - y0f) / 2
 
     if layout == "TOP_BOTTOM":
-        rear_frac = 0.38
-        wall_frac = 0.32
+        rear_frac = 0.55 if view_cargo else 0.38  # cargo_extent frame มักแคบกว่า container เดิม จึงขยายสัดส่วนขึ้น
+        wall_frac = 0.45 if view_cargo else 0.32
         if rear_side == "LEFT":
             rear_zone = (0.0, y0f, rear_frac, y1f)
             wall_zone = (1.0 - wall_frac, y0f, 1.0, y1f)
@@ -862,6 +954,58 @@ def _draw_single_or_dual_rectangle(draw, coords, outline_color, draw_colors=None
         draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
 
+def _convert_zoom_box_to_absolute(zoom_box_2d, crop_x0, crop_y0, crop_x1, crop_y1):
+    """
+    แปลงพิกัด box_2d (0-1000 normalized) ที่ Gemini ให้มาในระบบพิกัดของภาพ zoom-crop
+    ให้เป็นพิกัดสัมบูรณ์เทียบกับภาพเต็ม โดยใช้ขอบเขต crop ที่แท้จริงที่ถูกใช้ตอนส่งภาพ
+    ให้ Gemini วิเคราะห์ (rear_crop_front, front_crop_back เป็นต้น)
+    """
+    try:
+        ymin, xmin, ymax, xmax = map(float, zoom_box_2d)
+        if max(ymin, xmin, ymax, xmax) <= 1.0:
+            ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+        crop_w = crop_x1 - crop_x0
+        crop_h = crop_y1 - crop_y0
+        abs_xmin = crop_x0 + (xmin / 1000.0) * crop_w
+        abs_xmax = crop_x0 + (xmax / 1000.0) * crop_w
+        abs_ymin = crop_y0 + (ymin / 1000.0) * crop_h
+        abs_ymax = crop_y0 + (ymax / 1000.0) * crop_h
+        if abs_xmax <= abs_xmin or abs_ymax <= abs_ymin:
+            return None
+        return (int(abs_xmin), int(abs_ymin), int(abs_xmax), int(abs_ymax))
+    except Exception:
+        return None
+
+
+def _get_zoom_precise_box(zone_result, box_key, crop_rect, full_img, min_cargo_ratio=0.15):
+    """
+    v12 NEW: พยายามใช้ box_2d ที่ Gemini ส่งกลับมาจากการวิเคราะห์ zoom-crop (rear/front
+    zone analysis) เพื่อระบุตำแหน่งจุดเสี่ยงที่แม่นยำกว่าเปอร์เซ็นต์คงที่ทั่วไป
+    - แปลงพิกัดจาก zoom-crop space เป็นพิกัดสัมบูรณ์ของภาพเต็ม
+    - validate ว่าพื้นที่ในกรอบนั้นมีสัดส่วนพิกเซล 'สินค้าสีสด' เพียงพอ (ไม่ใช่พื้นที่
+      ว่างเปล่าล้วน) ก่อนนำไปใช้จริง - ถ้าไม่ผ่านจะคืนค่า None ให้ไปใช้ fallback แทน
+    """
+    if not isinstance(zone_result, dict):
+        return None
+    zoom_box = zone_result.get(box_key)
+    if not zoom_box or not isinstance(zoom_box, list) or len(zoom_box) != 4:
+        return None
+    crop_x0, crop_y0, crop_x1, crop_y1 = crop_rect
+    abs_box = _convert_zoom_box_to_absolute(zoom_box, crop_x0, crop_y0, crop_x1, crop_y1)
+    if not abs_box:
+        return None
+    cargo_ratio = _cargo_pixel_ratio_in_box(full_img, abs_box)
+    if cargo_ratio < min_cargo_ratio:
+        print(f"Zoom box_2d rejected (cargo_ratio={cargo_ratio:.2f} < {min_cargo_ratio}): {abs_box}")
+        return None
+    print(f"Zoom box_2d ACCEPTED (cargo_ratio={cargo_ratio:.2f}): {abs_box}")
+    return abs_box
+
+
+# ---------------------------------------------------------------------------
+# Main HTTP handler
+# ---------------------------------------------------------------------------
+
 @functions_framework.http
 def process_request(request):
     if request.method == "OPTIONS":
@@ -925,6 +1069,9 @@ def process_request(request):
         front_rear_side = HARDCODED_REAR_SIDE["FRONT"]
         back_rear_side = HARDCODED_REAR_SIDE["BACK"]
 
+        # เก็บพิกัด crop rectangle จริงของแต่ละ zoom เพื่อใช้แปลงพิกัด box_2d กลับมาทีหลัง
+        zoom_crop_rects = {}
+
         if layout == "TOP_BOTTOM":
             half_h = crop_h // 2
             (fr_x0, fr_x1), (fw_x0, fw_x1) = _zoom_crop_ranges(container_bounds.get("FRONT"), front_rear_side, 0, crop_w)
@@ -933,6 +1080,10 @@ def process_request(request):
             front_crop_front = img.crop((fw_x0, crop_y_start, fw_x1, crop_y_start + half_h))
             rear_crop_back = img.crop((br_x0, crop_y_start + half_h, br_x1, crop_y_end))
             front_crop_back = img.crop((bw_x0, crop_y_start + half_h, bw_x1, crop_y_end))
+            zoom_crop_rects["rear_FRONT"] = (fr_x0, crop_y_start, fr_x1, crop_y_start + half_h)
+            zoom_crop_rects["front_FRONT"] = (fw_x0, crop_y_start, fw_x1, crop_y_start + half_h)
+            zoom_crop_rects["rear_BACK"] = (br_x0, crop_y_start + half_h, br_x1, crop_y_end)
+            zoom_crop_rects["front_BACK"] = (bw_x0, crop_y_start + half_h, bw_x1, crop_y_end)
             print(f"TOP_BOTTOM crop (HARDCODED) - FRONT rear={front_rear_side} ({fr_x0}-{fr_x1}) | BACK rear={back_rear_side} ({br_x0}-{br_x1})")
         else:
             half_w = crop_w // 2
@@ -942,15 +1093,23 @@ def process_request(request):
             if front_rear_side == "LEFT":
                 rear_crop_front = img.crop((fr_x0, mid_h, fr_x1, crop_y_end))
                 front_crop_front = img.crop((fw_x0, crop_y_start, fw_x1, mid_h))
+                zoom_crop_rects["rear_FRONT"] = (fr_x0, mid_h, fr_x1, crop_y_end)
+                zoom_crop_rects["front_FRONT"] = (fw_x0, crop_y_start, fw_x1, mid_h)
             else:
                 rear_crop_front = img.crop((fr_x0, crop_y_start, fr_x1, mid_h))
                 front_crop_front = img.crop((fw_x0, mid_h, fw_x1, crop_y_end))
+                zoom_crop_rects["rear_FRONT"] = (fr_x0, crop_y_start, fr_x1, mid_h)
+                zoom_crop_rects["front_FRONT"] = (fw_x0, mid_h, fw_x1, crop_y_end)
             if back_rear_side == "LEFT":
                 rear_crop_back = img.crop((br_x0, mid_h, br_x1, crop_y_end))
                 front_crop_back = img.crop((bw_x0, crop_y_start, bw_x1, mid_h))
+                zoom_crop_rects["rear_BACK"] = (br_x0, mid_h, br_x1, crop_y_end)
+                zoom_crop_rects["front_BACK"] = (bw_x0, crop_y_start, bw_x1, mid_h)
             else:
                 rear_crop_back = img.crop((br_x0, crop_y_start, br_x1, mid_h))
                 front_crop_back = img.crop((bw_x0, mid_h, bw_x1, crop_y_end))
+                zoom_crop_rects["rear_BACK"] = (br_x0, crop_y_start, br_x1, mid_h)
+                zoom_crop_rects["front_BACK"] = (bw_x0, mid_h, bw_x1, crop_y_end)
             print(f"LEFT_RIGHT crop (HARDCODED) - FRONT rear={front_rear_side} ({fr_x0}-{fr_x1}) | BACK rear={back_rear_side} ({br_x0}-{br_x1})")
 
         api_keys_pool = get_api_keys_pool()
@@ -958,6 +1117,24 @@ def process_request(request):
         rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
         front_result_front = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
         front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
+
+        # v12: พยายามหาพิกัดแม่นยำจาก box_2d ที่ Gemini ส่งมาในการวิเคราะห์ zoom ก่อน
+        # (ถ้าไม่ผ่าน validation จะเป็น None แล้วไปใช้ fallback ตอนวาดกรอบทีหลัง)
+        precise_boxes = {}  # key: (view_label, risk_type) -> (x0,y0,x1,y1) absolute
+        for view_label, rear_result, key_prefix in (("FRONT", rear_result_front, "rear_FRONT"), ("BACK", rear_result_back, "rear_BACK")):
+            if isinstance(rear_result, dict) and str(rear_result.get("rear_zone_risk", "")).upper() != "SAFE":
+                pb = _get_zoom_precise_box(rear_result, "box_2d", zoom_crop_rects[key_prefix], img)
+                if pb:
+                    rear_zone_risk_val = str(rear_result.get("rear_zone_risk", "")).upper()
+                    if rear_zone_risk_val in ("REAR_EMPTY_RISK", "BOTH"):
+                        precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb
+                    if rear_zone_risk_val in ("REAR_LATERAL_IMBALANCE", "BOTH"):
+                        precise_boxes[(view_label, "REAR_LATERAL_IMBALANCE")] = pb
+        for view_label, front_result, key_prefix in (("FRONT", front_result_front, "front_FRONT"), ("BACK", front_result_back, "front_BACK")):
+            if isinstance(front_result, dict) and str(front_result.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
+                pb = _get_zoom_precise_box(front_result, "box_2d", zoom_crop_rects[key_prefix], img)
+                if pb:
+                    precise_boxes[(view_label, "FRONT_EMPTY_RISK")] = pb
 
         def _normalize_view(v):
             v = str(v).upper().strip()
@@ -986,8 +1163,6 @@ def process_request(request):
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH"):
                 if confidence in ("HIGH", "MEDIUM") and view_label not in _existing_risk_views("REAR_LATERAL"):
                     all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
-                else:
-                    print(f"Skipping REAR_LATERAL ({view_label}) - confidence={confidence}")
 
         for view_label, front_result in (("FRONT", front_result_front), ("BACK", front_result_back)):
             if not isinstance(front_result, dict):
@@ -1047,7 +1222,15 @@ def process_request(request):
             drawn = False
             is_zone_based = fallback_risk_type in ZONE_BASED_RISK_TYPES or risk_type == "COMBINED_AREA_RISK"
 
-            if not is_zone_based and box and isinstance(box, list) and len(box) == 4:
+            # v12: สำหรับ zone-based risk ที่ไม่ใช่ COMBINED (ไม่มีการรวมกล่องจากหลาย
+            # แหล่ง) ให้ลองใช้พิกัดแม่นยำจาก zoom box_2d ก่อนเป็นอันดับแรก
+            if is_zone_based and risk_type != "COMBINED_AREA_RISK":
+                precise = precise_boxes.get((resolved_view, risk_type))
+                if precise:
+                    _draw_single_or_dual_rectangle(draw, precise, outline_color, draw_colors)
+                    drawn = True
+
+            if not drawn and not is_zone_based and box and isinstance(box, list) and len(box) == 4:
                 try:
                     ymin, xmin, ymax, xmax = map(float, box)
                     if max(ymin, xmin, ymax, xmax) <= 1.0:
