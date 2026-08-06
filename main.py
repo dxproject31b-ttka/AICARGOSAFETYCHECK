@@ -16,32 +16,43 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v17
+# AI Cargo Safety Checker - High Precision v18
 #
-# v17 - แก้บั๊กสำคัญที่พบจากการใช้งานจริง: LATERAL_GAP_RISK (เพิ่มใน v16) ไม่ทำงาน
-#   เลยในไฟล์จริง (AA05) ทั้งที่มีพื้นที่ว่างด้านข้างชัดเจน (~90cm+ ตามที่ผู้ใช้ยืนยัน)
+# v18 - เพิ่มกลไก DETERMINISTIC สำหรับ STEP_DOWN_RISK (พบจากไฟล์ AA02/AB01 ที่ Gemini
+#   พลาดไม่ flag ความต่างระดับที่ชัดเจนตรงประตูท้ายตู้ เพราะ prompt เดิมบอกให้ AI
+#   "อย่า label ความต่างระดับตรงประตูท้ายเป็น STEP_DOWN_RISK" - ทำให้พลาดกรณีนี้ไป)
 #
-#   Root cause: ฟังก์ชัน compute_lateral_gap_mm() คืนค่า None ทันทีถ้า
-#   container_length_mm เป็น None (คือดึงตัวเลข "7200 (mm)" จากข้อความ PDF จริงไม่
-#   สำเร็จ - ต่างจากไฟล์ synthetic ที่ใช้ทดสอบซึ่งใส่ข้อความให้ตรงเป๊ะ) และไม่มี
-#   fallback แบบสัดส่วน % เหมือนที่ FRONT_EMPTY_RISK/REAR_EMPTY_RISK มี (ผ่าน
-#   compute_empty_gap_ratio) ทำให้เมื่อคาลิเบรต mm ไม่สำเร็จ การตรวจสอบ
-#   LATERAL_GAP_RISK ทั้งหมดถูกข้ามไปเงียบๆ โดยไม่มีทางเลือกสำรองเลย
+#   หลักการ: สแกน "ขอบบนสุดของสินค้าจริง" (height profile) ที่แต่ละตำแหน่ง x ตลอด
+#   ความกว้างของสินค้า แล้วหา "จุดกระโดด" (discontinuity) ระหว่างจุดที่ติดกัน - ในภาพ
+#   isometric ปกติ ขอบบนของกองที่สูงเท่ากันจะไล่ระดับตามมุมมองอย่างนุ่มนวล (ประมาณ
+#   0.4-0.5 พิกเซลต่อ 1 พิกเซลแนวนอน) แต่ถ้ามีกองที่สูงต่ำกว่ากันจริง จะเกิดการ
+#   "กระโดด" อย่างฉับพลันที่ตำแหน่งรอยต่อ (สังเกตได้ชัดจากข้อมูลจริง: ปกติ delta
+#   ระหว่างจุดติดกันจะอยู่ที่ 2-7 พิกเซล แต่ที่รอยต่อจริงจะกระโดดถึง 30-85+ พิกเซล)
 #
-#   นี่คือเหตุผลที่ FRONT_EMPTY_RISK ปลอม (false positive) หายไปถูกต้องแล้ว (เพราะมี
-#   ratio fallback ทำงานอยู่) แต่ LATERAL_GAP_RISK ใหม่กลับไม่ทำงานเลย (ไม่มี fallback)
+#   เมื่อพบจุดกระโดดที่มีขนาดเกินเกณฑ์ (เทียบเป็นสัดส่วนของความสูงตู้ทั้งหมด) จะแบ่ง
+#   ออกเป็น 2 ฝั่ง (ก่อน/หลังจุดกระโดด) หาฝั่งที่ 'เตี้ยกว่า' แล้ววาดกรอบครอบเฉพาะ
+#   กองเตี้ยนั้น (จากยอดกองลงไปถึงพื้นตู้) เพื่อไฮไลท์ตำแหน่งเสี่ยงที่แท้จริง แล้ว
+#   FORCE สร้าง STEP_DOWN_RISK เอง โดยไม่ต้องรอ Gemini (เหมือนกลไกที่ทำกับ
+#   FRONT_EMPTY_RISK/REAR_EMPTY_RISK/LATERAL_GAP_RISK ไปแล้วก่อนหน้านี้)
 #
-#   วิธีแก้ v17:
-#   1) เพิ่ม compute_lateral_gap_ratio() เป็น fallback แบบสัดส่วน % เหมือนที่มีอยู่แล้ว
-#      สำหรับ FRONT/REAR_EMPTY_RISK - ใช้เมื่อคาลิเบรต mm ไม่สำเร็จ
-#   2) ปรับปรุง extract_container_length_mm() ให้ทนทานขึ้น: ค้นหาในทุกหน้า (ไม่ใช่แค่
-#      หน้า 2) และรองรับรูปแบบข้อความที่หลากหลายกว่าเดิม (เว้นวรรค/ไม่เว้นวรรค,
-#      ตัวพิมพ์เล็ก-ใหญ่ของหน่วย mm) พร้อม log ชัดเจนขึ้นเมื่อค้นหาไม่พบ เพื่อให้ debug
-#      ปัญหาการดึงข้อความจาก PDF จริงได้ง่ายขึ้นในอนาคต
+#   ทดสอบยืนยันด้วยภาพจริง AA02 และ AB01 - กรอบที่ตรวจพบตรงกับตำแหน่งที่ผู้ใช้วงกลม
+#   ไว้ด้วยมือพอดี (AA02: กอง ASI1A-AF สูงเตี้ยกว่าเพื่อนบ้าน 42.9% ของความสูงตู้,
+#   AB01: กอง SHP1A-AK/NOKIA-AK เตี้ยกว่าเพื่อนบ้าน 24.4% ของความสูงตู้)
 #
-# v16 - เพิ่ม LATERAL_GAP_RISK deterministic (พื้นที่ว่างด้านข้าง ≥300mm) + FIX
-#       FRONT_EMPTY_RISK ให้ใช้ Front view เป็นแหล่งข้อมูลเดียว (แก้ false positive
-#       จากมุมมอง Back view ที่มีเงาบังทำให้สับสนกับด้านข้างกล่องสินค้า)
+#   เกณฑ์ MIN_STEP_DOWN_RATIO = 0.075 (7.5%) เลือกจากค่าที่วัดได้จริง: AB01 (กรณี
+#   เสี่ยงจริงที่เพิ่งพบว่า Gemini พลาด) วัดได้ ~7.6%, AA02 วัดได้ ~20%, ในขณะที่
+#   ความผันผวนปกติ (ไม่ใช่ความเสี่ยง) วัดได้เพียง ~1-2% เท่านั้น จึงมี margin เพียงพอ
+#
+#   หมายเหตุสำคัญ: ระหว่างพัฒนา พบว่าการทดสอบด้วยไฟล์ "AI_Result_*.jpg" (ผลลัพธ์ที่
+#   ผ่านการประมวลผลไปแล้ว มีกรอบสีจากรอบทดสอบก่อนหน้าติดอยู่) อาจทำให้เกิด false
+#   positive ได้ เพราะระบบตรวจจับสีสินค้าไปพบกรอบสีเหลือง/ฟ้า/ชมพูที่วาดค้างไว้เอง
+#   - นี่เป็นปัญหาของการใช้ไฟล์ที่ผ่านการประมวลผลแล้วมาทดสอบซ้ำ ไม่ใช่บั๊กของ
+#   algorithm สำหรับไฟล์ manifest ต้นฉบับที่สะอาด (ยังไม่เคยผ่านการวาดกรอบใดๆ)
+#
+# v17 - แก้บั๊ก LATERAL_GAP_RISK ไม่ทำงานเมื่อคาลิเบรต mm ไม่สำเร็จ (เพิ่ม ratio
+#   fallback + ปรับปรุง extract_container_length_mm ให้ทนทานขึ้น)
+# v16 - เพิ่ม LATERAL_GAP_RISK deterministic + FIX FRONT_EMPTY_RISK ให้ใช้ Front view
+#   เป็นแหล่งข้อมูลเดียว (แก้ false positive จากมุมมอง Back view ที่มีเงาบัง)
 # v15 - deterministic FORCE สำหรับ FRONT_EMPTY_RISK/REAR_EMPTY_RISK
 # v14 - เกณฑ์ deterministic ใช้ระยะทางจริง (มม.) แทนสัดส่วน % (คาลิเบรตจาก PDF text)
 # v13 - deterministic gap-ratio gate (สัดส่วน %)
@@ -87,18 +98,19 @@ HARDCODED_REAR_SIDE = {
     "BACK": "RIGHT",
 }
 
-# เกณฑ์ deterministic ขั้นต่ำของ "ระยะทางช่องว่างจริง" (มิลลิเมตร) สำหรับ
-# FRONT_EMPTY_RISK/REAR_EMPTY_RISK (อันตรายเพราะสินค้าเคลื่อนที่/ล้มได้ในแนวยาว)
 MIN_EMPTY_GAP_MM = 400
-
-# เกณฑ์ deterministic ขั้นต่ำของ "ช่องว่างด้านข้างบนพื้นตู้" (มิลลิเมตร) ที่ถือว่าเป็น
-# LATERAL_GAP_RISK จริง - ตามที่ผู้ใช้ยืนยัน: ถ้าพื้นที่ว่างเกิน 30 ซม. ถือว่าเสี่ยง
 MIN_LATERAL_GAP_MM = 300
-
-# ค่า fallback (สัดส่วน %) เมื่อไม่สามารถคาลิเบรต มม./พิกเซล ได้ - ใช้ร่วมกันทั้ง
-# FRONT/REAR_EMPTY_RISK และ LATERAL_GAP_RISK (v17: เพิ่ม lateral fallback)
 FALLBACK_MIN_EMPTY_GAP_RATIO = 0.12
 FALLBACK_MIN_LATERAL_GAP_RATIO = 0.12
+
+# v18 NEW: เกณฑ์ deterministic ขั้นต่ำของ "สัดส่วนความสูงที่ต่างกัน" (เทียบกับความสูง
+# ตู้ทั้งหมดในภาพ) ที่ถือว่าเป็น STEP_DOWN_RISK จริง - ดูรายละเอียดการเลือกค่าที่
+# comment หัวไฟล์ (derived from real AA02 ~20% and AB01 ~7.6% measurements)
+MIN_STEP_DOWN_RATIO = 0.075
+STEP_DOWN_PROFILE_STEP_PX = 5
+STEP_DOWN_MIN_CONSISTENT_RUN = 10
+STEP_DOWN_MIN_FLAT_WIDTH_PX = 12
+STEP_DOWN_MERGE_GAP_PX = 15
 
 
 def get_api_keys_pool():
@@ -198,10 +210,6 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
     """
     ตรวจจับ layout ของแผนภาพ (diagram) ในหน้า manifest ว่าเป็น TOP_BOTTOM
     (Front บน, Back ล่าง) หรือ LEFT_RIGHT (Front ซ้าย, Back ขวา)
-
-    *** สำคัญ: page.search_for() คืนพิกัดใน mediabox space (ก่อนหมุนหน้า) เสมอ แต่
-    page.rect คือขนาดหน้าหลังหมุนแล้ว ถ้าหน้า PDF มีการ rotate ต้องใช้
-    page.rotation_matrix แปลงพิกัดให้ตรงกันก่อนคำนวณเสมอ
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -256,17 +264,9 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
 
 def extract_container_length_mm(pdf_bytes: bytes):
     """
-    v17 IMPROVED: ดึงค่าความยาวตู้จริง (มิลลิเมตร) จากข้อความในหน้า manifest PDF
-    (เช่นตัวเลข "7200 (mm)" ที่ปรากฏกำกับเส้นบอกความยาวในแผนภาพ)
-
-    ปรับปรุงให้ทนทานกว่าเดิม:
-    - ค้นหาในทุกหน้าของ PDF (ไม่ใช่แค่หน้าที่ 2) เผื่อกรณีที่ข้อความอยู่คนละหน้า
-    - รองรับรูปแบบข้อความที่หลากหลายกว่าเดิม (เว้นวรรคไม่สม่ำเสมอ, ตัวพิมพ์เล็ก-ใหญ่
-      ของหน่วย "mm", มีหรือไม่มีวงเล็บ)
-    - log รายละเอียดชัดเจนเมื่อค้นหาไม่พบ เพื่อ debug ปัญหาการดึงข้อความได้ง่ายขึ้น
-
-    Returns: ความยาวตู้ (mm) เป็น int, หรือ None ถ้าไม่พบข้อมูลที่เชื่อถือได้
-    (เมื่อ None ระบบจะใช้ fallback แบบสัดส่วน % แทนโดยอัตโนมัติในทุกจุดที่เรียกใช้)
+    ดึงค่าความยาวตู้จริง (มิลลิเมตร) จากข้อความในหน้า manifest PDF (เช่นตัวเลข
+    "7200 (mm)") ใช้เป็นค่าคาลิเบรตแปลงพิกเซล -> มิลลิเมตรจริง ค้นหาในทุกหน้า
+    และรองรับรูปแบบข้อความหลากหลาย
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -274,7 +274,6 @@ def extract_container_length_mm(pdf_bytes: bytes):
         for page_idx in range(len(doc)):
             page = doc[page_idx]
             full_text = page.get_text("text")
-            # รองรับ "7200 (mm)", "7200(mm)", "7200 ( mm )", "7200 (MM)" เป็นต้น
             matches = re.findall(r"(\d{3,6})\s*\(\s*mm\s*\)", full_text, flags=re.IGNORECASE)
             values = [int(m) for m in matches if 1000 <= int(m) <= 20000]
             if values:
@@ -512,8 +511,6 @@ def _cargo_pixel_ratio_in_box(img, box):
 
 
 def compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type):
-    """คำนวณช่องว่างเป็นพิกเซล (raw) ในแนวยาว ระหว่างขอบเขตสินค้ากับขอบเขตโครงสร้างตู้
-    Returns: (gap_pixels, container_width_pixels) หรือ (None, None) ถ้าคำนวณไม่ได้"""
     if not view_container or not view_cargo:
         return None, None
     c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
@@ -535,7 +532,6 @@ def compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type):
 
 
 def compute_empty_gap_mm(view_container, view_cargo, rear_side, risk_type, container_length_mm):
-    """คำนวณระยะทางช่องว่างจริงในแนวยาว (มิลลิเมตร) โดยคาลิเบรตจากความยาวตู้จริง"""
     gap_px, container_width_px = compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type)
     if gap_px is None or not container_length_mm or container_width_px is None or container_width_px <= 0:
         return None
@@ -544,7 +540,6 @@ def compute_empty_gap_mm(view_container, view_cargo, rear_side, risk_type, conta
 
 
 def compute_empty_gap_ratio(view_container, view_cargo, rear_side, risk_type):
-    """Fallback: สัดส่วน % ของช่องว่างเทียบความกว้างตู้ที่ตรวจจับได้"""
     gap_px, container_width_px = compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type)
     if gap_px is None or container_width_px is None or container_width_px <= 0:
         return None
@@ -552,11 +547,6 @@ def compute_empty_gap_ratio(view_container, view_cargo, rear_side, risk_type):
 
 
 def compute_lateral_gap_pixels(view_container, view_cargo):
-    """
-    คำนวณช่องว่างด้านข้าง (lateral/width gap) เป็นพิกเซล (raw) - เปรียบเทียบ
-    'ช่วงแนวตั้ง (y-range)' ของขอบเขตโครงสร้างตู้กับขอบเขตสินค้าจริง
-    Returns: (gap_y_pixels, container_x_span_pixels) หรือ (None, None) ถ้าคำนวณไม่ได้
-    """
     if not view_container or not view_cargo:
         return None, None
     container_y_span = view_container["ymax"] - view_container["ymin"]
@@ -567,15 +557,6 @@ def compute_lateral_gap_pixels(view_container, view_cargo):
 
 
 def compute_lateral_gap_mm(view_container, view_cargo, container_length_mm):
-    """
-    ตรวจจับช่องว่างด้านข้าง (lateral/width gap) บนพื้นตู้ที่ไม่มีสินค้าค้ำยัน โดย
-    เปรียบเทียบ 'ช่วงแนวตั้ง (y-range)' ของขอบเขตโครงสร้างตู้กับขอบเขตสินค้าจริง แล้ว
-    คาลิเบรตเป็นมิลลิเมตรโดยใช้ mm-per-pixel เดียวกับที่ใช้คำนวณแนวยาว
-
-    Returns: ระยะทางช่องว่างด้านข้างจริง (mm) เป็น float, หรือ None ถ้าคำนวณไม่ได้
-    (ไม่มี container_bounds/cargo_extent หรือไม่มี container_length_mm - กรณีหลังนี้
-    ให้ใช้ compute_lateral_gap_ratio() แทนเป็น fallback)
-    """
     gap_y_px, container_x_span = compute_lateral_gap_pixels(view_container, view_cargo)
     if gap_y_px is None or not container_length_mm or not container_x_span:
         return None
@@ -584,19 +565,6 @@ def compute_lateral_gap_mm(view_container, view_cargo, container_length_mm):
 
 
 def compute_lateral_gap_ratio(view_container, view_cargo):
-    """
-    v17 NEW: Fallback แบบสัดส่วน % สำหรับ LATERAL_GAP_RISK เมื่อคาลิเบรต มม./พิกเซล
-    ไม่สำเร็จ (หา container_length_mm จาก PDF ไม่เจอ) - แก้บั๊กสำคัญที่พบจากการใช้งาน
-    จริง: เดิม (v16) ไม่มี fallback นี้เลย ทำให้ LATERAL_GAP_RISK ไม่ทำงานเลยเมื่อ
-    ดึงตัวเลขความยาวตู้จาก PDF จริงไม่สำเร็จ (ต่างจาก FRONT/REAR_EMPTY_RISK ที่มี
-    ratio fallback อยู่แล้วจึงยังทำงานถูกต้อง)
-
-    คำนวณสัดส่วนช่องว่างด้านข้าง (y-gap) เทียบกับ 'ความสูงของโครงสร้างตู้ทั้งหมด'
-    (container y-span) แทนการเทียบกับความยาวตู้ เพราะทั้งคู่วัดในแกนเดียวกัน
-    (แนวตั้งของภาพ) จึงเทียบสัดส่วนกันได้ตรงไปตรงมากว่า
-
-    Returns: สัดส่วน 0.0-1.0 หรือ None ถ้าคำนวณไม่ได้
-    """
     if not view_container or not view_cargo:
         return None
     container_y_span = view_container["ymax"] - view_container["ymin"]
@@ -605,6 +573,176 @@ def compute_lateral_gap_ratio(view_container, view_cargo):
         return None
     gap_y_px = max(0, container_y_span - cargo_y_span)
     return gap_y_px / container_y_span
+
+
+# ---------------------------------------------------------------------------
+# v18 NEW: STEP_DOWN_RISK deterministic detection - height-profile discontinuity
+# ---------------------------------------------------------------------------
+
+def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
+                            step=STEP_DOWN_PROFILE_STEP_PX, min_consistent_run=STEP_DOWN_MIN_CONSISTENT_RUN):
+    """
+    สแกนหา 'ขอบบนสุดของสินค้าจริง' ที่แต่ละตำแหน่ง x (ทุกๆ step พิกเซล) โดยกำหนดว่า
+    ต้องมีพิกเซลสีสินค้าติดต่อกันเพียงพอด้านล่างจุดนั้น (ไม่ใช่แค่ 1 จุดเดียว) เพื่อ
+    ป้องกัน false positive จากพิกเซลขอบ/เส้นกรอบ container หรือ anti-aliasing
+    """
+    px = view_img.convert("RGB").load()
+    w, h = view_img.size
+    x_start = max(0, int(x_start)); x_end = min(w, int(x_end))
+    y_start = max(0, int(y_start)); y_end = min(h, int(y_end))
+    profile = []
+    for x in range(x_start, x_end, step):
+        top_y = None
+        y = y_start
+        while y < y_end:
+            if _is_vivid_cargo_color(px[x, y]):
+                check_end = min(y + min_consistent_run, y_end)
+                consistent_count = sum(1 for yy in range(y, check_end) if _is_vivid_cargo_color(px[x, yy]))
+                if consistent_count >= min_consistent_run * 0.6:
+                    top_y = y
+                    break
+            y += 1
+        if top_y is not None:
+            profile.append((x, top_y))
+    return profile
+
+
+def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, container_ymax, container_y_span_px,
+                               step=STEP_DOWN_PROFILE_STEP_PX, min_ratio=MIN_STEP_DOWN_RATIO,
+                               min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX, merge_gap_px=STEP_DOWN_MERGE_GAP_PX):
+    """
+    ตรวจจับความต่างระดับ (step-down) ด้วยการหา 'จุดกระโดด' (discontinuity) ระหว่างจุด
+    ที่ติดกันบน height-profile (ไม่ใช้ linear regression ทั้งเส้น เพราะรูปทรง
+    isometric จริงมีลักษณะเป็นเนินสามเหลี่ยม/โค้ง ไม่ใช่เส้นตรง) แล้วสร้างกรอบครอบ
+    เฉพาะ 'กองที่เตี้ยกว่า' (จากยอดกองลงไปถึงพื้นตู้) เพื่อไฮไลท์ตำแหน่งเสี่ยงจริง
+    Returns: list of {"x_min","x_max","y_min","y_max","ratio"} ในพิกัด view-relative
+    """
+    profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
+    if len(profile) < 4:
+        return []
+    threshold_px = container_y_span_px * min_ratio
+    boundaries = []
+    for i in range(len(profile) - 1):
+        x0, y0 = profile[i]
+        x1, y1 = profile[i + 1]
+        delta = y1 - y0
+        if abs(delta) >= threshold_px:
+            boundaries.append(i)
+    if not boundaries:
+        return []
+
+    segments = []
+    start_idx = 0
+    for b in boundaries:
+        segments.append(profile[start_idx:b + 1])
+        start_idx = b + 1
+    segments.append(profile[start_idx:])
+
+    seg_info = []
+    for seg in segments:
+        if len(seg) < 1:
+            continue
+        xs = [p[0] for p in seg]
+        ys = [p[1] for p in seg]
+        width = (max(xs) - min(xs)) if len(xs) > 1 else step
+        seg_info.append({"x_min": min(xs), "x_max": max(xs), "y_avg": sum(ys) / len(ys), "width": width})
+    seg_info.sort(key=lambda s: s["x_min"])
+
+    regions = []
+    for i in range(len(seg_info) - 1):
+        seg_a = seg_info[i]
+        seg_b = seg_info[i + 1]
+        if seg_a["width"] < min_flat_width_px and seg_b["width"] < min_flat_width_px:
+            continue
+        y_a = seg_a["y_avg"]; y_b = seg_b["y_avg"]
+        height_diff_px = abs(y_b - y_a)
+        ratio = height_diff_px / container_y_span_px if container_y_span_px > 0 else 0
+        if ratio >= min_ratio:
+            shorter = seg_a if y_a > y_b else seg_b
+            x_min = shorter["x_min"]
+            x_max = shorter["x_max"]
+            if x_max - x_min < min_flat_width_px:
+                pad_x = (min_flat_width_px - (x_max - x_min)) / 2
+                x_min -= pad_x
+                x_max += pad_x
+            regions.append({
+                "x_min": x_min, "x_max": x_max,
+                "y_min": shorter["y_avg"], "y_max": container_ymax,
+                "ratio": ratio,
+            })
+
+    if not regions:
+        return []
+    regions.sort(key=lambda r: r["x_min"])
+    merged = [regions[0]]
+    for r in regions[1:]:
+        last = merged[-1]
+        if r["x_min"] - last["x_max"] <= merge_gap_px:
+            last["x_max"] = max(last["x_max"], r["x_max"])
+            last["x_min"] = min(last["x_min"], r["x_min"])
+            last["y_min"] = min(last["y_min"], r["y_min"])
+            last["ratio"] = max(last["ratio"], r["ratio"])
+        else:
+            merged.append(r)
+    return merged
+
+
+def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
+    """
+    ตรวจจับ STEP_DOWN_RISK แบบ deterministic แยกต่อ view (FRONT/BACK) - Returns dict
+    {"FRONT": [...], "BACK": [...]} โดยแต่ละ region มีพิกัดในระบบ 'ภาพเต็ม' (absolute,
+    บวก crop_y_start แล้ว) พร้อมใช้แปลงเป็น box_2d normalized ต่อได้ทันที
+    """
+    results = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        cb = container_bounds.get(view)
+        ce = cargo_extent.get(view)
+        if not cb or not ce:
+            continue
+        if layout == "TOP_BOTTOM":
+            mid_y = crop_h // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start + mid_y
+        else:
+            half_w = crop_w // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, half_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h))
+                origin_x, origin_y = half_w, crop_y_start
+
+        cb_rel_ymin = cb["ymin"] - origin_y
+        cb_rel_ymax = cb["ymax"] - origin_y
+        ce_rel_xmin = ce["xmin"] - origin_x
+        ce_rel_xmax = ce["xmax"] - origin_x
+        container_y_span_px = cb_rel_ymax - cb_rel_ymin
+        if container_y_span_px <= 0:
+            continue
+
+        try:
+            regions = _detect_step_down_regions(view_img, ce_rel_xmin, ce_rel_xmax, cb_rel_ymin, cb_rel_ymax,
+                                                  cb_rel_ymax, container_y_span_px)
+        except Exception as e:
+            print(f"WARNING: Step-down detection failed for {view} ({e})")
+            regions = []
+
+        for r in regions:
+            abs_region = {
+                "x_min": origin_x + r["x_min"], "x_max": origin_x + r["x_max"],
+                "y_min": origin_y + r["y_min"], "y_max": origin_y + r["y_max"],
+                "ratio": r["ratio"],
+            }
+            print(f"Deterministic STEP_DOWN_RISK candidate ({view}): "
+                  f"x=[{abs_region['x_min']:.0f}-{abs_region['x_max']:.0f}] "
+                  f"y=[{abs_region['y_min']:.0f}-{abs_region['y_max']:.0f}] "
+                  f"height_diff_ratio={abs_region['ratio']*100:.1f}% (threshold={MIN_STEP_DOWN_RATIO*100:.1f}%)")
+            results[view].append(abs_region)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -768,12 +906,13 @@ FIXED ORIENTATION (a known fact about how this diagram type is always drawn - tr
 YOUR TASK: Find ONLY these 4 risk types (REAR_EMPTY_RISK, FRONT_EMPTY_RISK, and
 REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them here):
 
-- STEP_DOWN_RISK: a sudden height drop between two ADJACENT cargo stacks (not at the very door
-  end). APPLY THIS NUMERIC RULE STRICTLY: if one stack is shorter than its immediate neighbor by
-  MORE than approximately 40-50% of the taller stack's height, this IS a STEP_DOWN_RISK - flag it
-  even if you are generally trying to be conservative. Only skip flagging when the height
-  difference is small, or when tall stacks gradually taper down over multiple positions toward
-  the doors (that gradual tapering is normal, not a STEP_DOWN_RISK).
+- STEP_DOWN_RISK: a sudden height drop between two ADJACENT cargo stacks. APPLY THIS NUMERIC RULE
+  STRICTLY: if one stack is shorter than its immediate neighbor by MORE than approximately 40-50%
+  of the taller stack's height, this IS a STEP_DOWN_RISK - flag it even if you are generally trying
+  to be conservative, and EVEN IF the height difference happens to be located near the door/rear end
+  of the container (a real height mismatch there is still a STEP_DOWN_RISK). Only skip flagging when
+  the height difference is small, or when tall stacks gradually taper down over multiple positions
+  toward the doors (that gradual tapering is normal, not a STEP_DOWN_RISK).
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
   OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
@@ -1238,10 +1377,6 @@ def process_request(request):
         api_keys_pool = get_api_keys_pool()
         rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
         rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
-
-        # FRONT_EMPTY_RISK ใช้ "ภาพ Front view เป็นแหล่งข้อมูลเดียว" เท่านั้น (v16)
-        # เพราะพิสูจน์แล้วจากไฟล์ AA05 ว่าการวิเคราะห์ผนังหัวตู้จากมุมมอง Back view ไม่
-        # น่าเชื่อถือ (มีเงา/มุมเอียงทำให้แยกไม่ออกจากด้านข้างกล่องสินค้า)
         front_result_from_front_view = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
 
         precise_boxes = {}
@@ -1259,9 +1394,10 @@ def process_request(request):
             pb = _get_zoom_precise_box(front_result_from_front_view, "box_2d", zoom_crop_rects["front_FRONT"], img)
             if pb:
                 precise_boxes[("FRONT", "FRONT_EMPTY_RISK")] = pb
-                # BACK view ใช้ fallback box (คำนวณจาก container_bounds/cargo_extent ของ
-                # BACK view เอง) เพราะพิกัดจาก Front view zoom-crop ไม่ตรงตำแหน่งพิกเซล
-                # จริงของ BACK view diagram
+
+        # v18 NEW: deterministic STEP_DOWN_RISK detection ต่อ view
+        step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_y_start=crop_y_start,
+                                                                crop_h=crop_h, container_bounds=container_bounds, cargo_extent=cargo_extent)
 
         def _normalize_view(v):
             v = str(v).upper().strip()
@@ -1277,10 +1413,6 @@ def process_request(request):
                         views.update(["FRONT", "BACK"])
             return views
 
-        # ---------------------------------------------------------------------------
-        # DETERMINISTIC GATE (ระยะทางจริง มม. + ratio fallback) สำหรับ REAR_EMPTY_RISK
-        # (ประเมินอิสระแยกกันทั้ง FRONT/BACK view - ไม่เปลี่ยนแปลงจากเดิม)
-        # ---------------------------------------------------------------------------
         gap_values_mm = {}
         gap_values_ratio = {}
         for view_label in ("FRONT", "BACK"):
@@ -1293,8 +1425,6 @@ def process_request(request):
                 HARDCODED_REAR_SIDE[view_label], "REAR_EMPTY_RISK"
             )
 
-        # FRONT_EMPTY_RISK deterministic gap - ใช้ FRONT view เท่านั้นเป็นแหล่งข้อมูล
-        # (ทั้ง key "FRONT" และ "BACK" ใช้ค่าเดียวกันจาก FRONT view's bounds)
         front_empty_gap_mm_from_front_view = compute_empty_gap_mm(
             container_bounds.get("FRONT"), cargo_extent.get("FRONT"),
             HARDCODED_REAR_SIDE["FRONT"], "FRONT_EMPTY_RISK", container_length_mm
@@ -1341,8 +1471,6 @@ def process_request(request):
                 return ratio_val >= FALLBACK_MIN_EMPTY_GAP_RATIO
             return False
 
-        # REAR risks: AI OR deterministic-force สำหรับ REAR_EMPTY_RISK; LATERAL ยังคง
-        # ขึ้นกับ AI เท่านั้น
         for view_label, rear_result in (("FRONT", rear_result_front), ("BACK", rear_result_back)):
             rear_result = rear_result if isinstance(rear_result, dict) else {}
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
@@ -1359,8 +1487,6 @@ def process_request(request):
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and confidence in ("HIGH", "MEDIUM") and view_label not in _existing_risk_views("REAR_LATERAL"):
                 all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
 
-        # FRONT_EMPTY_RISK - ใช้ผลจาก Front view analysis เพียงครั้งเดียว แล้ว flag ให้
-        # ทั้ง 2 view labels เพราะเป็นผนังหัวตู้เดียวกันทางกายภาพ
         front_conf = str(front_result_from_front_view.get("confidence", "LOW")).upper() if isinstance(front_result_from_front_view, dict) else "LOW"
         ai_front = (isinstance(front_result_from_front_view, dict)
                     and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK"
@@ -1375,12 +1501,6 @@ def process_request(request):
             elif ai_front:
                 print(f"Skipping FRONT_EMPTY ({view_label}) - gated out")
 
-        # ---------------------------------------------------------------------------
-        # v17 FIX: LATERAL_GAP_RISK deterministic force-check พร้อม ratio fallback
-        # (แก้บั๊กสำคัญ - v16 ไม่มี fallback นี้ ทำให้ไม่ทำงานเลยเมื่อคาลิเบรต mm ไม่
-        # สำเร็จในไฟล์ PDF จริง) - ประเมินอิสระต่อ view (FRONT/BACK ใช้
-        # container_bounds/cargo_extent ของตัวเอง)
-        # ---------------------------------------------------------------------------
         for view_label in ("FRONT", "BACK"):
             lateral_gap_mm = compute_lateral_gap_mm(container_bounds.get(view_label), cargo_extent.get(view_label), container_length_mm)
             lateral_gap_ratio = compute_lateral_gap_ratio(container_bounds.get(view_label), cargo_extent.get(view_label))
@@ -1402,6 +1522,27 @@ def process_request(request):
             if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
                 all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": None})
+
+        # v18 NEW: FORCE สร้าง STEP_DOWN_RISK จากการตรวจจับ deterministic (แปลงพิกัด
+        # absolute pixel เป็น box_2d normalized 0-1000 relative to crop_w/crop_h เหมือน
+        # ที่ Gemini ใช้ เพื่อให้ไหลผ่าน pipeline การวาด/validate เดิมได้เลย)
+        for view_label in ("FRONT", "BACK"):
+            for region in step_down_regions.get(view_label, []):
+                if region["ratio"] < MIN_STEP_DOWN_RATIO:
+                    continue
+                x0, y0, x1, y1 = region["x_min"], region["y_min"], region["x_max"], region["y_max"]
+                ymin_norm = ((y0 - crop_y_start) / crop_h) * 1000
+                ymax_norm = ((y1 - crop_y_start) / crop_h) * 1000
+                xmin_norm = (x0 / crop_w) * 1000
+                xmax_norm = (x1 / crop_w) * 1000
+                print(f"FORCED STEP_DOWN_RISK ({view_label}) from deterministic height-profile discontinuity "
+                      f"(height_diff_ratio={region['ratio']*100:.1f}%)")
+                all_risks.append({
+                    "view": view_label, "risk_type": "STEP_DOWN_RISK",
+                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "reasoning": "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP",
+                    "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis)",
+                })
 
         all_risks = _merge_same_area_risks(all_risks)
 
