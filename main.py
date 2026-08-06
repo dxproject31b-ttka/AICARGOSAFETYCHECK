@@ -16,30 +16,34 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v15
+# AI Cargo Safety Checker - High Precision v16
 #
-# v15 - แก้ปัญหา "กรอบ FRONT_EMPTY_RISK/REAR_EMPTY_RISK หายไป" ในบางไฟล์ (พบจาก
-#   RD09 ที่ gap จริงวัดได้ ~723mm ซึ่งเกินเกณฑ์ 400mm ชัดเจน แต่กรอบเหลืองไม่ปรากฏ)
+# v16 - 3 การเปลี่ยนแปลงสำคัญ (ตามผลทดสอบจริงจากไฟล์ AA05):
 #
-#   สาเหตุ: v14 ใช้ตรรกะ "AI ต้อง flag มาก่อน AND ต้องผ่านเกณฑ์ deterministic"
-#   (deterministic ทำหน้าที่แค่ "veto" ผลจาก AI เท่านั้น ไม่เคยสร้างความเสี่ยงเอง)
-#   ถ้า Gemini ตอบ SAFE (ซึ่งเกิดขึ้นได้เพราะความไม่แน่นอนของ generative model)
-#   ระบบจะไม่มีทางสร้างกรอบได้เลย ต่อให้วัด gap จริงเกินเกณฑ์แค่ไหนก็ตาม
+#   1) เพิ่ม LATERAL_GAP_RISK แบบ deterministic (พื้นที่ว่างด้านข้างบนพื้นตู้ที่ไม่มี
+#      สินค้าค้ำยัน - เสี่ยงสินค้าเลื่อน/ล้ม/ตกได้) โดยวัดจากผลต่างของ "ช่วงแนวตั้ง
+#      (y-range)" ระหว่างขอบเขตโครงสร้างตู้ (container_bounds) กับขอบเขตสินค้าจริง
+#      (cargo_extent) - เพราะในภาพ isometric แบบนี้ แกนความกว้าง (width) มีองค์ประกอบ
+#      แนวตั้งเดียวทิศกับแกนความสูง ถ้าสินค้าไม่กระจายเต็มความกว้างตู้ y-range ของ
+#      สินค้าจะสั้นกว่า y-range ของตู้อย่างมีนัยสำคัญ คาลิเบรตเป็น มม. แล้วเทียบเกณฑ์
+#      MIN_LATERAL_GAP_MM = 300mm (ถ้าเกิน = เสี่ยง) ทำงานแบบ FORCE เหมือน FRONT/
+#      REAR_EMPTY_RISK คือสร้างความเสี่ยงเองได้แม้ Gemini จะไม่ได้ flag มา
 #
-#   วิธีแก้ v15: เปลี่ยนตรรกะเป็น "AI flag OR deterministic gap เกินเกณฑ์" - เพิ่ม
-#   _force_gate() ที่ตรวจสอบว่า gap_mm (หรือ gap_ratio ถ้าคาลิเบรต mm ไม่ได้) เกิน
-#   threshold หรือไม่ ถ้าเกินจะ FORCE สร้างความเสี่ยงขึ้นเอง โดยไม่ต้องรอ Gemini
-#   พร้อม log ชัดเจนว่า "FORCED FRONT_EMPTY_RISK (view) from deterministic gap"
-#   เพื่อให้ debug ง่าย ส่วน _passes_gate() (จาก v13/v14) ยังคงทำหน้าที่ veto กรณีที่
-#   AI flag มาแต่ gap จริงเล็กเกินไปเหมือนเดิม - ทั้งสองกลไกทำงานคู่กัน:
-#     - AI บอกมีความเสี่ยง + gap เล็ก  -> ถูก veto เป็น SAFE (v13/v14 behavior)
-#     - AI บอก SAFE + gap ใหญ่ (เกินเกณฑ์) -> ถูก FORCE เป็นความเสี่ยง (v15 ใหม่)
-#     - AI บอกมีความเสี่ยง + gap ใหญ่ -> ยืนยันเป็นความเสี่ยง (ปกติ)
-#     - AI บอก SAFE + gap เล็ก -> SAFE (ปกติ)
+#   2) แก้ปัญหา False Positive ของ FRONT_EMPTY_RISK (พบจากไฟล์ AA05 ที่ผนังหัวตู้ใน
+#      มุมมอง Back view มีเงา/มุมเอียงทำให้แยกไม่ออกจากด้านข้างกล่องสินค้า) โดยเปลี่ยน
+#      มาใช้ "ภาพ Front view เป็นแหล่งข้อมูลเดียว" สำหรับ FRONT_EMPTY_RISK ทั้งหมด
+#      (ทั้งการวิเคราะห์ AI จาก zoom crop และการวัด deterministic จาก container_bounds/
+#      cargo_extent) แล้วนำผลไปใช้กับทั้ง 2 ตำแหน่ง (วาดกรอบทั้งใน Front view diagram
+#      และ Back view diagram) - ไม่พึ่งพาข้อมูลจาก Back view อีกต่อไปสำหรับ risk นี้
+#      เพราะพิสูจน์แล้วว่าไม่น่าเชื่อถือ (มุมมองมีเงาบังทำให้สับสนกับด้านข้างกล่อง)
 #
-# v14 - เกณฑ์ deterministic gate ใช้ระยะทางจริง (มม.) แทนสัดส่วน % โดยคาลิเบรตจาก
-#   ตัวเลขความยาวตู้ (เช่น "7200 (mm)") ที่ดึงจากข้อความใน PDF - เพราะอันตรายจาก
-#   ช่องว่างขึ้นอยู่กับระยะทางจริงที่สินค้าเคลื่อนที่ได้ ไม่ใช่สัดส่วนเทียบความยาวตู้
+#   3) REAR_EMPTY_RISK ยังคงใช้ทั้ง Back view และ Front view วิเคราะห์อิสระแยกกัน
+#      เหมือนเดิม (ไม่เปลี่ยนแปลง) เพราะประตูท้ายมองเห็นชัดเจนไม่มีปัญหาเงาบังในทั้ง
+#      2 มุมมอง
+#
+# v15 - deterministic FORCE สำหรับ FRONT_EMPTY_RISK/REAR_EMPTY_RISK (สร้างความเสี่ยง
+#       เองเมื่อวัด gap จริงเกินเกณฑ์ แม้ Gemini จะตอบ SAFE)
+# v14 - เกณฑ์ deterministic ใช้ระยะทางจริง (มม.) แทนสัดส่วน % (คาลิเบรตจาก PDF text)
 # v13 - deterministic gap-ratio gate (สัดส่วน % - ถูกแทนที่ด้วย mm-based ใน v14)
 # v12 - ใช้ box_2d จาก Gemini zoom analysis (validate ด้วยสัดส่วนพิกเซลสินค้าจริง)
 # v11 - ตรวจจับขอบเขตสินค้าจริงด้วย HSV saturation
@@ -83,13 +87,17 @@ HARDCODED_REAR_SIDE = {
     "BACK": "RIGHT",
 }
 
-# เกณฑ์ deterministic ขั้นต่ำของ "ระยะทางช่องว่างจริง" (มิลลิเมตร) ที่ถือว่าเป็น
-# FRONT_EMPTY_RISK/REAR_EMPTY_RISK จริง (อันตรายเพราะสินค้าเคลื่อนที่/ล้มได้)
-# ปรับได้ตามนโยบายความเสี่ยงของบริษัทโดยไม่ต้องแก้ logic อื่นเลย
+# เกณฑ์ deterministic ขั้นต่ำของ "ระยะทางช่องว่างจริง" (มิลลิเมตร) สำหรับ
+# FRONT_EMPTY_RISK/REAR_EMPTY_RISK (อันตรายเพราะสินค้าเคลื่อนที่/ล้มได้ในแนวยาว)
 MIN_EMPTY_GAP_MM = 400
 
-# ค่า fallback (สัดส่วน %) เมื่อไม่สามารถคาลิเบรต มม./พิกเซล ได้ (หาตัวเลขความยาวตู้
-# จาก PDF ไม่เจอ) เพื่อไม่ให้ระบบไม่มีเกณฑ์ใดๆ เลยในกรณีเช่นนี้
+# v16 NEW: เกณฑ์ deterministic ขั้นต่ำของ "ช่องว่างด้านข้างบนพื้นตู้" (มิลลิเมตร) ที่
+# ถือว่าเป็น LATERAL_GAP_RISK จริง (อันตรายเพราะสินค้าไม่มีอะไรค้ำยันด้านข้าง อาจ
+# เลื่อน/ล้ม/ตกได้เมื่อรถเลี้ยวหรือเบรก) - ตามที่ผู้ใช้ยืนยัน: ถ้าพื้นที่ว่างเกิน 30 ซม.
+# ถือว่าเสี่ยง
+MIN_LATERAL_GAP_MM = 300
+
+# ค่า fallback (สัดส่วน %) เมื่อไม่สามารถคาลิเบรต มม./พิกเซล ได้
 FALLBACK_MIN_EMPTY_GAP_RATIO = 0.12
 
 
@@ -148,11 +156,11 @@ def generate_action_report(case_type, description="", sku_list=""):
             f"  • รัดด้วยสายเบลท์หรือเชือกป้องกันสินค้าไถลมาข้างหน้าตอนเบรก"
         ),
         "LATERAL_GAP_RISK": (
-            f"แจ้งเตือน: พบช่องว่างด้านข้างระหว่างกองสินค้า{sku_line}\n"
+            f"แจ้งเตือน: พบพื้นที่ว่างด้านข้างบนพื้นตู้ สินค้าไม่กระจายเต็มความกว้าง{sku_line}\n"
             f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นอุดช่องว่างด้านข้างระหว่างกอง\n"
-            f"  • ตรวจสอบว่าทุกกองชิดกันแน่น ไม่มีช่องโยกไปมา\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกขวางตลอดแนว ป้องกันสินค้าเลื่อนตอนเลี้ยว"
+            f"  • นำไม้อัดกั้นหรือถุงลมอุดช่องว่างด้านข้างระหว่างสินค้ากับผนังด้านข้าง\n"
+            f"  • ตรวจสอบว่าสินค้าชิดกันแน่นทั้งด้านข้าง ไม่มีช่องให้เลื่อนหรือล้ม\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกขวางป้องกันสินค้าเลื่อน/ตกขณะเข้าโค้งหรือเบรก"
         ),
         "TALL_UNSTABLE_RISK": (
             f"แจ้งเตือน: พบสินค้าสูงโดดเดี่ยว ไม่มีของข้างค้ำยัน{sku_line}\n"
@@ -252,10 +260,6 @@ def extract_container_length_mm(pdf_bytes: bytes):
     "7200 (mm)" ที่ปรากฏกำกับเส้นบอกความยาวในแผนภาพ) ใช้เป็นค่าคาลิเบรตแปลง
     พิกเซล -> มิลลิเมตรจริง สำหรับคำนวณระยะทางช่องว่างจริง
 
-    หลักการ: ตัวเลขที่มีหน่วย "(mm)" ในหน้านี้ ปกติจะมี 3 ค่า คือ ความยาว/ความกว้าง/
-    ความสูงของตู้ (เช่น 7200, 2400, 2400) ซึ่งค่าความยาวจะเป็นค่าที่ใหญ่ที่สุดเสมอ
-    จึงใช้ค่าสูงสุดที่พบเป็นความยาว
-
     Returns: ความยาวตู้ (mm) เป็น int, หรือ None ถ้าไม่พบข้อมูลที่เชื่อถือได้
     """
     try:
@@ -277,8 +281,7 @@ def extract_container_length_mm(pdf_bytes: bytes):
 
 
 # ---------------------------------------------------------------------------
-# Container boundary detection (deterministic, pixel-based) - ขอบเขต "ทั้ง
-# โครงสร้างตู้" (ผนัง+พื้น+สินค้า รวมกัน)
+# Container boundary detection (deterministic, pixel-based)
 # ---------------------------------------------------------------------------
 
 def _is_saturated_color(rgb):
@@ -370,8 +373,7 @@ def detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_
 
 
 # ---------------------------------------------------------------------------
-# Cargo extent detection - หาขอบเขต "เฉพาะกล่องสินค้าจริง" แยกออกจากผนัง/พื้นตู้
-# ด้วย HSV saturation
+# Cargo extent detection - HSV saturation
 # ---------------------------------------------------------------------------
 
 def _is_arrow_color(rgb):
@@ -498,10 +500,8 @@ def _cargo_pixel_ratio_in_box(img, box):
 
 
 def compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type):
-    """
-    คำนวณช่องว่างเป็นพิกเซล (raw) ระหว่างขอบเขตสินค้ากับขอบเขตโครงสร้างตู้
-    Returns: (gap_pixels, container_width_pixels) หรือ (None, None) ถ้าคำนวณไม่ได้
-    """
+    """คำนวณช่องว่างเป็นพิกเซล (raw) ในแนวยาว ระหว่างขอบเขตสินค้ากับขอบเขตโครงสร้างตู้
+    Returns: (gap_pixels, container_width_pixels) หรือ (None, None) ถ้าคำนวณไม่ได้"""
     if not view_container or not view_cargo:
         return None, None
     c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
@@ -523,11 +523,7 @@ def compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type):
 
 
 def compute_empty_gap_mm(view_container, view_cargo, rear_side, risk_type, container_length_mm):
-    """
-    คำนวณระยะทางช่องว่างจริง (มิลลิเมตร) โดยคาลิเบรตจากความยาวตู้จริงที่ดึงมาจาก
-    ข้อความใน PDF (container_length_mm) เทียบกับความกว้างพิกเซลของ container_bounds
-    ที่ตรวจจับได้ Returns: ระยะทางช่องว่างจริง (mm) เป็น float, หรือ None ถ้าคำนวณไม่ได้
-    """
+    """คำนวณระยะทางช่องว่างจริงในแนวยาว (มิลลิเมตร) โดยคาลิเบรตจากความยาวตู้จริง"""
     gap_px, container_width_px = compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type)
     if gap_px is None or not container_length_mm or container_width_px is None or container_width_px <= 0:
         return None
@@ -536,12 +532,37 @@ def compute_empty_gap_mm(view_container, view_cargo, rear_side, risk_type, conta
 
 
 def compute_empty_gap_ratio(view_container, view_cargo, rear_side, risk_type):
-    """Fallback: สัดส่วน % ของช่องว่างเทียบความกว้างตู้ที่ตรวจจับได้
-    ใช้เฉพาะกรณีคาลิเบรตมม./พิกเซลไม่ได้ (หา container_length_mm จาก PDF ไม่เจอ)"""
+    """Fallback: สัดส่วน % ของช่องว่างเทียบความกว้างตู้ที่ตรวจจับได้"""
     gap_px, container_width_px = compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type)
     if gap_px is None or container_width_px is None or container_width_px <= 0:
         return None
     return gap_px / container_width_px
+
+
+def compute_lateral_gap_mm(view_container, view_cargo, container_length_mm):
+    """
+    v16 NEW: ตรวจจับช่องว่างด้านข้าง (lateral/width gap) บนพื้นตู้ที่ไม่มีสินค้าค้ำยัน
+    โดยเปรียบเทียบ 'ช่วงแนวตั้ง (y-range)' ของขอบเขตโครงสร้างตู้ (container_bounds)
+    กับขอบเขตสินค้าจริง (cargo_extent) - ในภาพ isometric แบบนี้ แกนความกว้าง (width)
+    มีองค์ประกอบแนวตั้งเดียวทิศกับแกนความสูง ถ้าสินค้าไม่กระจายเต็มความกว้างตู้
+    y-range ของสินค้าจะสั้นกว่า y-range ของตู้อย่างมีนัยสำคัญ ณ ตำแหน่งเดียวกัน
+
+    คาลิเบรตเป็นมิลลิเมตรโดยใช้ mm-per-pixel เดียวกับที่ใช้คำนวณแนวยาว (จาก
+    container_length_mm เทียบกับ x-range ของ container_bounds) เนื่องจากมุมมอง
+    isometric มาตรฐานมักมีอัตราส่วนพิกเซลต่อมม. ใกล้เคียงกันทั้ง 2 แกน
+
+    Returns: ระยะทางช่องว่างด้านข้างจริง (mm) เป็น float, หรือ None ถ้าคำนวณไม่ได้
+    """
+    if not view_container or not view_cargo or not container_length_mm:
+        return None
+    container_y_span = view_container["ymax"] - view_container["ymin"]
+    cargo_y_span = view_cargo["ymax"] - view_cargo["ymin"]
+    gap_y_px = max(0, container_y_span - cargo_y_span)
+    container_x_span = max(1, view_container["xmax"] - view_container["xmin"])
+    if container_x_span <= 0:
+        return None
+    mm_per_px = container_length_mm / container_x_span
+    return gap_y_px * mm_per_px
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +732,8 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
   even if you are generally trying to be conservative. Only skip flagging when the height
   difference is small, or when tall stacks gradually taper down over multiple positions toward
   the doors (that gradual tapering is normal, not a STEP_DOWN_RISK).
-- LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load.
+- LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
+  OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
 - OVERHANG_RISK: upper-tier cargo clearly overhanging past the edge of the cargo below it.
 
@@ -1174,8 +1196,16 @@ def process_request(request):
         api_keys_pool = get_api_keys_pool()
         rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
         rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
-        front_result_front = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
-        front_result_back = analyze_front_zone_with_ai(front_crop_back, api_keys_pool, "BACK")
+
+        # ---------------------------------------------------------------------------
+        # v16 FIX: FRONT_EMPTY_RISK ใช้ "ภาพ Front view เป็นแหล่งข้อมูลเดียว" เท่านั้น
+        # (ทั้ง AI zoom-analysis และ deterministic gap) เพราะพิสูจน์แล้วจากไฟล์ AA05 ว่า
+        # การวิเคราะห์ผนังหัวตู้จากมุมมอง Back view ไม่น่าเชื่อถือ (มีเงา/มุมเอียงทำให้
+        # แยกไม่ออกจากด้านข้างกล่องสินค้า) - ไม่เรียก analyze_front_zone_with_ai สำหรับ
+        # front_crop_back อีกต่อไป ใช้ผลจาก front_crop_front (Front view) ตัดสินใจแทน
+        # ทั้ง 2 ตำแหน่ง (FRONT view diagram และ BACK view diagram)
+        # ---------------------------------------------------------------------------
+        front_result_from_front_view = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
 
         precise_boxes = {}
         for view_label, rear_result, key_prefix in (("FRONT", rear_result_front, "rear_FRONT"), ("BACK", rear_result_back, "rear_BACK")):
@@ -1187,11 +1217,20 @@ def process_request(request):
                         precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb
                     if rear_zone_risk_val in ("REAR_LATERAL_IMBALANCE", "BOTH"):
                         precise_boxes[(view_label, "REAR_LATERAL_IMBALANCE")] = pb
-        for view_label, front_result, key_prefix in (("FRONT", front_result_front, "front_FRONT"), ("BACK", front_result_back, "front_BACK")):
-            if isinstance(front_result, dict) and str(front_result.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
-                pb = _get_zoom_precise_box(front_result, "box_2d", zoom_crop_rects[key_prefix], img)
-                if pb:
-                    precise_boxes[(view_label, "FRONT_EMPTY_RISK")] = pb
+
+        # FRONT_EMPTY_RISK precise box: ใช้ zoom box จาก Front view analysis เท่านั้น
+        # แต่ต้องแปลงพิกัดให้ตรงกับตำแหน่งจริงของแต่ละ view diagram ตอนวาด (ทำที่ขั้น
+        # ตอนวาดกรอบด้านล่าง โดยใช้ fallback zone ของแต่ละ view เอง ไม่ใช้ precise box
+        # ข้ามระหว่าง view เพราะพิกัดจาก Front view zoom-crop ไม่ตรงตำแหน่งพิกเซลของ
+        # Back view diagram)
+        if isinstance(front_result_from_front_view, dict) and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
+            pb = _get_zoom_precise_box(front_result_from_front_view, "box_2d", zoom_crop_rects["front_FRONT"], img)
+            if pb:
+                precise_boxes[("FRONT", "FRONT_EMPTY_RISK")] = pb
+                # หมายเหตุ: ไม่ใส่ precise box ให้ BACK view เพราะพิกัดมาจาก Front view
+                # zoom-crop ซึ่งไม่ตรงตำแหน่งพิกเซลจริงของ Back view diagram - BACK view
+                # จะใช้ fallback box (คำนวณจาก container_bounds/cargo_extent ของ BACK
+                # view เอง) แทน โดยยึดผล "มีความเสี่ยงหรือไม่" จาก Front view
 
         def _normalize_view(v):
             v = str(v).upper().strip()
@@ -1208,32 +1247,45 @@ def process_request(request):
             return views
 
         # ---------------------------------------------------------------------------
-        # DETERMINISTIC GATE (ระยะทางจริง มม.) - คำนวณช่องว่างจริงเป็นมิลลิเมตรด้วยการ
-        # คาลิเบรตจากความยาวตู้จริง (container_length_mm) ที่ดึงจากข้อความใน PDF
+        # DETERMINISTIC GATE (ระยะทางจริง มม.) สำหรับ REAR_EMPTY_RISK - คงพฤติกรรมเดิม
+        # (ประเมินอิสระแยกกันทั้ง FRONT และ BACK view เพราะประตูท้ายมองเห็นชัดเจนดีทั้ง
+        # 2 มุมมอง ไม่มีปัญหาเงาบังเหมือนฝั่งผนังหัวตู้)
         # ---------------------------------------------------------------------------
         gap_values_mm = {}
         gap_values_ratio = {}
         for view_label in ("FRONT", "BACK"):
-            for rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
-                gap_values_mm[(view_label, rt)] = compute_empty_gap_mm(
-                    container_bounds.get(view_label), cargo_extent.get(view_label),
-                    HARDCODED_REAR_SIDE[view_label], rt, container_length_mm
-                )
-                gap_values_ratio[(view_label, rt)] = compute_empty_gap_ratio(
-                    container_bounds.get(view_label), cargo_extent.get(view_label),
-                    HARDCODED_REAR_SIDE[view_label], rt
-                )
+            gap_values_mm[(view_label, "REAR_EMPTY_RISK")] = compute_empty_gap_mm(
+                container_bounds.get(view_label), cargo_extent.get(view_label),
+                HARDCODED_REAR_SIDE[view_label], "REAR_EMPTY_RISK", container_length_mm
+            )
+            gap_values_ratio[(view_label, "REAR_EMPTY_RISK")] = compute_empty_gap_ratio(
+                container_bounds.get(view_label), cargo_extent.get(view_label),
+                HARDCODED_REAR_SIDE[view_label], "REAR_EMPTY_RISK"
+            )
+
+        # v16: FRONT_EMPTY_RISK deterministic gap - ใช้ FRONT view เท่านั้นเป็นแหล่งข้อมูล
+        # (ทั้ง key "FRONT" และ "BACK" ใช้ค่าเดียวกันจาก FRONT view's container/cargo bounds)
+        front_empty_gap_mm_from_front_view = compute_empty_gap_mm(
+            container_bounds.get("FRONT"), cargo_extent.get("FRONT"),
+            HARDCODED_REAR_SIDE["FRONT"], "FRONT_EMPTY_RISK", container_length_mm
+        )
+        front_empty_gap_ratio_from_front_view = compute_empty_gap_ratio(
+            container_bounds.get("FRONT"), cargo_extent.get("FRONT"),
+            HARDCODED_REAR_SIDE["FRONT"], "FRONT_EMPTY_RISK"
+        )
+        for view_label in ("FRONT", "BACK"):
+            gap_values_mm[(view_label, "FRONT_EMPTY_RISK")] = front_empty_gap_mm_from_front_view
+            gap_values_ratio[(view_label, "FRONT_EMPTY_RISK")] = front_empty_gap_ratio_from_front_view
+
         for k in gap_values_mm:
             mm_val = gap_values_mm[k]
             ratio_val = gap_values_ratio[k]
             if mm_val is not None:
                 print(f"Deterministic gap for {k[1]} ({k[0]}): {mm_val:.0f}mm (threshold={MIN_EMPTY_GAP_MM}mm)")
             elif ratio_val is not None:
-                print(f"Deterministic gap for {k[1]} ({k[0]}): {ratio_val*100:.1f}% (mm calibration unavailable, using ratio fallback, threshold={FALLBACK_MIN_EMPTY_GAP_RATIO*100:.0f}%)")
+                print(f"Deterministic gap for {k[1]} ({k[0]}): {ratio_val*100:.1f}% (mm calibration unavailable, threshold={FALLBACK_MIN_EMPTY_GAP_RATIO*100:.0f}%)")
 
         def _passes_deterministic_gate(view_label, risk_type):
-            """คืน True ถ้า AI-flagged risk ไม่ถูก veto (gap_mm/ratio >= threshold หรือ
-            คำนวณไม่ได้เลย)"""
             mm_val = gap_values_mm.get((view_label, risk_type))
             if mm_val is not None:
                 if mm_val < MIN_EMPTY_GAP_MM:
@@ -1251,9 +1303,6 @@ def process_request(request):
             return True
 
         def _force_gate(view_label, risk_type):
-            """v15 NEW: คืน True ถ้าช่องว่างจริงที่วัดได้เกินเกณฑ์ชัดเจน (ควร FORCE
-            สร้างความเสี่ยงเอง แม้ Gemini จะตอบ SAFE ก็ตาม) - แก้ปัญหา RD09 ที่กรอบ
-            FRONT_EMPTY_RISK หายไปเพราะ Gemini ตอบ SAFE ทั้งที่ gap จริงเกินเกณฑ์"""
             mm_val = gap_values_mm.get((view_label, risk_type))
             if mm_val is not None:
                 return mm_val >= MIN_EMPTY_GAP_MM
@@ -1262,8 +1311,8 @@ def process_request(request):
                 return ratio_val >= FALLBACK_MIN_EMPTY_GAP_RATIO
             return False
 
-        # REAR risks: AI OR deterministic-force สำหรับ REAR_EMPTY_RISK; LATERAL ยังคง
-        # ขึ้นกับ AI เท่านั้น (ไม่มีวิธีวัดจุดสูงต่ำแบบ deterministic ที่แม่นยำพอ)
+        # REAR risks: AI OR deterministic-force สำหรับ REAR_EMPTY_RISK (คงเดิม - ประเมิน
+        # อิสระต่อ view); LATERAL ยังคงขึ้นกับ AI เท่านั้น
         for view_label, rear_result in (("FRONT", rear_result_front), ("BACK", rear_result_back)):
             rear_result = rear_result if isinstance(rear_result, dict) else {}
             rear_zone_risk = str(rear_result.get("rear_zone_risk", "")).upper()
@@ -1280,19 +1329,34 @@ def process_request(request):
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and confidence in ("HIGH", "MEDIUM") and view_label not in _existing_risk_views("REAR_LATERAL"):
                 all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
 
-        # FRONT_EMPTY_RISK: AI OR deterministic-force (แก้ปัญหา RD09 กรอบเหลืองหาย)
-        for view_label, front_result in (("FRONT", front_result_front), ("BACK", front_result_back)):
-            front_result = front_result if isinstance(front_result, dict) else {}
-            confidence = str(front_result.get("confidence", "LOW")).upper()
-            ai_front = str(front_result.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK" and confidence in ("HIGH", "MEDIUM")
+        # v16: FRONT_EMPTY_RISK - ใช้ผลจาก Front view analysis เพียงครั้งเดียว แล้ว flag
+        # ให้ทั้ง 2 view labels (FRONT และ BACK) เพราะเป็นผนังหัวตู้เดียวกันทางกายภาพ
+        front_conf = str(front_result_from_front_view.get("confidence", "LOW")).upper() if isinstance(front_result_from_front_view, dict) else "LOW"
+        ai_front = (isinstance(front_result_from_front_view, dict)
+                    and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK"
+                    and front_conf in ("HIGH", "MEDIUM"))
+        for view_label in ("FRONT", "BACK"):
             forced_front = _force_gate(view_label, "FRONT_EMPTY_RISK")
             if (ai_front or forced_front) and view_label not in _existing_risk_views("FRONT_EMPTY") and _passes_deterministic_gate(view_label, "FRONT_EMPTY_RISK"):
                 if forced_front and not ai_front:
-                    print(f"FORCED FRONT_EMPTY_RISK ({view_label}) from deterministic gap (AI said SAFE)")
-                reason = front_result.get("reasoning", "") if ai_front else "FORCED_DETERMINISTIC_GAP_MM"
-                all_risks.append({"view": view_label, "risk_type": "FRONT_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": reason, "description": "พบสินค้าต่างระดับฝั่งผนังหัวตู้ (วิเคราะห์จาก Zoom หัวตู้)" if ai_front else "Measured front-wall gap exceeds threshold (deterministic)", "box_2d": None})
+                    print(f"FORCED FRONT_EMPTY_RISK ({view_label}) from deterministic gap measured via FRONT view (AI said SAFE)")
+                reason = front_result_from_front_view.get("reasoning", "") if (ai_front and isinstance(front_result_from_front_view, dict)) else "FORCED_DETERMINISTIC_GAP_MM_FROM_FRONT_VIEW"
+                all_risks.append({"view": view_label, "risk_type": "FRONT_EMPTY_RISK", "direction": "LONGITUDINAL", "lateral_side": "N/A", "reasoning": reason, "description": "พบสินค้าต่างระดับฝั่งผนังหัวตู้ (วิเคราะห์จาก Front view เป็นหลัก)" if ai_front else "Measured front-wall gap (via FRONT view) exceeds threshold (deterministic)", "box_2d": None})
             elif ai_front:
                 print(f"Skipping FRONT_EMPTY ({view_label}) - gated out")
+
+        # ---------------------------------------------------------------------------
+        # v16 NEW: LATERAL_GAP_RISK deterministic force-check (พื้นที่ว่างด้านข้างบน
+        # พื้นตู้ ≥300mm = เสี่ยง) - ประเมินอิสระต่อ view (FRONT/BACK ใช้ container_bounds/
+        # cargo_extent ของตัวเอง)
+        # ---------------------------------------------------------------------------
+        for view_label in ("FRONT", "BACK"):
+            lateral_gap_mm = compute_lateral_gap_mm(container_bounds.get(view_label), cargo_extent.get(view_label), container_length_mm)
+            if lateral_gap_mm is not None:
+                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_mm:.0f}mm (threshold={MIN_LATERAL_GAP_MM}mm)")
+                if lateral_gap_mm >= MIN_LATERAL_GAP_MM and view_label not in _existing_risk_views("LATERAL_GAP"):
+                    print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
+                    all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP_MM", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {lateral_gap_mm/10:.0f} ซม. (เกินเกณฑ์ {MIN_LATERAL_GAP_MM/10:.0f} ซม.)", "box_2d": None})
 
         all_risks = _merge_same_area_risks(all_risks)
 
