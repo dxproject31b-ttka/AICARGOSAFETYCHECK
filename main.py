@@ -16,50 +16,47 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v18
+# AI Cargo Safety Checker - High Precision v19
 #
-# v18 - เพิ่มกลไก DETERMINISTIC สำหรับ STEP_DOWN_RISK (พบจากไฟล์ AA02/AB01 ที่ Gemini
-#   พลาดไม่ flag ความต่างระดับที่ชัดเจนตรงประตูท้ายตู้ เพราะ prompt เดิมบอกให้ AI
-#   "อย่า label ความต่างระดับตรงประตูท้ายเป็น STEP_DOWN_RISK" - ทำให้พลาดกรณีนี้ไป)
+# v19 - แก้ 2 บั๊กสำคัญที่พบจากการใช้งานจริง:
 #
-#   หลักการ: สแกน "ขอบบนสุดของสินค้าจริง" (height profile) ที่แต่ละตำแหน่ง x ตลอด
-#   ความกว้างของสินค้า แล้วหา "จุดกระโดด" (discontinuity) ระหว่างจุดที่ติดกัน - ในภาพ
-#   isometric ปกติ ขอบบนของกองที่สูงเท่ากันจะไล่ระดับตามมุมมองอย่างนุ่มนวล (ประมาณ
-#   0.4-0.5 พิกเซลต่อ 1 พิกเซลแนวนอน) แต่ถ้ามีกองที่สูงต่ำกว่ากันจริง จะเกิดการ
-#   "กระโดด" อย่างฉับพลันที่ตำแหน่งรอยต่อ (สังเกตได้ชัดจากข้อมูลจริง: ปกติ delta
-#   ระหว่างจุดติดกันจะอยู่ที่ 2-7 พิกเซล แต่ที่รอยต่อจริงจะกระโดดถึง 30-85+ พิกเซล)
+#   BUG 1 (สำคัญที่สุด): STEP_DOWN_RISK ไม่มี "GATE" (veto) สำหรับ claim จาก Gemini
+#   พบจากไฟล์ EE07 (โหลดเต็มตู้ 95.1%, สินค้าสม่ำเสมอสมบูรณ์แบบ - ยืนยันด้วยการวัด
+#   พิกเซลจริงว่า delta สูงสุดทั้งภาพคือ 3px เท่านั้น จากทั้งหมด ต่ำกว่า threshold
+#   (~30px) มาก - ไม่มีจุดกระโดดใดๆ เลย) แต่ระบบกลับรายงาน STEP_DOWN_RISK ผิดพลาด
 #
-#   เมื่อพบจุดกระโดดที่มีขนาดเกินเกณฑ์ (เทียบเป็นสัดส่วนของความสูงตู้ทั้งหมด) จะแบ่ง
-#   ออกเป็น 2 ฝั่ง (ก่อน/หลังจุดกระโดด) หาฝั่งที่ 'เตี้ยกว่า' แล้ววาดกรอบครอบเฉพาะ
-#   กองเตี้ยนั้น (จากยอดกองลงไปถึงพื้นตู้) เพื่อไฮไลท์ตำแหน่งเสี่ยงที่แท้จริง แล้ว
-#   FORCE สร้าง STEP_DOWN_RISK เอง โดยไม่ต้องรอ Gemini (เหมือนกลไกที่ทำกับ
-#   FRONT_EMPTY_RISK/REAR_EMPTY_RISK/LATERAL_GAP_RISK ไปแล้วก่อนหน้านี้)
+#   Root cause: ตอนออกแบบ v18 ผมเพิ่มกลไก FORCE (สร้างเองถ้า deterministic พบแต่
+#   Gemini พลาด) ให้ STEP_DOWN_RISK แต่ลืมเพิ่มกลไก GATE (ปฏิเสธถ้า Gemini flag ผิด/
+#   หลอน) ทำให้ไม่สมมาตรกับ FRONT_EMPTY_RISK/REAR_EMPTY_RISK ที่มีทั้ง FORCE+GATE
+#   ครบ - เมื่อ Gemini วิเคราะห์ภาพรวมแล้ว "เข้าใจผิด" ว่ามีความต่างระดับ (ความไม่
+#   แน่นอนของ generative model) ไม่มีกลไกใดมาตรวจสอบค้านเลย
 #
-#   ทดสอบยืนยันด้วยภาพจริง AA02 และ AB01 - กรอบที่ตรวจพบตรงกับตำแหน่งที่ผู้ใช้วงกลม
-#   ไว้ด้วยมือพอดี (AA02: กอง ASI1A-AF สูงเตี้ยกว่าเพื่อนบ้าน 42.9% ของความสูงตู้,
-#   AB01: กอง SHP1A-AK/NOKIA-AK เตี้ยกว่าเพื่อนบ้าน 24.4% ของความสูงตู้)
+#   วิธีแก้: เพิ่ม _step_down_claim_overlaps_detection() ตรวจสอบว่าตำแหน่งที่ Gemini
+#   อ้างว่าเป็น STEP_DOWN_RISK (จาก box_2d) ทับซ้อนกับจุดกระโดดจริงที่ deterministic
+#   height-profile ตรวจพบหรือไม่ - ถ้าไม่มี region ใดๆ ที่ deterministic ตรวจพบเลย
+#   สำหรับ view นั้น (คือภาพนั้นไม่มีความต่างระดับจริงตามที่วัดได้) ให้ปฏิเสธ (veto)
+#   claim ของ Gemini ทันที ไม่ว่า Gemini จะมั่นใจแค่ไหนก็ตาม
 #
-#   เกณฑ์ MIN_STEP_DOWN_RATIO = 0.075 (7.5%) เลือกจากค่าที่วัดได้จริง: AB01 (กรณี
-#   เสี่ยงจริงที่เพิ่งพบว่า Gemini พลาด) วัดได้ ~7.6%, AA02 วัดได้ ~20%, ในขณะที่
-#   ความผันผวนปกติ (ไม่ใช่ความเสี่ยง) วัดได้เพียง ~1-2% เท่านั้น จึงมี margin เพียงพอ
+#   BUG 2: height-profile discontinuity ถูก merge ผิดพลาดเมื่อมี pattern แบบ 'บันได'
+#   (เตี้ย -> กลาง -> สูง) พบจากไฟล์ RD09 ที่มี 2 จุดเสี่ยงแยกกันจริง (กองเตี้ยสุด
+#   "ด้านนอก" และกองกลาง "ด้านใน" ที่เตี้ยกว่ากองสูงสุด) แต่ระบบเดิมรวมเป็นกรอบเดียว
+#   ผิดๆ เพราะ merge ตามระยะห่าง x โดยไม่สนใจว่าเป็นกองเดียวกันจริงหรือไม่
 #
-#   หมายเหตุสำคัญ: ระหว่างพัฒนา พบว่าการทดสอบด้วยไฟล์ "AI_Result_*.jpg" (ผลลัพธ์ที่
-#   ผ่านการประมวลผลไปแล้ว มีกรอบสีจากรอบทดสอบก่อนหน้าติดอยู่) อาจทำให้เกิด false
-#   positive ได้ เพราะระบบตรวจจับสีสินค้าไปพบกรอบสีเหลือง/ฟ้า/ชมพูที่วาดค้างไว้เอง
-#   - นี่เป็นปัญหาของการใช้ไฟล์ที่ผ่านการประมวลผลแล้วมาทดสอบซ้ำ ไม่ใช่บั๊กของ
-#   algorithm สำหรับไฟล์ manifest ต้นฉบับที่สะอาด (ยังไม่เคยผ่านการวาดกรอบใดๆ)
+#   วิธีแก้: เปลี่ยนจาก 'เปรียบเทียบทีละคู่ segment แล้ว merge ตามระยะห่าง' เป็น
+#   'ตรวจสอบแต่ละ segment ว่าเตี้ยกว่าเพื่อนบ้านซ้าย/ขวาหรือไม่แยกกัน' - segment ใด
+#   เตี้ยกว่าเพื่อนบ้านฝั่งใดฝั่งหนึ่งเกินเกณฑ์ จะกลายเป็นจุดเสี่ยงของตัวเองทันที ไม่
+#   merge กับ segment อื่นอีกต่อไป (แต่ละกองที่เตี้ยกว่าเพื่อนบ้านคือจุดเสี่ยงแยกกันจริง)
 #
-# v17 - แก้บั๊ก LATERAL_GAP_RISK ไม่ทำงานเมื่อคาลิเบรต mm ไม่สำเร็จ (เพิ่ม ratio
-#   fallback + ปรับปรุง extract_container_length_mm ให้ทนทานขึ้น)
-# v16 - เพิ่ม LATERAL_GAP_RISK deterministic + FIX FRONT_EMPTY_RISK ให้ใช้ Front view
-#   เป็นแหล่งข้อมูลเดียว (แก้ false positive จากมุมมอง Back view ที่มีเงาบัง)
+# v18 - เพิ่มกลไก deterministic (height-profile) สำหรับ STEP_DOWN_RISK
+# v17 - แก้บั๊ก LATERAL_GAP_RISK ไม่ทำงานเมื่อคาลิเบรต mm ไม่สำเร็จ (ratio fallback)
+# v16 - เพิ่ม LATERAL_GAP_RISK deterministic + FIX FRONT_EMPTY_RISK ใช้ Front view
+#   เป็นแหล่งข้อมูลเดียว
 # v15 - deterministic FORCE สำหรับ FRONT_EMPTY_RISK/REAR_EMPTY_RISK
-# v14 - เกณฑ์ deterministic ใช้ระยะทางจริง (มม.) แทนสัดส่วน % (คาลิเบรตจาก PDF text)
+# v14 - เกณฑ์ deterministic ใช้ระยะทางจริง (มม.) แทนสัดส่วน %
 # v13 - deterministic gap-ratio gate (สัดส่วน %)
 # v12 - ใช้ box_2d จาก Gemini zoom analysis (validate ด้วยสัดส่วนพิกเซลสินค้าจริง)
 # v11 - ตรวจจับขอบเขตสินค้าจริงด้วย HSV saturation
-# v10 - แก้บั๊ก layout detection กรณีหน้า PDF มี rotation (page.rotation_matrix) +
-#       กฎตายตัว HARDCODED_REAR_SIDE แทนการตรวจจับลูกศร
+# v10 - แก้บั๊ก layout detection กรณีหน้า PDF มี rotation + กฎตายตัว HARDCODED_REAR_SIDE
 # v9  - รวม risk ที่อยู่บริเวณเดียวกันเป็น COMBINED_AREA_RISK วาดกรอบเดียว 2 สี
 # v6  - deterministic container-boundary detection
 # ---------------------------------------------------------------------------
@@ -103,14 +100,14 @@ MIN_LATERAL_GAP_MM = 300
 FALLBACK_MIN_EMPTY_GAP_RATIO = 0.12
 FALLBACK_MIN_LATERAL_GAP_RATIO = 0.12
 
-# v18 NEW: เกณฑ์ deterministic ขั้นต่ำของ "สัดส่วนความสูงที่ต่างกัน" (เทียบกับความสูง
-# ตู้ทั้งหมดในภาพ) ที่ถือว่าเป็น STEP_DOWN_RISK จริง - ดูรายละเอียดการเลือกค่าที่
-# comment หัวไฟล์ (derived from real AA02 ~20% and AB01 ~7.6% measurements)
 MIN_STEP_DOWN_RATIO = 0.075
 STEP_DOWN_PROFILE_STEP_PX = 5
 STEP_DOWN_MIN_CONSISTENT_RUN = 10
 STEP_DOWN_MIN_FLAT_WIDTH_PX = 12
-STEP_DOWN_MERGE_GAP_PX = 15
+# v19: เกณฑ์ overlap ขั้นต่ำระหว่าง claim ของ Gemini กับ region ที่ deterministic
+# ตรวจพบจริง เพื่อยอมรับ claim นั้น (ถ้าต่ำกว่านี้ = ปฏิเสธ เพราะถือว่าไม่มีหลักฐาน
+# สนับสนุนตำแหน่งที่ Gemini อ้างเลย)
+STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10
 
 
 def get_api_keys_pool():
@@ -207,10 +204,6 @@ def clean_json_response(text):
 
 
 def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
-    """
-    ตรวจจับ layout ของแผนภาพ (diagram) ในหน้า manifest ว่าเป็น TOP_BOTTOM
-    (Front บน, Back ล่าง) หรือ LEFT_RIGHT (Front ซ้าย, Back ขวา)
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
@@ -263,11 +256,6 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
 
 
 def extract_container_length_mm(pdf_bytes: bytes):
-    """
-    ดึงค่าความยาวตู้จริง (มิลลิเมตร) จากข้อความในหน้า manifest PDF (เช่นตัวเลข
-    "7200 (mm)") ใช้เป็นค่าคาลิเบรตแปลงพิกเซล -> มิลลิเมตรจริง ค้นหาในทุกหน้า
-    และรองรับรูปแบบข้อความหลากหลาย
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         all_values = []
@@ -522,7 +510,7 @@ def compute_empty_gap_pixels(view_container, view_cargo, rear_side, risk_type):
             gap = max(0, c_xmax - g_xmax)
         else:
             gap = max(0, g_xmin - c_xmin)
-    else:  # REAR_EMPTY_RISK
+    else:
         if rear_side == "LEFT":
             gap = max(0, g_xmin - c_xmin)
         else:
@@ -576,16 +564,11 @@ def compute_lateral_gap_ratio(view_container, view_cargo):
 
 
 # ---------------------------------------------------------------------------
-# v18 NEW: STEP_DOWN_RISK deterministic detection - height-profile discontinuity
+# STEP_DOWN_RISK deterministic detection - height-profile discontinuity
 # ---------------------------------------------------------------------------
 
 def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
                             step=STEP_DOWN_PROFILE_STEP_PX, min_consistent_run=STEP_DOWN_MIN_CONSISTENT_RUN):
-    """
-    สแกนหา 'ขอบบนสุดของสินค้าจริง' ที่แต่ละตำแหน่ง x (ทุกๆ step พิกเซล) โดยกำหนดว่า
-    ต้องมีพิกเซลสีสินค้าติดต่อกันเพียงพอด้านล่างจุดนั้น (ไม่ใช่แค่ 1 จุดเดียว) เพื่อ
-    ป้องกัน false positive จากพิกเซลขอบ/เส้นกรอบ container หรือ anti-aliasing
-    """
     px = view_img.convert("RGB").load()
     w, h = view_img.size
     x_start = max(0, int(x_start)); x_end = min(w, int(x_end))
@@ -609,13 +592,14 @@ def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
 
 def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, container_ymax, container_y_span_px,
                                step=STEP_DOWN_PROFILE_STEP_PX, min_ratio=MIN_STEP_DOWN_RATIO,
-                               min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX, merge_gap_px=STEP_DOWN_MERGE_GAP_PX):
+                               min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX):
     """
-    ตรวจจับความต่างระดับ (step-down) ด้วยการหา 'จุดกระโดด' (discontinuity) ระหว่างจุด
-    ที่ติดกันบน height-profile (ไม่ใช้ linear regression ทั้งเส้น เพราะรูปทรง
-    isometric จริงมีลักษณะเป็นเนินสามเหลี่ยม/โค้ง ไม่ใช่เส้นตรง) แล้วสร้างกรอบครอบ
-    เฉพาะ 'กองที่เตี้ยกว่า' (จากยอดกองลงไปถึงพื้นตู้) เพื่อไฮไลท์ตำแหน่งเสี่ยงจริง
-    Returns: list of {"x_min","x_max","y_min","y_max","ratio"} ในพิกัด view-relative
+    v19 FIX: ตรวจจับความต่างระดับด้วยการหา 'จุดกระโดด' ระหว่างจุดที่ติดกันบน
+    height-profile แล้วตรวจสอบแต่ละ segment ว่า 'เตี้ยกว่าเพื่อนบ้านซ้าย/ขวา' หรือไม่
+    แยกกันเป็นอิสระ (ไม่ใช่เปรียบเทียบทีละคู่แล้ว merge ตามระยะห่าง แบบ v18 เดิมที่มี
+    บั๊กเมื่อเจอ pattern บันได 'เตี้ย->กลาง->สูง' ทำให้ 2 จุดเสี่ยงจริงถูกรวมเป็นกรอบ
+    เดียวผิดๆ) - segment ใดเตี้ยกว่าเพื่อนบ้านฝั่งใดฝั่งหนึ่งเกินเกณฑ์ จะกลายเป็นจุด
+    เสี่ยงแยกของตัวเองทันที
     """
     profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
     if len(profile) < 4:
@@ -648,51 +632,42 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
         seg_info.append({"x_min": min(xs), "x_max": max(xs), "y_avg": sum(ys) / len(ys), "width": width})
     seg_info.sort(key=lambda s: s["x_min"])
 
-    regions = []
-    for i in range(len(seg_info) - 1):
-        seg_a = seg_info[i]
-        seg_b = seg_info[i + 1]
-        if seg_a["width"] < min_flat_width_px and seg_b["width"] < min_flat_width_px:
+    risky_segments = []
+    n = len(seg_info)
+    for i in range(n):
+        seg = seg_info[i]
+        if seg["width"] < min_flat_width_px:
             continue
-        y_a = seg_a["y_avg"]; y_b = seg_b["y_avg"]
-        height_diff_px = abs(y_b - y_a)
-        ratio = height_diff_px / container_y_span_px if container_y_span_px > 0 else 0
-        if ratio >= min_ratio:
-            shorter = seg_a if y_a > y_b else seg_b
-            x_min = shorter["x_min"]
-            x_max = shorter["x_max"]
-            if x_max - x_min < min_flat_width_px:
-                pad_x = (min_flat_width_px - (x_max - x_min)) / 2
-                x_min -= pad_x
-                x_max += pad_x
-            regions.append({
-                "x_min": x_min, "x_max": x_max,
-                "y_min": shorter["y_avg"], "y_max": container_ymax,
-                "ratio": ratio,
+        is_risky = False
+        max_ratio = 0
+        if i > 0:
+            left = seg_info[i - 1]
+            diff = abs(seg["y_avg"] - left["y_avg"])
+            ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
+            if seg["y_avg"] > left["y_avg"] and ratio >= min_ratio:
+                is_risky = True
+                max_ratio = max(max_ratio, ratio)
+        if i < n - 1:
+            right = seg_info[i + 1]
+            diff = abs(seg["y_avg"] - right["y_avg"])
+            ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
+            if seg["y_avg"] > right["y_avg"] and ratio >= min_ratio:
+                is_risky = True
+                max_ratio = max(max_ratio, ratio)
+        if is_risky:
+            risky_segments.append({
+                "x_min": seg["x_min"], "x_max": seg["x_max"],
+                "y_min": seg["y_avg"], "y_max": container_ymax,
+                "ratio": max_ratio,
             })
 
-    if not regions:
-        return []
-    regions.sort(key=lambda r: r["x_min"])
-    merged = [regions[0]]
-    for r in regions[1:]:
-        last = merged[-1]
-        if r["x_min"] - last["x_max"] <= merge_gap_px:
-            last["x_max"] = max(last["x_max"], r["x_max"])
-            last["x_min"] = min(last["x_min"], r["x_min"])
-            last["y_min"] = min(last["y_min"], r["y_min"])
-            last["ratio"] = max(last["ratio"], r["ratio"])
-        else:
-            merged.append(r)
-    return merged
+    risky_segments.sort(key=lambda r: r["x_min"])
+    return risky_segments
 
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
-    """
-    ตรวจจับ STEP_DOWN_RISK แบบ deterministic แยกต่อ view (FRONT/BACK) - Returns dict
-    {"FRONT": [...], "BACK": [...]} โดยแต่ละ region มีพิกัดในระบบ 'ภาพเต็ม' (absolute,
-    บวก crop_y_start แล้ว) พร้อมใช้แปลงเป็น box_2d normalized ต่อได้ทันที
-    """
+    """ตรวจจับ STEP_DOWN_RISK แบบ deterministic แยกต่อ view - Returns dict
+    {"FRONT": [...], "BACK": [...]} พิกัดใน 'ภาพเต็ม' (absolute)"""
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
         cb = container_bounds.get(view)
@@ -742,7 +717,58 @@ def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop
                   f"y=[{abs_region['y_min']:.0f}-{abs_region['y_max']:.0f}] "
                   f"height_diff_ratio={abs_region['ratio']*100:.1f}% (threshold={MIN_STEP_DOWN_RATIO*100:.1f}%)")
             results[view].append(abs_region)
+        if not regions:
+            print(f"Deterministic STEP_DOWN_RISK: no discontinuity found for {view} (container appears uniform)")
     return results
+
+
+def _box_iou_absolute(box_a, box_b):
+    """คำนวณ intersection-over-area ของ box_a (ไม่ใช่ IoU มาตรฐาน แต่เป็นสัดส่วน
+    พื้นที่ทับซ้อนเทียบกับพื้นที่ของ box_a เอง - ใช้ตรวจว่า claim ของ AI ตกอยู่ในขอบเขต
+    ของ region ที่ deterministic ตรวจพบมากน้อยแค่ไหน)"""
+    ax0, ay0, ax1, ay1 = box_a
+    bx0, by0, bx1, by1 = box_b
+    ix0 = max(ax0, bx0); ix1 = min(ax1, bx1)
+    iy0 = max(ay0, by0); iy1 = min(ay1, by1)
+    iw = max(0.0, ix1 - ix0); ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    area_a = max(1.0, (ax1 - ax0) * (ay1 - ay0))
+    return inter / area_a
+
+
+def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
+                                          overlap_threshold=STEP_DOWN_CLAIM_OVERLAP_THRESHOLD):
+    """
+    v19 NEW: ตรวจสอบว่า STEP_DOWN_RISK ที่ Gemini อ้างมา (box_2d) ทับซ้อนกับจุดที่
+    deterministic height-profile ตรวจพบจริงหรือไม่ - ถ้า regions_for_view ว่างเปล่า
+    (deterministic ไม่พบความต่างระดับใดๆ เลยสำหรับ view นี้) ให้ปฏิเสธ claim ทันที
+    เพราะถือว่าไม่มีหลักฐานทางพิกเซลสนับสนุนเลย (นี่คือ GATE ที่ขาดหายไปใน v18)
+    """
+    if not regions_for_view:
+        print("STEP_DOWN_RISK claim REJECTED - no deterministic discontinuity detected for this view at all "
+              "(container appears uniform based on pixel measurement)")
+        return False
+    try:
+        ymin, xmin, ymax, xmax = map(float, box_2d)
+        if max(ymin, xmin, ymax, xmax) <= 1.0:
+            ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+        abs_xmin = (xmin / 1000.0) * crop_w
+        abs_xmax = (xmax / 1000.0) * crop_w
+        abs_ymin = crop_y_start + (ymin / 1000.0) * crop_h
+        abs_ymax = crop_y_start + (ymax / 1000.0) * crop_h
+    except Exception:
+        return True  # คำนวณพิกัดไม่ได้ - ปล่อยผ่านโดยไม่ block (ไม่มีเหตุผลจะปฏิเสธ)
+
+    claim_box = (abs_xmin, abs_ymin, abs_xmax, abs_ymax)
+    for region in regions_for_view:
+        region_box = (region["x_min"], region["y_min"], region["x_max"], region["y_max"])
+        overlap = _box_iou_absolute(claim_box, region_box)
+        if overlap >= overlap_threshold:
+            print(f"STEP_DOWN_RISK claim ACCEPTED - overlaps with detected discontinuity (overlap={overlap:.2f})")
+            return True
+    print(f"STEP_DOWN_RISK claim REJECTED - box_2d does not overlap with any detected discontinuity "
+          f"(claim_box={claim_box}, available_regions={len(regions_for_view)})")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -910,17 +936,17 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
   STRICTLY: if one stack is shorter than its immediate neighbor by MORE than approximately 40-50%
   of the taller stack's height, this IS a STEP_DOWN_RISK - flag it even if you are generally trying
   to be conservative, and EVEN IF the height difference happens to be located near the door/rear end
-  of the container (a real height mismatch there is still a STEP_DOWN_RISK). Only skip flagging when
-  the height difference is small, or when tall stacks gradually taper down over multiple positions
-  toward the doors (that gradual tapering is normal, not a STEP_DOWN_RISK).
+  of the container. Only skip flagging when the height difference is small, or when tall stacks
+  gradually taper down over multiple positions toward the doors (that gradual tapering is normal).
+  BE VERY CAREFUL: if the container appears fully and uniformly loaded (all stacks the same height),
+  you MUST NOT invent a STEP_DOWN_RISK - only report what you can clearly and confidently see.
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
   OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
 - OVERHANG_RISK: upper-tier cargo clearly overhanging past the edge of the cargo below it.
 
 Look carefully at EVERY pair of adjacent stacks in both views before concluding there are no risks.
-A fully and evenly loaded container should return an EMPTY array []; but if you see any clear,
-obvious height mismatch between neighboring stacks as described above, you MUST report it.
+A fully and evenly loaded container should return an EMPTY array [].
 
 BOUNDING BOX RULES:
 - box_2d must use [ymin, xmin, ymax, xmax] format, values 0-1000 normalized to image size.
@@ -1316,9 +1342,37 @@ def process_request(request):
         container_bounds = detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
         cargo_extent = detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
 
-        all_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
-        if not isinstance(all_risks, list):
-            all_risks = []
+        # v19: คำนวณ step_down_regions ตั้งแต่ต้น (ก่อนเรียก Gemini วิเคราะห์ภาพรวม)
+        # เพื่อใช้เป็น GATE ตรวจสอบ claim ของ Gemini ทันทีที่ได้ผลลัพธ์กลับมา
+        step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
+                                                                container_bounds, cargo_extent)
+
+        raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
+        if not isinstance(raw_ai_risks, list):
+            raw_ai_risks = []
+
+        # v19: กรอง STEP_DOWN_RISK ที่ Gemini claim มา ผ่าน deterministic GATE ก่อน
+        # นำเข้า all_risks - ถ้าตำแหน่งที่อ้างไม่ตรงกับจุดกระโดดจริงที่ตรวจพบ (หรือ
+        # ไม่มีจุดกระโดดใดๆ เลยสำหรับ view นั้น) จะถูกปฏิเสธทันที
+        all_risks = []
+        for r in raw_ai_risks:
+            rt = str(r.get("risk_type", "")).upper().strip()
+            if rt == "STEP_DOWN_RISK":
+                view_of_claim = str(r.get("view", "")).upper().strip()
+                box_2d = r.get("box_2d")
+                if view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
+                    regions_for_view = step_down_regions.get(view_of_claim, [])
+                    if _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
+                        all_risks.append(r)
+                    else:
+                        print(f"Gemini STEP_DOWN_RISK claim for {view_of_claim} view REJECTED by deterministic gate "
+                              f"(description: {r.get('description', '')[:100]})")
+                else:
+                    # ไม่มี view/box_2d ชัดเจนพอจะตรวจสอบได้ - ปฏิเสธเพื่อความปลอดภัย
+                    # (ป้องกัน hallucination ที่ไม่มีพิกัดชัดเจนให้ตรวจสอบ)
+                    print(f"Gemini STEP_DOWN_RISK claim REJECTED - missing valid view/box_2d for verification")
+            else:
+                all_risks.append(r)
 
         def _zoom_crop_ranges(view_bounds, rear_side, default_origin_x, default_ref_w):
             if view_bounds:
@@ -1394,10 +1448,6 @@ def process_request(request):
             pb = _get_zoom_precise_box(front_result_from_front_view, "box_2d", zoom_crop_rects["front_FRONT"], img)
             if pb:
                 precise_boxes[("FRONT", "FRONT_EMPTY_RISK")] = pb
-
-        # v18 NEW: deterministic STEP_DOWN_RISK detection ต่อ view
-        step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_y_start=crop_y_start,
-                                                                crop_h=crop_h, container_bounds=container_bounds, cargo_extent=cargo_extent)
 
         def _normalize_view(v):
             v = str(v).upper().strip()
@@ -1523,12 +1573,37 @@ def process_request(request):
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
                 all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": None})
 
-        # v18 NEW: FORCE สร้าง STEP_DOWN_RISK จากการตรวจจับ deterministic (แปลงพิกัด
-        # absolute pixel เป็น box_2d normalized 0-1000 relative to crop_w/crop_h เหมือน
-        # ที่ Gemini ใช้ เพื่อให้ไหลผ่าน pipeline การวาด/validate เดิมได้เลย)
+        # FORCE สร้าง STEP_DOWN_RISK เองสำหรับ region ที่ deterministic ตรวจพบ แต่
+        # Gemini ไม่ได้ flag มา (dedup: ถ้า all_risks มี STEP_DOWN_RISK ของ view นี้
+        # ที่ผ่าน gate มาแล้วและตำแหน่งซ้อนทับกับ region นี้อยู่แล้ว จะไม่เพิ่มซ้ำ)
         for view_label in ("FRONT", "BACK"):
             for region in step_down_regions.get(view_label, []):
                 if region["ratio"] < MIN_STEP_DOWN_RATIO:
+                    continue
+                already_covered = False
+                region_box = [region["y_min"], region["x_min"], region["y_max"], region["x_max"]]
+                for r in all_risks:
+                    if str(r.get("risk_type", "")).upper().strip() != "STEP_DOWN_RISK":
+                        continue
+                    if str(r.get("view", "")).upper().strip() != view_label:
+                        continue
+                    r_box = r.get("box_2d")
+                    if not r_box:
+                        continue
+                    try:
+                        ymin, xmin, ymax, xmax = map(float, r_box)
+                        if max(ymin, xmin, ymax, xmax) <= 1.0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                        abs_xmin = (xmin/1000.0)*crop_w; abs_xmax = (xmax/1000.0)*crop_w
+                        abs_ymin = crop_y_start + (ymin/1000.0)*crop_h; abs_ymax = crop_y_start + (ymax/1000.0)*crop_h
+                        overlap = _box_iou_absolute((region["x_min"], region["y_min"], region["x_max"], region["y_max"]),
+                                                      (abs_xmin, abs_ymin, abs_xmax, abs_ymax))
+                        if overlap >= 0.15:
+                            already_covered = True
+                            break
+                    except Exception:
+                        continue
+                if already_covered:
                     continue
                 x0, y0, x1, y1 = region["x_min"], region["y_min"], region["x_max"], region["y_max"]
                 ymin_norm = ((y0 - crop_y_start) / crop_h) * 1000
