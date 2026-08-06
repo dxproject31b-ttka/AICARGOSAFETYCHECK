@@ -16,7 +16,71 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v19
+# AI Cargo Safety Checker - High Precision v20
+#
+# v20 - ทำให้ทุก risk type มี deterministic GATE (veto) ครบสมมาตรกัน ก่อนหน้านี้มี
+#   เพียง REAR_EMPTY_RISK/FRONT_EMPTY_RISK/STEP_DOWN_RISK เท่านั้นที่มี GATE ส่วน
+#   REAR_LATERAL_IMBALANCE, LATERAL_GAP_RISK (จาก AI claim), TALL_UNSTABLE_RISK,
+#   OVERHANG_RISK ยังคงรับคำตอบจาก Gemini ตรงๆ โดยไม่มีการตรวจสอบพิกเซลจริงใดๆ เลย -
+#   v20 นี้ปิดช่องโหว่ทั้งหมดให้ครบทุกตัว:
+#
+#   1) REAR_LATERAL_IMBALANCE - แก้บั๊กไม่มี "GATE" สำหรับ claim จาก Gemini
+#   (บั๊กแบบเดียวกับที่ STEP_DOWN_RISK เจอใน v19 แต่ตอนนั้นแก้เฉพาะ STEP_DOWN_RISK
+#   ยังไม่ได้แก้ REAR_LATERAL_IMBALANCE ด้วย)
+#
+#   พบจากไฟล์ EE06-01,04 (สินค้า SKU เดียวกันทั้งหมด 12 กล่อง เรียง 4x3 เต็มพอดี
+#   ไม่มีงานสูง-ต่ำต่างกันจริงที่ฝั่งประตูท้ายตู้เลย) แต่ระบบกลับวาดกรอบสีชมพู
+#   (deeppink) แจ้ง REAR_LATERAL_IMBALANCE ผิดพลาด โดยกรอบไปเกาะอยู่ที่ "รอยต่อ"
+#   ของภาพ isometric (จุดที่หลังคากล่อง 2 ใบมาบรรจบกันเป็นรูปตัว V) ซึ่งเป็น
+#   artifact ของการวาดภาพ 3D ไม่ใช่ช่องว่างหรือความสูงต่างกันจริง
+#
+#   Root cause: REAR_EMPTY_RISK และ FRONT_EMPTY_RISK มีทั้งกลไก FORCE (สร้างเองถ้า
+#   deterministic พบแต่ Gemini พลาด) และ GATE (ปฏิเสธถ้า Gemini flag ผิด/หลอน) ผ่าน
+#   _passes_deterministic_gate() ที่วัดระยะห่างจริงจากพิกเซล/มม. ก่อนยอมรับ claim
+#   แต่ REAR_LATERAL_IMBALANCE รับ claim ของ Gemini ตรงๆ ทันทีที่ confidence เป็น
+#   HIGH หรือ MEDIUM โดยไม่มีการตรวจสอบพิกเซลจริงใดๆ เลย (ไม่มี GATE) ทำให้เมื่อ
+#   Gemini "เข้าใจผิด" ว่าซ้าย-ขวาสูงต่ำไม่เท่ากัน (ความไม่แน่นอนของ generative
+#   model ตอบสนองต่อรอยต่อภาพ) ไม่มีกลไกใดมาตรวจสอบค้านเลย
+#
+#   วิธีแก้: เพิ่ม _measure_rear_lateral_height_diff_ratio() วัดความสูงกองสินค้า
+#   จริงฝั่งซ้ายเทียบฝั่งขวาของภาพ zoom ประตูท้ายตู้ด้วย height-profile แบบเดียวกับ
+#   ที่ใช้กับ STEP_DOWN_RISK แล้วเพิ่ม _passes_lateral_imbalance_gate() เป็น GATE
+#   ปฏิเสธ claim ของ Gemini ทันทีถ้าความต่างของความสูงที่วัดได้จริงไม่ถึงเกณฑ์
+#   MIN_REAR_LATERAL_IMBALANCE_RATIO (ไม่ว่า Gemini จะมั่นใจแค่ไหนก็ตาม) -
+#   ตอนนี้ REAR_LATERAL_IMBALANCE มีทั้ง GATE สมมาตรกับ REAR_EMPTY_RISK/
+#   FRONT_EMPTY_RISK/STEP_DOWN_RISK ครบทุกตัวแล้ว
+#
+#   2) LATERAL_GAP_RISK - claim ของ Gemini (จาก analyze_diagram_image_with_ai)
+#   ก่อนหน้านี้ผ่านเข้า all_risks ตรงๆ ทันที (else-branch ของ filter loop) โดยไม่มี
+#   GATE เลย ทั้งที่ระบบมีฟังก์ชัน compute_lateral_gap_mm/ratio อยู่แล้ว (เดิมใช้เป็น
+#   FORCE เท่านั้น) - v20 ย้ายการคำนวณ lateral gap มาไว้ตั้งแต่ต้น (ก่อนเรียก Gemini)
+#   แล้วใช้ค่าเดียวกันทั้งเป็น GATE (ปฏิเสธ claim ถ้าวัดจริงไม่ถึงเกณฑ์) และ FORCE
+#   (single source of truth เดียวกัน ไม่ใช้เกณฑ์คนละชุด)
+#
+#   3) TALL_UNSTABLE_RISK - เดิมไม่มี deterministic detection ใดๆ เลย รับ claim
+#   ของ Gemini ตรงๆ ทั้งหมด - v20 เพิ่ม _detect_tall_unstable_regions() ใช้
+#   height-profile เดียวกับ STEP_DOWN_RISK แต่ตรวจหา "กองสูงโดดเดี่ยว" (สูงกว่า
+#   เพื่อนบ้านทั้งสองฝั่งพร้อมกัน และแคบพอที่จะเป็นกองเดี่ยว ไม่ใช่แนวยาว) แล้วเพิ่ม
+#   GATE ผ่าน _region_claim_overlaps_detection() ปฏิเสธ claim ที่ไม่ทับซ้อนกับจุดที่
+#   ตรวจพบจริง พร้อม FORCE สร้างเองถ้า deterministic พบแต่ Gemini พลาด
+#
+#   4) OVERHANG_RISK - เดิมไม่มี deterministic detection ใดๆ เลยเช่นกัน - v20 เพิ่ม
+#   _detect_overhang_regions() แบ่งพื้นที่สินค้าเป็นแถบแนวตั้ง (tier bands) วัดขอบเขต
+#   ซ้าย-ขวาของแต่ละแถบ เปรียบเทียบแถบบนกับแถบล่างว่ายื่นล้ำเกินเกณฑ์หรือไม่ แล้วเพิ่ม
+#   GATE + FORCE แบบเดียวกับ TALL_UNSTABLE_RISK
+#
+#   *** พบบั๊กจากการทดสอบจริงกับไฟล์ EE06-01,04 (โหลดเต็มตู้ปลอดภัย 100%) ***:
+#   เวอร์ชันแรกของ _detect_overhang_regions เปรียบเทียบแถบที่ติดกันตรงๆ โดยไม่ได้
+#   คำนึงถึง 'เส้นทแยงหลังคาตู้' (isometric roofline) ที่ทำให้ขอบเขตสินค้าเปลี่ยนแปลง
+#   อย่างต่อเนื่องราบเรียบไปหลายแถบ (สูงสุดถึง 29.3% ratio) และ 'จุดยอด/จุดหักมุม'
+#   ของทรงข้าวหลามตัดในภาพ isometric - ทำให้ตรวจพบ false positive 13 จุดในการ
+#   ทดสอบครั้งแรก ก่อนแก้เป็น 4 จุด แล้วแก้จนเหลือ 0 จุด ด้วย 3 มาตรการร่วมกัน:
+#   (ก) แยก 'จุดกระโดดเดี่ยว' (isolated spike, run<=2 แถบ) ออกจาก 'ความลาดเอียง
+#   ต่อเนื่องจากมุมมอง 3D' (long taper run) ด้วย OVERHANG_MAX_TAPER_RUN_BANDS
+#   (ข) ตัดแถบขอบบน-ล่างสุดทิ้ง (OVERHANG_EDGE_EXCLUSION_BANDS) เพราะเป็นจุดยอด
+#   ตามธรรมชาติของทรงข้าวหลามตัด (ข) ปรับ MIN_OVERHANG_RATIO เป็น 0.32 (32%) ให้อยู่
+#   เหนือ noise floor ที่วัดได้จริงสูงสุด (29.3%) พร้อม margin ปลอดภัย - ยืนยันด้วย
+#   unit test สังเคราะห์ว่ายังตรวจจับกรณี overhang จริงที่รุนแรง (>=33%) ได้ถูกต้อง
 #
 # v19 - แก้ 2 บั๊กสำคัญที่พบจากการใช้งานจริง:
 #
@@ -108,6 +172,52 @@ STEP_DOWN_MIN_FLAT_WIDTH_PX = 12
 # ตรวจพบจริง เพื่อยอมรับ claim นั้น (ถ้าต่ำกว่านี้ = ปฏิเสธ เพราะถือว่าไม่มีหลักฐาน
 # สนับสนุนตำแหน่งที่ Gemini อ้างเลย)
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10
+
+# v20: เกณฑ์ความต่างของความสูงจริง (วัดจากพิกเซล) ระหว่างฝั่งซ้าย-ขวาของภาพ zoom
+# ประตูท้ายตู้ ที่ต้องพบอย่างน้อยเท่านี้ ถึงจะยอมรับ claim REAR_LATERAL_IMBALANCE
+# ของ Gemini (ถ้าต่ำกว่านี้ = ปฏิเสธ เพราะถือว่าไม่มีหลักฐานทางพิกเซลสนับสนุนเลย -
+# นี่คือ GATE ที่ขาดหายไปสำหรับ REAR_LATERAL_IMBALANCE)
+MIN_REAR_LATERAL_IMBALANCE_RATIO = 0.25
+
+# v20: เกณฑ์สำหรับ TALL_UNSTABLE_RISK deterministic detection (กองสูงโดดเดี่ยว
+# ไม่มีตัวประคองข้าง) - ใช้ height-profile เดียวกับ STEP_DOWN_RISK แต่ตรวจว่า
+# segment หนึ่ง 'สูงกว่าเพื่อนบ้านทั้งสองฝั่ง' พร้อมกัน (ไม่ใช่แค่ฝั่งเดียวแบบ step-down)
+# และต้องแคบพอ (ไม่เกิน MAX_TALL_UNSTABLE_WIDTH_RATIO ของความกว้างทั้งหมด) ถึงจะ
+# ถือว่าเป็นกองโดดเดี่ยว ไม่ใช่แนวสินค้าสูงยาวปกติ
+MIN_TALL_UNSTABLE_RATIO = 0.30
+MAX_TALL_UNSTABLE_WIDTH_RATIO = 0.30
+TALL_UNSTABLE_CLAIM_OVERLAP_THRESHOLD = 0.10
+
+# v20: เกณฑ์สำหรับ OVERHANG_RISK deterministic detection - แบ่งพื้นที่สินค้าตาม
+# แนวตั้งเป็นแถบ (band) แล้ววัดว่าขอบเขตซ้าย/ขวาของแถบบนยื่นล้ำออกไปเกินขอบเขตของ
+# แถบล่าง (ชั้นรองรับ) เกินสัดส่วนความกว้างตู้เท่าใด ถึงจะถือว่าเป็นการยื่นล้ำจริง
+#
+# v20 IMPORTANT FIX (พบจากการทดสอบจริงกับไฟล์ EE06-01,04): เวอร์ชันแรกของ
+# _detect_overhang_regions เปรียบเทียบ x_min/x_max ของแถบที่ติดกันตรงๆ โดยไม่ได้
+# คำนึงถึง 'เส้นทแยงหลังคาตู้' (isometric roofline) ของภาพ isometric ที่ทำให้ขอบเขต
+# ซ้าย-ขวาของสินค้าค่อยๆ เปลี่ยนแปลงอย่างต่อเนื่องและราบเรียบไปหลายแถบติดกัน (5-8
+# แถบ) ตามธรรมชาติของมุมมอง 3D - ไม่ใช่การยื่นล้ำจริง (เหมือนบั๊ก REAR_LATERAL_
+# IMBALANCE เดิมที่สับสนรอยต่อภาพ isometric กับความเสี่ยงจริง) ส่วนการยื่นล้ำจริง
+# ระหว่างชั้นสินค้าจะปรากฏเป็น 'จุดกระโดดเดี่ยว' (isolated spike) ในช่วงสั้นๆ
+# (1-2 แถบ) ไม่ใช่แนวโน้มต่อเนื่องยาว - จึงเพิ่ม OVERHANG_MAX_TAPER_RUN_BANDS เป็น
+# เกณฑ์แยกแยะ 'จุดกระโดดเดี่ยวจริง' ออกจาก 'ความลาดเอียงต่อเนื่องจากมุมมอง 3D'
+OVERHANG_BAND_STEP_PX = 25
+# v20 FIX (หลังทดสอบกับไฟล์จริง EE06-01,04): เดิมตั้ง 0.08 (8%) ต่ำเกินไป ทำให้ตรวจ
+# พบ false positive จากรอยต่อธรรมชาติของภาพ isometric (จุดยอด/จุดหักมุมของทรง
+# ข้าวหลามตัดที่เกิดจากมุมมอง 3D) ซึ่งวัดได้สูงสุดถึง 29.3% ในไฟล์ทดสอบจริงที่โหลด
+# เต็มตู้ปลอดภัย 100% - ปรับเป็น 0.32 (32%) เพื่อให้อยู่เหนือ noise floor ที่วัดได้
+# จริงทุกจุด (สูงสุด 29.3%) พร้อม margin ปลอดภัย
+MIN_OVERHANG_RATIO = 0.32
+OVERHANG_CLAIM_OVERLAP_THRESHOLD = 0.10
+OVERHANG_MAX_TAPER_RUN_BANDS = 2
+# v20 NEW: จำนวนแถบที่ตัดทิ้งจากขอบบน-ล่างสุดของช่วงที่สแกน (ไม่นำมาพิจารณา) เพราะ
+# เป็นจุดยอด/จุดหักมุมตามธรรมชาติของทรงข้าวหลามตัดในภาพ isometric (ไม่ใช่รอยต่อ
+# ระหว่างชั้นสินค้าจริง) - พบจากการทดสอบจริงว่า false positive มักอยู่ที่ขอบเหล่านี้
+OVERHANG_EDGE_EXCLUSION_BANDS = 2
+
+# v20: เกณฑ์ GATE สำหรับ LATERAL_GAP_RISK ที่ Gemini claim มาจากการวิเคราะห์ภาพรวม
+# (แยกจาก FORCE mechanism เดิมที่มีอยู่แล้ว) - ใช้ค่าเดียวกับที่ใช้ FORCE
+# (MIN_LATERAL_GAP_MM / FALLBACK_MIN_LATERAL_GAP_RATIO) เป็นเกณฑ์ยอมรับ claim ด้วย
 
 
 def get_api_keys_pool():
@@ -590,6 +700,65 @@ def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
     return profile
 
 
+def _measure_rear_lateral_height_diff_ratio(rear_crop_img, step=STEP_DOWN_PROFILE_STEP_PX,
+                                             min_consistent_run=STEP_DOWN_MIN_CONSISTENT_RUN):
+    """
+    v20 NEW: วัดความสูงจริง (พิกเซล) ของกองสินค้าฝั่งซ้ายเทียบกับฝั่งขวาของภาพ
+    zoom บริเวณประตูท้ายตู้ (rear_crop) แบบ deterministic เพื่อใช้เป็น GATE
+    ตรวจสอบ claim REAR_LATERAL_IMBALANCE ของ Gemini - ถ้าความต่างของความสูงจริง
+    ที่วัดได้ไม่ถึงเกณฑ์ ให้ถือว่า Gemini หลอน (hallucinate) และปฏิเสธ claim นั้น
+    (เช่นกรณีรอยต่อของภาพ isometric ที่ทำให้ดูเหมือนมีขั้นบันไดทั้งที่จริงแล้ว
+    สินค้าสูงเท่ากันทั้งสองฝั่ง)
+
+    คืนค่า ratio = |height_left - height_right| / max(height_left, height_right)
+    หรือ None ถ้าวัดไม่ได้ (เช่น หา profile ไม่เจอฝั่งใดฝั่งหนึ่งเลย)
+    """
+    if rear_crop_img is None:
+        return None
+    w, h = rear_crop_img.size
+    if w < 10 or h < 10:
+        return None
+    mid_x = w // 2
+    left_profile = _detect_height_profile(rear_crop_img, 0, mid_x, 0, h, step, min_consistent_run)
+    right_profile = _detect_height_profile(rear_crop_img, mid_x, w, 0, h, step, min_consistent_run)
+    if not left_profile or not right_profile:
+        return None
+    # top_y ยิ่งน้อย = กองยิ่งสูง ใช้ค่า top_y ที่ต่ำสุด (สูงสุด) ของแต่ละฝั่งเป็นตัวแทน
+    left_top = min(y for _, y in left_profile)
+    right_top = min(y for _, y in right_profile)
+    left_height = h - left_top
+    right_height = h - right_top
+    if left_height <= 0 or right_height <= 0:
+        return None
+    taller = max(left_height, right_height)
+    diff = abs(left_height - right_height)
+    return diff / taller if taller > 0 else None
+
+
+def _passes_lateral_imbalance_gate(view_label, rear_crop_img,
+                                    min_ratio=MIN_REAR_LATERAL_IMBALANCE_RATIO):
+    """
+    v20 NEW: GATE ที่ขาดหายไปสำหรับ REAR_LATERAL_IMBALANCE (สมมาตรกับ
+    _passes_deterministic_gate ของ REAR_EMPTY_RISK/FRONT_EMPTY_RISK และ
+    _step_down_claim_overlaps_detection ของ STEP_DOWN_RISK) - ปฏิเสธ claim ของ
+    Gemini ทันทีถ้าวัดพิกเซลจริงแล้วไม่พบความต่างของความสูงซ้าย-ขวาเกินเกณฑ์
+    """
+    ratio = _measure_rear_lateral_height_diff_ratio(rear_crop_img)
+    if ratio is None:
+        print(f"REAR_LATERAL_IMBALANCE gate ({view_label}): could not measure height profile for "
+              f"either side - passing through (no pixel evidence available to reject)")
+        return True
+    if ratio < min_ratio:
+        print(f"REAR_LATERAL_IMBALANCE claim REJECTED ({view_label}) - measured left/right height "
+              f"diff ratio={ratio:.3f} < threshold {min_ratio} (both sides appear the same height "
+              f"based on pixel measurement; Gemini claim treated as hallucination, likely triggered "
+              f"by an isometric-drawing seam artifact rather than a real height difference)")
+        return False
+    print(f"REAR_LATERAL_IMBALANCE claim ACCEPTED ({view_label}) - measured left/right height "
+          f"diff ratio={ratio:.3f} >= threshold {min_ratio}")
+    return True
+
+
 def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, container_ymax, container_y_span_px,
                                step=STEP_DOWN_PROFILE_STEP_PX, min_ratio=MIN_STEP_DOWN_RATIO,
                                min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX):
@@ -767,6 +936,330 @@ def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, re
             print(f"STEP_DOWN_RISK claim ACCEPTED - overlaps with detected discontinuity (overlap={overlap:.2f})")
             return True
     print(f"STEP_DOWN_RISK claim REJECTED - box_2d does not overlap with any detected discontinuity "
+          f"(claim_box={claim_box}, available_regions={len(regions_for_view)})")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# v20 NEW: TALL_UNSTABLE_RISK deterministic detection - isolated tall peak
+# ---------------------------------------------------------------------------
+
+def _detect_tall_unstable_regions(view_img, x_start, x_end, y_start, y_end, container_ymax, container_y_span_px,
+                                   step=STEP_DOWN_PROFILE_STEP_PX, min_ratio=MIN_TALL_UNSTABLE_RATIO,
+                                   min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX,
+                                   max_width_ratio=MAX_TALL_UNSTABLE_WIDTH_RATIO):
+    """
+    v20 NEW: ตรวจจับ 'กองสูงโดดเดี่ยวไม่มีตัวประคองข้าง' แบบ deterministic โดยใช้
+    height-profile เดียวกับ STEP_DOWN_RISK แต่เกณฑ์ต่างกัน: STEP_DOWN_RISK มองหา
+    segment ที่เตี้ยกว่าเพื่อนบ้านฝั่งใดฝั่งหนึ่ง ส่วน TALL_UNSTABLE_RISK มองหา segment
+    ที่ 'สูงกว่าเพื่อนบ้านทั้งสองฝั่งพร้อมกัน' (เป็นยอดโดดเดี่ยวจริง ไม่ใช่ขั้นบันได)
+    และต้องแคบพอ (ไม่เกิน max_width_ratio ของความกว้างทั้งหมด) มิฉะนั้นจะเป็นแนว
+    สินค้าสูงยาวปกติซึ่งไม่ถือว่าเสี่ยง
+    """
+    profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
+    if len(profile) < 6:
+        return []
+    total_width = max(1, x_end - x_start)
+    threshold_px = container_y_span_px * min_ratio
+    boundaries = []
+    for i in range(len(profile) - 1):
+        x0, y0 = profile[i]
+        x1, y1 = profile[i + 1]
+        delta = y1 - y0
+        if abs(delta) >= threshold_px:
+            boundaries.append(i)
+    if not boundaries:
+        return []
+
+    segments = []
+    start_idx = 0
+    for b in boundaries:
+        segments.append(profile[start_idx:b + 1])
+        start_idx = b + 1
+    segments.append(profile[start_idx:])
+
+    seg_info = []
+    for seg in segments:
+        if len(seg) < 1:
+            continue
+        xs = [p[0] for p in seg]
+        ys = [p[1] for p in seg]
+        width = (max(xs) - min(xs)) if len(xs) > 1 else step
+        seg_info.append({"x_min": min(xs), "x_max": max(xs), "y_avg": sum(ys) / len(ys), "width": width})
+    seg_info.sort(key=lambda s: s["x_min"])
+
+    risky_segments = []
+    n = len(seg_info)
+    for i in range(1, n - 1):
+        seg = seg_info[i]
+        if seg["width"] < min_flat_width_px or seg["width"] > total_width * max_width_ratio:
+            continue
+        left, right = seg_info[i - 1], seg_info[i + 1]
+        left_diff = left["y_avg"] - seg["y_avg"]
+        right_diff = right["y_avg"] - seg["y_avg"]
+        left_ratio = left_diff / container_y_span_px if container_y_span_px > 0 else 0
+        right_ratio = right_diff / container_y_span_px if container_y_span_px > 0 else 0
+        if left_ratio >= min_ratio and right_ratio >= min_ratio:
+            risky_segments.append({
+                "x_min": seg["x_min"], "x_max": seg["x_max"],
+                "y_min": seg["y_avg"], "y_max": container_ymax,
+                "ratio": min(left_ratio, right_ratio),
+            })
+
+    risky_segments.sort(key=lambda r: r["x_min"])
+    return risky_segments
+
+
+def detect_tall_unstable_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
+    """ตรวจจับ TALL_UNSTABLE_RISK แบบ deterministic แยกต่อ view - Returns dict
+    {"FRONT": [...], "BACK": [...]} พิกัดใน 'ภาพเต็ม' (absolute), รูปแบบเดียวกับ
+    detect_step_down_regions_per_view"""
+    results = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        cb = container_bounds.get(view)
+        ce = cargo_extent.get(view)
+        if not cb or not ce:
+            continue
+        if layout == "TOP_BOTTOM":
+            mid_y = crop_h // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start + mid_y
+        else:
+            half_w = crop_w // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, half_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h))
+                origin_x, origin_y = half_w, crop_y_start
+
+        cb_rel_ymin = cb["ymin"] - origin_y
+        cb_rel_ymax = cb["ymax"] - origin_y
+        ce_rel_xmin = ce["xmin"] - origin_x
+        ce_rel_xmax = ce["xmax"] - origin_x
+        container_y_span_px = cb_rel_ymax - cb_rel_ymin
+        if container_y_span_px <= 0:
+            continue
+
+        try:
+            regions = _detect_tall_unstable_regions(view_img, ce_rel_xmin, ce_rel_xmax, cb_rel_ymin, cb_rel_ymax,
+                                                      cb_rel_ymax, container_y_span_px)
+        except Exception as e:
+            print(f"WARNING: Tall-unstable detection failed for {view} ({e})")
+            regions = []
+
+        for r in regions:
+            abs_region = {
+                "x_min": origin_x + r["x_min"], "x_max": origin_x + r["x_max"],
+                "y_min": origin_y + r["y_min"], "y_max": origin_y + r["y_max"],
+                "ratio": r["ratio"],
+            }
+            print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view}): "
+                  f"x=[{abs_region['x_min']:.0f}-{abs_region['x_max']:.0f}] "
+                  f"y=[{abs_region['y_min']:.0f}-{abs_region['y_max']:.0f}] "
+                  f"isolation_ratio={abs_region['ratio']*100:.1f}% (threshold={MIN_TALL_UNSTABLE_RATIO*100:.1f}%)")
+            results[view].append(abs_region)
+        if not regions:
+            print(f"Deterministic TALL_UNSTABLE_RISK: no isolated tall peak found for {view}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# v20 NEW: OVERHANG_RISK deterministic detection - upper tier extends past
+# the support tier below it
+# ---------------------------------------------------------------------------
+
+def _detect_overhang_regions(view_img, x_start, x_end, y_start, y_end,
+                              band_step=OVERHANG_BAND_STEP_PX, min_overhang_ratio=MIN_OVERHANG_RATIO,
+                              max_taper_run=OVERHANG_MAX_TAPER_RUN_BANDS,
+                              edge_exclusion=OVERHANG_EDGE_EXCLUSION_BANDS):
+    """
+    v20 NEW (FIXED after real-file testing): แบ่งพื้นที่สินค้าตามแนวตั้งเป็นแถบ
+    (bands) จากบนลงล่าง แล้ววัดขอบเขตซ้าย-ขวาของสินค้าในแต่ละแถบ - หากแถบบนยื่นล้ำ
+    ออกไปเกินขอบเขตของแถบล่างเกิน min_overhang_ratio ถือว่าเป็นผู้สมัคร (candidate)
+
+    สำคัญ: ต้องแยกแยะ 'จุดกระโดดเดี่ยวจริง' (ชั้นสินค้าจริงยื่นล้ำ) ออกจาก 'ความลาด
+    เอียงต่อเนื่องจากเส้นทแยงหลังคาตู้ในภาพ isometric' (perspective taper) ซึ่งจะ
+    ปรากฏเป็นการเปลี่ยนแปลงทิศทางเดียวกันต่อเนื่องหลายแถบติดกัน (5-8 แถบขึ้นไป) -
+    วิธีแก้คือจัดกลุ่ม (run-length) แถบที่มี overhang ทิศทางเดียวกันติดกัน แล้วยอมรับ
+    เฉพาะ run ที่สั้น (<= max_taper_run แถบ) เท่านั้นว่าเป็นจุดกระโดดเดี่ยวจริง - ถ้า
+    เป็น run ยาวต่อเนื่อง ให้ถือว่าเป็น isometric roofline taper ตามธรรมชาติ ไม่ใช่
+    ความเสี่ยง (พบบั๊กนี้จากการทดสอบจริงกับไฟล์ EE06-01,04 ที่โหลดเต็มตู้ปลอดภัย
+    100% แต่เวอร์ชันแรกกลับ flag เป็น OVERHANG_RISK ผิดพลาดหลายจุด)
+    """
+    px = view_img.convert("RGB").load()
+    w, h = view_img.size
+    x_start = max(0, int(x_start)); x_end = min(w, int(x_end))
+    y_start = max(0, int(y_start)); y_end = min(h, int(y_end))
+    if x_end <= x_start or y_end <= y_start:
+        return []
+    total_width = max(1, x_end - x_start)
+    band_h = max(6, int(band_step))
+
+    bands = []
+    y = y_start
+    while y < y_end:
+        y2 = min(y + band_h, y_end)
+        y_mid = (y + y2) // 2
+        xs_with_cargo = [x for x in range(x_start, x_end) if _is_vivid_cargo_color(px[x, y_mid])]
+        if xs_with_cargo:
+            bands.append({"y_min": y, "y_max": y2, "x_min": min(xs_with_cargo), "x_max": max(xs_with_cargo)})
+        y = y2
+    # v20 NEW: ตัดแถบขอบบน-ล่างสุดทิ้ง (จุดยอด/จุดหักมุมตามธรรมชาติของทรงข้าวหลามตัด
+    # ในภาพ isometric - พิสูจน์แล้วจากการทดสอบจริงว่าเป็นจุดที่มักเกิด false positive)
+    if edge_exclusion > 0 and len(bands) > edge_exclusion * 2 + 2:
+        bands = bands[edge_exclusion:-edge_exclusion]
+
+    if len(bands) < 2 * max_taper_run + 2:
+        return []
+
+    # คำนวณ per-boundary overhang ทั้งด้านซ้ายและขวาแยกกัน พร้อมทิศทาง (sign)
+    boundary_info = []
+    for i in range(len(bands) - 1):
+        upper, lower = bands[i], bands[i + 1]
+        left_overhang = lower["x_min"] - upper["x_min"]     # บวก = แถบบนยื่นล้ำซ้าย
+        right_overhang = upper["x_max"] - lower["x_max"]    # บวก = แถบบนยื่นล้ำขวา
+        boundary_info.append({
+            "i": i, "left": left_overhang, "right": right_overhang,
+            "upper": upper, "lower": lower,
+        })
+
+    def _find_isolated_spikes(values, sign_fn):
+        """หา run สั้นๆ (<=max_taper_run) ของ boundary ที่มีค่า overhang ทิศทางเดียวกัน
+        เกินเกณฑ์ติดต่อกัน - ปฏิเสธ run ที่ยาวกว่านั้น (ถือเป็น perspective taper)"""
+        threshold_px = total_width * min_overhang_ratio
+        n = len(values)
+        i = 0
+        spikes = []
+        while i < n:
+            v = values[i]
+            if abs(v) >= threshold_px:
+                sign = 1 if v > 0 else -1
+                j = i
+                while j < n and abs(values[j]) >= threshold_px * 0.5 and sign_fn(values[j]) == sign:
+                    j += 1
+                run_len = j - i
+                if run_len <= max_taper_run:
+                    # run สั้น = จุดกระโดดเดี่ยวจริง - เลือก boundary ที่มี |overhang| มากที่สุดในกลุ่มนี้
+                    best_idx = max(range(i, j), key=lambda k: abs(values[k]))
+                    spikes.append(best_idx)
+                i = j if j > i else i + 1
+            else:
+                i += 1
+        return spikes
+
+    def _sign(v):
+        return 1 if v > 0 else -1
+
+    left_spikes = _find_isolated_spikes([b["left"] for b in boundary_info], _sign)
+    right_spikes = _find_isolated_spikes([b["right"] for b in boundary_info], _sign)
+
+    risky = []
+    seen_boundaries = set()
+    for idx in sorted(set(left_spikes) | set(right_spikes)):
+        if idx in seen_boundaries:
+            continue
+        seen_boundaries.add(idx)
+        b = boundary_info[idx]
+        overhang_px = max(abs(b["left"]), abs(b["right"]))
+        ratio = overhang_px / total_width if total_width > 0 else 0
+        upper, lower = b["upper"], b["lower"]
+        x0 = min(upper["x_min"], lower["x_min"])
+        x1 = max(upper["x_max"], lower["x_max"])
+        risky.append({"x_min": x0, "x_max": x1, "y_min": upper["y_min"], "y_max": lower["y_max"], "ratio": ratio})
+
+    risky.sort(key=lambda r: r["y_min"])
+    return risky
+
+
+def detect_overhang_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
+    """ตรวจจับ OVERHANG_RISK แบบ deterministic แยกต่อ view - Returns dict
+    {"FRONT": [...], "BACK": [...]} พิกัดใน 'ภาพเต็ม' (absolute), รูปแบบเดียวกับ
+    detect_step_down_regions_per_view"""
+    results = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        cb = container_bounds.get(view)
+        ce = cargo_extent.get(view)
+        if not cb or not ce:
+            continue
+        if layout == "TOP_BOTTOM":
+            mid_y = crop_h // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start + mid_y
+        else:
+            half_w = crop_w // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, half_w, crop_h))
+                origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h))
+                origin_x, origin_y = half_w, crop_y_start
+
+        cb_rel_ymin = cb["ymin"] - origin_y
+        cb_rel_ymax = cb["ymax"] - origin_y
+        ce_rel_xmin = ce["xmin"] - origin_x
+        ce_rel_xmax = ce["xmax"] - origin_x
+
+        try:
+            regions = _detect_overhang_regions(view_img, ce_rel_xmin, ce_rel_xmax, cb_rel_ymin, cb_rel_ymax)
+        except Exception as e:
+            print(f"WARNING: Overhang detection failed for {view} ({e})")
+            regions = []
+
+        for r in regions:
+            abs_region = {
+                "x_min": origin_x + r["x_min"], "x_max": origin_x + r["x_max"],
+                "y_min": origin_y + r["y_min"], "y_max": origin_y + r["y_max"],
+                "ratio": r["ratio"],
+            }
+            print(f"Deterministic OVERHANG_RISK candidate ({view}): "
+                  f"x=[{abs_region['x_min']:.0f}-{abs_region['x_max']:.0f}] "
+                  f"y=[{abs_region['y_min']:.0f}-{abs_region['y_max']:.0f}] "
+                  f"overhang_ratio={abs_region['ratio']*100:.1f}% (threshold={MIN_OVERHANG_RATIO*100:.1f}%)")
+            results[view].append(abs_region)
+        if not regions:
+            print(f"Deterministic OVERHANG_RISK: no tier overhang found for {view}")
+    return results
+
+
+def _region_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
+                                      overlap_threshold, risk_name):
+    """
+    v20 NEW: เวอร์ชัน generic ของ _step_down_claim_overlaps_detection ใช้ร่วมกันได้
+    กับทุก risk type ที่ต้องการ GATE แบบ 'ตรวจสอบ overlap กับ region ที่ deterministic
+    ตรวจพบจริง' (ตอนนี้ใช้กับ TALL_UNSTABLE_RISK และ OVERHANG_RISK)
+    """
+    if not regions_for_view:
+        print(f"{risk_name} claim REJECTED - no deterministic evidence detected for this view at all "
+              f"(measured pixel profile shows nothing matching this risk pattern)")
+        return False
+    try:
+        ymin, xmin, ymax, xmax = map(float, box_2d)
+        if max(ymin, xmin, ymax, xmax) <= 1.0:
+            ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+        abs_xmin = (xmin / 1000.0) * crop_w
+        abs_xmax = (xmax / 1000.0) * crop_w
+        abs_ymin = crop_y_start + (ymin / 1000.0) * crop_h
+        abs_ymax = crop_y_start + (ymax / 1000.0) * crop_h
+    except Exception:
+        return True  # คำนวณพิกัดไม่ได้ - ปล่อยผ่านโดยไม่ block (ไม่มีเหตุผลจะปฏิเสธ)
+
+    claim_box = (abs_xmin, abs_ymin, abs_xmax, abs_ymax)
+    for region in regions_for_view:
+        region_box = (region["x_min"], region["y_min"], region["x_max"], region["y_max"])
+        overlap = _box_iou_absolute(claim_box, region_box)
+        if overlap >= overlap_threshold:
+            print(f"{risk_name} claim ACCEPTED - overlaps with detected region (overlap={overlap:.2f})")
+            return True
+    print(f"{risk_name} claim REJECTED - box_2d does not overlap with any detected region "
           f"(claim_box={claim_box}, available_regions={len(regions_for_view)})")
     return False
 
@@ -1347,13 +1840,46 @@ def process_request(request):
         step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                                 container_bounds, cargo_extent)
 
+        # v20: เพิ่ม deterministic detection ตั้งแต่ต้นให้ครบทุก risk type ที่เหลือซึ่ง
+        # ก่อนหน้านี้พึ่งพา Gemini ล้วนๆ โดยไม่มี GATE เลย (TALL_UNSTABLE_RISK,
+        # OVERHANG_RISK) - ให้สมมาตรกับ STEP_DOWN_RISK ที่มี GATE อยู่แล้ว
+        tall_unstable_regions = detect_tall_unstable_regions_per_view(diagram_crop, layout, crop_w, crop_h,
+                                                                        crop_y_start, container_bounds, cargo_extent)
+        overhang_regions = detect_overhang_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
+                                                              container_bounds, cargo_extent)
+
+        # v20: คำนวณ lateral gap (ใช้กับ LATERAL_GAP_RISK) ตั้งแต่ต้นด้วยเช่นกัน เพื่อ
+        # นำไปใช้เป็น GATE สำหรับ claim ของ Gemini (ก่อนหน้านี้ค่านี้ถูกคำนวณช้าเกินไป -
+        # ใช้เป็น FORCE เท่านั้น ไม่เคยถูกใช้ GATE claim จาก Gemini เลย) ค่าที่คำนวณนี้จะ
+        # ถูกใช้ซ้ำสำหรับ FORCE mechanism ด้านล่างด้วย (single source of truth)
+        lateral_gap_should_flag = {}
+        lateral_gap_display = {}
+        for _vl in ("FRONT", "BACK"):
+            _mm = compute_lateral_gap_mm(container_bounds.get(_vl), cargo_extent.get(_vl), container_length_mm)
+            _ratio = compute_lateral_gap_ratio(container_bounds.get(_vl), cargo_extent.get(_vl))
+            if _mm is not None:
+                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({_vl}): {_mm:.0f}mm (threshold={MIN_LATERAL_GAP_MM}mm)")
+                lateral_gap_should_flag[_vl] = _mm >= MIN_LATERAL_GAP_MM
+                lateral_gap_display[_vl] = f"{_mm/10:.0f} ซม."
+            elif _ratio is not None:
+                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({_vl}): {_ratio*100:.1f}% "
+                      f"(mm calibration unavailable, using ratio fallback, threshold={FALLBACK_MIN_LATERAL_GAP_RATIO*100:.0f}%)")
+                lateral_gap_should_flag[_vl] = _ratio >= FALLBACK_MIN_LATERAL_GAP_RATIO
+                lateral_gap_display[_vl] = f"{_ratio*100:.0f}% ของความสูงโครงสร้างตู้"
+            else:
+                print(f"WARNING: Could not compute lateral gap for {_vl} (missing container_bounds or cargo_extent)")
+                lateral_gap_should_flag[_vl] = False
+                lateral_gap_display[_vl] = ""
+
         raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
         if not isinstance(raw_ai_risks, list):
             raw_ai_risks = []
 
-        # v19: กรอง STEP_DOWN_RISK ที่ Gemini claim มา ผ่าน deterministic GATE ก่อน
-        # นำเข้า all_risks - ถ้าตำแหน่งที่อ้างไม่ตรงกับจุดกระโดดจริงที่ตรวจพบ (หรือ
-        # ไม่มีจุดกระโดดใดๆ เลยสำหรับ view นั้น) จะถูกปฏิเสธทันที
+        # v19/v20: กรองทุก risk type ที่ Gemini claim มา ผ่าน deterministic GATE ก่อน
+        # นำเข้า all_risks - ถ้าตำแหน่ง/หลักฐานที่อ้างไม่ตรงกับสิ่งที่ deterministic
+        # ตรวจพบจริง (หรือไม่พบหลักฐานใดๆ เลยสำหรับ view นั้น) จะถูกปฏิเสธทันที ไม่ว่า
+        # Gemini จะมั่นใจแค่ไหนก็ตาม - ตอนนี้ครบทุก risk type แล้ว (REAR_EMPTY_RISK/
+        # FRONT_EMPTY_RISK/REAR_LATERAL_IMBALANCE มี GATE แยกอยู่ในขั้นตอนถัดไปด้วย)
         all_risks = []
         for r in raw_ai_risks:
             rt = str(r.get("risk_type", "")).upper().strip()
@@ -1371,6 +1897,40 @@ def process_request(request):
                     # ไม่มี view/box_2d ชัดเจนพอจะตรวจสอบได้ - ปฏิเสธเพื่อความปลอดภัย
                     # (ป้องกัน hallucination ที่ไม่มีพิกัดชัดเจนให้ตรวจสอบ)
                     print(f"Gemini STEP_DOWN_RISK claim REJECTED - missing valid view/box_2d for verification")
+            elif rt == "TALL_UNSTABLE_RISK":
+                view_of_claim = str(r.get("view", "")).upper().strip()
+                box_2d = r.get("box_2d")
+                if view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
+                    regions_for_view = tall_unstable_regions.get(view_of_claim, [])
+                    if _region_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
+                                                         TALL_UNSTABLE_CLAIM_OVERLAP_THRESHOLD, "TALL_UNSTABLE_RISK"):
+                        all_risks.append(r)
+                    else:
+                        print(f"Gemini TALL_UNSTABLE_RISK claim for {view_of_claim} view REJECTED by deterministic gate "
+                              f"(description: {r.get('description', '')[:100]})")
+                else:
+                    print(f"Gemini TALL_UNSTABLE_RISK claim REJECTED - missing valid view/box_2d for verification")
+            elif rt == "OVERHANG_RISK":
+                view_of_claim = str(r.get("view", "")).upper().strip()
+                box_2d = r.get("box_2d")
+                if view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4:
+                    regions_for_view = overhang_regions.get(view_of_claim, [])
+                    if _region_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
+                                                         OVERHANG_CLAIM_OVERLAP_THRESHOLD, "OVERHANG_RISK"):
+                        all_risks.append(r)
+                    else:
+                        print(f"Gemini OVERHANG_RISK claim for {view_of_claim} view REJECTED by deterministic gate "
+                              f"(description: {r.get('description', '')[:100]})")
+                else:
+                    print(f"Gemini OVERHANG_RISK claim REJECTED - missing valid view/box_2d for verification")
+            elif rt == "LATERAL_GAP_RISK":
+                view_of_claim = str(r.get("view", "")).upper().strip()
+                if view_of_claim in ("FRONT", "BACK") and lateral_gap_should_flag.get(view_of_claim, False):
+                    all_risks.append(r)
+                else:
+                    print(f"Gemini LATERAL_GAP_RISK claim for {view_of_claim or 'UNKNOWN'} view REJECTED by "
+                          f"deterministic gate - measured side-floor gap does not exceed threshold "
+                          f"(description: {r.get('description', '')[:100]})")
             else:
                 all_risks.append(r)
 
@@ -1535,7 +2095,11 @@ def process_request(request):
             elif ai_empty:
                 print(f"Skipping REAR_EMPTY ({view_label}) - confidence={confidence} or gated out")
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and confidence in ("HIGH", "MEDIUM") and view_label not in _existing_risk_views("REAR_LATERAL"):
-                all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                rear_crop_for_measure = rear_crop_front if view_label == "FRONT" else rear_crop_back
+                if _passes_lateral_imbalance_gate(view_label, rear_crop_for_measure):
+                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                else:
+                    print(f"Skipping REAR_LATERAL_IMBALANCE ({view_label}) - rejected by deterministic pixel gate")
 
         front_conf = str(front_result_from_front_view.get("confidence", "LOW")).upper() if isinstance(front_result_from_front_view, dict) else "LOW"
         ai_front = (isinstance(front_result_from_front_view, dict)
@@ -1551,23 +2115,12 @@ def process_request(request):
             elif ai_front:
                 print(f"Skipping FRONT_EMPTY ({view_label}) - gated out")
 
+        # v20: ใช้ค่า lateral_gap_should_flag / lateral_gap_display ที่คำนวณไว้ตั้งแต่
+        # ต้น (single source of truth เดียวกับที่ใช้ GATE claim ของ Gemini ด้านบน)
+        # แทนการคำนวณซ้ำ เพื่อไม่ให้ GATE กับ FORCE ใช้เกณฑ์/ค่าคนละชุดกัน
         for view_label in ("FRONT", "BACK"):
-            lateral_gap_mm = compute_lateral_gap_mm(container_bounds.get(view_label), cargo_extent.get(view_label), container_length_mm)
-            lateral_gap_ratio = compute_lateral_gap_ratio(container_bounds.get(view_label), cargo_extent.get(view_label))
-
-            should_flag_lateral = False
-            gap_display = ""
-            if lateral_gap_mm is not None:
-                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_mm:.0f}mm (threshold={MIN_LATERAL_GAP_MM}mm)")
-                should_flag_lateral = lateral_gap_mm >= MIN_LATERAL_GAP_MM
-                gap_display = f"{lateral_gap_mm/10:.0f} ซม."
-            elif lateral_gap_ratio is not None:
-                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_ratio*100:.1f}% "
-                      f"(mm calibration unavailable, using ratio fallback, threshold={FALLBACK_MIN_LATERAL_GAP_RATIO*100:.0f}%)")
-                should_flag_lateral = lateral_gap_ratio >= FALLBACK_MIN_LATERAL_GAP_RATIO
-                gap_display = f"{lateral_gap_ratio*100:.0f}% ของความสูงโครงสร้างตู้"
-            else:
-                print(f"WARNING: Could not compute lateral gap for {view_label} (missing container_bounds or cargo_extent)")
+            should_flag_lateral = lateral_gap_should_flag.get(view_label, False)
+            gap_display = lateral_gap_display.get(view_label, "")
 
             if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
@@ -1617,6 +2170,95 @@ def process_request(request):
                     "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
                     "reasoning": "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP",
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis)",
+                })
+
+        # v20: FORCE สร้าง TALL_UNSTABLE_RISK เองสำหรับ region ที่ deterministic
+        # ตรวจพบ แต่ Gemini ไม่ได้ flag มา (สมมาตรกับ STEP_DOWN_RISK ด้านบน - dedup
+        # ด้วยวิธีเดียวกัน คือเช็ค overlap กับ claim ที่ผ่าน gate มาแล้วของ view เดียวกัน)
+        for view_label in ("FRONT", "BACK"):
+            for region in tall_unstable_regions.get(view_label, []):
+                if region["ratio"] < MIN_TALL_UNSTABLE_RATIO:
+                    continue
+                already_covered = False
+                for r in all_risks:
+                    if str(r.get("risk_type", "")).upper().strip() != "TALL_UNSTABLE_RISK":
+                        continue
+                    if str(r.get("view", "")).upper().strip() != view_label:
+                        continue
+                    r_box = r.get("box_2d")
+                    if not r_box:
+                        continue
+                    try:
+                        ymin, xmin, ymax, xmax = map(float, r_box)
+                        if max(ymin, xmin, ymax, xmax) <= 1.0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                        abs_xmin = (xmin/1000.0)*crop_w; abs_xmax = (xmax/1000.0)*crop_w
+                        abs_ymin = crop_y_start + (ymin/1000.0)*crop_h; abs_ymax = crop_y_start + (ymax/1000.0)*crop_h
+                        overlap = _box_iou_absolute((region["x_min"], region["y_min"], region["x_max"], region["y_max"]),
+                                                      (abs_xmin, abs_ymin, abs_xmax, abs_ymax))
+                        if overlap >= 0.15:
+                            already_covered = True
+                            break
+                    except Exception:
+                        continue
+                if already_covered:
+                    continue
+                x0, y0, x1, y1 = region["x_min"], region["y_min"], region["x_max"], region["y_max"]
+                ymin_norm = ((y0 - crop_y_start) / crop_h) * 1000
+                ymax_norm = ((y1 - crop_y_start) / crop_h) * 1000
+                xmin_norm = (x0 / crop_w) * 1000
+                xmax_norm = (x1 / crop_w) * 1000
+                print(f"FORCED TALL_UNSTABLE_RISK ({view_label}) from deterministic isolated-peak height-profile "
+                      f"(isolation_ratio={region['ratio']*100:.1f}%)")
+                all_risks.append({
+                    "view": view_label, "risk_type": "TALL_UNSTABLE_RISK",
+                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "reasoning": "FORCED_DETERMINISTIC_ISOLATED_PEAK",
+                    "description": f"พบกองสินค้าสูงโดดเดี่ยวไม่มีตัวประคองข้าง สูงกว่าเพื่อนบ้านทั้งสองฝั่งประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis)",
+                })
+
+        # v20: FORCE สร้าง OVERHANG_RISK เองสำหรับ region ที่ deterministic ตรวจพบ
+        # แต่ Gemini ไม่ได้ flag มา (สมมาตรกับ STEP_DOWN_RISK/TALL_UNSTABLE_RISK)
+        for view_label in ("FRONT", "BACK"):
+            for region in overhang_regions.get(view_label, []):
+                if region["ratio"] < MIN_OVERHANG_RATIO:
+                    continue
+                already_covered = False
+                for r in all_risks:
+                    if str(r.get("risk_type", "")).upper().strip() != "OVERHANG_RISK":
+                        continue
+                    if str(r.get("view", "")).upper().strip() != view_label:
+                        continue
+                    r_box = r.get("box_2d")
+                    if not r_box:
+                        continue
+                    try:
+                        ymin, xmin, ymax, xmax = map(float, r_box)
+                        if max(ymin, xmin, ymax, xmax) <= 1.0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                        abs_xmin = (xmin/1000.0)*crop_w; abs_xmax = (xmax/1000.0)*crop_w
+                        abs_ymin = crop_y_start + (ymin/1000.0)*crop_h; abs_ymax = crop_y_start + (ymax/1000.0)*crop_h
+                        overlap = _box_iou_absolute((region["x_min"], region["y_min"], region["x_max"], region["y_max"]),
+                                                      (abs_xmin, abs_ymin, abs_xmax, abs_ymax))
+                        if overlap >= 0.15:
+                            already_covered = True
+                            break
+                    except Exception:
+                        continue
+                if already_covered:
+                    continue
+                x0, y0, x1, y1 = region["x_min"], region["y_min"], region["x_max"], region["y_max"]
+                ymin_norm = ((y0 - crop_y_start) / crop_h) * 1000
+                ymax_norm = ((y1 - crop_y_start) / crop_h) * 1000
+                xmin_norm = (x0 / crop_w) * 1000
+                xmax_norm = (x1 / crop_w) * 1000
+                print(f"FORCED OVERHANG_RISK ({view_label}) from deterministic tier-boundary measurement "
+                      f"(overhang_ratio={region['ratio']*100:.1f}%)")
+                all_risks.append({
+                    "view": view_label, "risk_type": "OVERHANG_RISK",
+                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "reasoning": "FORCED_DETERMINISTIC_TIER_OVERHANG",
+                    "description": f"พบชั้นบนยื่นล้ำออกไปเกินขอบเขตของชั้นรองรับด้านล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างตู้ (ตรวจจับจาก tier-band analysis)",
                 })
 
         all_risks = _merge_same_area_risks(all_risks)
