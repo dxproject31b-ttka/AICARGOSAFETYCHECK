@@ -366,23 +366,43 @@ def detect_page_layout_from_pdf(pdf_bytes: bytes) -> str:
 
 
 def extract_container_length_mm(pdf_bytes: bytes):
+    """
+    v20.1 FIX: แก้บั๊กร้ายแรงที่พบจากไฟล์ AB01-01.pdf จริง - เดิมฟังก์ชันนี้ค้นหา
+    ตัวเลขที่ตามด้วย "(mm)" ในข้อความทั้งหน้าแบบไม่แยกแยะบริบท ทำให้ในไฟล์จริงที่
+    ตัวเลขขนาดตู้ (เช่น "7200 (mm)") ถูกวาดเป็น vector graphics ในภาพ diagram (ไม่ใช่
+    text layer ที่ get_text() ดึงได้เลย) กลับไปจับค่าจากบรรทัด
+    "COG : 4261 x 966 x 1425 (mm)" แทน (ซึ่งเป็นพิกัดจุดศูนย์ถ่วง ไม่ใช่ขนาดตู้เลย)
+    ทำให้ได้ค่า 1425mm ผิดพลาด (ควรจะเป็น 7200mm) - คลาดเคลื่อนประมาณ 5 เท่า ทำให้
+    ทุกระยะทางที่คำนวณเป็น "มิลลิเมตรจริง" เล็กกว่าความเป็นจริงถึง 5 เท่า และไม่มีทาง
+    ผ่านเกณฑ์ threshold ใดๆ ได้เลย (สาเหตุที่แท้จริงที่ AB01 ไม่พบจุดเสี่ยงใน v19)
+
+    วิธีแก้: ประมวลผลทีละบรรทัด (ไม่ใช่ full-text regex) แล้ว "ข้ามบรรทัดที่มีคำว่า
+    COG โดยเด็ดขาด" เพราะรูปแบบ "N x N x N (mm)" ของ COG ไม่ใช่ค่าความยาวตู้เดี่ยวๆ
+    แบบ "N (mm)" ที่ label เส้นบอกขนาดในภาพ diagram ใช้
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         all_values = []
         for page_idx in range(len(doc)):
             page = doc[page_idx]
             full_text = page.get_text("text")
-            matches = re.findall(r"(\d{3,6})\s*\(\s*mm\s*\)", full_text, flags=re.IGNORECASE)
-            values = [int(m) for m in matches if 1000 <= int(m) <= 20000]
-            if values:
-                print(f"Page {page_idx}: found mm values {sorted(set(values))}")
-                all_values.extend(values)
+            for line in full_text.splitlines():
+                if "cog" in line.lower():
+                    # ข้ามบรรทัด COG (Center of Gravity) โดยเด็ดขาด - รูปแบบ
+                    # "N x N x N (mm)" ของ COG ไม่ใช่ความยาวตู้เดี่ยวๆ
+                    continue
+                matches = re.findall(r"(\d{3,6})\s*\(\s*mm\s*\)", line, flags=re.IGNORECASE)
+                values = [int(m) for m in matches if 1000 <= int(m) <= 20000]
+                if values:
+                    print(f"Page {page_idx} line {line!r}: found mm values {sorted(set(values))}")
+                    all_values.extend(values)
         if not all_values:
-            print("WARNING: Could not find any '(mm)' dimension text in ANY page of PDF - "
-                  "length calibration unavailable, will use ratio-based fallback for all deterministic gates")
+            print("WARNING: Could not find any valid '(mm)' dimension text in ANY page of PDF "
+                  "(excluding COG lines) - length calibration unavailable, will use ratio-based "
+                  "fallback for all deterministic gates")
             return None
         length_mm = max(all_values)
-        print(f"Container length extracted from PDF text: {length_mm}mm (all mm values found across pages: {sorted(set(all_values))})")
+        print(f"Container length extracted from PDF text: {length_mm}mm (all valid mm values found across pages, excluding COG: {sorted(set(all_values))})")
         return length_mm
     except Exception as e:
         print(f"WARNING: Container length extraction failed ({e}) - will use ratio-based fallback")
