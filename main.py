@@ -16,7 +16,50 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.3
+# AI Cargo Safety Checker - High Precision v24.5
+#
+# v24.5 - แก้ปัญหา STEP_DOWN_RISK ตีกรอบผิดตำแหน่งที่กล่องม่วง (ไฟล์ ED85-02, ผู้ใช้
+#   ยืนยัน "งานสูงเสมอกัน" แต่ระบบตีกรอบครอบกล่องม่วงทั้งกลุ่มผิดพลาด) - ตรวจสอบ
+#   pixel-level พบ ROOT CAUSE 2 จุดที่ทำให้ _detect_height_profile() วัด top_y ผิด
+#   ตำแหน่ง (กระโดดสลับไปมาเป็น noise) จนตัดรอยต่อปลอมขึ้นมาแทนรอยต่อจริง:
+#
+#   1. "ขอบหลังคาตู้" (roof/frame edge) สีเขียวมะกอกเข้ม (179,179,90, saturation
+#      เพียง 0.497) ที่ผ่านการกรอง _is_cargo_pixel_lenient() เดิมได้ เพราะ
+#      _is_probable_structure_color() (v24.4) จำกัดแค่สีเหลือง/ครีมที่ r,g>=230
+#      เท่านั้น ไม่ครอบคลุมเฉดเข้มกว่านี้ แก้ไขด้วยการเปลี่ยนเงื่อนไขจาก "r,g>=230
+#      ตายตัว" เป็น "saturation อยู่ในช่วงปานกลาง 0.25-0.62" (ครอบคลุมทั้งเหลืองอ่อน
+#      และเขียวมะกอกเข้มกว่าในเงื่อนไขเดียว โดยไม่กระทบคาร์โก้จริงที่มัก sat=1.0 หรือ
+#      ถ้าเป็นพาสเทลก็มัก r≠g ชัดเจน)
+#   2. "Anti-aliasing ของตัวอักษร/ป้ายบอกระยะทาง" (เช่น "1058 (mm)") ที่มีสีเทา
+#      (135,135,135), (88,77,70) ซึ่งไม่ตรงกับ pattern สีโครงสร้างใดๆ เลย (ไม่ใช่
+#      เหลือง/เขียวมะกอก) จึงหลุดผ่านการกรองเดิมไปด้วย เพิ่มฟังก์ชันใหม่
+#      _is_grayscale_color() (ตรวจ R≈G≈B) มากรองสีเทาออกโดยเฉพาะ เนื่องจากคาร์โก้ใน
+#      ไดอะแกรมนี้ไม่เคยใช้สีเทาล้วนตามธรรมชาติ
+#
+#   นอกจากนี้ยังพบว่าเส้น/ป้ายเหล่านี้บางมาก (~7-8px) เทียบกับเนื้อกล่องจริง (>200px
+#   ต่อเนื่อง) จึงเพิ่ม STEP_DOWN_MIN_CONSISTENT_RUN จาก 10 เป็น 20 เป็นการป้องกันชั้น
+#   ที่ 2 (แม้สีจะหลุดผ่านการกรองไปได้ ก็ยังต้องมีความหนาต่อเนื่องมากพอจึงจะนับเป็น
+#   "เนื้อกล่องจริง")
+#
+#   สุดท้าย พบว่าแม้แก้ noise หมดแล้ว กรอบที่วาดยังคงกว้างเกินไป (147px) เพราะค่า
+#   edge_zone_width เดิมคำนวณจาก 35% ของความสูงตู้ ปรับลดเป็น
+#   STEP_DOWN_EDGE_ZONE_RATIO=0.05 (+ ค่าต่ำสุด 50px เพื่อผ่านเกณฑ์ box_too_small ที่
+#   ต้องการอย่างน้อย 3% ของความกว้างภาพ) ทำให้กรอบสุดท้ายแคบลงเหลือ ~50px รอบรอยต่อ
+#   จริงเท่านั้น ไม่ขยายเข้าไปในเนื้อกล่องข้างเคียงลึกเกินจำเป็นอีกต่อไป
+#
+#   ผลการทดสอบ: FRONT view ตรวจพบ STEP_DOWN_RISK ถูกต้อง 2 จุด (รอยต่อม่วง->น้ำตาล
+#   เข้ม, น้ำเงิน->cyan) กรอบแคบตรงตำแหน่งจริง ไม่ครอบกล่องม่วงทั้งกลุ่มอีกต่อไป BACK
+#   view ยังคงไม่พบ STEP_DOWN_RISK (ยืนยันว่าตั้ง cyan สูงเท่ากับเพื่อนบ้านจริง ต่างกัน
+#   แค่ ~2px เป็นภาพลวงตาจากมุมมอง isometric ไม่ใช่บั๊ก) Regression test ยืนยันสีคาร์โก้
+#   จริงทั้งหมด (เหลือง,เขียว,ม่วง,น้ำตาลเข้ม,cyan,พาสเทลฟ้าอ่อน) ไม่ถูกกรองผิดพลาด
+#
+# v24.4 - เพิ่มการกรอง "สีโครงสร้างตู้" (container structure color) ออกจากการตรวจจับ
+#   คาร์โก้แบบผ่อนปรน (lenient) สำหรับใช้ใน STEP_DOWN_RISK height-profile scan โดย
+#   เฉพาะ - พบว่าสีพื้น/ผนังตู้บางเฉด (เช่น 255,255,133 / 255,255,147 / 255,255,175)
+#   มี saturation ต่ำกว่าเกณฑ์ปกติของ _is_vivid_cargo_color (0.75) แต่ก็ยังสว่างพอจะ
+#   ถูกนับเป็น "อาจเป็นคาร์โก้" ได้ในบางเงื่อนไข เพิ่ม _is_probable_structure_color()
+#   และ _is_cargo_pixel_lenient() เป็นเกณฑ์ตรวจจับแยกที่ยืดหยุ่นกว่า
+#   _is_vivid_cargo_color แต่กรองสีโครงสร้างที่ทราบรูปแบบแล้วออกไปด้วย
 #
 # v24.3 - เพิ่ม LOCAL DEPTH-GAP SCAN เพื่อตรวจจับ "หลุมเฉพาะจุด" (localized floor
 #   gap) ที่ผู้ใช้ชี้ตำแหน่งด้วยการวงสีแดงในไฟล์ EC50-01/EC51-02 ซึ่งกลไก
@@ -192,9 +235,27 @@ LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO = 0.15  # ตัดโซนประตูท�
 
 MIN_STEP_DOWN_RATIO = 0.075
 STEP_DOWN_PROFILE_STEP_PX = 5
-STEP_DOWN_MIN_CONSISTENT_RUN = 10
+STEP_DOWN_MIN_CONSISTENT_RUN = 20  # v24.5 FIX: เพิ่มจาก 10 เป็น 20 - เดิมค่า 10 ทำให้
+                                    # เส้นบางๆ ที่ไม่ใช่คาร์โก้จริง (เช่น anti-aliasing
+                                    # ของลูกศรชี้ระยะทาง/เส้นขอบโครงสร้างที่หลุดผ่านการ
+                                    # กรองสี) ผ่านเกณฑ์ "ต่อเนื่องนานพอ" ได้ง่ายเกินไป
+                                    # ยืนยันจากไฟล์จริง ED85-02: เส้น anti-aliasing ของ
+                                    # ลูกศรสีฟ้าหนาแค่ ~8px ผ่านเกณฑ์เดิม (10) ได้ ทำให้
+                                    # ตรวจ top_y ผิดตำแหน่ง เพิ่มเป็น 20 บังคับให้ต้องมี
+                                    # ความหนาต่อเนื่องมากพอที่จะเป็นเนื้อกล่องจริงเท่านั้น
 STEP_DOWN_MIN_FLAT_WIDTH_PX = 12
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10
+STEP_DOWN_EDGE_ZONE_RATIO = 0.05    # v24.5 NEW: สัดส่วนความกว้างของ "โซนใกล้รอยต่อ" ที่
+                                    # ใช้วาดกรอบ STEP_DOWN_RISK (แทนที่ค่าเดิม 0.35 ที่
+                                    # กว้างเกินไปจนกรอบขยายเข้าไปในเนื้อกล่องข้างเคียงลึก
+                                    # เกินจำเป็น - ยืนยันจากไฟล์จริง ED85-02: กรอบเดิม
+                                    # กว้างถึง 147px ก่อนถึงรอยต่อจริง)
+STEP_DOWN_EDGE_ZONE_MIN_PX = 50     # v24.5: ความกว้างขั้นต่ำของโซนกรอบ - ต้อง >=45px
+                                    # เพื่อผ่านเกณฑ์ box_too_small (min 3% ของ crop_w
+                                    # ~1485px ที่ dpi=180 มาตรฐาน) มิฉะนั้นกรอบจะถูก
+                                    # ปฏิเสธและตกไปใช้ fallback ขนาดใหญ่แทน (ย้อนกลับไป
+                                    # เป็นปัญหาเดิมที่กรอบครอบคลุมกล่องทั้งกลุ่มผิดพลาด)
+                                    # ตั้งไว้ที่ 50 เผื่อ margin เล็กน้อย
 
 
 def get_api_keys_pool():
@@ -533,6 +594,73 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
     if mx < min_brightness:
         return False
     return _hsv_saturation(rgb) >= sat_thresh
+
+
+def _is_probable_structure_color(rgb):
+    """
+    v24.4/v24.5 NEW: ตรวจจับ 'ลายนิ้วมือสี' ของพื้น/ผนัง/ขอบหลังคาตู้ (container
+    structure) ที่พบสม่ำเสมอในไฟล์ที่ทดสอบมาทั้งหมด - สีเหล่านี้มีลักษณะร่วมกันคือ
+    R และ G เท่ากัน (หรือใกล้เคียงกันมาก) ในขณะที่ B ต่ำกว่าอย่างชัดเจน (โทนเหลือง/
+    เขียวมะกอก) และมีค่า SATURATION อยู่ในช่วง "ปานกลาง" (0.25-0.62) ซึ่งต่างจาก
+    คาร์โก้จริงที่มักมี saturation สูงมาก (~1.0 สำหรับสีสด) หรือถ้าเป็นพาสเทลก็มักจะ
+    r≠g อย่างชัดเจน (เช่น light-blue (150,200,255))
+
+    v24.4: เดิมจำกัดแค่สีเหลือง/ครีมที่ r,g>=230 (พื้น/ผนังตู้): (255,255,133),
+    (255,255,147), (255,255,175)
+    v24.5 FIX: พบว่าเงื่อนไขเดิมไม่ครอบคลุม "ขอบหลังคาตู้" (roof/frame edge) ที่มีสี
+    เขียวมะกอกเข้มกว่า (179,179,90, r,g เพียง 179 ไม่ถึง 230) ทำให้เส้นขอบบางๆ นี้
+    หลุดผ่านการกรอง ถูกนับเป็นคาร์โก้ผิดพลาด จนทำให้ _detect_height_profile (กลไก
+    STEP_DOWN_RISK) วัด top_y ผิดตำแหน่ง (ยืนยันจากไฟล์จริง ED85-02: เกิด false
+    STEP_DOWN_RISK ที่กล่องสีม่วงเพราะสแกนไปเจอเส้นขอบหลังคานี้ก่อนเจอกล่องจริง)
+    แก้ไขด้วยการเปลี่ยนเงื่อนไขจาก "r,g>=230" (ตายตัว) เป็น "saturation อยู่ในช่วง
+    ปานกลาง 0.25-0.62" (ใช้ได้ทั่วไปกับทั้งสีเหลืองอ่อนจางและเขียวมะกอกเข้มกว่า)
+    """
+    r, g, b = rgb
+    if abs(r - g) > 10:
+        return False
+    if not (r > b and g > b):
+        return False
+    sat = _hsv_saturation(rgb)
+    return 0.25 <= sat <= 0.62
+
+
+def _is_grayscale_color(rgb, tol=25):
+    """
+    v24.5 NEW: ตรวจจับ 'สีเทา' (grayscale, R≈G≈B) ซึ่งไม่ใช่สีคาร์โก้ตามธรรมชาติของ
+    ไดอะแกรมนี้ (คาร์โก้ใช้สีสันชัดเจนเสมอ) แต่มักเป็น anti-aliasing ของตัวอักษร/
+    ป้ายบอกระยะทาง (dimension label, เช่น "1058 (mm)") ที่วาดสีดำ/เทาบนพื้นหลังขาว
+    ยืนยันจากไฟล์จริง ED85-02: พบสีเทา (135,135,135), (88,77,70) ที่ตำแหน่งป้ายบอก
+    ระยะทางเหนือกล่องม่วง ซึ่งหลุดผ่านการกรองสีโครงสร้างเดิม (ไม่ตรง pattern เหลือง/
+    เขียวมะกอก) จนถูกนับเป็นคาร์โก้ผิดพลาด ทำให้ _detect_height_profile วัด top_y
+    ผิดตำแหน่งไปจับที่ตัวอักษรแทนที่จะเป็นกล่องจริงด้านล่าง
+    """
+    r, g, b = rgb
+    return (max(r, g, b) - min(r, g, b)) <= tol
+
+
+def _is_cargo_pixel_lenient(rgb, min_brightness=40, white_thresh=245):
+    """
+    v24.4/v24.5 NEW: เกณฑ์ตรวจจับ "คาร์โก้" แบบผ่อนปรนกว่า _is_vivid_cargo_color
+    (ไม่บังคับ saturation>=0.75) สำหรับใช้เฉพาะใน STEP_DOWN_RISK height-profile scan
+    ที่ต้องการความไวสูงพอจะจับคาร์โก้สีอ่อน/จางได้ แต่ต้องกรอง "สีที่ไม่ใช่คาร์โก้"
+    ออกอย่างรัดกุม (โครงสร้างตู้ + ตัวอักษร/ป้ายบอกระยะ + ลูกศรอ้างอิง + พื้นหลังขาว)
+    เพื่อไม่ให้เกิด false STEP_DOWN_RISK จากการวัด top_y ผิดตำแหน่ง (ดู
+    _is_probable_structure_color, _is_grayscale_color, _is_arrow_color)
+    """
+    r, g, b = rgb
+    if r >= white_thresh and g >= white_thresh and b >= white_thresh:
+        return False
+    if max(r, g, b) < min_brightness:
+        return False
+    # v24.5 FIX: กรอง anti-aliasing ของตัวอักษร/ป้ายบอกระยะทาง (สีเทา) ออกด้วย - ดู
+    # comment เต็มที่ _is_grayscale_color() ด้านบน
+    if _is_grayscale_color(rgb):
+        return False
+    if _is_probable_structure_color(rgb):
+        return False
+    if _is_arrow_color(rgb):
+        return False
+    return True
 
 
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
@@ -922,6 +1050,12 @@ def detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h, crop_y
 
 def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
                             step=STEP_DOWN_PROFILE_STEP_PX, min_consistent_run=STEP_DOWN_MIN_CONSISTENT_RUN):
+    """
+    v24.4/v24.5 FIX: เปลี่ยนจาก _is_vivid_cargo_color (บังคับ saturation>=0.75) มาใช้
+    _is_cargo_pixel_lenient() แทน (ผ่อนปรนกว่า แต่กรองสีโครงสร้าง/ข้อความ/ลูกศรออก
+    อย่างรัดกุมแล้ว) เพื่อให้จับคาร์โก้สีอ่อน/จางได้ครบถ้วนขึ้น โดยไม่เพิ่ม false
+    positive จากสีที่ไม่ใช่คาร์โก้จริง - ดู comment เต็มที่ _is_cargo_pixel_lenient()
+    """
     px = view_img.convert("RGB").load()
     w, h = view_img.size
     x_start = max(0, int(x_start)); x_end = min(w, int(x_end))
@@ -931,9 +1065,9 @@ def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
         top_y = None
         y = y_start
         while y < y_end:
-            if _is_vivid_cargo_color(px[x, y]):
+            if _is_cargo_pixel_lenient(px[x, y]):
                 check_end = min(y + min_consistent_run, y_end)
-                consistent_count = sum(1 for yy in range(y, check_end) if _is_vivid_cargo_color(px[x, yy]))
+                consistent_count = sum(1 for yy in range(y, check_end) if _is_cargo_pixel_lenient(px[x, yy]))
                 if consistent_count >= min_consistent_run * 0.6:
                     top_y = y
                     break
@@ -1011,7 +1145,13 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
         is_risky = False
         max_ratio = 0
         risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
-        edge_zone_width = min(seg["width"], max(min_flat_width_px, int(container_y_span_px * 0.35)))
+        # v24.5 FIX: เดิมใช้ 0.35*container_y_span_px (กว้างถึง ~147px ในไฟล์ทดสอบ
+        # ED85-02) ทำให้กรอบขยายเข้าไปในเนื้อกล่องข้างเคียงลึกเกินจำเป็น (ไม่ใช่แค่
+        # "ใกล้รอยต่อ" อีกต่อไป) แก้ไขด้วยสัดส่วนที่แคบลงมาก (0.05) + ค่าต่ำสุดที่
+        # เหมาะสม (50px, ต้อง >=45px เพื่อผ่านเกณฑ์ box_too_small ด้วย) ทำให้กรอบที่
+        # วาดแคบลงเหลือ ~50px รอบรอยต่อจริงเท่านั้น
+        edge_zone_width = min(seg["width"], max(STEP_DOWN_EDGE_ZONE_MIN_PX,
+                                                  int(container_y_span_px * STEP_DOWN_EDGE_ZONE_RATIO)))
         if i > 0:
             left = seg_info[i - 1]
             diff = abs(seg["edge_left"] - left["edge_right"])
