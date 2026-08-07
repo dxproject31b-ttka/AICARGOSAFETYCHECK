@@ -16,101 +16,79 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v23.1
+# AI Cargo Safety Checker - High Precision v24
+#
+# v24 - แก้ปัญหา ROOT CAUSE สำคัญที่สุดที่พบจากการตรวจสอบ /ooda /scout กับไฟล์จริง 6
+#   ไฟล์ (ED85-02, ED86-03, EC51-02, EC50-01, EC20-01, EC25-01) ที่ผู้ใช้รายงานว่า
+#   วิเคราะห์ผิดพลาด:
+#
+#   ROOT CAUSE: ฟังก์ชันแบ่ง "ตั้ง" (stack) และ "กล่อง" (box) ในเวอร์ชัน v22/v23.1
+#   (detect_stack_columns, detect_boxes_in_stack) ใช้แค่ _find_dark_boundary_lines_1d
+#   (หา "dip" สีเข้มแคบๆ) เพื่อหาตำแหน่งรอยต่อ ซึ่งใช้ได้ผลเฉพาะกรณีกล่อง 2 ใบสี
+#   เดียวกันมีเส้นขอบมืดบางๆ คั่นเท่านั้น แต่ในสถานการณ์จริงส่วนใหญ่ กล่องแต่ละใบ/แต่ละ
+#   SKU มักมีสีต่างกันชัดเจน (เช่น น้ำเงิน->ชมพู->เขียวมะกอก->เขียว, หรือกล่องสีน้ำตาล
+#   เข้ม/สีเหลืองที่ผู้ใช้สังเกตว่า "มันหลอก") ซึ่งสร้าง "step change" ถาวรในค่าสี ไม่ใช่
+#   dip แคบ ทำให้ตรวจจับพลาดเกือบทั้งหมด นำไปสู่การรวมหลายตั้ง/กล่องเข้าด้วยกันผิดพลาด
+#   (under-segmentation รุนแรง - ยืนยันแล้วว่าบางไฟล์ทั้ง BACK view ถูกรวมเป็นแค่ 2
+#   ก้อนใหญ่ ทั้งที่ควรจะมี 6-7 ตั้งแยกกัน) ทำให้การคำนวณความสูงผิดพลาดรุนแรง และเป็น
+#   สาเหตุหลักที่ deterministic per-box segmentation ไม่สามารถ FORCE/VETO ผลของ AI ได้
+#   อย่างน่าเชื่อถือ (เพราะข้อมูลเปรียบเทียบเองก็ผิดตั้งแต่ต้น)
+#
+#   วิธีแก้: เพิ่มสัญญาณตรวจจับ boundary อีก 2 ชนิด รวมกับของเดิม (union แทนที่):
+#     1. COLOR-STEP boundary: เปรียบเทียบสี RGB เฉลี่ย (หลัง median smoothing เพื่อกรอง
+#        สัญญาณรบกวนจากไฮไลท์/เงาสะท้อน) ระหว่างตำแหน่งที่ติดกัน หากต่างกันเกิน
+#        threshold (Euclidean distance ใน RGB space) และสีใหม่นี้คงอยู่ต่อเนื่อง (ไม่ใช่
+#        สัญญาณรบกวนชั่วขณะ) ถือเป็นรอยต่อกล่อง/ตั้งจริง
+#     2. FLOOR/EDGE-JUMP boundary: เปรียบเทียบตำแหน่ง local floor (แนวนอน) หรือความกว้าง
+#        ของขอบซ้าย/ขวา (แนวตั้ง) ระหว่างตำแหน่งที่ติดกัน (หลัง median smoothing) หาก
+#        กระโดดขึ้น/ลงมากพอ แสดงว่าเป็นรอยต่อระหว่างกล่อง/ตั้งที่ความสูงต่างกัน แม้จะมี
+#        สีเดียวกันก็ตาม (กรณีนี้ color-step จะไม่ trigger เพราะสีไม่เปลี่ยน)
+#   ทั้ง dark-dip (เดิม) + color-step (ใหม่) + floor/edge-jump (ใหม่) ทำงานร่วมกันแบบ
+#   union (พบจากสัญญาณใดสัญญาณหนึ่งก็ถือว่าเป็นรอยต่อ) ทดสอบยืนยันแล้วว่าการรวม 3
+#   สัญญาณช่วยแยกตั้ง/กล่องได้ถูกต้องมากขึ้นอย่างมีนัยสำคัญในทุกไฟล์ทดสอบ โดยไม่ลบ
+#   ความสามารถเดิมออก (net improvement เทียบกับ v23.1)
+#
+#   เพิ่มเติม: เพิ่ม VETO GATE สำหรับ REAR_LATERAL_IMBALANCE - เดิม (v21-v23.1) เลือก
+#   ใช้ FORCE เท่านั้น (ไม่ veto AI) เพราะกลัวว่า deterministic per-box segmentation ที่
+#   (ตอนนั้น) ยังไม่แม่นยำพอจะ veto ผิดพลาดในกรณีที่มี occlusion จริง แต่เมื่อการแบ่ง
+#   ตั้ง/กล่องแม่นยำขึ้นมากจากการแก้ไข v24 นี้แล้ว จึงเพิ่ม VETO แบบมีเงื่อนไข: ถ้า
+#   deterministic segmentation มี coverage สูง (ผ่านเกณฑ์) และวัดได้ว่าความสูงระหว่าง
+#   ตั้งที่ AI อ้างว่าต่างกันจริง ๆ ใกล้เคียงกัน (ไม่เกิน threshold) ให้ veto การอ้างของ
+#   AI (นี่คือสาเหตุของปัญหา ED85-02/EC20-01 ที่ AI สับสนจากสีเข้ม/สีผิดปกติ จนรายงาน
+#   REAR_LATERAL_IMBALANCE ผิดพลาดทั้งที่ deterministic วัดว่าไม่มีความแตกต่างจริง)
+#
+#   ปรับปรุง AI PROMPT: เพิ่มคำเตือนเฉพาะเจาะจงเรื่องกล่องสีเข้ม (dark brown/maroon)
+#   หรือสีที่ไม่คุ้นเคยอาจถูกมองข้ามไปว่าไม่ใช่คาร์โก้ (เข้าใจผิดว่าเป็นเงา/พื้นหลัง)
+#   ต้องพิจารณาว่าเป็นคาร์โก้จริงเสมอหากมีขอบเขตชัดเจนและมี SKU label กำกับ
+#
+#   ข้อจำกัดที่ยังคงเหลืออยู่ (ยืนยันจากการทดสอบ พบว่าเป็นข้อจำกัดพื้นฐาน ไม่ใช่บั๊ก):
+#   - OCCLUSION: กรณีที่กล่องชั้นบนของตั้งหนึ่งถูกกล่องอื่นบังจนมองไม่เห็นจากมุมมอง
+#     ใดมุมมองหนึ่ง (ยืนยันจากไฟล์ EC51-02: กล่อง TEM1A-DZ สูง 2 ชั้นจริง ยืนยันจาก
+#     FRONT view แต่ BACK view มองเห็นแค่ 1 ชั้นเนื่องจากมุมมอง/การบัง) - ทั้ง AI และ
+#     deterministic pixel-analysis ไม่สามารถ "มองทะลุ" สิ่งที่บังอยู่ได้ เป็นข้อจำกัด
+#     พื้นฐานของการวิเคราะห์ภาพ 2D projection
+#   - SAME-COLOR ADJACENT STACKS: ตั้งหลายอันที่มีสีเดียวกันสนิทติดกัน (เช่น กล่องสีม่วง
+#     5 ตั้งติดกัน) ยังคงอาศัย dark-dip (เส้นขอบมืดบางๆ) เป็นหลักในการแยก ซึ่งบางครั้ง
+#     อาจแยกได้ไม่ครบทุกเส้นถ้าเส้นขอบไม่ชัดเจนพอ (ไม่กระทบผลลัพธ์ความเสี่ยงมากนัก
+#     เพราะตั้งที่ under-segment มักมีความสูงใกล้เคียงกันอยู่แล้ว)
+#   - THRESHOLD TUNING: บางกรณี (เช่น ED86-03) ค่าที่วัดได้ใกล้เคียง threshold มาก
+#     (11.6% vs เกณฑ์ 12% สำหรับ LATERAL_GAP_RISK) ซึ่งเป็นเรื่องการปรับจูนค่าคงที่
+#     มากกว่าจะเป็นบั๊กเชิงโครงสร้าง - ควรพิจารณาปรับลด FALLBACK_MIN_LATERAL_GAP_RATIO
+#     ลงเล็กน้อยหากพบว่ากรณีแบบนี้เกิดขึ้นบ่อย (ปัจจุบันยังไม่ปรับเพื่อป้องกัน false
+#     positive ใหม่ในไฟล์อื่นที่เคยผ่านมาแล้ว)
 #
 # v23.1 - แก้ปัญหา FRONT view โดยเปลี่ยนแนวทางจาก "แบบจำลองเส้นตรงทั่วโลก" (global
 #   floor-line V-shape) เป็น "LOCAL FLOOR" (พื้นเฉพาะจุด คำนวณจากพิกเซลคาร์โก้จริงใน
-#   แต่ละคอลัมน์/ตั้งโดยตรง):
-#
-#   ROOT CAUSE ที่พบจากการ debug พิกเซลจริง: ขอบล่างของคาร์โก้ใน FRONT view มีลักษณะ
-#   เป็น "คลื่น" จริง (ไม่ใช่สัญญาณรบกวน) เกิดจากการจัดวางกล่องแบบสลับตำแหน่งความลึก
-#   (checker pattern) เพื่อความมั่นคงของคาร์โก้ - แต่ละตั้งอยู่คนละตำแหน่งความลึกทำให้
-#   ตำแหน่งขอบล่างที่เห็นในภาพ isometric ต่างกันไปตามตำแหน่งความลึกของตั้งนั้น เส้นตรง
-#   ทั่วโลกเส้นเดียว (แม้จะฟิตได้ R²=1.00 ในบางส่วน) จึงไม่สามารถแทนตำแหน่งพื้นจริงของ
-#   ทุกตั้งได้แม่นยำพอ ทำให้ coverage ต่ำมาก (0.08-0.24) เพราะ extrapolation คลาดเคลื่อน
-#   นอกช่วงข้อมูลจริงที่ใช้ฟิต
-#
-#   วิธีแก้: เปลี่ยน detect_stack_columns/_find_cargo_present_clusters ให้ตรวจสอบ "มี
-#   คาร์โก้หรือไม่" จากทั้งช่วงความสูงที่เป็นไปได้ (ไม่ใช่แถบแคบตามเส้นตรงทั่วโลก) และ
-#   เปลี่ยน detect_boxes_in_stack ให้คำนวณ "พื้นเฉพาะของแต่ละตั้ง" จากค่ามัธยฐานของ
-#   ตำแหน่ง local floor ที่พบจริงในช่วง x ของตั้งนั้นโดยตรง (ไม่พึ่งพาแบบจำลองเรขาคณิต
-#   ใดๆ) วิธีนี้ทนทานต่อคลื่นของตำแหน่งความลึกได้เองตามธรรมชาติ
-#   ผลลัพธ์: FRONT view coverage เพิ่มจาก 0.08-0.24 เป็น 0.84-1.00 ทุกไฟล์ (17/17)
-#   detect_floor_line_v_shape() ยังคงเก็บไว้ในโค้ด (เป็นข้อมูลอ้างอิง/อาจมีประโยชน์ใน
-#   อนาคต) แต่ไม่ได้ถูกเรียกใช้ในเส้นทางหลักของ per-box segmentation อีกต่อไป
-#
-#   บั๊กเพิ่มเติมที่พบและแก้ไขระหว่างการทดสอบ FRONT view (ไฟล์ AC09-02):
-#   - "SAME-COLOR ADJACENT BLEED" - เมื่อกล่อง 2 ตั้งที่อยู่ติดกันมีสีเดียวกันสนิทและ
-#     ไม่มีเส้นแบ่งที่มองเห็นได้ระหว่างกัน การขยายขอบเขต (extend) ของกล่องในตั้งหนึ่ง
-#     จะไหลข้ามไปติดกับตั้งข้างเคียง ทำให้เกิด OVERHANG_RISK ปลอม - แก้ไขโดยตรวจจับ
-#     "hit_limit" (การขยายไปจนสุด search_expand_px โดยไม่เจอขอบเขตจริง) ใน
-#     _extend_edge_contiguous() แล้วทิ้งค่าที่ hit_limit=True ออกจากการคำนวณค่ามัธยฐาน
-#   - เพิ่มเกณฑ์ "จำนวนตัวอย่างที่เชื่อถือได้ขั้นต่ำ" (ต้องมีอย่างน้อยครึ่งหนึ่งของ
-#     ตัวอย่างทั้งหมดที่ไม่ hit_limit) มิฉะนั้น fallback ไปใช้ขอบเขตของตั้งเดิม (x0/x1)
-#     แทนการเชื่อค่ามัธยฐานจากตัวอย่างที่เหลือน้อยเกินไป (ไม่น่าเชื่อถือทางสถิติ)
-#
-#   ผลการทดสอบสุดท้าย (17 ไฟล์) หลัง v23.1: ทั้ง FRONT และ BACK view มี coverage
-#   0.84-1.00 ทุกไฟล์ (17/17 ทั้งคู่) พบการตรวจจับ REAR_LATERAL_IMBALANCE เพิ่มเติมใน
-#   FRONT view 5 ไฟล์ (ratio 0.39-0.64) ซึ่งตรวจสอบด้วยภาพจริงแล้วยืนยันว่าเป็น true
-#   positive (เห็นความสูงต่างกันจริงระหว่างตั้งที่อยู่ติดกัน เช่น AB01-01: NOKIA-AK
-#   1 ชั้น ติดกับ STEMB-AK/SHPIA-AK 2 ชั้น) พบ OVERHANG_RISK 1 รายการที่ไฟล์ AC09-02
-#   ซึ่งหลังผ่านการกรองหลายชั้น (ratio, absolute px, hit_limit, minimum samples) และ
-#   ตรวจสอบภาพจริงแล้ว มีความเป็นไปได้สูงว่าเป็น true positive เช่นกัน (ไม่ตัดทิ้ง)
-#
-# v23 - แก้ปัญหา "PERSPECTIVE/ISOMETRIC FLOOR" ที่ค้นพบระหว่างทดสอบ v22 กับไฟล์จริง
-#   17 ไฟล์: ภาพ diagram เป็นมุมมอง isometric ซึ่ง "พื้นตู้" ไม่ใช่เส้นแนวนอน แต่เป็น
-#   รูปตัว "V" (piecewise-linear 2 ท่อน) เนื่องจากกล้องมองจากมุมของตู้คอนเทนเนอร์
-#   (ยืนยันด้วยการ debug พิกเซลจริง: bottom-most structure pixel ต่อคอลัมน์ x สร้าง
-#   กราฟรูป V ที่มีจุดยอด แล้วลาดลงทั้ง 2 ข้างด้วยความชันคงที่ ~0.47-0.53 ซึ่งตรงกับ
-#   อัตราส่วน isometric/dimetric แบบ 2:1 ที่พบได้ทั่วไปในซอฟต์แวร์ CAD/loading-plan)
-#
-#   v22.1 (patch ก่อนหน้า) ใช้ floor_y แบบคงที่ (flat, scalar) ซึ่งทำให้การสุ่มแถบ
-#   พิกเซลใกล้ "พื้น" เพื่อแบ่งตั้ง (stack) มีโอกาสตกอยู่ในพื้นที่ว่าง/ไปเจอลูกศรชี้
-#   ตำแหน่งอ้างอิง (reference arrow) แทนพื้นสินค้าจริง ทำให้ coverage ratio ต่ำและถูก
-#   REJECTED โดย safety gate เกือบทุกไฟล์ (16/17 ไฟล์ fallback กลับไปพึ่ง AI ทั้งหมด)
-#
-#   v23 เพิ่มฟังก์ชัน detect_floor_line_v_shape() ที่ตรวจจับพื้นตู้จริงเป็น piecewise-
-#   linear V-shape จากขอบล่างสุดของ "โครงสร้างตู้" (container structure, saturated
-#   color) - ไม่ใช้ขอบล่างของคาร์โก้ เพราะทดสอบพบว่าขอบคาร์โก้ให้ผลฟิตแย่ (R² ต่ำ
-#   0.27-0.47) บริเวณใกล้ผนังหัวตู้/ประตูท้ายตู้ที่มักมีช่องว่างจริง (ตรงกับ
-#   FRONT_EMPTY_RISK/REAR_EMPTY_RISK ที่ต้องการตรวจจับพอดี - ใช้คาร์โก้อ้างอิงพื้นจะ
-#   ขัดแย้งกันเองในโซนนั้น) ในขณะที่โครงสร้างตู้ (ผนัง/พื้น) ปรากฏอยู่เสมอไม่ว่าจะมี
-#   คาร์โก้วางถึงหรือไม่ จึงเป็นข้อมูลอ้างอิงที่เสถียรกว่า (ทดสอบแล้วได้ R²~0.99 ทั้ง
-#   2 ฝั่งเมื่อใช้หน้าต่างค้นหาแคบรอบๆ container_bounds['ymax'] ที่ตรวจพบไว้แล้ว)
-#
-#   บั๊กที่พบและแก้ไขระหว่างพัฒนา detect_floor_line_v_shape:
-#   1) "PLATEAU BUG" - จุดยอดของ V ไม่ใช่จุดแหลมเดี่ยว แต่เป็นแนวราบสั้นๆ (พบว่ามี
-#      หลายจุด x ติดกันที่ y เท่ากับค่าสูงสุดพอดี) การแบ่งฝั่งซ้าย/ขวาแบบ argmax เดิม
-#      ทำให้จุด plateau ปนเข้าไปฝั่งใดฝั่งหนึ่ง บิดเบือน slope ที่ฟิตได้ - แก้ไขโดยหา
-#      "พิสัยของ plateau" แล้วตัดออกจากทั้ง 2 ฝั่งก่อนฟิตเส้นตรง
-#   2) ปรับ FLOOR_LINE_SAMPLE_STEP_PX จาก 6 เป็น 3 (ละเอียดขึ้น)
-#   3) "GAP-CLUSTER NOISE" - หลังคาร์โก้บดบังพื้นบางส่วน จุดข้อมูลกระจัดกระจายที่ไม่
-#      เกี่ยวข้องกับพื้นจริงอาจปรากฏหลัง gap ทำให้การฟิตเสียหาย - แก้ไขด้วยการเลือก
-#      เฉพาะ "กลุ่มก้อนต่อเนื่องที่ใหญ่ที่สุด" ก่อนฟิตเส้นตรง
-#
-#   มี QUALITY GATE ป้องกันผลลัพธ์แย่: ตรวจสอบ R² ของการฟิตเส้นตรงทั้ง 2 ฝั่ง + ตรวจสอบ
-#   ความชันต้องอยู่ในช่วงสมเหตุสมผล + เครื่องหมายถูกต้อง หากคุณภาพต่ำเกินไปจะคืนค่า
-#   valid=False ให้ผู้เรียกใช้ fallback กลับไปใช้ floor_y แบบคงที่ (flat) ทันที
-#
-# v22 - พัฒนา PER-BOX SEGMENTATION (deterministic) ให้กับ 3 risk type ที่เดิมพึ่ง
-#   AI (Gemini) เพียงอย่างเดียวใน v21: REAR_LATERAL_IMBALANCE, TALL_UNSTABLE_RISK,
-#   OVERHANG_RISK ดูรายละเอียดในหัวข้อ "PER-BOX SEGMENTATION" ด้านล่าง
-#   (v22.1: เพิ่ม coverage sanity check ป้องกัน false positive จากลูกศรอ้างอิง - ดู
-#   หัวข้อ KNOWN LIMITATION ใน build_stack_box_model_per_view สำหรับรายละเอียด)
-#
-# v21 - แก้ปัญหา "REAR_LATERAL_IMBALANCE พลาดกรณีที่กล่องในตั้งเดียวกันสูงไม่เท่ากัน
-#   ในมุมมอง 3 มิติ แม้จะดูซ้อนทับ/บังกันบางส่วน" (พบจากไฟล์ AC03-01 ที่ตำแหน่ง
-#   ประตูท้าย Front view มี pattern ความสูง 2,2,1) ผ่อนเกณฑ์ confidence ของ
-#   REAR_LATERAL_IMBALANCE จาก "HIGH เท่านั้น" เป็น "HIGH หรือ MEDIUM" และปรับปรุง
-#   prompt ของ analyze_rear_zone_with_ai() ให้ระบุชัดเจนเรื่อง "ความสูงรวมทั้งตั้ง"
-# v20.1 - แก้บั๊ก extract_container_length_mm() ดึงค่าผิดจากบรรทัด COG - ข้ามบรรทัดที่
-#   มีคำว่า COG โดยเด็ดขาด
-# v19 - เพิ่ม GATE (veto) สำหรับ STEP_DOWN_RISK ที่ Gemini claim มา + แก้บั๊ก merge
-#   segment ผิดพลาดเมื่อมี pattern แบบ 'บันได'
+#   แต่ละคอลัมน์/ตั้งโดยตรง) - ดูรายละเอียดในฟังก์ชัน build_stack_box_model_per_view
+# v23 - แก้ปัญหา "PERSPECTIVE/ISOMETRIC FLOOR" (พื้นตู้เป็นรูปตัว V ไม่ใช่เส้นแนวนอน)
+# v22 - พัฒนา PER-BOX SEGMENTATION (deterministic) สำหรับ OVERHANG_RISK,
+#   TALL_UNSTABLE_RISK, REAR_LATERAL_IMBALANCE ที่เดิมพึ่ง AI 100% ใน v21
+# v21 - ผ่อนเกณฑ์ confidence ของ REAR_LATERAL_IMBALANCE + ปรับปรุง prompt
+# v20.1 - แก้บั๊ก extract_container_length_mm() ดึงค่าผิดจากบรรทัด COG
+# v19 - เพิ่ม GATE (veto) สำหรับ STEP_DOWN_RISK ที่ Gemini claim มา
 # v18 - เพิ่มกลไก deterministic (height-profile) สำหรับ STEP_DOWN_RISK (FORCE)
 # v17 - แก้บั๊ก LATERAL_GAP_RISK ไม่ทำงานเมื่อคาลิเบรต mm ไม่สำเร็จ (ratio fallback)
-# v16 - เพิ่ม LATERAL_GAP_RISK deterministic + FRONT_EMPTY_RISK ใช้ Front view เป็น
-#   แหล่งข้อมูลเดียว
+# v16 - เพิ่ม LATERAL_GAP_RISK deterministic + FRONT_EMPTY_RISK ใช้ Front view
 # v15 - deterministic FORCE สำหรับ FRONT_EMPTY_RISK/REAR_EMPTY_RISK
 # v14 - เกณฑ์ deterministic ใช้ระยะทางจริง (มม.) แทนสัดส่วน %
 # v13 - deterministic gap-ratio gate (สัดส่วน %)
@@ -159,6 +137,56 @@ MIN_EMPTY_GAP_MM = 400
 MIN_LATERAL_GAP_MM = 300
 FALLBACK_MIN_EMPTY_GAP_RATIO = 0.12
 FALLBACK_MIN_LATERAL_GAP_RATIO = 0.12
+UNUSED_FLOOR_MIN_MM = 100          # v24.1: ค่า "Unused Floor" จาก PDF ต้อง >=100mm
+                                    # (~4in) จึงถือว่ามีนัยสำคัญพอจะใช้ผ่อนเกณฑ์ gap
+                                    # ratio (กันค่าเล็กน้อยจากการปัดเศษ/พื้นที่ว่าง
+                                    # เล็กน้อยที่ยอมรับได้ตามปกติ)
+UNUSED_FLOOR_RELAXED_GAP_RATIO = 0.06  # เกณฑ์ผ่อนลงครึ่งหนึ่งจาก 12% ปกติ - ใช้เฉพาะ
+                                    # เมื่อมี "Unused Floor" ยืนยันจาก PDF โดยตรงเท่านั้น
+                                    # (ไม่ใช่ค่าที่ใช้ทั่วไปโดยไม่มีหลักฐานยืนยัน)
+
+# v24.3 NEW: LOCAL DEPTH-GAP SCAN - ตรวจจับ "หลุมเฉพาะจุด" (localized floor gap) ที่
+# เดิม LATERAL_GAP_RISK (คำนวณจาก whole-container average) พลาดไป
+#
+# ROOT CAUSE ที่พบ (ผู้ใช้ชี้ตำแหน่งด้วยการวงสีแดงใน EC50-01, EC51-02): ค่า
+# compute_lateral_gap_ratio() เดิมเปรียบเทียบ "กรอบสี่เหลี่ยมรวมทั้งภาพ" (container
+# bounds ymax เทียบ cargo extent ymax) เป็นตัวเลขเดียว ซึ่งไม่ไวพอจะจับ "หลุม" ที่เกิด
+# ขึ้นเฉพาะบางตำแหน่ง x เพราะตำแหน่งอื่นที่กล่องยื่นลึกกว่า (จากมุมมอง isometric ที่
+# พื้นตู้เป็นรูปคลื่น) จะ "กลบ" ค่าเฉลี่ยรวมจนดูเหมือนไม่มีปัญหา ยืนยันด้วยพิกเซลจริง:
+# ตรวจสอบ EC50-01/EC51-02 พบช่องว่างเฉพาะจุดลึกถึง 63-69px ณ ตำแหน่งกลางตั้ง แต่ค่า
+# lateral_gap_ratio ที่คำนวณแบบเดิมออกมาแค่ ~10% (ไม่ถึงเกณฑ์ 12%)
+#
+# วิธีแก้: สแกน "ช่องว่างเฉพาะจุด" (local gap = โครงสร้างตู้ที่ต่ำสุด ณ ตำแหน่ง x นั้น
+# ลบด้วยขอบล่างคาร์โก้ ณ ตำแหน่ง x เดียวกัน) ตลอดความกว้างคาร์โก้ แล้วหาช่วงที่ค่านี้
+# "สูงต่อเนื่องเป็นบริเวณกว้าง" (ไม่ใช่จุดเดียวโดดๆ) ซึ่งบ่งชี้หลุมจริง
+#
+# ข้อควรระวังสำคัญ (พบจากการทดสอบไฟล์จริง) - มี 2 แหล่งสัญญาณรบกวนหลักที่ต้องกรอง:
+#   1. ป้ายบอกระยะทาง/ตัวเลข (เช่น "0.9", "1.8", "2.7") ที่วาดทับพื้นหลังสีขาว สร้าง
+#      "จุดกระโดดสูงโดดๆ" (spike) ในสัญญาณ ไม่ใช่หลุมต่อเนื่อง - กรองด้วย (ก) median
+#      smoothing หน้าต่างกว้าง (11px) และ (ข) เช็ค "ความขรุขระ" (roughness) ของสัญญาณ
+#      ดิบ (ไม่ smooth) ภายในช่วงที่ตรวจพบ - หลุมจริงมีรูปทรงสามเหลี่ยมลาดเอียงสม่ำเสมอ
+#      (roughness ต่ำ) ในขณะที่ noise จะกระโดดสลับไปมา (roughness สูง)
+#   2. โซนผนังหัวตู้/ประตูท้ายตู้ (ริมทั้ง 2 ข้างของคาร์โก้) มีแผงโครงสร้างตู้ทึบที่ทำให้
+#      เกิด "gap ปลอม" ขนาดใหญ่คงที่เสมอ (~166-170px) ในทุกไฟล์แม้แต่ไฟล์ที่ปลอดภัย
+#      100% (ยืนยันจาก EC20-01) เพราะแผงนี้ไม่ใช่ตัวชี้วัดพื้นที่ว่างจากการโหลดสินค้า
+#      แต่เป็นโครงสร้างที่มีอยู่แล้วโดยธรรมชาติ (มีกลไก FRONT_EMPTY_RISK/
+#      REAR_EMPTY_RISK แยกต่างหากดูแลโซนนี้อยู่แล้ว) - จึง "ตัดโซนริม" ทั้ง 2 ข้างออก
+#      จากการสแกน (เหลือแค่ส่วนกลาง ~65% ของความกว้างคาร์โก้)
+LOCAL_GAP_SAMPLE_STEP_PX = 5
+LOCAL_GAP_SEARCH_MARGIN_PX = 20        # ขยายขอบเขตค้นหา (บน/ล่าง) เผื่อพื้นตู้/คาร์โก้
+                                        # ไม่ได้อยู่พอดีกับ container_bounds/cargo_extent
+LOCAL_GAP_SMOOTH_WINDOW = 11
+LOCAL_GAP_MIN_PX = 15                  # ช่องว่างเฉพาะจุด (หลัง smooth) ขั้นต่ำที่ถือว่า
+                                        # น่าสงสัย
+LOCAL_GAP_MIN_WIDTH_PX = 60             # ต้องกว้างต่อเนื่องอย่างน้อยเท่านี้ (px) จึงจะ
+                                        # ถือว่าเป็นหลุมจริง (ไม่ใช่จุดเดียวโดดๆ)
+LOCAL_GAP_MIN_RAW_COVERAGE = 0.65       # สัดส่วนของจุดข้อมูลดิบ (ไม่ smooth) ในช่วงที่
+                                        # ตรวจพบ ต้องมีค่าเกิน LOCAL_GAP_RAW_LOWER_THRESH
+                                        # อย่างน้อยเท่านี้ (กัน noise ที่ smooth รวมกัน)
+LOCAL_GAP_RAW_LOWER_THRESH = 8
+LOCAL_GAP_MAX_ROUGHNESS = 0.35          # ความขรุขระสูงสุดที่ยอมรับได้ (ดู comment ด้านบน)
+LOCAL_GAP_WALL_ZONE_MARGIN_RATIO = 0.20  # ตัดโซนผนังหัวตู้ออก (สัดส่วนความกว้างคาร์โก้)
+LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO = 0.15  # ตัดโซนประตูท้ายตู้ออก (สัดส่วนความกว้างคาร์โก้)
 
 MIN_STEP_DOWN_RATIO = 0.075
 STEP_DOWN_PROFILE_STEP_PX = 5
@@ -319,8 +347,7 @@ def extract_container_length_mm(pdf_bytes: bytes):
 
     v20.1 FIX: ประมวลผลทีละบรรทัด (ไม่ใช่ full-text regex) แล้ว "ข้ามบรรทัดที่มีคำว่า
     COG โดยเด็ดขาด" เพราะรูปแบบ "N x N x N (mm)" ของ COG (Center of Gravity) ไม่ใช่
-    ค่าความยาวตู้เดี่ยวๆ แบบ "N (mm)" ที่ label เส้นบอกขนาดในภาพ diagram ใช้ - เดิม
-    เคยจับค่าจากบรรทัด COG ผิดพลาด ทำให้คาลิเบรตคลาดเคลื่อนหลายเท่า
+    ค่าความยาวตู้เดี่ยวๆ แบบ "N (mm)" ที่ label เส้นบอกขนาดในภาพ diagram ใช้
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -346,6 +373,46 @@ def extract_container_length_mm(pdf_bytes: bytes):
         return length_mm
     except Exception as e:
         print(f"WARNING: Container length extraction failed ({e}) - will use ratio-based fallback")
+        return None
+
+
+def extract_unused_floor_mm(pdf_bytes: bytes):
+    """
+    ดึงค่า "Unused Floor: X (in)" จาก PDF text - เป็นตัวเลขที่ MaxLoad Pro พิมพ์ไว้บน
+    หน้า manifest โดยตรง (GROUND TRUTH ที่แม่นยำ 100% ไม่ต้องพึ่งพา pixel measurement
+    เลย) บอกว่ามีพื้นที่พื้นตู้ว่างไม่ได้ใช้เท่าใด (หน่วยนิ้ว)
+
+    v24.1 NEW (พบระหว่างการตรวจสอบ /ooda /scout): เดิมระบบไม่เคยใช้ค่านี้เลย ทั้งที่
+    เป็นสัญญาณที่แม่นยำที่สุดสำหรับ LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK
+    - ยืนยันจากไฟล์จริง: ED86-03 และ EC25-01 (ที่ผู้ใช้รายงานว่า "มี gap แต่ไม่ระบุ")
+    ทั้งคู่มีค่า "Unused Floor" ที่ไม่ใช่ศูนย์ (17.7in, 18.9in ตามลำดับ) ในขณะที่ไฟล์
+    อื่นๆ ที่ไม่มีปัญหาเรื่อง gap (EC20-01, EC50-01, EC51-02, ED85-02) ล้วนมีค่า
+    "Unused Floor: 0 (in)" ตรงกันทุกไฟล์ - เป็นความสัมพันธ์ที่ชัดเจนมาก
+
+    หมายเหตุ: ข้อความ "Unused Floor:" และค่าตัวเลข "X (in)" มักอยู่คนละบรรทัดใน PDF
+    text stream (เพราะ PDF จัดเรียงข้อความตามตำแหน่งพิกัด ไม่ใช่ตามลำดับที่อ่านเข้าใจ)
+    จึงค้นหาแบบ "หลังจากเจอบรรทัด 'Unused Floor' ให้สแกนต่ออีก 2-5 บรรทัดถัดไป หา
+    pattern ตัวเลขตามด้วย (in)" แทนการค้นหาในบรรทัดเดียวกัน
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_index = 1 if len(doc) >= 2 else 0
+        page = doc[page_index]
+        lines = page.get_text("text").splitlines()
+        for i, line in enumerate(lines):
+            if "unused floor" in line.lower():
+                for j in range(i, min(i + 5, len(lines))):
+                    m = re.search(r"([\d.]+)\s*\(\s*in\s*\)", lines[j], flags=re.IGNORECASE)
+                    if m:
+                        inches = float(m.group(1))
+                        mm = inches * 25.4
+                        print(f"Unused Floor extracted from PDF text: {inches}in ({mm:.0f}mm)")
+                        return mm
+                break
+        print("WARNING: Could not find 'Unused Floor' value in PDF text")
+        return None
+    except Exception as e:
+        print(f"WARNING: Unused Floor extraction failed ({e})")
         return None
 
 
@@ -633,6 +700,222 @@ def compute_lateral_gap_ratio(view_container, view_cargo):
     return gap_y_px / container_y_span
 
 
+def get_precise_lateral_gap_box(view_container, view_cargo):
+    """
+    v24.2 NEW: คำนวณตำแหน่งกรอบที่แม่นยำสำหรับ LATERAL_GAP_RISK (deterministic) แทนที่
+    จะใช้ fallback แบบทั่วไป (percentage-based zone ที่ครอบคลุมกลางคาร์โก้)
+
+    ROOT CAUSE ที่พบจากการตรวจสอบภาพจริงร่วมกับผู้ใช้ (ED86-03): เดิมค่า "lateral gap"
+    คำนวณจากแค่ "ผลต่างความสูงรวม" (container_y_span - cargo_y_span) โดยไม่ได้ระบุว่า
+    ช่องว่างอยู่ฝั่งไหน (บนหรือล่าง) ทำให้เมื่อวาดกรอบ ระบบไม่มีข้อมูลพอจะชี้ตำแหน่งที่
+    แม่นยำ จึงตกไปใช้ fallback แบบ percentage-based ที่ครอบคลุมกลางคาร์โก้แทน (ผิด
+    ตำแหน่งจากช่องว่างจริงที่มักอยู่ชิดขอบใดขอบหนึ่ง) ผู้ใช้ยืนยันด้วยการวงสีแดงว่า
+    ตำแหน่งช่องว่างจริงอยู่ที่ "มุมล่างขวาของพื้นตู้" (บริเวณระหว่างขอบล่างของกล่อง
+    คาร์โก้กับขอบล่างของตู้ในภาพ 2D) ซึ่งตรงกับค่าที่คำนวณได้: bottom_gap=40px มากกว่า
+    top_gap=9px อย่างชัดเจน (บ่งชี้ว่าช่องว่างส่วนใหญ่อยู่ด้านล่าง ไม่ใช่ตรงกลาง)
+
+    วิธีแก้: เปรียบเทียบ "ช่องว่างด้านบน" (cargo_ymin - container_ymin) กับ "ช่องว่าง
+    ด้านล่าง" (container_ymax - cargo_ymax) แยกกัน แล้ววาดกรอบเฉพาะฝั่งที่มีช่องว่าง
+    มากกว่าเท่านั้น (แถบแคบตามความกว้างเต็มของคาร์โก้ x ความสูงเท่ากับช่องว่างจริง)
+    """
+    if not view_container or not view_cargo:
+        return None
+    top_gap = view_cargo["ymin"] - view_container["ymin"]
+    bottom_gap = view_container["ymax"] - view_cargo["ymax"]
+    x0, x1 = view_cargo["xmin"], view_cargo["xmax"]
+    if bottom_gap >= top_gap and bottom_gap > 0:
+        y0, y1 = view_cargo["ymax"], view_container["ymax"]
+    elif top_gap > 0:
+        y0, y1 = view_container["ymin"], view_cargo["ymin"]
+    else:
+        return None
+    # ขยายกรอบเล็กน้อย (padding) เพื่อให้มองเห็นขอบเขตชัดเจนขึ้น ไม่บางจนเกินไป
+    pad = max(3, int((y1 - y0) * 0.15))
+    return (x0, max(0, y0 - pad), x1, y1 + pad)
+
+
+# ---------------------------------------------------------------------------
+# LOCAL DEPTH-GAP SCAN (v24.3) - ดู CHANGELOG ที่ค่าคงที่ LOCAL_GAP_* ด้านบนสำหรับ
+# รายละเอียด root cause และวิธีแก้ทั้งหมด
+# ---------------------------------------------------------------------------
+
+def _raw_local_gap_profile(px, x_range, y_search, step=LOCAL_GAP_SAMPLE_STEP_PX):
+    """สแกนหา 'ช่องว่างเฉพาะจุด' ณ แต่ละตำแหน่ง x = (ขอบล่างสุดของโครงสร้างตู้ -
+    ขอบล่างสุดของคาร์โก้) ภายในหน้าต่างค้นหา y_search ที่กำหนด คืนค่า list ของ
+    (x, gap_หรือ_None)"""
+    results = []
+    for x in range(x_range[0], x_range[1], step):
+        cargo_bottom = None
+        struct_bottom = None
+        for y in range(y_search[0], y_search[1]):
+            if _is_vivid_cargo_color(px[x, y]):
+                cargo_bottom = y
+            if _is_saturated_color(px[x, y]):
+                struct_bottom = y
+        gap = (struct_bottom - cargo_bottom) if (cargo_bottom is not None and struct_bottom is not None) else None
+        results.append((x, gap, cargo_bottom, struct_bottom))
+    return results
+
+
+def _median_smooth_gap_profile(profile, window=LOCAL_GAP_SMOOTH_WINDOW):
+    """median smooth เฉพาะค่า gap (index 1 ของแต่ละ tuple) รองรับค่า None"""
+    vals = [p[1] for p in profile]
+    n = len(vals)
+    out = []
+    half = window // 2
+    for i in range(n):
+        lo = max(0, i - half); hi = min(n, i + half + 1)
+        window_vals = sorted(v for v in vals[lo:hi] if v is not None)
+        out.append(window_vals[len(window_vals) // 2] if window_vals else None)
+    return out
+
+
+def _compute_gap_roughness(raw_vals):
+    """คำนวณ 'ความขรุขระ' ของสัญญาณ = ค่าเฉลี่ยของ |ผลต่างระหว่างจุดติดกัน| หารด้วย
+    ค่าเฉลี่ยของสัญญาณเอง - หลุมจริง (สามเหลี่ยมลาดเอียงสม่ำเสมอจากมุมมอง isometric)
+    จะมีค่าต่ำ ในขณะที่ noise (จากตัวอักษร/ป้ายเลขระยะที่กระโดดสลับไปมา) จะมีค่าสูง"""
+    if len(raw_vals) < 2:
+        return 0
+    diffs = [abs(raw_vals[i + 1] - raw_vals[i]) for i in range(len(raw_vals) - 1)]
+    avg_diff = sum(diffs) / len(diffs)
+    avg_val = sum(raw_vals) / len(raw_vals)
+    return avg_diff / avg_val if avg_val > 0 else 999
+
+
+def detect_local_depth_gap_regions(view_img, cargo_xmin, cargo_xmax, container_ymax, cargo_ymin,
+                                     wall_side, step=LOCAL_GAP_SAMPLE_STEP_PX,
+                                     min_gap_px=LOCAL_GAP_MIN_PX, min_width_px=LOCAL_GAP_MIN_WIDTH_PX,
+                                     min_raw_coverage=LOCAL_GAP_MIN_RAW_COVERAGE,
+                                     raw_lower_thresh=LOCAL_GAP_RAW_LOWER_THRESH,
+                                     max_roughness=LOCAL_GAP_MAX_ROUGHNESS):
+    """
+    สแกน "ช่องว่างเฉพาะจุด" (local depth gap) ตลอดความกว้างคาร์โก้ (เฉพาะโซนกลาง -
+    ตัดโซนผนังหัวตู้/ประตูท้ายตู้ออกแล้ว) แล้วหาช่วงที่เป็นหลุมจริง (กว้างต่อเนื่อง,
+    ราบเรียบ) ไม่ใช่ noise (จุดเดียวโดดๆ, กระโดดสลับ)
+
+    คืนค่า list ของ region dict: {"x_min","x_max","y_min","y_max","max_gap_px",
+    "avg_gap_px","width_px"} เป็นพิกัด "สัมพัทธ์กับ view_img" (ผู้เรียกต้องแปลงเป็น
+    พิกัดสัมบูรณ์เอง)
+    """
+    px = view_img.convert("RGB").load()
+    w, h = view_img.size
+    cargo_xmin = max(0, int(cargo_xmin)); cargo_xmax = min(w, int(cargo_xmax))
+    cargo_width = cargo_xmax - cargo_xmin
+    if cargo_width <= 0:
+        return []
+
+    # ตัดโซนผนังหัวตู้/ประตูท้ายตู้ออก (ดู comment ที่ LOCAL_GAP_WALL_ZONE_MARGIN_RATIO)
+    if wall_side == "RIGHT":  # ผนังหัวตู้อยู่ขวา -> ประตูท้ายตู้อยู่ซ้าย
+        scan_x0 = cargo_xmin + int(cargo_width * LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO)
+        scan_x1 = cargo_xmax - int(cargo_width * LOCAL_GAP_WALL_ZONE_MARGIN_RATIO)
+    else:  # wall_side == "LEFT" -> ประตูท้ายตู้อยู่ขวา
+        scan_x0 = cargo_xmin + int(cargo_width * LOCAL_GAP_WALL_ZONE_MARGIN_RATIO)
+        scan_x1 = cargo_xmax - int(cargo_width * LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO)
+    if scan_x1 <= scan_x0:
+        return []
+
+    y_top = max(0, int(cargo_ymin) - LOCAL_GAP_SEARCH_MARGIN_PX)
+    y_bot = min(h, int(container_ymax) + LOCAL_GAP_SEARCH_MARGIN_PX)
+    if y_bot <= y_top:
+        return []
+
+    raw_profile = _raw_local_gap_profile(px, (scan_x0, scan_x1), (y_top, y_bot), step=step)
+    if len(raw_profile) < 4:
+        return []
+    smoothed_vals = _median_smooth_gap_profile(raw_profile)
+
+    regions = []
+    n = len(raw_profile)
+    i = 0
+    min_samples = max(1, min_width_px // step)
+    while i < n:
+        g = smoothed_vals[i]
+        if g is not None and g >= min_gap_px:
+            j = i
+            while j < n and smoothed_vals[j] is not None and smoothed_vals[j] >= min_gap_px:
+                j += 1
+            width_samples = j - i
+            if width_samples >= min_samples:
+                raw_vals = [raw_profile[k][1] for k in range(i, j) if raw_profile[k][1] is not None]
+                coverage = sum(1 for v in raw_vals if v >= raw_lower_thresh) / len(raw_vals) if raw_vals else 0
+                roughness = _compute_gap_roughness(raw_vals)
+                if coverage >= min_raw_coverage and roughness <= max_roughness:
+                    xs = [raw_profile[k][0] for k in range(i, j)]
+                    cargo_bottoms = [raw_profile[k][2] for k in range(i, j) if raw_profile[k][2] is not None]
+                    struct_bottoms = [raw_profile[k][3] for k in range(i, j) if raw_profile[k][3] is not None]
+                    region_x_min, region_x_max = min(xs), max(xs)
+                    region_y_min = min(cargo_bottoms) if cargo_bottoms else y_top
+                    region_y_max = max(struct_bottoms) if struct_bottoms else y_bot
+                    max_gap = max(smoothed_vals[k] for k in range(i, j))
+                    avg_gap = sum(smoothed_vals[k] for k in range(i, j)) / width_samples
+                    print(f"Local depth-gap ACCEPTED: x=[{region_x_min}-{region_x_max}] width={region_x_max-region_x_min}px "
+                          f"max_gap={max_gap:.0f}px avg_gap={avg_gap:.0f}px raw_coverage={coverage:.2f} roughness={roughness:.2f}")
+                    regions.append({
+                        "x_min": region_x_min, "x_max": region_x_max,
+                        "y_min": region_y_min, "y_max": region_y_max,
+                        "max_gap_px": max_gap, "avg_gap_px": avg_gap,
+                        "width_px": region_x_max - region_x_min,
+                    })
+                else:
+                    xs = [raw_profile[k][0] for k in range(i, j)]
+                    print(f"Local depth-gap REJECTED (likely noise from dimension text): "
+                          f"x=[{min(xs)}-{max(xs)}] raw_coverage={coverage:.2f} roughness={roughness:.2f}")
+            i = j
+        else:
+            i += 1
+    return regions
+
+
+def detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
+    """
+    เรียก detect_local_depth_gap_regions() สำหรับทั้ง FRONT และ BACK view โดยแปลง
+    พิกัดผลลัพธ์เป็น "สัมบูรณ์บนภาพเต็ม" (เช่นเดียวกับ container_bounds/cargo_extent)
+    """
+    result = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        cb = container_bounds.get(view)
+        ce = cargo_extent.get(view)
+        if not cb or not ce:
+            continue
+        if layout == "TOP_BOTTOM":
+            mid_y = crop_h // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, crop_w, mid_y)); origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h)); origin_x, origin_y = 0, crop_y_start + mid_y
+        else:
+            half_w = crop_w // 2
+            if view == "FRONT":
+                view_img = diagram_crop.crop((0, 0, half_w, crop_h)); origin_x, origin_y = 0, crop_y_start
+            else:
+                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h)); origin_x, origin_y = half_w, crop_y_start
+
+        rear_side = HARDCODED_REAR_SIDE[view]
+        wall_side = "RIGHT" if rear_side == "LEFT" else "LEFT"
+
+        rel_cargo_xmin = ce["xmin"] - origin_x
+        rel_cargo_xmax = ce["xmax"] - origin_x
+        rel_cargo_ymin = ce["ymin"] - origin_y
+        rel_container_ymax = cb["ymax"] - origin_y
+
+        try:
+            regions_rel = detect_local_depth_gap_regions(view_img, rel_cargo_xmin, rel_cargo_xmax,
+                                                            rel_container_ymax, rel_cargo_ymin, wall_side)
+        except Exception as e:
+            print(f"WARNING: Local depth-gap scan failed for {view} ({e})")
+            regions_rel = []
+
+        regions_abs = []
+        for r in regions_rel:
+            regions_abs.append({
+                "x_min": r["x_min"] + origin_x, "x_max": r["x_max"] + origin_x,
+                "y_min": r["y_min"] + origin_y, "y_max": r["y_max"] + origin_y,
+                "max_gap_px": r["max_gap_px"], "avg_gap_px": r["avg_gap_px"], "width_px": r["width_px"],
+            })
+        result[view] = regions_abs
+    return result
+
+
 # ---------------------------------------------------------------------------
 # STEP_DOWN_RISK deterministic detection - height-profile discontinuity
 # ---------------------------------------------------------------------------
@@ -666,8 +949,6 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
     """
     ตรวจจับความต่างระดับด้วยการหา 'จุดกระโดด' ระหว่างจุดที่ติดกันบน height-profile
     แล้วตรวจสอบแต่ละ segment ว่า 'เตี้ยกว่าเพื่อนบ้านซ้าย/ขวา' หรือไม่แยกกันเป็นอิสระ
-    (v19 fix: ไม่ merge ตามระยะห่าง x อีกต่อไป เพราะทำให้เกิดบั๊กเมื่อเจอ pattern
-    บันได 'เตี้ย->กลาง->สูง' ที่ 2 จุดเสี่ยงจริงถูกรวมเป็นกรอบเดียวผิดๆ)
     """
     profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
     if len(profile) < 4:
@@ -690,14 +971,35 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
         start_idx = b + 1
     segments.append(profile[start_idx:])
 
+    # v24.1 FIX (EDGE-BASED comparison แทน whole-segment AVERAGE):
+    # เดิมเปรียบเทียบ "ค่าเฉลี่ยทั้ง segment" (y_avg) ระหว่างเพื่อนบ้าน ซึ่งพังเมื่อ
+    # segment มีความชันแบบค่อยเป็นค่อยไปภายในตัวเอง (perspective drift จากตำแหน่ง
+    # ความลึกที่ทำให้ความสูงที่วัดได้ค่อยๆ เปลี่ยนต่อเนื่องตลอด segment แม้จะเป็นกล่อง
+    # ความสูงจริงเท่ากันทั้งหมด) พบจากไฟล์จริง ED85-02: purple TGT1G segment กว้าง
+    # 335px มีความสูงไล่ระดับต่อเนื่องจาก perspective (ไม่ใช่รอยต่อจริง) แต่ค่าเฉลี่ย
+    # ทั้ง segment ถูกเทียบกับเพื่อนบ้านทำให้เกิด false STEP_DOWN กว้างเกินจริง (24%)
+    # ครอบคลุมกล่องสีม่วงทั้งหมดผิดพลาด (ตรงกับที่ผู้ใช้รายงาน "กรอบคลุมกล่องสีม่วงผิด")
+    # แก้ไขด้วยการเปรียบเทียบเฉพาะ "ค่าที่ขอบ" (เฉลี่ยจากไม่กี่จุดใกล้รอยต่อที่สุด)
+    # แทนค่าเฉลี่ยทั้ง segment + จำกัดกรอบที่รายงานให้อยู่ใกล้รอยต่อจริงเท่านั้น (ไม่ใช่
+    # ทั้ง segment ที่อาจกว้างจาก perspective drift ภายใน)
+    EDGE_SAMPLE_N = 4
+
+    def _edge_value(seg, from_start):
+        pts = seg[:EDGE_SAMPLE_N] if from_start else seg[-EDGE_SAMPLE_N:]
+        ys = [p[1] for p in pts]
+        return sum(ys) / len(ys)
+
     seg_info = []
     for seg in segments:
         if len(seg) < 1:
             continue
         xs = [p[0] for p in seg]
-        ys = [p[1] for p in seg]
         width = (max(xs) - min(xs)) if len(xs) > 1 else step
-        seg_info.append({"x_min": min(xs), "x_max": max(xs), "y_avg": sum(ys) / len(ys), "width": width})
+        seg_info.append({
+            "x_min": min(xs), "x_max": max(xs), "width": width,
+            "edge_left": _edge_value(seg, from_start=True),
+            "edge_right": _edge_value(seg, from_start=False),
+        })
     seg_info.sort(key=lambda s: s["x_min"])
 
     risky_segments = []
@@ -708,21 +1010,29 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
             continue
         is_risky = False
         max_ratio = 0
+        risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
+        edge_zone_width = min(seg["width"], max(min_flat_width_px, int(container_y_span_px * 0.35)))
         if i > 0:
             left = seg_info[i - 1]
-            diff = abs(seg["y_avg"] - left["y_avg"])
+            diff = abs(seg["edge_left"] - left["edge_right"])
             ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
-            if seg["y_avg"] > left["y_avg"] and ratio >= min_ratio:
+            if seg["edge_left"] > left["edge_right"] and ratio >= min_ratio:
                 is_risky = True
                 max_ratio = max(max_ratio, ratio)
+                risky_x_max = min(risky_x_max, seg["x_min"] + edge_zone_width)
         if i < n - 1:
             right = seg_info[i + 1]
-            diff = abs(seg["y_avg"] - right["y_avg"])
+            diff = abs(seg["edge_right"] - right["edge_left"])
             ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
-            if seg["y_avg"] > right["y_avg"] and ratio >= min_ratio:
+            if seg["edge_right"] > right["edge_left"] and ratio >= min_ratio:
                 is_risky = True
                 max_ratio = max(max_ratio, ratio)
+                risky_x_min = max(risky_x_min, seg["x_max"] - edge_zone_width)
         if is_risky:
+            if risky_x_min > risky_x_max:
+                risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
+            seg["x_min"], seg["x_max"] = risky_x_min, risky_x_max
+            seg["y_avg"] = min(seg["edge_left"], seg["edge_right"])
             risky_segments.append({
                 "x_min": seg["x_min"], "x_max": seg["x_max"],
                 "y_min": seg["y_avg"], "y_max": container_ymax,
@@ -829,259 +1139,59 @@ def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, re
 
 
 # ---------------------------------------------------------------------------
-# PER-BOX SEGMENTATION (v22, ปรับปรุงใน v23/v23.1)
+# PER-BOX SEGMENTATION (v22, ปรับปรุงครั้งใหญ่ใน v24)
 #
 # แนวคิด: สร้าง "stack-box model" (แบบจำลองตั้ง-กล่อง) จากพิกเซลในแต่ละ view
 # (FRONT/BACK) โดยแบ่งเป็น 2 ขั้นตอน:
-#
-#   ขั้น 1 (แบ่ง "ตั้ง"/stack ตามแนวกว้าง): แยก "กลุ่มก้อนสินค้าจริง" (physical
-#   cluster) ก่อนด้วยช่องว่างจริง แล้วหาเส้นแบ่งบางๆ (เส้นขอบ/เส้นแบ่งสี) ภายในแต่ละ
-#   กลุ่มเพื่อแยกตั้งที่วางชิดติดกัน (v23.1: ใช้ "local floor" ต่อคอลัมน์แทนเส้นตรง
-#   ทั่วโลก - ดู comment ในหัวข้อ v23.1 ของ changelog ด้านบนของไฟล์)
-#
-#   ขั้น 2 (แบ่ง "กล่อง" ในแต่ละตั้งตามแนวสูง): ในแต่ละตั้ง สแกนจากพื้นขึ้นไปจนถึง
-#   ยอดสินค้า หาเส้นแบ่งแนวนอนระหว่างกล่องแต่ละใบที่ซ้อนกัน จากนั้น "วัดขอบซ้าย/ขวา
-#   จริง" ของกล่องแต่ละใบแยกกัน (ใช้ median-of-multiple-rows แทนแถวเดียว - v23.1)
+#   ขั้น 1 (แบ่ง "ตั้ง"/stack ตามแนวกว้าง): แยก "กลุ่มก้อนสินค้าจริง" ก่อนด้วยช่องว่าง
+#   จริง แล้วหาเส้นแบ่งภายในแต่ละกลุ่มด้วย 3 สัญญาณรวมกัน (v24 - ดู CHANGELOG หัวไฟล์):
+#   dark-dip (เดิม) + color-step (ใหม่) + floor-jump (ใหม่)
+#   ขั้น 2 (แบ่ง "กล่อง" ในแต่ละตั้งตามแนวสูง): ใช้หลักการเดียวกัน (3 สัญญาณรวมกัน)
+#   ตามแนวตั้ง แล้ววัดขอบซ้าย/ขวาจริงของกล่องแต่ละใบด้วย median-of-multiple-rows
 #
 # นำแบบจำลองนี้ไปใช้กับ 3 risk type ที่เดิมพึ่ง AI 100% ใน v21:
-#   - OVERHANG_RISK: เทียบขอบซ้าย/ขวาของกล่องที่อยู่ติดกันในตั้งเดียวกัน (บน vs ล่าง)
-#   - TALL_UNSTABLE_RISK: เทียบความสูงรวมทั้งตั้ง (ผลรวมทุกกล่อง) กับตั้งข้างเคียง
-#     ทั้งสองด้าน (ต้องมีเพื่อนบ้านทั้ง 2 ฝั่ง - v23.1 fix) ถ้าสูงกว่าทั้งคู่มากพอ
-#     (ไม่มีตั้งข้างค้ำยัน) = เสี่ยง
-#   - REAR_LATERAL_IMBALANCE: เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกันเฉพาะ
-#     ในโซนประตูท้ายตู้
+#   - OVERHANG_RISK, TALL_UNSTABLE_RISK: FORCE + VETO
+#   - REAR_LATERAL_IMBALANCE: FORCE เสมอ + VETO แบบมีเงื่อนไข (v24 ใหม่ - ดู
+#     process_request สำหรับ logic การ veto)
 #
-# ข้อจำกัดที่ทราบและยอมรับ (สำคัญ - ต้องแจ้งผู้ใช้งานเสมอ):
-#   Occlusion ในมุมมอง isometric - หากตั้งเตี้ยถูกตั้งสูงบังจนไม่เห็นขอบเลยในภาพ 2D
-#   projection นี้ pixel analysis จะ "มองไม่เห็น" ตั้งนั้นเลย (ไม่มีข้อมูลความลึก/
-#   depth ให้ประมวลผล) เป็นข้อจำกัดพื้นฐานที่แก้ไม่ได้ด้วย pixel heuristic ล้วนๆ
-#   (นี่คือสาเหตุที่ v21 เลือกพึ่ง AI สำหรับเคส AC03 pattern 2,2,1 ที่ตั้งเตี้ยถูกบัง)
-#
-#   ดังนั้นใช้กลไก deterministic แบบ "FORCE + VETO" เสริมคู่กับ AI (ไม่ใช่แทนที่
-#   AI ทั้งหมด):
-#     * OVERHANG_RISK, TALL_UNSTABLE_RISK: ใช้ FORCE (deterministic เจอแต่ AI บอก
-#       SAFE -> บังคับขึ้น) + VETO (AI claim มาแต่ deterministic ไม่เจอจุดทับซ้อน
-#       เลย -> ปฏิเสธ) เหมือนกลไกของ STEP_DOWN_RISK ที่มีอยู่แล้ว
-#     * REAR_LATERAL_IMBALANCE: ใช้ FORCE เท่านั้น (ไม่ veto AI) เพราะ AI อาจเห็น
-#       ตั้งที่ถูกบังซึ่ง pixel-based มองไม่เห็น - deterministic ทำหน้าที่เป็น
-#       "second opinion" เสริมความมั่นใจ/จับเคสที่ AI พลาดเฉพาะกรณีที่ไม่มี occlusion
-#
-# ผ่านการทดสอบกับไฟล์ PDF จริง 17 ไฟล์แล้ว (v22.1 -> v23 -> v23.1) พบและแก้บั๊ก
-# หลายจุด (ดู CHANGELOG ที่หัวไฟล์สำหรับรายละเอียดทั้งหมด)
+# ข้อจำกัดที่ทราบและยอมรับ (ดู CHANGELOG หัวไฟล์สำหรับรายละเอียดเต็ม):
+#   - Occlusion ในมุมมอง isometric (ยืนยันจากไฟล์ EC51-02)
+#   - Same-color adjacent stacks อาจแยกไม่ครบ 100% (ไม่กระทบผลลัพธ์ความเสี่ยงมากนัก)
 # ---------------------------------------------------------------------------
 
-BOX_BOUNDARY_MIN_DROP = 22            # ความสว่างต้องลดลงอย่างน้อยเท่านี้ถึงจะนับเป็น
-                                       # ผู้สมัคร "เส้นแบ่งกล่อง" (0-255 scale)
-BOX_BOUNDARY_MAX_THICKNESS_PX = 6      # เส้นแบ่งกล่องต้องบาง (<=6px) ถ้าหนากว่านี้
-                                       # ถือว่าเป็นพื้นที่ว่างจริง ไม่ใช่แค่เส้นขอบ
-STACK_MIN_WIDTH_PX = 18                # ความกว้างต่ำสุดที่เป็นไปได้ของ 1 ตั้ง
-BOX_MIN_HEIGHT_PX = 4                  # ความสูงต่ำสุดสัมบูรณ์ (px) ของ 1 กล่อง
-BOX_MIN_HEIGHT_RATIO = 0.12             # v23: เกณฑ์ความบางสัมพัทธ์ - segment ที่บาง
-                                        # กว่า 12% ของความสูงตั้งทั้งหมด ถือว่าเป็น
-                                        # สัญญาณรบกวน (เช่น เส้นข้อความ SKU) ไม่ใช่
-                                        # รอยต่อกล่องจริง จะถูก "รวม" เข้ากับเพื่อนบ้าน
+BOX_BOUNDARY_MIN_DROP = 22
+BOX_BOUNDARY_MAX_THICKNESS_PX = 6
+STACK_MIN_WIDTH_PX = 18
+BOX_MIN_HEIGHT_PX = 4
+BOX_MIN_HEIGHT_RATIO = 0.12
+TOP_ROW_MAJORITY_RATIO = 0.65  # v24.1 FIX: เดิมใช้ "ANY column has cargo" (1 คอลัมน์
+                                # เดียวก็พอ) เพื่อหา top_y ของตั้ง ซึ่งเสี่ยงถูก "หน้า
+                                # บนลาดเอียง" (isometric parallelogram top face) ของ
+                                # กล่องเพื่อนบ้านที่สูงกว่า "ล้ำ" เข้ามาในช่วง x ของตั้ง
+                                # ที่เตี้ยกว่า (แม้พื้นจะแบ่งเขตถูกต้องแล้วก็ตาม เพราะ
+                                # หน้าบนที่ลาดเอียงไปตามแนวความลึกทำให้ที่ตำแหน่ง y สูงๆ
+                                # อาจมีเพียง 1-2 คอลัมน์ริมขอบที่ยังเห็นสีเพื่อนบ้าน)
+                                # พบจากไฟล์จริง EC50-01: กล่องเหลือง VCS1A (2 ชั้น) ถูก
+                                # วัดความสูงผิดจนใกล้เคียงกล่องเขียว TSC1A (4 ชั้น) ข้าง
+                                # เคียง เพราะคอลัมน์เดียวที่ริมขอบจับสีเขียวได้ที่ y สูง
+                                # แก้ไขด้วยการกำหนดว่าต้องมีอย่างน้อย 65% ของคอลัมน์ที่
+                                # สุ่มตรวจเป็นสี cargo พร้อมกัน จึงถือว่าเป็นแถวบนสุดจริง
 
-# v22.1 SAFETY GATE: เกณฑ์ความครอบคลุมขั้นต่ำ - ถ้าผลรวมความกว้างของ "ตั้ง" ที่
-# ตรวจพบทั้งหมดในหนึ่ง view น้อยกว่าสัดส่วนนี้ของความกว้าง cargo_extent จริง ให้ถือว่า
-# การแบ่งกล่อง (per-box segmentation) ใน view นั้น "ล้มเหลว/ไม่น่าเชื่อถือ" หากล้มเหลว
-# จะข้ามการ FORCE/VETO ทั้งหมดสำหรับ view นั้น (fallback กลับไปพึ่ง AI 100% เหมือน v21)
 STACK_COVERAGE_MIN_RATIO = 0.60
 
-OVERHANG_MIN_RATIO = 0.20              # กล่องบนยื่นพ้นกล่องล่าง >=20% ของความกว้าง
-                                       # กล่องล่าง จึงนับเป็นความเสี่ยง (v23: เพิ่มจาก
-                                       # 0.12 หลังพบว่าการวัดขอบซ้าย/ขวายังมี noise
-                                       # ตกค้างระดับ ~15-20px แม้ใช้ median-of-rows
-                                       # แล้ว - ดู comment ใน detect_boxes_in_stack)
-OVERHANG_MIN_ABS_PX = 20               # v23: ต้องยื่นออกมาอย่างน้อย 20px (สัมบูรณ์)
-                                       # ด้วย ไม่ใช่แค่ผ่านเกณฑ์สัดส่วนอย่างเดียว เพื่อ
-                                       # ป้องกัน false positive จาก noise ระดับพิกเซล
-                                       # เดียวกับที่พบในกล่องแคบ (ความกว้างกล่องน้อย)
-TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.35  # ตั้งนี้ต้องสูงกว่าตั้งข้างเคียง (ที่สูงสุด)
-                                       # อย่างน้อย 35% ของความสูงตัวเอง
-TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.65  # เพื่อนบ้านต้องเตี้ยกว่า <=65% ของตั้งนี้
-                                       # ถึงจะนับว่า "ไม่มีตั้งข้างค้ำยัน"
-LATERAL_IMBALANCE_MIN_RATIO = 0.40     # เกณฑ์ FORCE ของ REAR_LATERAL_IMBALANCE
-                                       # (สอดคล้องกับเกณฑ์ 40-50% ใน AI prompt เดิม)
+OVERHANG_MIN_RATIO = 0.20
+OVERHANG_MIN_ABS_PX = 20
+TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.35
+TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.65
+LATERAL_IMBALANCE_MIN_RATIO = 0.40
 
-
-# ---------------------------------------------------------------------------
-# FLOOR LINE DETECTION (v23)
-#
-# ปัญหาที่พบจากการทดสอบไฟล์จริง: ภาพ diagram เป็นมุมมอง ISOMETRIC ซึ่งกล้องมองจาก
-# มุมของตู้คอนเทนเนอร์ ทำให้ "พื้นตู้" ที่ปรากฏในภาพไม่ใช่เส้นแนวนอน แต่เป็นรูปตัว
-# "V" (piecewise-linear 2 ท่อน มีจุดยอดตรงกลาง แล้วลาดขึ้นทั้ง 2 ข้าง)
-#
-# หมายเหตุ (v23.1): ฟังก์ชันนี้ยังคงเก็บไว้ในโค้ด (ใช้ได้ผลดีกับ BACK view เป็นข้อมูล
-# อ้างอิงเสริม) แต่ "ไม่ได้" ถูกเรียกใช้ในเส้นทางหลักของ per-box segmentation อีก
-# ต่อไป (build_stack_box_model_per_view เปลี่ยนไปใช้ LOCAL FLOOR แทน) เนื่องจากพบว่า
-# FRONT view มีขอบคาร์โก้เป็น "คลื่น" จริง (ไม่ใช่สัญญาณรบกวน) จากการจัดวางกล่องแบบ
-# สลับตำแหน่งความลึก ทำให้แบบจำลองเส้นตรงทั่วโลกไม่แม่นยำพอ - ดู CHANGELOG v23.1
-# ---------------------------------------------------------------------------
-
-FLOOR_LINE_SAMPLE_STEP_PX = 3           # v23: ใช้ step ละเอียด (3px แทน 6px เดิม) หลัง
-                                        # พบว่า step หยาบทำให้ slope ที่ฟิตได้คลาดเคลื่อน
-                                        # จากค่าจริงมากขึ้น (ยืนยันด้วยการทดสอบไฟล์จริง)
-FLOOR_LINE_SMOOTH_WINDOW = 5
-FLOOR_LINE_MIN_R2 = 0.85
-FLOOR_LINE_MIN_POINTS_PER_SIDE = 4
-FLOOR_LINE_MIN_SLOPE_ABS = 0.15
-FLOOR_LINE_MAX_SLOPE_ABS = 1.5
-FLOOR_LINE_SEARCH_TOP_RATIO = 0.12    # หน้าต่างค้นหาด้านบน (สัดส่วนของความสูงตู้)
-FLOOR_LINE_SEARCH_BOTTOM_RATIO = 0.08  # หน้าต่างค้นหาด้านล่าง (สัดส่วนของความสูงตู้)
-FLOOR_LINE_SEARCH_TOP_MIN_PX = 25
-FLOOR_LINE_SEARCH_BOTTOM_MIN_PX = 15
-
-
-def _median_smooth_points(pts, window=FLOOR_LINE_SMOOTH_WINDOW):
-    ys = [y for _, y in pts]
-    n = len(ys)
-    out = []
-    half = window // 2
-    for i in range(n):
-        lo = max(0, i - half); hi = min(n, i + half + 1)
-        w = sorted(ys[lo:hi])
-        out.append(w[len(w) // 2])
-    return [(pts[i][0], out[i]) for i in range(n)]
-
-
-def _linreg_simple(pts):
-    n = len(pts)
-    if n < 2:
-        return None
-    sx = sum(x for x, y in pts); sy = sum(y for x, y in pts)
-    sxx = sum(x * x for x, y in pts); sxy = sum(x * y for x, y in pts)
-    denom = n * sxx - sx * sx
-    if denom == 0:
-        return None
-    slope = (n * sxy - sx * sy) / denom
-    intercept = (sy - slope * sx) / n
-    return slope, intercept
-
-
-def _linreg_r2(pts, slope, intercept):
-    ys = [y for _, y in pts]
-    mean_y = sum(ys) / len(ys)
-    ss_tot = sum((y - mean_y) ** 2 for y in ys)
-    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in pts)
-    if ss_tot == 0:
-        return 1.0 if ss_res == 0 else 0.0
-    return 1 - ss_res / ss_tot
-
-
-def detect_floor_line_v_shape(view_img, x_min, x_max, container_ymax, container_height_px):
-    """
-    ตรวจจับพื้นตู้เป็นรูปตัว "V" (piecewise-linear 2 ท่อน) จากขอบล่างสุดของพิกเซล
-    "โครงสร้างตู้" (saturated color) ตามแนวกว้าง [x_min, x_max) โดยค้นหาในหน้าต่างแคบ
-    รอบๆ container_ymax ที่ตรวจพบไว้แล้ว (v23.1: ไม่ได้ใช้ในเส้นทางหลักอีกต่อไป
-    ดู comment ด้านบน - เก็บไว้เป็นข้อมูลอ้างอิง)
-
-    คืนค่า dict: {"valid": bool, "floor_y_fn": callable(x)->float, "peak_x":, ...}
-    หากคุณภาพการฟิตต่ำเกินไป คืนค่า {"valid": False} ให้ผู้เรียกใช้ fallback เอง
-    """
-    px = view_img.convert("RGB").load()
-    w, h = view_img.size
-    x_min = max(0, int(x_min)); x_max = min(w, int(x_max))
-    if x_max - x_min < FLOOR_LINE_MIN_POINTS_PER_SIDE * 2 * FLOOR_LINE_SAMPLE_STEP_PX:
-        return {"valid": False}
-
-    top_margin = max(FLOOR_LINE_SEARCH_TOP_MIN_PX, int(container_height_px * FLOOR_LINE_SEARCH_TOP_RATIO))
-    bottom_margin = max(FLOOR_LINE_SEARCH_BOTTOM_MIN_PX, int(container_height_px * FLOOR_LINE_SEARCH_BOTTOM_RATIO))
-    y_search_top = max(0, int(container_ymax) - top_margin)
-    y_search_bottom = min(h, int(container_ymax) + bottom_margin)
-
-    xs = list(range(x_min, x_max, FLOOR_LINE_SAMPLE_STEP_PX))
-    raw_pts = []
-    for x in xs:
-        last_y = None
-        for y in range(y_search_top, y_search_bottom):
-            if _is_saturated_color(px[x, y]):
-                last_y = y
-        if last_y is not None:
-            raw_pts.append((x, last_y))
-
-    if len(raw_pts) < FLOOR_LINE_MIN_POINTS_PER_SIDE * 2:
-        return {"valid": False}
-
-    # v23.1 FIX (FRONT view head-wall noise): พบจากการ debug ไฟล์จริงว่าเมื่อคาร์โก้
-    # บดบังพื้นตู้บางส่วน (โดยเฉพาะ FRONT view ที่คาร์โก้สูงและอยู่ใกล้ผนังหัวตู้) จะ
-    # เกิด "ช่องว่าง" (gap) ในลำดับจุดข้อมูลตามแนว x จากนั้นอาจมีจุดกระจัดกระจายที่ไม่
-    # เกี่ยวข้องกับพื้นจริง ปรากฏขึ้นอีกครั้งหลังช่องว่างนั้น ทำให้การฟิตเส้นตรงทั้งเส้น
-    # เสียหาย (ค่า R2 ต่ำ) ทั้งที่ส่วนข้อมูลก่อนช่องว่างมีคุณภาพดีมาก
-    # แก้ไข: ตัดข้อมูลเป็น "กลุ่มก้อนต่อเนื่อง" (cluster) ตามช่องว่างของค่า x แล้วเลือก
-    # ใช้เฉพาะกลุ่มก้อนที่มีจำนวนจุดมากที่สุด
-    max_gap_x = FLOOR_LINE_SAMPLE_STEP_PX * 2
-    clusters = []
-    cur_cluster = [raw_pts[0]]
-    for i in range(1, len(raw_pts)):
-        if raw_pts[i][0] - raw_pts[i - 1][0] <= max_gap_x:
-            cur_cluster.append(raw_pts[i])
-        else:
-            clusters.append(cur_cluster)
-            cur_cluster = [raw_pts[i]]
-    clusters.append(cur_cluster)
-    largest_cluster = max(clusters, key=len)
-    if len(clusters) > 1:
-        print(f"Floor line: found {len(clusters)} point cluster(s) (gaps from cargo occlusion), "
-              f"using largest cluster with {len(largest_cluster)}/{len(raw_pts)} points "
-              f"(x=[{largest_cluster[0][0]}-{largest_cluster[-1][0]}])")
-    raw_pts = largest_cluster
-
-    if len(raw_pts) < FLOOR_LINE_MIN_POINTS_PER_SIDE * 2:
-        return {"valid": False}
-
-    pts = _median_smooth_points(raw_pts)
-    max_y = max(y for _, y in pts)
-
-    # v23 fix: จุดยอดของ "V" มักไม่ใช่จุดแหลมเดี่ยว แต่เป็น "แนวราบสั้นๆ" (plateau)
-    # หากตัด peak แบบ argmax เฉยๆ จุด plateau ที่เหลือจะถูกปนเข้าไปในฝั่งใดฝั่งหนึ่ง
-    # ทำให้ slope ที่ฟิตได้เพี้ยนไปทางค่าน้อยกว่าจริง จึงต้องหา "พิสัยของ plateau"
-    # (จุดทั้งหมดที่ y อยู่ใกล้ max_y ภายใน tolerance) แล้วตัดพิสัยนี้ออกจากทั้ง 2 ฝั่ง
-    plateau_tol_px = 2
-    plateau_indices = [i for i, (x, y) in enumerate(pts) if (max_y - y) <= plateau_tol_px]
-    plateau_lo, plateau_hi = min(plateau_indices), max(plateau_indices)
-    peak_x = pts[(plateau_lo + plateau_hi) // 2][0]
-    peak_y = max_y
-
-    left_pts = pts[:plateau_lo]
-    right_pts = pts[plateau_hi + 1:]
-    if len(left_pts) < FLOOR_LINE_MIN_POINTS_PER_SIDE or len(right_pts) < FLOOR_LINE_MIN_POINTS_PER_SIDE:
-        return {"valid": False}
-
-    left_fit = _linreg_simple(left_pts)
-    right_fit = _linreg_simple(right_pts)
-    if not left_fit or not right_fit:
-        return {"valid": False}
-
-    left_r2 = _linreg_r2(left_pts, *left_fit)
-    right_r2 = _linreg_r2(right_pts, *right_fit)
-    if left_r2 < FLOOR_LINE_MIN_R2 or right_r2 < FLOOR_LINE_MIN_R2:
-        print(f"Floor line detection REJECTED (low R2: left={left_r2:.2f}, right={right_r2:.2f}, "
-              f"threshold={FLOOR_LINE_MIN_R2}) - falling back to flat floor_y")
-        return {"valid": False}
-
-    ls, li = left_fit
-    rs, ri = right_fit
-    if not (FLOOR_LINE_MIN_SLOPE_ABS <= abs(ls) <= FLOOR_LINE_MAX_SLOPE_ABS):
-        return {"valid": False}
-    if not (FLOOR_LINE_MIN_SLOPE_ABS <= abs(rs) <= FLOOR_LINE_MAX_SLOPE_ABS):
-        return {"valid": False}
-    if not (ls > 0 and rs < 0):
-        return {"valid": False}
-
-    def floor_y_fn(x):
-        if x <= peak_x:
-            return ls * x + li
-        return rs * x + ri
-
-    print(f"Floor line V-shape detected: peak=({peak_x},{peak_y:.0f}) "
-          f"left_slope={ls:.3f}(r2={left_r2:.2f}) right_slope={rs:.3f}(r2={right_r2:.2f})")
-    return {"valid": True, "peak_x": peak_x, "peak_y": peak_y,
-            "left_slope": ls, "right_slope": rs, "floor_y_fn": floor_y_fn}
-
-
-def _make_flat_floor_fn(floor_y_scalar):
-    """Fallback: floor_y คงที่ (flat) ไม่ขึ้นกับ x - เก็บไว้เป็นข้อมูลอ้างอิง"""
-    return lambda x: floor_y_scalar
+# v24 NEW: เกณฑ์สำหรับ VETO ของ REAR_LATERAL_IMBALANCE - ถ้า deterministic วัดว่า
+# ความสูงต่างกันน้อยกว่านี้ (สัดส่วน) ถือว่า "ไม่มีความไม่สมดุลจริง" สามารถ veto การ
+# claim ของ AI ได้ (ตั้งค่าต่ำกว่า LATERAL_IMBALANCE_MIN_RATIO ของ FORCE พอสมควร
+# เพื่อเป็น "buffer zone" - ไม่ FORCE และไม่ VETO ถ้าอยู่ระหว่างกลาง เพื่อความปลอดภัย)
+LATERAL_IMBALANCE_VETO_MAX_RATIO = 0.20
+# ต้องมี coverage สูงพอ (มากกว่า FORCE/VETO gate ปกติ) จึงจะเชื่อถือพอจะ veto ได้
+LATERAL_IMBALANCE_VETO_MIN_COVERAGE = 0.75
 
 
 def _luminance(rgb):
@@ -1091,11 +1201,9 @@ def _luminance(rgb):
 
 def _find_dark_boundary_lines_1d(profile, min_drop=BOX_BOUNDARY_MIN_DROP, max_thickness=BOX_BOUNDARY_MAX_THICKNESS_PX):
     """
-    รับ list ของค่าความสว่างเฉลี่ยตามตำแหน่ง (index = แถว/คอลัมน์ตามลำดับ) แล้วหา
-    "ร่อง" (dip) ที่ความสว่างลดฮวบแล้วกลับขึ้นภายในระยะสั้นๆ (<=max_thickness) ซึ่ง
-    บ่งบอกว่าเป็นเส้นขอบบางๆ ระหว่างกล่อง 2 ใบ (ไม่ใช่พื้นที่ว่างจริงที่ความสว่างจะ
-    เปลี่ยนแปลงต่อเนื่องเป็นระยะยาว ไม่ใช่แค่ dip แคบๆ)
-    คืนค่า index ตำแหน่งกึ่งกลางของแต่ละเส้นแบ่งที่เจอ (relative ต่อ profile)
+    รับ list ของค่าความสว่างเฉลี่ยตามตำแหน่ง แล้วหา "ร่อง" (dip) ที่ความสว่างลดฮวบแล้ว
+    กลับขึ้นภายในระยะสั้นๆ (<=max_thickness) ซึ่งบ่งบอกว่าเป็นเส้นขอบบางๆ ระหว่างกล่อง
+    2 ใบ (ไม่ใช่พื้นที่ว่างจริงที่ความสว่างจะเปลี่ยนแปลงต่อเนื่องเป็นระยะยาว)
     """
     n = len(profile)
     boundaries = []
@@ -1115,10 +1223,115 @@ def _find_dark_boundary_lines_1d(profile, min_drop=BOX_BOUNDARY_MIN_DROP, max_th
     return boundaries
 
 
+# --- v24 NEW: color-step + floor/edge-jump boundary detectors -------------
+
+COLOR_STEP_MIN_DISTANCE = 60
+COLOR_STEP_MIN_RUN_AFTER = 6
+COLOR_STEP_MIN_GAP = 15
+JUMP_MIN_PX = 40
+JUMP_MIN_GAP = 15
+BOUNDARY_SMOOTH_WINDOW = 5
+
+
+def _color_distance(rgb1, rgb2):
+    return sum((a - b) ** 2 for a, b in zip(rgb1, rgb2)) ** 0.5
+
+
+def _median_smooth_colors(color_profile, window=BOUNDARY_SMOOTH_WINDOW):
+    n = len(color_profile)
+    out = []
+    half = window // 2
+    for i in range(n):
+        lo = max(0, i - half); hi = min(n, i + half + 1)
+        window_colors = color_profile[lo:hi]
+        rs = sorted(c[0] for c in window_colors)
+        gs = sorted(c[1] for c in window_colors)
+        bs = sorted(c[2] for c in window_colors)
+        mid = len(window_colors) // 2
+        out.append((rs[mid], gs[mid], bs[mid]))
+    return out
+
+
+def _median_smooth_scalar(profile, window=BOUNDARY_SMOOTH_WINDOW):
+    """median smooth ที่รองรับค่า None"""
+    n = len(profile)
+    out = []
+    half = window // 2
+    for i in range(n):
+        lo = max(0, i - half); hi = min(n, i + half + 1)
+        vals = sorted(v for v in profile[lo:hi] if v is not None)
+        if not vals:
+            out.append(None)
+        else:
+            out.append(vals[len(vals) // 2])
+    return out
+
+
+def _find_color_step_boundaries(color_profile, min_distance=COLOR_STEP_MIN_DISTANCE,
+                                  min_run_after=COLOR_STEP_MIN_RUN_AFTER, min_gap_between=COLOR_STEP_MIN_GAP):
+    """ตรวจจับ "รอยต่อสี" (color step boundary) ระหว่างกล่อง 2 ใบที่มีสีต่างกันชัดเจน
+    (v24 NEW - ดู CHANGELOG หัวไฟล์: แก้ปัญหาหลักที่ dark-dip เดิมพลาดการเปลี่ยนสี)"""
+    n = len(color_profile)
+    boundaries = []
+    last_boundary = -999
+    i = 1
+    while i < n:
+        prev_color = color_profile[i - 1]
+        cur_color = color_profile[i]
+        dist = _color_distance(prev_color, cur_color)
+        if dist >= min_distance:
+            run_ok = True
+            check_len = min(min_run_after, n - i - 1)
+            for k in range(1, check_len + 1):
+                if _color_distance(color_profile[i + k], cur_color) > min_distance * 0.5:
+                    run_ok = False
+                    break
+            if run_ok and (i - last_boundary) > min_gap_between:
+                boundaries.append(i)
+                last_boundary = i
+        i += 1
+    return boundaries
+
+
+def _find_jump_boundaries(profile, min_jump=JUMP_MIN_PX, min_gap_between=JUMP_MIN_GAP):
+    """ตรวจจับตำแหน่งที่ local floor (แนวนอน) หรือความกว้างขอบ (แนวตั้ง) กระโดดขึ้น/ลง
+    อย่างฉับพลันและคงอยู่ต่อเนื่อง (v24 NEW - จับรอยต่อระหว่างตั้ง/กล่องที่ความสูง/
+    ความกว้างต่างกัน แม้จะมีสีเดียวกันก็ตาม)"""
+    n = len(profile)
+    boundaries = []
+    last_boundary = -999
+    for i in range(1, n):
+        a, b = profile[i - 1], profile[i]
+        if a is None or b is None:
+            continue
+        if abs(b - a) >= min_jump and (i - last_boundary) > min_gap_between:
+            boundaries.append(i)
+            last_boundary = i
+    return boundaries
+
+
+def _combined_boundaries(color_profile, position_profile, lum_profile, min_seg_width):
+    """รวม 3 สัญญาณ: dark-dip (เดิม) + color-step (ใหม่) + floor/edge-jump (ใหม่)
+    แบบ union แล้ว dedupe/merge boundary ที่อยู่ใกล้กันเกินไป - ดู CHANGELOG หัวไฟล์
+    (หัวข้อ v24) สำหรับเหตุผลที่ตัดสินใจคงทั้ง 3 สัญญาณไว้ในทั้ง 2 ทิศทาง (แนวนอน/
+    แนวตั้ง) แทนที่จะใช้แค่บางสัญญาณในบางทิศทาง"""
+    smoothed_colors = _median_smooth_colors(color_profile)
+    smoothed_position = _median_smooth_scalar(position_profile)
+    color_b = _find_color_step_boundaries(smoothed_colors)
+    jump_b = _find_jump_boundaries(smoothed_position)
+    dark_b = _find_dark_boundary_lines_1d(lum_profile)
+    all_b = sorted(set(color_b) | set(jump_b) | set(dark_b))
+    deduped = []
+    for b in all_b:
+        if not deduped or b - deduped[-1] > min_seg_width // 2:
+            deduped.append(b)
+    return deduped
+
+
 def _local_bottom_cargo_y(px, x, y_top, y_bot):
     """หาตำแหน่ง y ของพิกเซลคาร์โก้ที่อยู่ล่างสุด (ใกล้พื้นที่สุด) ในคอลัมน์ x เดียว
     ภายในช่วง [y_top, y_bot) - ใช้เป็น "พื้นเฉพาะจุด" (local floor) ที่คำนวณจาก
-    พิกเซลจริงโดยตรง แทนที่จะพึ่งพาแบบจำลองเส้นตรงทั่วโลก (global floor line)"""
+    พิกเซลจริงโดยตรง (v23.1)"""
     last_y = None
     for y in range(y_top, y_bot):
         if _is_vivid_cargo_color(px[x, y]):
@@ -1127,17 +1340,9 @@ def _local_bottom_cargo_y(px, x, y_top, y_bot):
 
 
 def _find_cargo_present_clusters(px, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom):
-    """
-    หา "กลุ่มก้อนสินค้าจริง" (physical cluster) ตามแนว x โดยตรวจสอบว่ามีพิกเซล
-    คาร์โก้อยู่ที่ใดก็ได้ภายในช่วง y ที่กำหนด (y_search_top, y_search_bottom) ซึ่ง
-    ควรครอบคลุมทั้งช่วงความสูงที่คาร์โก้อาจปรากฏ (v23.1 FIX: เปลี่ยนจากการใช้แถบ
-    แคบใกล้ floor_y_fn(x) เป็นการตรวจสอบ "ทั้งช่วง" แทน เนื่องจากพบจากการทดสอบไฟล์
-    จริงว่าขอบล่างของคาร์โก้มีลักษณะเป็น "คลื่น" จริง ไม่ใช่เส้นตรงเดียว - เกิดจาก
-    การจัดวางกล่องแบบสลับตำแหน่งความลึก (checker pattern เพื่อความมั่นคง) ทำให้แถบ
-    แคบที่อิงกับเส้นตรงทั่วโลกพลาดคาร์โก้จริงไปมาก คำถามว่า "มีคาร์โก้ในคอลัมน์นี้
-    หรือไม่" ไม่จำเป็นต้องพึ่งพาตำแหน่งพื้นที่แม่นยำเลย จึงปลอดภัยกว่ามาก)
-    เว้นช่องว่างแท้จริง (ไม่มีสินค้าเลยตลอดคอลัมน์) ที่กว้างเกิน tolerance เป็นตัวแบ่ง
-    """
+    """หา "กลุ่มก้อนสินค้าจริง" (physical cluster) ตามแนว x โดยตรวจสอบว่ามีพิกเซล
+    คาร์โก้อยู่ที่ใดก็ได้ภายในช่วง y ที่กำหนด (v23.1 - ครอบคลุมทั้งช่วงความสูงที่
+    คาร์โก้อาจปรากฏ เพื่อทนทานต่อ "คลื่น" ของตำแหน่งความลึกจากการจัดวางแบบสลับ)"""
     max_gap_tolerance_px = 3
     cargo_present = []
     for x in range(cargo_xmin, cargo_xmax):
@@ -1164,71 +1369,14 @@ def _find_cargo_present_clusters(px, cargo_xmin, cargo_xmax, y_search_top, y_sea
             if gap_width > max_gap_tolerance_px:
                 clusters.append((cluster_start, gap_start))
                 cluster_start = None
-            # ถ้า gap เล็กกว่า tolerance ให้ถือว่ายังเป็นก้อนเดียวกัน (ข้าม gap ไปต่อ)
     if cluster_start is not None:
         clusters.append((cluster_start, n))
     return [(cargo_xmin + a, cargo_xmin + b) for a, b in clusters]
 
 
-def detect_stack_columns(view_img, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom, sample_band_px=6):
-    """
-    แบ่งความกว้างของสินค้า [cargo_xmin, cargo_xmax) ออกเป็น "ตั้ง" (stack) ด้วย 2
-    ขั้นตอน:
-      1) แยก "กลุ่มก้อนสินค้าจริง" (physical cluster) ก่อน โดยใช้ช่องว่างจริง (ไม่มี
-         สินค้าเลย) เป็นตัวแบ่ง - ครอบคลุมกรณีตั้งที่วางห่างกันจริง (มี gap มองเห็น
-         ได้ชัดเจน)
-      2) ในแต่ละกลุ่มก้อน สแกนหาเส้นแบ่งบางๆ (เส้นขอบ/เส้นแบ่งสี) เพิ่มเติม เพื่อแยก
-         ตั้งที่วางชิดติดกันสนิท (ไม่มีช่องว่างจริง แต่มีเส้นขอบคั่น) ออกจากกัน โดยใช้
-         "พื้นเฉพาะจุด" (local floor) ของแต่ละคอลัมน์ที่คำนวณจากพิกเซลจริงโดยตรง
-         (ไม่ใช่เส้นตรงทั่วโลก) เพื่อทนทานต่อ "คลื่น" ของขอบคาร์โก้จากการจัดวางแบบ
-         สลับตำแหน่งความลึก (v23.1 - ดู comment ใน _find_cargo_present_clusters)
-    """
-    px = view_img.convert("RGB").load()
-    w, h = view_img.size
-    cargo_xmin = max(0, int(cargo_xmin))
-    cargo_xmax = min(w, int(cargo_xmax))
-    y_search_top = max(0, int(y_search_top))
-    y_search_bottom = min(h, int(y_search_bottom))
-    if cargo_xmax <= cargo_xmin or y_search_bottom <= y_search_top:
-        return []
-
-    clusters = _find_cargo_present_clusters(px, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom)
-    if not clusters:
-        return [(cargo_xmin, cargo_xmax)]
-
-    stacks = []
-    for (cx0, cx1) in clusters:
-        if cx1 - cx0 < STACK_MIN_WIDTH_PX:
-            continue
-        profile = []
-        for x in range(cx0, cx1):
-            local_floor = _local_bottom_cargo_y(px, x, y_search_top, y_search_bottom)
-            if local_floor is None:
-                profile.append(255.0)  # ไม่มีคาร์โก้ในคอลัมน์นี้ - ถือเป็นค่าสว่าง (background)
-                continue
-            y1 = local_floor
-            y0 = max(0, y1 - sample_band_px)
-            vals = [_luminance(px[x, y]) for y in range(y0, y1)]
-            profile.append(sum(vals) / len(vals) if vals else 0)
-        boundaries_rel = _find_dark_boundary_lines_1d(profile)
-        boundaries_abs = sorted(cx0 + b for b in boundaries_rel)
-        edges = [cx0] + boundaries_abs + [cx1]
-        for i in range(len(edges) - 1):
-            x0, x1 = edges[i], edges[i + 1]
-            if x1 - x0 >= STACK_MIN_WIDTH_PX:
-                stacks.append((x0, x1))
-    if not stacks:
-        stacks = [(cargo_xmin, cargo_xmax)]
-    return stacks
-
-
 def _merge_thin_edge_segments(edges, min_height):
-    """
-    รวม (merge) ขอบเขต (boundary) ที่สร้าง segment บางเกินไป (< min_height) เข้ากับ
-    เพื่อนบ้านที่เล็กกว่า โดยลบขอบเขตที่เกี่ยวข้องออก ทำซ้ำจนไม่มี segment บางเกินไป
-    เหลืออยู่ (หรือเหลือแค่ 1 segment) ป้องกันไม่ให้ boundary ปลอม (เช่น เส้นข้อความ
-    SKU) แยกกล่องจริง 2 ใบออกจากกันผิดพลาด - ดู comment ใน detect_boxes_in_stack
-    """
+    """รวม (merge) ขอบเขตที่สร้าง segment บางเกินไป (< min_height) เข้ากับเพื่อนบ้าน
+    ที่เล็กกว่า ป้องกันไม่ให้ boundary ปลอมแยกกล่อง/ตั้งจริง 2 ใบออกจากกันผิดพลาด"""
     edges = list(edges)
     changed = True
     while changed and len(edges) > 2:
@@ -1249,6 +1397,52 @@ def _merge_thin_edge_segments(edges, min_height):
                 changed = True
                 break
     return edges
+
+
+def detect_stack_columns(view_img, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom, sample_band_px=6):
+    """แบ่งความกว้างของสินค้าออกเป็น "ตั้ง" (stack) ด้วย 2 ขั้นตอน: (1) แยกกลุ่มก้อน
+    สินค้าจริงด้วยช่องว่างจริงก่อน (2) หาเส้นแบ่งภายในแต่ละกลุ่มด้วย 3 สัญญาณรวมกัน
+    (v24: dark-dip + color-step + floor-jump)"""
+    px = view_img.convert("RGB").load()
+    w, h = view_img.size
+    cargo_xmin = max(0, int(cargo_xmin)); cargo_xmax = min(w, int(cargo_xmax))
+    y_search_top = max(0, int(y_search_top)); y_search_bottom = min(h, int(y_search_bottom))
+    if cargo_xmax <= cargo_xmin or y_search_bottom <= y_search_top:
+        return []
+
+    clusters = _find_cargo_present_clusters(px, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom)
+    if not clusters:
+        return [(cargo_xmin, cargo_xmax)]
+
+    stacks = []
+    for (cx0, cx1) in clusters:
+        if cx1 - cx0 < STACK_MIN_WIDTH_PX:
+            continue
+        color_profile, floor_profile, lum_profile = [], [], []
+        for x in range(cx0, cx1):
+            lf = _local_bottom_cargo_y(px, x, y_search_top, y_search_bottom)
+            floor_profile.append(lf)
+            if lf is None:
+                color_profile.append((255, 255, 255)); lum_profile.append(255.0)
+                continue
+            y1 = lf; y0 = max(0, y1 - sample_band_px)
+            rs = [px[x, y][0] for y in range(y0, y1)]
+            gs = [px[x, y][1] for y in range(y0, y1)]
+            bs = [px[x, y][2] for y in range(y0, y1)]
+            color_profile.append((sum(rs) / len(rs), sum(gs) / len(gs), sum(bs) / len(bs)))
+            lum_profile.append(sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in zip(rs, gs, bs)) / len(rs))
+
+        deduped = _combined_boundaries(color_profile, floor_profile, lum_profile, STACK_MIN_WIDTH_PX)
+        boundaries_abs = sorted(cx0 + b for b in deduped)
+        edges = [cx0] + boundaries_abs + [cx1]
+        edges = _merge_thin_edge_segments(edges, STACK_MIN_WIDTH_PX)
+        for i in range(len(edges) - 1):
+            x0, x1 = edges[i], edges[i + 1]
+            if x1 - x0 >= STACK_MIN_WIDTH_PX:
+                stacks.append((x0, x1))
+    if not stacks:
+        stacks = [(cargo_xmin, cargo_xmax)]
+    return stacks
 
 
 def _seed_extent_in_range(px, x0, x1, y, step=1):
@@ -1274,20 +1468,10 @@ def _median_of(values):
 
 
 def _extend_edge_contiguous(px, seed_x, direction, y, img_w, limit_px, max_pixel_gap=2):
-    """
-    ขยายขอบเขตออกจากตำแหน่ง seed_x ไปทางซ้าย (direction=-1) หรือขวา (direction=+1)
-    แบบ "ต่อเนื่อง" เท่านั้น (ยอมรับช่องว่างเล็กๆ จาก anti-aliasing ไม่เกิน
-    max_pixel_gap พิกเซล) เพื่อป้องกันการกระโดดข้ามช่องว่างจริงไปจับสินค้าของตั้ง/
-    กล่องข้างเคียงที่ไม่เกี่ยวข้องมาผิดพลาด (บั๊กที่พบระหว่างการทดสอบ)
-
-    v23.1 FIX: คืนค่า (result, hit_limit) แทนแค่ result เดี่ยวๆ - hit_limit=True หาก
-    การขยายไปถึง limit_px พอดีโดยไม่เจอขอบเขตจริง (ไม่ใช่หยุดเพราะเจอ gap) ซึ่งบ่งชี้
-    ว่าอาจกำลัง "ขยายข้ามไปติดกับตั้ง/กล่องข้างเคียงที่มีสีเดียวกันสนิท ไม่มีเส้นแบ่ง"
-    (พบจากการทดสอบไฟล์จริง AC09-02: กล่อง 2 ตั้งที่ติดกันสีเดียวกันในแถวเดียวกัน ทำให้
-    การขยายวิ่งไปจนเกือบสุด limit_px ทั้ง 2 ด้าน แล้วเกิด OVERHANG_RISK ปลอมจากการ
-    เปรียบเทียบกับกล่องล่างที่แคบกว่า) ผู้เรียกใช้ควรทิ้งค่าที่ hit_limit=True ออกจาก
-    การคำนวณค่ามัธยฐาน เพราะถือว่าไม่น่าเชื่อถือ
-    """
+    """ขยายขอบเขตออกจากตำแหน่ง seed_x แบบ "ต่อเนื่อง" เท่านั้น (ยอมรับช่องว่างเล็กๆ
+    จาก anti-aliasing ไม่เกิน max_pixel_gap พิกเซล) คืนค่า (result, hit_limit) -
+    hit_limit=True หากขยายไปจนสุด limit_px โดยไม่เจอขอบเขตจริง (บ่งชี้ว่าอาจกำลัง
+    "ขยายข้ามไปติดกับตั้ง/กล่องข้างเคียงที่มีสีเดียวกันสนิท ไม่มีเส้นแบ่ง")"""
     result = seed_x
     x = seed_x + direction
     gap = 0
@@ -1304,30 +1488,18 @@ def _extend_edge_contiguous(px, seed_x, direction, y, img_w, limit_px, max_pixel
         x += direction
         steps += 1
     else:
-        # while loop สิ้นสุดเพราะ steps>=limit_px (ไม่ใช่ break จาก gap) - หมายความว่า
-        # ยังพบ cargo ต่อเนื่องอยู่จนถึงขอบเขตการค้นหา ไม่ได้เจอขอบเขตจริงของกล่อง
         if steps >= limit_px:
             hit_limit = True
     return result, hit_limit
 
 
 def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, search_expand_px=25):
-    """
-    ในตั้ง [x0,x1) สแกนจากยอดสินค้าลงมาถึงพื้นตู้ หาเส้นแบ่งแนวนอนระหว่าง
-    กล่องแต่ละใบที่ซ้อนกัน แล้ววัด "ขอบซ้าย/ขวาจริง" ของกล่องแต่ละใบแยกกัน โดยเริ่ม
-    จาก seed ภายในช่วง [x0,x1) เดิมก่อน แล้วขยายออกทั้ง 2 ข้างแบบ "ต่อเนื่อง"
-    (contiguous) เท่านั้น เพื่อจับ OVERHANG ที่กล่องยื่นออกนอกขอบตั้งเดิมได้ โดยไม่
-    กระโดดข้ามช่องว่างจริงไปจับสินค้าของตั้งข้างเคียงมาผิดพลาด
-    คืนค่า list ของกล่อง เรียงจาก "บนสุด" (ยอด, y น้อย) ไป "ล่างสุด" (พื้น, y มาก)
+    """ในตั้ง [x0,x1) สแกนจากยอดสินค้าลงมาถึงพื้นตู้ หาเส้นแบ่งแนวนอนระหว่างกล่อง
+    แต่ละใบที่ซ้อนกัน (v24: ด้วย 3 สัญญาณรวมกัน) แล้ววัดขอบซ้าย/ขวาจริงของกล่องแต่ละ
+    ใบด้วย median-of-multiple-rows คืนค่า list ของกล่อง เรียงจากบนสุดไปล่างสุด
 
-    v23.1 FIX: เดิมใช้ floor_y_fn(mid_x) จากแบบจำลองเส้นตรงทั่วโลก (global V-shape)
-    เป็นตัวกำหนด floor_y ของทั้งตั้ง แต่พบจากการทดสอบไฟล์จริงว่าขอบล่างคาร์โก้มี
-    ลักษณะเป็น "คลื่น" จริง (จากการจัดวางกล่องสลับตำแหน่งความลึกเพื่อความมั่นคง) ทำให้
-    ตำแหน่งจากเส้นตรงทั่วโลกคลาดเคลื่อนจากตำแหน่งจริงของแต่ละตั้งได้มาก (โดยเฉพาะ
-    FRONT view) จึงเปลี่ยนมาคำนวณ "พื้นเฉพาะของตั้งนี้" จากพิกเซลคาร์โก้จริงในช่วง
-    x0:x1 โดยตรง (หาค่า y ล่างสุดที่พบคาร์โก้ ภายในช่วง y_search_top:y_search_bottom
-    ที่กำหนดมาอย่างกว้างขวางพอ) ทำให้ทนทานต่อ "คลื่น" ของตำแหน่งความลึกได้เอง
-    """
+    v23.1: คำนวณ "พื้นเฉพาะของตั้งนี้" จากพิกเซลคาร์โก้จริงในช่วง x0:x1 โดยตรง แทนที่
+    จะพึ่งพาแบบจำลองเส้นตรงทั่วโลก (ทนทานต่อ "คลื่น" ของตำแหน่งความลึก)"""
     px = view_img.convert("RGB").load()
     w, h = view_img.size
     x0 = max(0, int(x0)); x1 = min(w, int(x1))
@@ -1335,9 +1507,6 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
     if x1 <= x0 or y_search_bottom <= y_search_top:
         return []
 
-    # คำนวณ "พื้นเฉพาะของตั้งนี้" จากค่ามัธยฐานของตำแหน่ง local floor ที่พบในแต่ละ
-    # คอลัมน์ภายในช่วง x0:x1 (median แทน max เพื่อลดผลกระทบจาก outlier เดี่ยวๆ เช่น
-    # SKU text ที่บังเอิญยื่นต่ำกว่าปกติในบางคอลัมน์)
     local_floors = []
     for x in range(x0, x1, max(1, (x1 - x0) // 20)):
         lf = _local_bottom_cargo_y(px, x, y_search_top, y_search_bottom)
@@ -1350,30 +1519,35 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
 
     top_y = None
     for y in range(0, floor_y):
-        row_has_cargo = any(_is_vivid_cargo_color(px[x, y]) for x in range(x0, x1, max(1, (x1 - x0) // 12)))
+        sample_xs = list(range(x0, x1, max(1, (x1 - x0) // 12)))
+        cargo_count = sum(1 for x in sample_xs if _is_vivid_cargo_color(px[x, y]))
+        row_has_cargo = (cargo_count / len(sample_xs)) >= TOP_ROW_MAJORITY_RATIO if sample_xs else False
         if row_has_cargo:
             top_y = y
             break
     if top_y is None:
         return []
 
-    profile = []
+    # v24: สร้าง color_profile และ width_profile (ความกว้างขอบซ้าย/ขวาต่อแถว) ตาม
+    # แนวตั้ง เพื่อใช้ตรวจจับ color-step boundary และ edge-jump boundary เพิ่มเติมจาก
+    # dark-dip เดิม (แก้ปัญหากล่อง 2 ใบต่างสีกันซ้อนกัน หรือกล่องความกว้างต่างกันซ้อน)
+    color_profile, lum_profile, width_profile = [], [], []
     for y in range(top_y, floor_y):
-        vals = [_luminance(px[x, y]) for x in range(x0, x1, 2)]
-        profile.append(sum(vals) / len(vals) if vals else 0)
-    boundaries_rel = _find_dark_boundary_lines_1d(profile)
-    boundaries_abs = sorted(top_y + b for b in boundaries_rel)
+        seed_left, seed_right = _seed_extent_in_range(px, x0, x1, y)
+        if seed_left is None:
+            color_profile.append((255, 255, 255)); lum_profile.append(255.0); width_profile.append(None)
+            continue
+        rs = [px[x, y][0] for x in range(seed_left, seed_right + 1)]
+        gs = [px[x, y][1] for x in range(seed_left, seed_right + 1)]
+        bs = [px[x, y][2] for x in range(seed_left, seed_right + 1)]
+        color_profile.append((sum(rs) / len(rs), sum(gs) / len(gs), sum(bs) / len(bs)))
+        lum_profile.append(sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in zip(rs, gs, bs)) / len(rs))
+        width_profile.append(seed_right - seed_left)
+
+    deduped = _combined_boundaries(color_profile, width_profile, lum_profile, BOX_MIN_HEIGHT_PX * 3)
+    boundaries_abs = sorted(top_y + b for b in deduped)
     edges = [top_y] + boundaries_abs + [floor_y]
 
-    # v23 fix: เดิม (v22) แค่ "ข้าม" (skip) segment ที่บางเกินไปโดยไม่รวมขอบเขตเข้ากับ
-    # เพื่อนบ้าน ทำให้ boundary ปลอม (มักเกิดจากข้อความ SKU/เส้นบางๆ ที่ไม่ใช่รอยต่อ
-    # กล่องจริง) ยังคงแยกกล่องจริง 2 ใบออกจากกันผิดพลาด โดยกล่องที่อยู่ติดกับ segment
-    # บางนั้นจะยังคงใช้ขอบเขตของตัวเองที่ (อาจ) วัดความกว้างผิดในบริเวณที่ถูกบัง/ปนกับ
-    # ข้อความ ทำให้เกิด OVERHANG_RISK ปลอม (พบจากการทดสอบไฟล์จริง AC09-02: segment
-    # สูงเพียง 12px ถูกนับเป็นกล่องแยก ทำให้วัดความกว้างผิดพลาดจนดูเหมือนยื่นออกมา)
-    # แก้ไข: "รวม" (merge) boundary ที่สร้าง segment บางเกินไปเข้ากับเพื่อนบ้านที่เล็ก
-    # กว่าแทนที่จะแค่ข้าม โดยเกณฑ์ความบางคิดเป็นสัดส่วนของความสูงตั้งทั้งหมด (ไม่ใช่
-    # ค่าคงที่ตายตัว) เพื่อให้ปรับตามขนาด/DPI ของภาพที่ต่างกันได้
     stack_total_height = max(1, floor_y - top_y)
     min_segment_height = max(BOX_MIN_HEIGHT_PX, int(stack_total_height * BOX_MIN_HEIGHT_RATIO))
     edges = _merge_thin_edge_segments(edges, min_segment_height)
@@ -1383,19 +1557,9 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
         y0b, y1b = edges[i], edges[i + 1]
         if y1b - y0b < BOX_MIN_HEIGHT_PX:
             continue
-
-        # v23 fix: เดิม (v22) วัดขอบซ้าย/ขวาจาก "แถวเดียว" (mid_y) เพียงแถวเดียว ซึ่ง
-        # เสี่ยงถูกรบกวนจากข้อความ SKU/label ที่ปนอยู่บนกล่อง (ตัวอักษรมักไม่ใช่สี
-        # cargo ที่ชัดเจน ทำให้ _extend_edge_contiguous หยุดขยายก่อนถึงขอบจริงถ้าบังเอิญ
-        # ตัวอักษรอยู่ตรงแถวที่สุ่มวัดพอดี) พบจากการทดสอบไฟล์จริง (AC09-02) ว่าทำให้
-        # เกิด OVERHANG_RISK ปลอมจากกล่องที่จัดเรียงตรงกันจริงๆ แต่วัดขอบผิดพลาด
-        # แก้ไข: สุ่มวัดหลายแถว (กระจายในช่วงกลาง 60% ของความสูง segment เพื่อหลีกเลี่ยง
-        # ขอบบน/ล่างที่อาจเป็นรอยต่อ) แล้วใช้ค่ามัธยฐาน (median) ของขอบซ้าย/ขวาที่วัดได้
-        # เพื่อลดผลกระทบจากข้อความ/สัญญาณรบกวนเฉพาะจุด
         seg_height = y1b - y0b
         pad = max(1, int(seg_height * 0.2))
-        sample_y0 = y0b + pad
-        sample_y1 = y1b - pad
+        sample_y0 = y0b + pad; sample_y1 = y1b - pad
         if sample_y1 <= sample_y0:
             sample_ys = [(y0b + y1b) // 2]
         else:
@@ -1403,10 +1567,8 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
             step_y = max(1, (sample_y1 - sample_y0) // max(1, n_samples - 1))
             sample_ys = list(range(sample_y0, sample_y1 + 1, step_y))
 
-        # v23.1 FIX: ทิ้งค่าที่ hit_limit=True (การขยายไปจนสุด search_expand_px โดยไม่
-        # เจอขอบเขตจริง) ออกจากการคำนวณค่ามัธยฐาน เพราะบ่งชี้ว่าอาจกำลัง "ขยายข้ามไป
-        # ติดกับตั้ง/กล่องข้างเคียงที่มีสีเดียวกันสนิท ไม่มีเส้นแบ่ง" (พบจากการทดสอบ
-        # ไฟล์จริง AC09-02 - ดู comment ใน _extend_edge_contiguous)
+        # v23.1: ทิ้งค่าที่ hit_limit=True ออกจากการคำนวณค่ามัธยฐาน (ป้องกันขยายข้าม
+        # ไปติดกับตั้ง/กล่องข้างเคียงที่สีเดียวกันสนิท) + เกณฑ์จำนวนตัวอย่างขั้นต่ำ
         left_measurements, right_measurements = [], []
         for sy in sample_ys:
             seed_left, seed_right = _seed_extent_in_range(px, x0, x1, sy)
@@ -1419,21 +1581,9 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
             if not r_hit_limit:
                 right_measurements.append(r)
 
-        # v23.1 FIX (เพิ่มเติม): เกณฑ์ "จำนวนตัวอย่างที่เชื่อถือได้ขั้นต่ำ" - หากจำนวน
-        # ตัวอย่างที่ไม่ hit_limit เหลือน้อยกว่าครึ่งหนึ่งของจำนวนตัวอย่างทั้งหมด แสดง
-        # ว่าขอบด้านนั้นมี "ความไม่แน่นอนสูง" (ส่วนใหญ่ชนกำแพง limit ซ้ำๆ) ไม่ควรเชื่อ
-        # ค่ามัธยฐานจากตัวอย่างเพียงหยิบมือที่เหลือ - ให้ใช้ขอบเขตของตั้งเดิม (x0/x1)
-        # แทนอย่างระมัดระวัง (พบจากการทดสอบไฟล์จริง AC09-02: เหลือตัวอย่างที่เชื่อถือ
-        # ได้เพียง 1 จาก 7 ตัวอย่างฝั่งขวา ซึ่งไม่เพียงพอจะสรุปว่ากล่องยื่นออกจริง)
         min_valid_samples = max(1, len(sample_ys) // 2)
-        if len(left_measurements) < min_valid_samples:
-            left = x0
-        else:
-            left = _median_of(left_measurements)
-        if len(right_measurements) < min_valid_samples:
-            right = x1
-        else:
-            right = _median_of(right_measurements)
+        left = x0 if len(left_measurements) < min_valid_samples else _median_of(left_measurements)
+        right = x1 if len(right_measurements) < min_valid_samples else _median_of(right_measurements)
         boxes.append({"y_min": y0b, "y_max": y1b, "x_left": left, "x_right": right, "height_px": y1b - y0b})
     return boxes
 
@@ -1444,48 +1594,17 @@ def build_stack_box_model_for_view(view_img, y_search_top, y_search_bottom, carg
     for (x0, x1) in stack_ranges:
         boxes = detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom)
         if boxes:
-            top_y = boxes[0]["y_min"]
-            floor_y_here = boxes[-1]["y_max"]
+            top_y = boxes[0]["y_min"]; floor_y_here = boxes[-1]["y_max"]
         else:
-            top_y = y_search_bottom
-            floor_y_here = y_search_bottom
+            top_y = y_search_bottom; floor_y_here = y_search_bottom
         stacks.append({"x0": x0, "x1": x1, "top_y": top_y, "floor_y": floor_y_here, "boxes": boxes})
     stacks.sort(key=lambda s: s["x0"])
     return stacks
 
 
 def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
-    """
-    สร้าง stack-box model สำหรับ FRONT และ BACK view โดยพิกัดผลลัพธ์ (x0,x1,top_y,
-    floor_y และพิกัดกล่องแต่ละใบ) เป็นพิกัด "สัมบูรณ์บนภาพเต็ม" (เช่นเดียวกับ
-    container_bounds/cargo_extent ที่คำนวณไว้ก่อนหน้า) เพื่อให้นำไปวาดกรอบและเทียบ
-    ตำแหน่งกับผลจาก AI ได้โดยตรง
-
-    v23.1 FIX (FRONT view head-wall/wave noise): เดิม (v23) ใช้ detect_floor_line_v_shape()
-    สร้างแบบจำลอง "เส้นตรงทั่วโลก" (global piecewise-linear V-shape) เพื่อประมาณตำแหน่ง
-    พื้นตู้ - ใช้ได้ผลดีกับ BACK view แต่ล้มเหลวกับ FRONT view เพราะพบจากการทดสอบไฟล์
-    จริงว่าขอบล่างของคาร์โก้ใน FRONT view มีลักษณะเป็น "คลื่น" จริง (ไม่ใช่สัญญาณรบกวน)
-    เกิดจากการจัดวางกล่องแบบสลับตำแหน่งความลึกเพื่อความมั่นคง (แต่ละตั้งมีตำแหน่งความ
-    ลึกต่างกัน ทำให้ตำแหน่งขอบล่างที่มองเห็นในภาพ isometric ต่างกันไปด้วย) ทำให้เส้นตรง
-    ทั่วโลกเส้นเดียวไม่สามารถแทนตำแหน่งพื้นจริงของทุกตั้งได้แม่นยำพอ
-
-    จึงเปลี่ยนแนวทางเป็น "LOCAL FLOOR" - ให้แต่ละคอลัมน์/แต่ละตั้งคำนวณตำแหน่งพื้นของ
-    ตัวเองจากพิกเซลคาร์โก้จริงในบริเวณนั้นโดยตรง (ดู _local_bottom_cargo_y,
-    detect_boxes_in_stack) แทนที่จะพึ่งพาแบบจำลองเส้นตรงทั่วโลก วิธีนี้ทนทานต่อคลื่น
-    ของตำแหน่งความลึกได้เองตามธรรมชาติ โดยไม่ต้องพยายามสร้างแบบจำลองเรขาคณิตที่ซับซ้อน
-    ขึ้น ฟังก์ชัน detect_floor_line_v_shape() ยังคงเก็บไว้ในโค้ด (ใช้ได้ผลดีกับ BACK
-    view เป็นข้อมูลอ้างอิงเสริม) แต่ไม่ใช่ตัวตัดสินหลักสำหรับการแบ่งตั้ง/กล่องอีกต่อไป
-
-    ใช้ y_search_top = cargo_extent['ymin'] (ขอบบนสุดของคาร์โก้ทั้งหมด) และ
-    y_search_bottom = max(cargo_extent['ymax'], container_bounds['ymax']) + margin
-    เป็นขอบเขตการค้นหาที่กว้างพอจะครอบคลุมคลื่นของตำแหน่งความลึกทั้งหมด
-
-    KNOWN LIMITATION ที่ยังคงเหลืออยู่: ยังมี "coverage sanity check" ด้านล่างเป็นชั้น
-    ป้องกันสุดท้าย เผื่อกรณีที่ตั้ง (stack) ที่ตรวจพบครอบคลุมพื้นที่น้อยผิดปกติ (เช่น
-    SKU สีเดียวกันหลายกล่องติดกันไม่มีเส้นแบ่งให้เห็นเลย) - ถ้าความกว้างรวมของตั้งที่
-    ตรวจพบทั้งหมดน้อยกว่า STACK_COVERAGE_MIN_RATIO ของความกว้าง cargo_extent จริง จะ
-    ทิ้งผลลัพธ์ของ view นั้น (fallback กลับไปพึ่ง AI 100% เหมือน v21)
-    """
+    """สร้าง stack-box model สำหรับ FRONT และ BACK view - ใช้ LOCAL FLOOR (v23.1)
+    ร่วมกับ combined boundary detection (v24) เพื่อความแม่นยำสูงสุด"""
     result = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
         cb = container_bounds.get(view)
@@ -1496,32 +1615,26 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
         if layout == "TOP_BOTTOM":
             mid_y = crop_h // 2
             if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
-                origin_x, origin_y = 0, crop_y_start
+                view_img = diagram_crop.crop((0, 0, crop_w, mid_y)); origin_x, origin_y = 0, crop_y_start
             else:
-                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h))
-                origin_x, origin_y = 0, crop_y_start + mid_y
+                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h)); origin_x, origin_y = 0, crop_y_start + mid_y
         else:
             half_w = crop_w // 2
             if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, half_w, crop_h))
-                origin_x, origin_y = 0, crop_y_start
+                view_img = diagram_crop.crop((0, 0, half_w, crop_h)); origin_x, origin_y = 0, crop_y_start
             else:
-                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h))
-                origin_x, origin_y = half_w, crop_y_start
+                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h)); origin_x, origin_y = half_w, crop_y_start
 
         rel_cargo_xmin = ce["xmin"] - origin_x
         rel_cargo_xmax = ce["xmax"] - origin_x
         cargo_width = max(1, rel_cargo_xmax - rel_cargo_xmin)
-
         rel_cargo_ymin = ce["ymin"] - origin_y
         margin = max(20, int((cb["ymax"] - cb["ymin"]) * 0.08))
         rel_y_search_bottom = max(ce["ymax"], cb["ymax"]) - origin_y + margin
         rel_y_search_top = max(0, rel_cargo_ymin - 5)
 
         try:
-            stacks_local = build_stack_box_model_for_view(view_img, rel_y_search_top, rel_y_search_bottom,
-                                                            rel_cargo_xmin, rel_cargo_xmax)
+            stacks_local = build_stack_box_model_for_view(view_img, rel_y_search_top, rel_y_search_bottom, rel_cargo_xmin, rel_cargo_xmax)
         except Exception as e:
             print(f"WARNING: Per-box segmentation failed for {view} ({e})")
             stacks_local = []
@@ -1548,6 +1661,10 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
                 "boxes": abs_boxes,
             })
         result[view] = stacks_abs
+        # v24 NEW: coverage_ratio ถูกเก็บไว้ใน key พิเศษเพื่อให้ process_request นำไปใช้
+        # ตัดสินใจ VETO ของ REAR_LATERAL_IMBALANCE ได้ (ต้องการ coverage สูงกว่าเกณฑ์
+        # ปกติจึงจะเชื่อถือพอจะ veto)
+        result[f"{view}_coverage_ratio"] = coverage_ratio
         print(f"Per-box segmentation ({view}): coverage_ratio={coverage_ratio:.2f}, "
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
@@ -1555,46 +1672,28 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def detect_overhang_regions_for_view(stacks):
-    """
-    ในแต่ละตั้งที่มี >=2 กล่อง เทียบขอบซ้าย/ขวาของกล่องที่อยู่ติดกัน (บน vs ล่าง)
-    ถ้ากล่องบนยื่นพ้นขอบกล่องล่างเกิน OVERHANG_MIN_RATIO ของความกว้างกล่องล่าง
-    "และ" ยื่นเกิน OVERHANG_MIN_ABS_PX พิกเซล (ทั้ง 2 เกณฑ์ต้องผ่าน - v23: เพิ่มเกณฑ์
-    absolute pixel เพื่อป้องกัน false positive จาก noise การวัดขอบที่ตกค้างอยู่แม้ใช้
-    median-of-rows แล้ว โดยเฉพาะกับกล่องแคบที่ผ่านเกณฑ์ % ได้ง่ายด้วย noise เพียงเล็กน้อย)
-    ถือว่าเป็น OVERHANG_RISK
-    """
+    """ในแต่ละตั้งที่มี >=2 กล่อง เทียบขอบซ้าย/ขวาของกล่องที่อยู่ติดกัน ถ้ากล่องบนยื่น
+    พ้นขอบกล่องล่างเกิน OVERHANG_MIN_RATIO "และ" เกิน OVERHANG_MIN_ABS_PX พิกเซล
+    (ทั้ง 2 เกณฑ์ต้องผ่าน) ถือว่าเป็น OVERHANG_RISK"""
     regions = []
     for s in stacks:
         boxes = s["boxes"]
         for i in range(len(boxes) - 1):
-            upper = boxes[i]      # y น้อยกว่า = อยู่สูงกว่าทางกายภาพ (ชั้นบน)
-            lower = boxes[i + 1]  # y มากกว่า = อยู่ใกล้พื้นกว่า (ชั้นล่าง/รองรับ)
+            upper = boxes[i]; lower = boxes[i + 1]
             lower_width = max(1, lower["x_right"] - lower["x_left"])
             left_overhang = lower["x_left"] - upper["x_left"]
             right_overhang = upper["x_right"] - lower["x_right"]
             overhang_px = max(left_overhang, right_overhang, 0)
             ratio = overhang_px / lower_width
             if ratio >= OVERHANG_MIN_RATIO and overhang_px >= OVERHANG_MIN_ABS_PX:
-                x_min = min(upper["x_left"], lower["x_left"])
-                x_max = max(upper["x_right"], lower["x_right"])
+                x_min = min(upper["x_left"], lower["x_left"]); x_max = max(upper["x_right"], lower["x_right"])
                 regions.append({"x_min": x_min, "y_min": upper["y_min"], "x_max": x_max, "y_max": lower["y_max"], "ratio": ratio})
     return regions
 
 
 def detect_tall_unstable_regions_for_view(stacks):
-    """
-    เทียบความสูงรวมทั้งตั้ง (floor_y - top_y) ระหว่างตั้งที่อยู่ติดกัน ถ้าตั้งใดตั้ง
-    หนึ่งสูงกว่าตั้งข้างเคียงทั้ง 2 ฝั่ง (ซ้ายและขวา) มากพอ (ไม่มีตั้งข้างค้ำยันเลย)
-    ถือว่าเป็น TALL_UNSTABLE_RISK
-
-    v23 fix: เดิม (v22) พิจารณาตั้งที่อยู่ "ริมสุด" ของขอบเขตที่วิเคราะห์ (มีเพื่อนบ้าน
-    แค่ฝั่งเดียว) ด้วย ทำให้เกิด false positive จากเงื่อนไข "ขอบเขต" ล้วนๆ (พบจากการ
-    ทดสอบไฟล์จริง AB01-02: ตั้งที่ริมซ้ายสุดของพื้นที่วิเคราะห์ถูกตัดสินว่า "ไม่มีตั้ง
-    ข้างค้ำยัน" ทั้งที่ในความเป็นจริงอาจมีคาร์โก้ต่ออีกฝั่งนอกขอบเขตที่ครอปมาวิเคราะห์
-    ซึ่งเราไม่มีข้อมูลเพียงพอจะยืนยันได้) จึงเปลี่ยนให้ต้องมีเพื่อนบ้าน "ทั้ง 2 ฝั่ง"
-    เท่านั้นจึงจะพิจารณา (ตั้งที่ริมขอบเขตจะถูกข้ามไปเสมอ - ยอมพลาดบางเคสเพื่อไม่ให้
-    เกิด false positive จากข้อจำกัดของขอบเขตการวิเคราะห์)
-    """
+    """เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน ต้องมีเพื่อนบ้านทั้ง 2 ฝั่ง
+    เท่านั้นจึงจะพิจารณา (ป้องกัน false positive จากตั้งริมขอบเขตการวิเคราะห์)"""
     regions = []
     n = len(stacks)
     if n < 3:
@@ -1614,12 +1713,7 @@ def detect_tall_unstable_regions_for_view(stacks):
 
 
 def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
-    """
-    เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน "เฉพาะในโซนประตูท้ายตู้"
-    (rear_x0, rear_x1) เพื่อเป็น deterministic corroboration ให้ REAR_LATERAL_IMBALANCE
-    หมายเหตุ: ตรวจไม่ได้ในกรณีที่ตั้งเตี้ยถูกตั้งสูงบังจนไม่เห็นขอบเลย (ดูหัวข้อ
-    ข้อจำกัดด้านบน) - ในกรณีนั้น AI (Gemini) ยังจำเป็นต้องเป็นตัวตรวจหลัก
-    """
+    """เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน เฉพาะในโซนประตูท้ายตู้"""
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
     regions = []
@@ -1638,6 +1732,25 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
     return regions
 
 
+def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
+    """v24 NEW: คืนค่า "อัตราส่วนความแตกต่างความสูงสูงสุด" ระหว่างคู่ตั้งที่อยู่ติดกัน
+    ในโซนประตูท้ายตู้ (ไม่กรองด้วย threshold) - ใช้สำหรับตัดสินใจ VETO การ claim ของ
+    AI (ถ้าค่าสูงสุดที่วัดได้ต่ำมาก แสดงว่าไม่มีความไม่สมดุลจริงในโซนนี้เลย)"""
+    relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
+    relevant.sort(key=lambda s: s["x0"])
+    max_ratio = 0.0
+    for i in range(len(relevant) - 1):
+        a, b = relevant[i], relevant[i + 1]
+        ha = max(1, a["floor_y"] - a["top_y"]) if a["boxes"] else 0
+        hb = max(1, b["floor_y"] - b["top_y"]) if b["boxes"] else 0
+        if ha == 0 or hb == 0:
+            continue
+        taller, shorter = (ha, hb) if ha >= hb else (hb, ha)
+        ratio = 1 - (shorter / taller)
+        max_ratio = max(max_ratio, ratio)
+    return max_ratio
+
+
 def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
     try:
         ymin, xmin, ymax, xmax = map(float, box_2d)
@@ -1653,10 +1766,8 @@ def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
 
 
 def _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view, overlap_threshold=0.10):
-    """
-    VETO gate ทั่วไป (ใช้แนวคิดเดียวกับ _step_down_claim_overlaps_detection): ปฏิเสธ
-    claim จาก AI ถ้า deterministic segmentation ไม่เจอตำแหน่งที่ทับซ้อนกันเลย
-    """
+    """VETO gate ทั่วไป: ปฏิเสธ claim จาก AI ถ้า deterministic segmentation ไม่เจอ
+    ตำแหน่งที่ทับซ้อนกันเลย"""
     if not regions_for_view:
         return False
     claim_box = _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start)
@@ -1748,42 +1859,51 @@ def _call_gemini_json(prompt, image, api_keys):
 
 def analyze_rear_zone_with_ai(rear_crop, api_keys, view_label="UNKNOWN"):
     """
-    v21 IMPROVED PROMPT: เพิ่มความเจาะจงเรื่อง 'ความสูงรวมทั้งตั้ง' และให้ตัวอย่าง
-    สถานการณ์ที่ตั้งหนึ่งซ้อนกล่องสูงกว่า (เช่น 2 ชั้น) อยู่ติดกับตั้งที่เตี้ยกว่า
-    (เช่น 1 ชั้น) แม้จะดูเหมือนซ้อนทับ/บังกันบางส่วนในมุมมอง 3 มิติ ก็ต้องนับเป็น
-    ความเสี่ยง (พบจากไฟล์ AC03 ที่ pattern ความสูง 2,2,1 ในตำแหน่งประตูท้ายตู้ ซึ่ง
-    ตั้งเตี้ยอยู่คนละตำแหน่งความกว้าง/ลึกของตู้ ทำให้สังเกตยากกว่ากรณีปกติ)
+    v24 IMPROVED PROMPT: เพิ่มคำเตือนเฉพาะเจาะจงเรื่อง "กล่องสีเข้ม/สีผิดปกติ" (เช่น
+    สีน้ำตาลเข้ม, สีแดงเข้ม/maroon) อาจถูกมองข้ามไปว่าไม่ใช่คาร์โก้ (เข้าใจผิดว่าเป็น
+    เงา/พื้นหลัง/โครงสร้างตู้) ซึ่งเป็นสาเหตุที่ยืนยันแล้วจากการตรวจสอบไฟล์จริง (EC20-01,
+    ED85-02) ว่าทำให้ AI มองข้ามกล่องบางใบ จนคำนวณความสูงรวมของตั้งผิดพลาด แล้วรายงาน
+    REAR_LATERAL_IMBALANCE ที่ผิดพลาด (false positive)
 
     v22: ผลจาก AI นี้จะถูกนำไปเทียบ (corroborate) กับ deterministic per-box
-    segmentation ใน process_request() - หาก deterministic เจอความไม่สมดุลชัดเจน
-    (ไม่มี occlusion) แต่ AI ตอบ SAFE จะถูก FORCE เพิ่มเข้าไปโดยอัตโนมัติ
+    segmentation ใน process_request() - v24 เพิ่มการ VETO แบบมีเงื่อนไข (ไม่ใช่แค่
+    FORCE อย่างเดียวเหมือน v21-v23.1) เมื่อ deterministic มี coverage สูงพอและวัดว่า
+    ไม่มีความแตกต่างจริง
     """
     prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the DOOR END (REAR) zone of a container.
 This is the {view_label} view.
 YOUR TASK: Determine if there is a genuine safety risk at the door end.
 
+IMPORTANT - COLOR AWARENESS: Cargo boxes in this diagram can be ANY color, including dark or
+unusual colors (dark brown, dark maroon/red, dark olive, etc.), not just bright/vivid colors. A
+box with a dark color is STILL cargo if it has a clear rectangular outline and an SKU label on it
+- do NOT mistake a dark-colored box for a shadow, background element, or empty space. When
+computing the TOTAL STACKED HEIGHT of a column, you MUST count every visible box regardless of
+how dark or unusual its color appears, otherwise you will underestimate that stack's true height
+and incorrectly conclude there is a height imbalance where none exists.
+
 RULES (numeric thresholds - apply consistently, do not be overly cautious):
 1. REAR_EMPTY_RISK: Flag if there is empty floor space near the door of more than roughly 20% of
    the container height, OR cargo drops off sharply leaving a dangerous unsupported edge.
 2. REAR_LATERAL_IMBALANCE: Flag if the TOTAL STACKED HEIGHT of cargo (adding up ALL boxes stacked
-   in that column, from floor to top - not just a single box) on one side of the door zone differs
-   from the total stacked height on an adjacent position by MORE than approximately 40-50% of the
-   taller stack's total height. This is a real, measurable visual difference.
+   in that column, from floor to top - not just a single box, and counting dark-colored boxes too,
+   see COLOR AWARENESS note above) on one side of the door zone differs from the total stacked
+   height on an adjacent position by MORE than approximately 40-50% of the taller stack's total
+   height. This is a real, measurable visual difference.
 
    IMPORTANT - look carefully at EVERY stack position, not just left-vs-right overall: in this
    isometric 3D view, a shorter stack (e.g. only 1 tier tall) sitting at a different depth/width
    position than a taller stack (e.g. 2 tiers tall) may appear to be PARTIALLY OVERLAPPED OR
    PARTIALLY HIDDEN BEHIND the taller stack from this viewing angle - it does NOT mean they are
    the same height. If you can see even a portion of a stack that is clearly shorter than its
-   immediate neighbors (for example a pattern where two adjacent stacks are 2 tiers tall but a
-   third stack right next to them, at a different depth, is only 1 tier tall), this IS a genuine
-   REAR_LATERAL_IMBALANCE risk - the top box of the taller stack could slide/fall onto the shorter
-   stack, or fall into the empty space above the shorter stack. Do not dismiss this just because
-   the stacks appear to visually overlap or touch in the 2D projection.
-3. The container wall/floor/frame structure itself is NOT cargo - never flag it.
-4. If cargo reasonably fills the rear area and all stacks (including hidden/partially-visible ones)
-   are close in total height (within ~1 small tier) -> SAFE.
+   immediate neighbors, this IS a genuine REAR_LATERAL_IMBALANCE risk. Do not dismiss this just
+   because the stacks appear to visually overlap or touch in the 2D projection.
+3. The container wall/floor/frame structure itself is NOT cargo - never flag it. But remember: a
+   dark-colored BOX with an SKU label is cargo, not structure (see COLOR AWARENESS above).
+4. If cargo reasonably fills the rear area and all stacks (including hidden/partially-visible ones,
+   and including all dark-colored boxes counted properly) are close in total height (within ~1
+   small tier) -> SAFE.
 
 IMPORTANT - if you flag a risk, you MUST also provide "box_2d" pinpointing EXACTLY where the
 problem is visible in THIS image (the specific shorter stack, or the boundary between stacks with
@@ -1792,7 +1912,7 @@ this image's own size. The box must tightly enclose the actual shorter stack (or
 mismatch boundary) - not the whole image, not empty background.
 
 Return ONLY this exact JSON:
-{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
+{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever rear_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, rear_crop, api_keys)
@@ -1848,6 +1968,10 @@ VIEW LAYOUT: {layout_desc}
 FIXED ORIENTATION (a known fact about how this diagram type is always drawn - trust it completely):
 - FRONT view: REAR/door side is {front_rear}; FRONT/head-wall side is {front_wall}.
 - BACK view: REAR/door side is {back_rear}; FRONT/head-wall side is {back_wall}.
+
+IMPORTANT - COLOR AWARENESS: Cargo boxes can be ANY color, including dark or unusual colors (dark
+brown, dark maroon/red, dark olive/yellow, etc.) - these are still cargo if they have a clear
+rectangular outline and SKU label. Do not mistake dark-colored boxes for shadows or background.
 
 YOUR TASK: Find ONLY these 4 risk types (REAR_EMPTY_RISK, FRONT_EMPTY_RISK, and
 REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them here):
@@ -2242,6 +2366,7 @@ def process_request(request):
         sku_list = extract_sku_from_pdf(pdf_bytes)
         sku_str = ", ".join(sku_list) if sku_list else ""
         container_length_mm = extract_container_length_mm(pdf_bytes)
+        unused_floor_mm = extract_unused_floor_mm(pdf_bytes)
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
@@ -2265,9 +2390,10 @@ def process_request(request):
         step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                                 container_bounds, cargo_extent)
 
-        # v22/v23.1: สร้าง per-box stack model (deterministic) สำหรับ OVERHANG_RISK,
+        # v22/v24: สร้าง per-box stack model (deterministic) สำหรับ OVERHANG_RISK,
         # TALL_UNSTABLE_RISK, REAR_LATERAL_IMBALANCE - ดูหัวข้อ "PER-BOX SEGMENTATION"
-        # ด้านบนสำหรับรายละเอียดอัลกอริทึมและข้อจำกัด
+        # ด้านบนสำหรับรายละเอียดอัลกอริทึมและข้อจำกัด (v24: แก้บั๊ก under-segmentation
+        # หลักที่พบจากการทดสอบไฟล์จริง 6 ไฟล์)
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
         overhang_regions = {}
@@ -2284,6 +2410,12 @@ def process_request(request):
                 print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view_label}): "
                       f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
                       f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={TALL_UNSTABLE_MIN_HEIGHT_RATIO*100:.0f}%)")
+
+        # v24.3 NEW: LOCAL DEPTH-GAP SCAN - จับ "หลุมเฉพาะจุด" ที่ compute_lateral_gap_ratio
+        # แบบเดิม (whole-container average) พลาดไป - ดู CHANGELOG ที่ค่าคงที่ LOCAL_GAP_*
+        # สำหรับรายละเอียด root cause (พบจากผู้ใช้ชี้ตำแหน่งด้วยการวงสีแดงใน EC50-01/EC51-02)
+        local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
+                                                                     crop_y_start, container_bounds, cargo_extent)
 
         raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
         if not isinstance(raw_ai_risks, list):
@@ -2307,8 +2439,6 @@ def process_request(request):
                 else:
                     print(f"Gemini STEP_DOWN_RISK claim REJECTED - missing valid view/box_2d for verification")
             elif rt == "OVERHANG_RISK":
-                # VETO: ปฏิเสธ claim ถ้า deterministic per-box segmentation ไม่เจอ
-                # ตำแหน่งกล่องยื่นที่ทับซ้อนกันเลยในตั้งใดๆ ของ view นี้
                 if has_valid_box:
                     regions_for_view = overhang_regions.get(view_of_claim, [])
                     if _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
@@ -2319,7 +2449,6 @@ def process_request(request):
                 else:
                     print("Gemini OVERHANG_RISK claim REJECTED - missing valid view/box_2d for verification")
             elif rt == "TALL_UNSTABLE_RISK":
-                # VETO: เช่นเดียวกับ OVERHANG_RISK
                 if has_valid_box:
                     regions_for_view = tall_unstable_regions.get(view_of_claim, [])
                     if _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
@@ -2332,8 +2461,6 @@ def process_request(request):
             else:
                 all_risks.append(r)
 
-        # FORCE: เพิ่ม OVERHANG_RISK / TALL_UNSTABLE_RISK ที่ deterministic เจอ
-        # แต่ AI ไม่ได้ claim มา (AI บอก SAFE หรือพลาดจุดนั้นไป)
         def _view_already_has_overlapping_claim(view_label, risk_type, region, existing_risks):
             for r in existing_risks:
                 if str(r.get("risk_type", "")).upper().strip() != risk_type:
@@ -2534,6 +2661,35 @@ def process_request(request):
                 return ratio_val >= FALLBACK_MIN_EMPTY_GAP_RATIO
             return False
 
+        # v24 NEW: VETO GATE สำหรับ REAR_LATERAL_IMBALANCE - เดิม (v21-v23.1) ใช้ FORCE
+        # เท่านั้น (ไม่ veto AI) เพราะ deterministic segmentation ยังไม่แม่นยำพอ แต่หลัง
+        # แก้ไข v24 (per-box segmentation แม่นยำขึ้นมาก) จึงเพิ่ม VETO แบบมีเงื่อนไข:
+        # ต้องมี coverage สูงพอ (>= LATERAL_IMBALANCE_VETO_MIN_COVERAGE) และวัดได้ว่า
+        # ความแตกต่างความสูงสูงสุดในโซนประตูท้ายตู้ต่ำกว่า
+        # LATERAL_IMBALANCE_VETO_MAX_RATIO (มี "buffer zone" ระหว่าง veto กับ force
+        # เพื่อความปลอดภัย - ถ้าอยู่ระหว่างกลางจะไม่ veto และไม่ force เพื่อคง behavior
+        # แบบ AI-first เดิมไว้ในกรณีที่ไม่ชัดเจนพอ)
+        def _should_veto_lateral_imbalance(view_label):
+            coverage = stack_box_model.get(f"{view_label}_coverage_ratio")
+            if coverage is None or coverage < LATERAL_IMBALANCE_VETO_MIN_COVERAGE:
+                return False
+            cb = container_bounds.get(view_label)
+            if not cb:
+                return False
+            rear_side = HARDCODED_REAR_SIDE[view_label]
+            container_width = cb["xmax"] - cb["xmin"]
+            if rear_side == "LEFT":
+                rear_x0, rear_x1 = cb["xmin"], cb["xmin"] + int(container_width * 0.45)
+            else:
+                rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
+            max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
+            if max_ratio < LATERAL_IMBALANCE_VETO_MAX_RATIO:
+                print(f"REAR_LATERAL_IMBALANCE VETO candidate ({view_label}): coverage={coverage:.2f} "
+                      f"(>= {LATERAL_IMBALANCE_VETO_MIN_COVERAGE}), max measured height-diff ratio in rear zone "
+                      f"= {max_ratio:.2f} (< veto threshold {LATERAL_IMBALANCE_VETO_MAX_RATIO}) -> VETO")
+                return True
+            return False
+
         # v21: ผ่อนเกณฑ์ confidence ของ REAR_LATERAL_IMBALANCE จาก "HIGH เท่านั้น" เป็น
         # "HIGH หรือ MEDIUM" (เดิมเข้มงวดกว่า REAR_EMPTY_RISK โดยไม่มีเหตุผลชัดเจน)
         for view_label, rear_result in (("FRONT", rear_result_front), ("BACK", rear_result_back)):
@@ -2550,14 +2706,18 @@ def process_request(request):
             elif ai_empty:
                 print(f"Skipping REAR_EMPTY ({view_label}) - confidence={confidence} or gated out")
             # v21: เดิมเงื่อนไขนี้เช็คแค่ confidence=="HIGH" ปรับเป็น in ("HIGH","MEDIUM")
+            # v24: เพิ่ม VETO gate ก่อนยอมรับ claim ของ AI (ดู _should_veto_lateral_imbalance)
             if rear_zone_risk in ("REAR_LATERAL_IMBALANCE", "BOTH") and confidence in ("HIGH", "MEDIUM") and view_label not in _existing_risk_views("REAR_LATERAL"):
-                all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
-                print(f"REAR_LATERAL_IMBALANCE ({view_label}) accepted with confidence={confidence}")
+                if _should_veto_lateral_imbalance(view_label):
+                    print(f"REAR_LATERAL_IMBALANCE claim ({view_label}) VETOED - deterministic per-box segmentation "
+                          f"shows no genuine height difference in rear zone (AI reasoning: {rear_result.get('reasoning','')[:150]})")
+                else:
+                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                    print(f"REAR_LATERAL_IMBALANCE ({view_label}) accepted with confidence={confidence}")
 
         # v22 FORCE: deterministic corroboration สำหรับ REAR_LATERAL_IMBALANCE เฉพาะ
         # กรณีที่ AI บอก SAFE/ไม่ผ่านเกณฑ์ confidence แต่ per-box segmentation เจอ
-        # ความไม่สมดุลชัดเจนในโซนประตูท้ายตู้ (ไม่ veto AI เพราะ AI อาจเห็นตั้งที่ถูก
-        # บังซึ่ง pixel-based มองไม่เห็น - ดูข้อจำกัดในหัวข้อ PER-BOX SEGMENTATION)
+        # ความไม่สมดุลชัดเจนในโซนประตูท้ายตู้
         for view_label in ("FRONT", "BACK"):
             if view_label in _existing_risk_views("REAR_LATERAL"):
                 continue
@@ -2583,7 +2743,7 @@ def process_request(request):
                     "description": f"พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันประมาณ {region['ratio']*100:.0f}% (ตรวจจับจาก per-box segmentation, AI ไม่พบ)",
                     "box_2d": None,
                 })
-                break  # 1 กรอบต่อ view ก็เพียงพอสำหรับ zone-based risk นี้
+                break
 
         front_conf = str(front_result_from_front_view.get("confidence", "LOW")).upper() if isinstance(front_result_from_front_view, dict) else "LOW"
         ai_front = (isinstance(front_result_from_front_view, dict)
@@ -2617,9 +2777,84 @@ def process_request(request):
             else:
                 print(f"WARNING: Could not compute lateral gap for {view_label} (missing container_bounds or cargo_extent)")
 
+            # v24.2 NEW: คำนวณกรอบแม่นยำสำหรับ LATERAL_GAP_RISK ก่อน (ถ้าคำนวณได้) แล้ว
+            # แปลงเป็นพิกัด normalized (0-1000) เพื่อใส่เป็น box_2d - ป้องกันไม่ให้ระบบ
+            # ตกไปใช้ fallback แบบ percentage-based ที่ผิดตำแหน่ง (ดู comment ใน
+            # get_precise_lateral_gap_box สำหรับรายละเอียด root cause ที่พบจากผู้ใช้)
+            precise_abs_box = get_precise_lateral_gap_box(container_bounds.get(view_label), cargo_extent.get(view_label))
+            precise_lateral_box_2d = None
+            if precise_abs_box:
+                px0, py0, px1, py1 = precise_abs_box
+                precise_lateral_box_2d = [
+                    ((py0 - crop_y_start) / crop_h) * 1000,
+                    (px0 / crop_w) * 1000,
+                    ((py1 - crop_y_start) / crop_h) * 1000,
+                    (px1 / crop_w) * 1000,
+                ]
+
             if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
-                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": None})
+                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": precise_lateral_box_2d})
+            elif (unused_floor_mm is not None and unused_floor_mm >= UNUSED_FLOOR_MIN_MM
+                  and view_label not in _existing_risk_views("LATERAL_GAP")
+                  and lateral_gap_ratio is not None and lateral_gap_ratio >= UNUSED_FLOOR_RELAXED_GAP_RATIO):
+                # v24.1 NEW: "Unused Floor" ที่พิมพ์อยู่บน PDF โดยตรง (ground truth ไม่
+                # ต้องพึ่งพา pixel measurement) ยืนยันว่ามีพื้นที่ว่างจริงในโหลดนี้ ใช้
+                # เป็นตัวช่วยผ่อนเกณฑ์ ratio ปกติ (12%) ลงครึ่งหนึ่ง (6%) เพื่อจับเคส
+                # borderline ที่ pixel-based ratio วัดได้ใกล้เคียงเกณฑ์มาก (พบจากไฟล์
+                # จริง ED86-03: lateral_gap_ratio=11.6% ใกล้เกณฑ์ 12% มาก แต่ไม่ผ่าน
+                # เกณฑ์เดิมพอดี ทั้งที่ PDF ระบุ "Unused Floor: 17.7(in)" ยืนยันชัดเจน
+                # ว่ามีพื้นที่ว่างจริง) - อ้างอิงค่าที่พิมพ์จาก PDF ในคำอธิบายเพื่อความ
+                # โปร่งใส/ตรวจสอบย้อนหลังได้
+                # v24.2: ใช้ precise_lateral_box_2d เดียวกันเพื่อวาดกรอบตรงตำแหน่งจริง
+                print(f"FORCED LATERAL_GAP_RISK ({view_label}) corroborated by printed 'Unused Floor: "
+                      f"{unused_floor_mm/25.4:.1f}in' + pixel ratio {lateral_gap_ratio*100:.1f}% "
+                      f"(relaxed threshold {UNUSED_FLOOR_RELAXED_GAP_RATIO*100:.0f}%)")
+                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A",
+                                   "reasoning": "FORCED_BY_PRINTED_UNUSED_FLOOR",
+                                   "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {lateral_gap_ratio*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
+                                   "box_2d": precise_lateral_box_2d})
+            elif (local_depth_gap_regions.get(view_label) and view_label not in _existing_risk_views("LATERAL_GAP")):
+                # v24.3 NEW: FORCE จาก LOCAL DEPTH-GAP SCAN - จับ "หลุมเฉพาะจุด" ที่
+                # ทั้งวิธี whole-container ratio และ Unused Floor (ซึ่งเป็นค่ารวมทั้ง
+                # โหลดเช่นกัน ไม่ได้แยกเฉพาะจุด) พลาดไป ยืนยันจากผู้ใช้ด้วยการวงสีแดง
+                # ชี้ตำแหน่งจริงในไฟล์ EC50-01/EC51-02 ซึ่งมีหลุมเฉพาะจุดลึกถึง 57-69px
+                # แต่ lateral_gap_ratio รวมวัดได้แค่ ~7-10% (ไม่ถึงเกณฑ์ 12%) และไฟล์
+                # เหล่านี้ไม่มี "Unused Floor" ระบุด้วย (เพราะพื้นที่รวมทั้งโหลดยังถือว่า
+                # ใช้เต็มพื้นที่ แต่มี "หลุม" เฉพาะจุดที่เป็นอันตรายจากมุมมองความปลอดภัย)
+                best_region = max(local_depth_gap_regions[view_label], key=lambda r: r["max_gap_px"])
+                ymin_norm = ((best_region["y_min"] - crop_y_start) / crop_h) * 1000
+                ymax_norm = ((best_region["y_max"] - crop_y_start) / crop_h) * 1000
+                xmin_norm = (best_region["x_min"] / crop_w) * 1000
+                xmax_norm = (best_region["x_max"] / crop_w) * 1000
+                print(f"FORCED LATERAL_GAP_RISK ({view_label}) from LOCAL DEPTH-GAP SCAN "
+                      f"(x=[{best_region['x_min']:.0f}-{best_region['x_max']:.0f}], "
+                      f"max_local_gap={best_region['max_gap_px']:.0f}px, width={best_region['width_px']:.0f}px)")
+                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A",
+                                   "reasoning": "FORCED_BY_LOCAL_DEPTH_GAP_SCAN",
+                                   "description": f"พบหลุมเฉพาะจุดบนพื้นตู้ (ตำแหน่งเดียว ไม่ใช่ทั้งโหลด) ลึกประมาณ {best_region['max_gap_px']:.0f}px กว้าง {best_region['width_px']:.0f}px (ตรวจจับจาก local depth-gap scan)",
+                                   "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm]})
+
+        # v24.1 NEW: เช่นเดียวกับ LATERAL_GAP_RISK - ใช้ "Unused Floor" ที่พิมพ์จาก PDF
+        # เป็นตัวช่วยผ่อนเกณฑ์ ratio สำหรับ REAR_EMPTY_RISK/FRONT_EMPTY_RISK ด้วย เผื่อ
+        # กรณีที่ช่องว่างจริงอยู่ฝั่งหน้า/หลังตู้แทนที่จะเป็นด้านข้าง (ตรวจสอบทุก
+        # ผลรวมที่มี เพื่อครอบคลุมทุกทิศทางที่ "Unused Floor" อาจสะท้อนถึง)
+        if unused_floor_mm is not None and unused_floor_mm >= UNUSED_FLOOR_MIN_MM:
+            for gap_risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                for view_label in ("FRONT", "BACK"):
+                    if view_label in _existing_risk_views(gap_risk_type.replace("_RISK", "")):
+                        continue
+                    ratio_val = gap_values_ratio.get((view_label, gap_risk_type))
+                    if ratio_val is not None and ratio_val >= UNUSED_FLOOR_RELAXED_GAP_RATIO:
+                        print(f"FORCED {gap_risk_type} ({view_label}) corroborated by printed 'Unused Floor: "
+                              f"{unused_floor_mm/25.4:.1f}in' + pixel ratio {ratio_val*100:.1f}% "
+                              f"(relaxed threshold {UNUSED_FLOOR_RELAXED_GAP_RATIO*100:.0f}%)")
+                        desc_zone = "ประตูท้ายตู้" if gap_risk_type == "REAR_EMPTY_RISK" else "ผนังหัวตู้"
+                        all_risks.append({"view": view_label, "risk_type": gap_risk_type,
+                                           "direction": "LONGITUDINAL", "lateral_side": "N/A",
+                                           "reasoning": "FORCED_BY_PRINTED_UNUSED_FLOOR",
+                                           "description": f"พบพื้นที่ว่างบริเวณ{desc_zone}ประมาณ {ratio_val*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
+                                           "box_2d": None})
 
         for view_label in ("FRONT", "BACK"):
             for region in step_down_regions.get(view_label, []):
