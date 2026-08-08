@@ -18,7 +18,32 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.14
+# AI Cargo Safety Checker - High Precision v24.15
+#
+# v24.15 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.14) พบกรอบแดง (STEP_DOWN_RISK)
+#   เท็จอีกรูปแบบหนึ่ง ("วงกลมสีส้ม คือที่เป็นกรอบแดงเกินมา หาสิ่งผิดปกติ และนำออกไป")
+#   ยืนยันจากภาพผลลัพธ์จริง 3 ไฟล์ (EC12-01, EC15-01, EC20-02 - ทั้ง 3 ไฟล์กรอบแดง
+#   เท็จปรากฏในตำแหน่ง BACK view เดียวกันเป๊ะกับกรอบ TALL_UNSTABLE_RISK สีม่วงแดง
+#   (magenta) ที่ตรวจพบถูกต้องอยู่แล้ว)
+#
+#   ROOT CAUSE: เมื่อมี "ตั้งเดียวสูงโดดเด่นผิดปกติ" (isolated tall peak - เพื่อนบ้าน
+#   ทั้ง 2 ฝั่งเตี้ยกว่ามาก, ตรงกับเงื่อนไขที่ detect_tall_unstable_regions_for_view ใช้
+#   ตรวจจับ TALL_UNSTABLE_RISK อยู่แล้ว) detect_step_down_regions_from_stacks (v24.13/
+#   v24.14) จะมองว่าเพื่อนบ้านทั้ง 2 ฝั่งของตั้งสูงนั้น "เตี้ยกว่าตั้งข้างเคียงที่สูงกว่า"
+#   จึง flag เป็น STEP_DOWN_RISK ซ้ำซ้อน - แต่จริงๆ แล้วเป็นปรากฏการณ์เดียวกันกับที่
+#   TALL_UNSTABLE_RISK อธิบายไปแล้ว (กล่องสูงโดดเดี่ยว 1 ตั้ง ไม่ใช่ "ที่ราบ/ขั้นบันได"
+#   ของกล่องหลายใบที่ควรเป็น STEP_DOWN_RISK จริง)
+#
+#   วิธีแก้ (ฟังก์ชันใหม่ _is_isolated_tall_peak): ก่อนใช้ตั้งข้างเคียงเป็นฐานเปรียบเทียบ
+#   ว่า "สูงกว่า" ในการตรวจสอบ STEP_DOWN_RISK ตรวจสอบก่อนว่าตั้งข้างเคียงนั้นเข้าเกณฑ์
+#   "ตั้งสูงโดดเดี่ยว" หรือไม่ (สูงกว่าเพื่อนบ้านของมันเองทั้ง 2 ฝั่ง อย่างน้อย
+#   TALL_UNSTABLE_NEIGHBOR_MAX_RATIO) - ถ้าใช่ ให้ข้ามเพื่อนบ้านนั้นไปเลย (ปล่อยให้
+#   TALL_UNSTABLE_RISK เป็นผู้รายงานปรากฏการณ์นี้แต่เพียงผู้เดียว ไม่ซ้ำซ้อนกัน)
+#
+#   ผลลัพธ์ที่คาดหวัง: STEP_DOWN_RISK ยังคงตรวจจับ "ที่ราบ/ขั้นบันได" จริงที่มีตั้ง
+#   หลายใบสูงต่อเนื่องกัน (เช่นกรณี ED85-02/EC20-02 ฝั่งอื่นที่ยืนยันถูกต้องแล้ว) แต่จะ
+#   ไม่ flag ซ้ำกับกรณีที่เป็นตั้งสูงโดดเดี่ยวเดี่ยวๆ ซึ่งควรรายงานเป็น TALL_UNSTABLE_RISK
+#   เพียงอย่างเดียวเท่านั้น
 #
 # v24.14 - แก้ไขตามผลทดสอบใช้งานจริงกับไฟล์หลากหลาย (v24.13) พบ 3 ปัญหา:
 #   ("กรอบสีแดงส่วนหน้ารถ หาพื้นที่ต่ำ ไม่ต้องทำแล้ว ที่ไปหารูโบ๋ ภาพbackผมต้องการให้
@@ -1617,22 +1642,59 @@ def _stack_width(s):
     return max(1, s["x1"] - s["x0"])
 
 
+def _is_isolated_tall_peak(idx, heights, min_height_px,
+                            neighbor_max_ratio=TALL_UNSTABLE_NEIGHBOR_MAX_RATIO):
+    """
+    v24.15 NEW: ตรวจสอบว่าตั้งที่ตำแหน่ง idx เป็น "ตั้งสูงโดดเดี่ยว" (isolated tall
+    peak) หรือไม่ - คือกรณีที่ตั้งนี้สูงกว่าตั้งข้างเคียง "ทั้ง 2 ฝั่ง" อย่างมีนัยสำคัญ
+    (เกณฑ์เดียวกับ detect_tall_unstable_regions_for_view ที่ใช้กับ TALL_UNSTABLE_RISK
+    อยู่แล้ว) - ใช้แยกแยะระหว่าง "ตั้งเดียวที่สูงโดดเด่นผิดปกติ" (ซึ่งควรถูกจัดเป็น
+    TALL_UNSTABLE_RISK เท่านั้น) กับ "ที่ราบสูง/ขั้นบันไดจริง" (ตั้งหลายตั้งที่สูง
+    ต่อเนื่องกัน ซึ่งเป็น STEP_DOWN_RISK ที่แท้จริง)
+
+    ดู CHANGELOG v24.15 หัวไฟล์สำหรับรายละเอียด root cause (ยืนยันจากภาพผลลัพธ์จริง:
+    EC12-01/EC15-01/EC20-02 - กรอบแดง STEP_DOWN_RISK เท็จซ้อนทับ/อยู่ติดกับกรอบม่วงแดง
+    TALL_UNSTABLE_RISK ที่ถูกต้องอยู่แล้วเสมอ)
+    """
+    h = heights[idx]
+    if h is None or h < min_height_px:
+        return False
+    neighbor_heights = []
+    if idx > 0:
+        neighbor_heights.append(heights[idx - 1])
+    if idx < len(heights) - 1:
+        neighbor_heights.append(heights[idx + 1])
+    neighbor_heights = [nh for nh in neighbor_heights if nh is not None]
+    if not neighbor_heights:
+        return False
+    return all(nh <= h * neighbor_max_ratio for nh in neighbor_heights)
+
+
 def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
                                           min_ratio=STEP_DOWN_STACK_MIN_RATIO,
                                           min_height_px=STEP_DOWN_STACK_MIN_HEIGHT_PX,
                                           max_width_ratio=STEP_DOWN_STACK_MAX_WIDTH_RATIO):
     """
-    v24.13 NEW / v24.14 FIX: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ "ความสูงรวมของ
-    ตั้งกล่อง" (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ซ้ายหรือ
-    ขวา) - ไม่ใช้ pixel/height-profile scan หรือ floor-hole scan อีกต่อไป
+    v24.13 NEW / v24.14 FIX / v24.15 FIX: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ
+    "ความสูงรวมของตั้งกล่อง" (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรง
+    เท่านั้น (ซ้ายหรือขวา) - ไม่ใช้ pixel/height-profile scan หรือ floor-hole scan อีก
 
-    v24.14 NEW - STACK-WIDTH SANITY GATE: ผู้ใช้ทดสอบพบว่ากรอบบางไฟล์ (EC10-03,
-    EC13-01, EC18-01, EC26-02) ใหญ่ผิดปกติครอบคลุมกล่องหลายใบพร้อมกัน - ROOT CAUSE คือ
-    per-box segmentation บางครั้งรวมกล่องหลายใบสีเดียวกัน/ความสูงเท่ากันเป็น "ตั้งเดียว"
-    ผิดพลาด (under-segmentation) ทำให้ตั้งที่ถูกรวมผิด (กว้างผิดปกติ) ถูกนำไปเทียบกับ
-    ตั้งข้างเคียงแล้วสร้างกรอบกว้างเท่าตั้งที่รวมผิดทั้งหมด - แก้ไขด้วยการปฏิเสธคู่ใดๆ
-    ที่มีตั้งฝั่งใดฝั่งหนึ่งกว้างเกิน max_width_ratio ของความกว้างคาร์โก้ทั้งหมด (ถือว่า
-    ไม่น่าเชื่อถือพอจะใช้ตัดสิน - ไม่ใช่กล่องเดียวจริง)
+    v24.14 - STACK-WIDTH SANITY GATE: ปฏิเสธคู่ใดๆ ที่มีตั้งฝั่งใดฝั่งหนึ่งกว้างเกิน
+    max_width_ratio ของความกว้างคาร์โก้ทั้งหมด (ป้องกัน per-box segmentation ที่รวม
+    กล่องหลายใบผิดพลาดเป็นตั้งเดียว - ดู CHANGELOG v24.14)
+
+    v24.15 - ISOLATED-PEAK EXCLUSION (ใหม่): ผู้ใช้ทดสอบพบว่ากรอบแดง STEP_DOWN_RISK
+    เท็จปรากฏซ้ำซ้อน/ติดกับกรอบ TALL_UNSTABLE_RISK ที่ถูกต้องอยู่แล้วเสมอ (ยืนยันจาก
+    ภาพจริง EC12-01/EC15-01/EC20-02 - วงกลมส้มชี้ตำแหน่งเดียวกับกรอบม่วงแดง) ROOT
+    CAUSE: เมื่อมีตั้งเดียวสูงโดดเด่นผิดปกติ (isolated tall peak - เพื่อนบ้านทั้ง 2
+    ฝั่งเตี้ยกว่ามาก) การเปรียบเทียบแบบเดิมจะมองว่าเพื่อนบ้านทั้ง 2 ฝั่งนั้น "เตี้ยกว่า
+    ตั้งสูงข้างเคียง" และ flag เป็น STEP_DOWN_RISK ซ้ำซ้อนกับที่ TALL_UNSTABLE_RISK
+    ตรวจพบไปแล้ว (ซึ่งเป็นการอธิบายปรากฏการณ์เดียวกันคนละมุม ไม่ใช่ปัญหาที่แยกจากกัน)
+    วิธีแก้: ก่อนใช้ตั้งข้างเคียง (neighbor) เป็นฐานเปรียบเทียบว่า "สูงกว่า" ตรวจสอบ
+    ก่อนว่าตั้งข้างเคียงนั้นเป็น isolated tall peak หรือไม่ (_is_isolated_tall_peak) -
+    ถ้าใช่ ให้ข้ามเพื่อนบ้านนั้นไปเลย (ถือว่าเป็นกรณีของ TALL_UNSTABLE_RISK ไม่ใช่
+    STEP_DOWN_RISK) ตั้งเตี้ยยังคงถูกตรวจพบได้ปกติหากมีเพื่อนบ้านอีกฝั่งที่สูงกว่าแบบ
+    เป็นที่ราบ/หลายตั้งต่อเนื่องกันจริง (ไม่ใช่ตั้งโดดเดี่ยว)
 
     กรอบผลลัพธ์ (region) ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า" เท่านั้น (x0-x1 ของตั้งนั้น,
     y จาก top_y ถึง floor_y ของตั้งนั้นจริง) - ไม่ยืดไปคลุมตั้งข้างเคียงหรือพื้นตู้เต็ม
@@ -1671,6 +1733,11 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
                 continue
             if h_neighbor <= h_this:
                 continue  # เพื่อนบ้านไม่ได้สูงกว่า -> ตั้งนี้ไม่ใช่ตั้งเตี้ยเทียบตั้งนั้น
+            # v24.15 NEW: ถ้าเพื่อนบ้านที่ "สูงกว่า" นี้เป็น isolated tall peak (สูงโดด
+            # เด่นผิดปกติจากเพื่อนบ้านทั้ง 2 ฝั่งของมันเอง) แสดงว่านี่คือกรณีเดียวกับที่
+            # TALL_UNSTABLE_RISK ตรวจพบไปแล้ว - ไม่ใช่ step-down/ที่ราบจริง ข้ามไป
+            if _is_isolated_tall_peak(j, heights, min_height_px):
+                continue
             ratio = 1 - (h_this / h_neighbor)
             best_ratio = max(best_ratio, ratio)
         if best_ratio >= min_ratio:
