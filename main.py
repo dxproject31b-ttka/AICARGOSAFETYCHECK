@@ -32,9 +32,70 @@ except Exception as _ocr_import_err:
           f"SKU-based cross-view matching disabled, will use depth-ratio only")
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.10
+# AI Cargo Safety Checker - High Precision v24.12
 #
-# v24.10 - ปรับปรุงความชัดเจนของสีและความหนาของกรอบความเสี่ยงทุกประเภท ตามคำขอผู้ใช้
+# v24.12 - 3 การแก้ไขตามคำขอผู้ใช้หลังทดสอบ v24.11:
+#
+#   1) FLOOR-HOLE FALLBACK สำหรับ view ที่ per-box segmentation coverage ต่ำ (ผู้ใช้
+#      สังเกต: "FRONT พบตั้งเตี้ยหัวตู้ แต่ BACK ไม่พบ - เพราะไม่ได้ค้นหาแบบเดียวกัน
+#      หรือไม่") ROOT CAUSE ที่ยืนยันแล้ว: ตัวโค้ดค้นหาเหมือนกันทุกประการทั้ง 2 view
+#      (loop เดียวกัน) แต่ build_stack_box_model_per_view() เดิมจะ "ทิ้ง" ผลการแบ่ง
+#      กล่องทั้งหมดของ view ที่ coverage_ratio < 0.60 ไปเลย (result[view]=[] และไม่
+#      เคยตั้งค่า coverage_ratio) ทำให้ floor-hole validation หาตั้งไม่เจอ จึงปฏิเสธ
+#      ทุก candidate ของ view นั้นเสมอ (BACK มักมี occlusion มากกว่า FRONT ทำให้
+#      coverage ต่ำกว่าบ่อยกว่า) วิธีแก้: เก็บผลการแบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์
+#      coverage) ไว้ในคีย์แยก (f"{view}_raw_stacks") เสมอ ให้ floor-hole validation ใช้
+#      เป็น fallback (พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น 45% แทน 30% เพื่อชดเชยความไม่
+#      แน่นอนของข้อมูล) โดยไม่กระทบ OVERHANG/TALL_UNSTABLE/LATERAL_IMBALANCE/cross-view
+#      ที่ยังคงใช้เฉพาะ high-confidence data เหมือนเดิมทุกประการ
+#
+#   2) จำกัดขนาดกรอบทุกประเภทความเสี่ยงให้ใกล้เคียงขนาดจริงของกล่อง/บริเวณที่วิเคราะห์
+#      ("เลยมาได้นิดหน่อย") - พบบั๊กที่ STEP_DOWN_RISK (height-profile method) เดิมใช้
+#      y_max=container_ymax เสมอ (ยืดกรอบไปจนสุดพื้นตู้เต็มความสูง แม้กล่องจริงในบริเวณ
+#      นั้นจะเตี้ยกว่ามาก) แก้ไขด้วยการวัด "พื้นเฉพาะจุด" (local floor) จากพิกเซลจริง
+#      แทน เพิ่มฟังก์ชันกลาง _region_to_padded_normalized_box() (ขยายกรอบออกเล็กน้อย
+#      ~6px จากขอบเขตจริง + clip ไม่ให้ล้ำเข้า view อื่น) แทนที่โค้ด normalize พิกัด
+#      แบบ inline ที่กระจายอยู่ 5 จุด (OVERHANG, TALL_UNSTABLE, LATERAL_GAP x2,
+#      STEP_DOWN) ให้ใช้หลักการเดียวกันทั้งหมด
+#
+#   3) รายงานคำอธิบายความเสี่ยงซ้ำประเภทเดียวกัน แค่ 1 ครั้ง (ผู้ใช้: "พบ
+#      STEP_DOWN_RISK จำนวน 2 เคส ระบุตัวเลข 2 แต่คำอธิบายด้านล่างมีแค่ 1 อันพอ") -
+#      แยกการนับ (instance_key ยังคง position-aware แบบ v24.8 ใช้กับ hazardCount) ออก
+#      จากการแสดงข้อความ (group_key ใหม่ - จัดกลุ่มตาม risk_type อย่างเดียว ไม่รวม
+#      ตำแหน่ง) แสดงคำอธิบายเพียง 1 ครั้งต่อประเภท พร้อมต่อท้ายชื่อเรื่องด้วย
+#      "(พบ N จุด)" เมื่อ N > 1 - hazardCount ยังคงเป็นจำนวนจุดเสี่ยงจริงทั้งหมดเหมือนเดิม
+#
+# v24.11 - ROLLBACK + FIX ตามคำขอผู้ใช้หลังทดสอบ v24.9/v24.10 จริง:
+#   ("24.10,24.9 ไม่ดี รูปทรงสี่เหลี่ยมดีกว่า / 24.8 รูโบ๋ ไปจับผนังตู้ ไม่จับ
+#   กล่องสูงต่ำวางติดกัน / ให้ตั้งต้นใหม่ นำ24.8มาแก้ไข")
+#
+#   ส่วนที่ 1 - ROLLBACK ภาพ: ตัด v24.9 (quad-corner/parallelogram) และ v24.10
+#   (halo effect + hex-color/line-width scheme) ออกทั้งหมด กลับไปใช้ "สี่เหลี่ยม
+#   ผืนผ้าตรง" (axis-aligned rectangle) + สีชื่อมาตรฐาน (red/orange/purple/ฯลฯ)
+#   แบบ v24.8 ตามที่ผู้ใช้ยืนยันว่าดูดีกว่า/อ่านง่ายกว่า
+#
+#   ส่วนที่ 2 - FIX Floor-Hole Detection (v24.8): ROOT CAUSE ที่ผู้ใช้ชี้ - เดิม
+#   detect_floor_hole_regions() ตัดสินจากสี pixel ล้วนๆ (hole_depth/width/roughness)
+#   โดยไม่เคยตรวจสอบว่ามี "กล่องข้างเคียงที่สูงกว่าจริง" หรือไม่เลย ทำให้กรณีที่เห็น
+#   ผนัง/พื้นตู้โผล่โดยไม่มีตั้งข้างเคียงให้เทียบ (เช่น ขอบเขตนอกสุดของคาร์โก้ที่ติด
+#   ผนัง) ถูกเข้าใจผิดว่าเป็น STEP_DOWN_RISK ทั้งที่ไม่มีกล่องสูงต่ำวางติดกันจริง
+#
+#   วิธีแก้ (_validate_floor_hole_with_adjacent_stacks): เพิ่มขั้นตอนตรวจสอบไขว้กับ
+#   per-box stack model (build_stack_box_model_per_view, ซึ่งคำนวณเสร็จก่อนหน้านี้
+#   แล้วในลำดับการทำงาน) ก่อนยอมรับ floor-hole candidate ใดๆ - ต้องผ่านครบ 3 เงื่อนไข:
+#     1. มีตั้งที่ hole_region ทับซ้อนอยู่จริง เป็นคาร์โก้จริง วัดความสูงได้
+#     2. มีตั้งข้างเคียง (ซ้ายหรือขวา ติดกันโดยตรง) ที่เป็นคาร์โก้จริงเช่นกัน
+#     3. ตั้งข้างเคียงอย่างน้อย 1 ฝั่งสูงกว่าตั้งที่มีรูอย่างมีนัยสำคัญ
+#        (>= FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO = 30%)
+#   หากไม่ผ่านครบทั้ง 3 ข้อ จะถูกปฏิเสธทันที (ถือเป็นแค่ผนังตู้/โครงสร้างที่โผล่ ไม่ใช่
+#   ความเสี่ยงจริง) - detect_floor_hole_regions_per_view() รับ stack_box_model เป็น
+#   พารามิเตอร์เพิ่มเติม (optional, None=ข้ามการ validate เพื่อ backward compatibility)
+#
+#   ผลลัพธ์ที่คาดหวัง: Floor-Hole ยังคงจับ "กล่องสูงต่ำวางติดกันจริง" ได้เหมือนเดิม
+#   (เช่นกรณี ED85-02 ที่เคยยืนยันแล้ว) แต่จะไม่จับ "ผนังตู้เปล่าๆ ที่ไม่มีตั้งข้างเคียง
+#   ให้เทียบ" อีกต่อไป
+#
+# v24.10 - [ROLLED BACK - ดูด้านบน] ปรับปรุงความชัดเจนของสีและความหนาของกรอบความเสี่ยงทุกประเภท ตามคำขอผู้ใช้
 #   ("ปรับสีและความหนาของกรอบให้เหมาะสมกับแต่ละสี")
 #
 #   ROOT CAUSE ที่พบ (ยืนยันด้วยภาพจริงจากไฟล์ ED85-02): สีกรอบเดิมหลายสี (purple,
@@ -256,38 +317,20 @@ except Exception as _ocr_import_err:
 GLOBAL_API_KEYS = []
 GLOBAL_KEY_INDEX = 0
 
-# v24.10: ปรับสีให้ต่างจากสีคาร์โก้ทั่วไปมากขึ้น (ดู CHANGELOG หัวไฟล์) - ใช้ hex
-# code แทนชื่อสีมาตรฐานเพื่อควบคุมโทนสีได้แม่นยำ ทุกสีจะถูกวาดพร้อม halo (ขอบตัดกัน
-# อัตโนมัติ) เสมอ ทำให้มองเห็นชัดเจนไม่ว่าพื้นหลังจะเป็นสีอะไร
+# v24.11: ROLLBACK - กลับไปใช้สีชื่อมาตรฐาน (แบบ v24.8) ตามคำขอผู้ใช้ที่ต้องการรูปทรง
+# กรอบสี่เหลี่ยมธรรมดา ไม่ใช้ halo/hex-color scheme ของ v24.10 อีกต่อไป
 RISK_COLORS = {
-    "STEP_DOWN_RISK": "#FF0000",           # แดงสด - รุนแรง (เสี่ยงล้ม/ตกจริง)
-    "REAR_EMPTY_RISK": "#FF8C00",          # ส้มเข้ม - พื้นที่ว่างท้ายตู้
-    "REAR_LATERAL_IMBALANCE": "#FF1493",   # ชมพูเข้ม (deep pink) - ไม่สมดุลท้ายตู้
-    "REAR_COMBINED_RISK": "#FF6A00",       # ส้มแดง - ผสมทั้งว่างและไม่สมดุล (ใช้น้อย)
-    "COMBINED_AREA_RISK": "#8B008B",       # ม่วงเข้ม - ใช้เป็นค่าสำรองเมื่อไม่มี
-                                            # draw_colors (ปกติกรณีนี้ใช้ 2 สีเสมอ)
-    "FRONT_EMPTY_RISK": "#FFC300",         # เหลืองอำพัน (amber) - พื้นที่ว่างหัวตู้
-    "LATERAL_GAP_RISK": "#00B7EB",         # ฟ้าเข้ม (cerulean) - ช่องว่างด้านข้าง
-    "TALL_UNSTABLE_RISK": "#C400FF",       # ม่วงอมชมพูสด - รุนแรง (เสี่ยงล้มคว่ำ)
-    "OVERHANG_RISK": "#39FF14",            # เขียวนีออน - รุนแรง (เสี่ยงของหล่น)
+    "STEP_DOWN_RISK": "red",
+    "REAR_EMPTY_RISK": "orange",
+    "REAR_LATERAL_IMBALANCE": "deeppink",
+    "REAR_COMBINED_RISK": "orange",
+    "COMBINED_AREA_RISK": "purple",
+    "FRONT_EMPTY_RISK": "yellow",
+    "LATERAL_GAP_RISK": "cyan",
+    "TALL_UNSTABLE_RISK": "magenta",
+    "OVERHANG_RISK": "lime",
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
-
-# v24.10 NEW: ความหนาเส้นกรอบ (พิกเซล) ตามระดับความรุนแรงของแต่ละประเภทความเสี่ยง -
-# ความเสี่ยงที่มีโอกาสทำให้สินค้าล้ม/ตกจริง (fall/tip-over hazard) ใช้เส้นหนาสุดเพื่อ
-# ดึงดูดความสนใจมากกว่าความเสี่ยงเชิงพื้นที่ว่าง/การจัดวางที่รุนแรงน้อยกว่า
-RISK_LINE_WIDTH = {
-    "STEP_DOWN_RISK": 10,
-    "OVERHANG_RISK": 10,
-    "TALL_UNSTABLE_RISK": 10,
-    "REAR_LATERAL_IMBALANCE": 8,
-    "REAR_COMBINED_RISK": 8,
-    "REAR_EMPTY_RISK": 7,
-    "FRONT_EMPTY_RISK": 7,
-    "LATERAL_GAP_RISK": 7,
-    "COMBINED_AREA_RISK": 9,
-}
-DEFAULT_RISK_LINE_WIDTH = 8
 
 ZONE_BASED_RISK_TYPES = {
     "FRONT_EMPTY_RISK",
@@ -341,6 +384,26 @@ FLOOR_HOLE_MIN_RAW_COVERAGE = 0.70         # สัดส่วนจุดข�
                                           # ขั้นต่ำ (กัน noise แทรกในหลุมที่ควรจะสม่ำเสมอ)
 FLOOR_HOLE_MAX_ROUGHNESS = 0.30            # ความขรุขระสูงสุดที่ยอมรับได้ (หลุมจริงราบ
                                           # เรียบมาก ยืนยันจากไฟล์จริง roughness≈0)
+
+# v24.11 NEW: FLOOR-HOLE ADJACENT-STACK VALIDATION - แก้บั๊กที่ผู้ใช้พบ ("รูโบ๋ ไปจับ
+# ผนังตู้ ไม่จับ กล่องสูงต่ำวางติดกัน") ROOT CAUSE: detect_floor_hole_regions() เดิม
+# ตัดสินจากสี pixel ล้วนๆ (hole_depth/width/roughness) โดยไม่เคยตรวจสอบว่ามี "กล่อง
+# ข้างเคียงที่สูงกว่าจริง" หรือไม่ ทำให้กรณีที่เห็นผนัง/พื้นตู้โผล่ (เช่น ขอบเขตนอกสุด
+# ของคาร์โก้ที่ติดผนัง แต่ไม่มีตั้งข้างเคียงอีกฝั่งให้เทียบ) ถูกเข้าใจผิดว่าเป็น
+# STEP_DOWN_RISK ทั้งที่ไม่มีกล่องสูงต่ำวางติดกันจริงตามที่ผู้ใช้ต้องการตรวจจับ
+#
+# วิธีแก้: เพิ่มขั้นตอนตรวจสอบไขว้กับ per-box stack model (build_stack_box_model_per_
+# view) ก่อนยอมรับ floor-hole candidate ใดๆ - ต้องมี (1) ตั้งที่ hole_region ทับซ้อน
+# อยู่จริง เป็นคาร์โก้จริง (2) มีตั้งข้างเคียง (ซ้ายหรือขวา) ที่เป็นคาร์โก้จริงเช่นกัน
+# และ (3) ตั้งข้างเคียงสูงกว่าตั้งที่มีรูอย่างมีนัยสำคัญ (>= เกณฑ์นี้) - ถ้าไม่ผ่านครบ
+# ทั้ง 3 เงื่อนไข จะถูกปฏิเสธทันที (ถือเป็นแค่ผนังตู้/โครงสร้างที่โผล่ ไม่ใช่ความเสี่ยง)
+FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO = 0.30
+
+# v24.12 NEW: เกณฑ์ที่เข้มงวดกว่า (สูงกว่า) ใช้เฉพาะเมื่อต้อง fallback ไปใช้ "raw
+# stacks" (การแบ่งกล่องคุณภาพต่ำที่ coverage ไม่ผ่านเกณฑ์ปกติ) เพื่อชดเชยความไม่
+# น่าเชื่อถือของข้อมูล - ต้องการความต่างความสูงที่ชัดเจนกว่าปกติมากจึงจะยอมรับ ลด
+# ความเสี่ยงจาก false positive ที่อาจเกิดจากการแบ่งกล่องที่ไม่สมบูรณ์
+FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK = 0.45
 
 MIN_STEP_DOWN_RATIO = 0.075
 STEP_DOWN_PROFILE_STEP_PX = 5
@@ -1165,9 +1228,66 @@ def detect_floor_hole_regions(view_img, cargo_xmin, cargo_xmax, container_ymax, 
     return regions
 
 
-def detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
+def _validate_floor_hole_with_adjacent_stacks(hole_region, stacks, min_height_ratio=FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO):
+    """
+    v24.11 NEW: ตรวจสอบว่า floor-hole candidate มีหลักฐานจาก per-box stack model ว่า
+    เป็น "กล่องเตี้ยวางติดกับกล่องสูง" จริง ไม่ใช่แค่ผนังตู้/พื้นที่ว่างเปล่าที่ไม่มี
+    คู่เทียบให้ยืนยัน (เช่น ขอบเขตนอกสุดของคาร์โก้ที่ติดผนังตู้แต่ไม่มีกล่องข้างเคียง
+    อีกฝั่งให้เปรียบเทียบด้วย) - ดู CHANGELOG ที่ FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO
+    สำหรับรายละเอียด root cause
+
+    เงื่อนไขที่ต้องผ่านครบทั้งหมดจึงจะยอมรับ (คืนค่า True):
+      1. มีตั้ง (stack) ที่ x-range ทับซ้อนกับ hole_region จริง (คือ "ตั้งเตี้ย" ที่มีรู)
+         และตั้งนั้นต้องมีกล่องคาร์โก้จริง วัดความสูงได้
+      2. มีตั้งข้างเคียง (ซ้ายหรือขวา ที่ติดกันโดยตรงตามลำดับ x) ที่เป็นคาร์โก้จริงด้วย
+      3. ตั้งข้างเคียงอย่างน้อย 1 ฝั่งต้องสูงกว่าตั้งเตี้ยอย่างมีนัยสำคัญ
+         (>= min_height_ratio) - นี่คือหลักฐานว่า "กล่องสูงต่ำวางติดกันจริง"
+    """
+    if not stacks:
+        return False
+    hole_x_mid = (hole_region["x_min"] + hole_region["x_max"]) / 2
+    sorted_stacks = sorted(stacks, key=lambda s: s["x0"])
+
+    low_stack = None
+    low_idx = None
+    for idx, s in enumerate(sorted_stacks):
+        if s["x0"] - 10 <= hole_x_mid <= s["x1"] + 10:
+            low_stack = s
+            low_idx = idx
+            break
+    if low_stack is None or not low_stack.get("boxes"):
+        return False
+    low_height = _stack_total_height(low_stack)
+    if low_height is None:
+        return False
+
+    neighbors = []
+    if low_idx > 0:
+        neighbors.append(sorted_stacks[low_idx - 1])
+    if low_idx < len(sorted_stacks) - 1:
+        neighbors.append(sorted_stacks[low_idx + 1])
+
+    for neighbor in neighbors:
+        if not neighbor.get("boxes"):
+            continue
+        neighbor_height = _stack_total_height(neighbor)
+        if neighbor_height is None or neighbor_height <= low_height:
+            continue
+        diff_ratio = 1 - (low_height / neighbor_height)
+        if diff_ratio >= min_height_ratio:
+            return True
+    return False
+
+
+def detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent,
+                                         stack_box_model=None):
     """เรียก detect_floor_hole_regions() สำหรับทั้ง FRONT และ BACK view โดยแปลงพิกัด
-    ผลลัพธ์เป็น 'สัมบูรณ์บนภาพเต็ม' (เช่นเดียวกับ container_bounds/cargo_extent)"""
+    ผลลัพธ์เป็น 'สัมบูรณ์บนภาพเต็ม' (เช่นเดียวกับ container_bounds/cargo_extent)
+
+    v24.11 NEW: หากมี stack_box_model ส่งเข้ามา จะตรวจสอบทุก candidate ด้วย
+    _validate_floor_hole_with_adjacent_stacks() ก่อนยอมรับเสมอ (ปฏิเสธ candidate ที่
+    ไม่มีหลักฐานว่าเป็น "กล่องสูงต่ำวางติดกันจริง" - แก้บั๊กที่เคยจับผนังตู้ผิดพลาด)
+    """
     result = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
         cb = container_bounds.get(view)
@@ -1199,18 +1319,49 @@ def detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h, cro
             print(f"WARNING: Floor-hole detection failed for {view} ({e})")
             regions_rel = []
 
+        # v24.12 NEW: FALLBACK สำหรับ view ที่ per-box segmentation ปกติ (high-
+        # confidence, coverage >= threshold) ถูก reject ไป - ลองใช้ "raw_stacks"
+        # (best-effort, ไม่ผ่านเกณฑ์ coverage) แทน พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น
+        # (FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอนของ
+        # การแบ่งกล่องคุณภาพต่ำ - ดู CHANGELOG ที่ build_stack_box_model_per_view
+        # สำหรับรายละเอียด root cause (แก้บั๊กที่ BACK view ไม่เคยถูกตรวจพบเลยเมื่อ
+        # per-box segmentation ของ BACK ถูก reject เพราะ occlusion)
+        stacks_for_view = None
+        min_height_ratio_for_view = FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO
+        using_fallback_stacks = False
+        if stack_box_model is not None:
+            stacks_for_view = stack_box_model.get(view, [])
+            if not stacks_for_view:
+                fallback_stacks = stack_box_model.get(f"{view}_raw_stacks", [])
+                if fallback_stacks:
+                    stacks_for_view = fallback_stacks
+                    min_height_ratio_for_view = FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK
+                    using_fallback_stacks = True
+                    print(f"Floor-hole validation ({view}): high-confidence stack model unavailable "
+                          f"(coverage too low), using RAW fallback stacks with stricter threshold "
+                          f"({FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK*100:.0f}%)")
+
         regions_abs = []
         for r in regions_rel:
-            regions_abs.append({
+            region_abs = {
                 "x_min": r["x_min"] + origin_x, "x_max": r["x_max"] + origin_x,
                 "y_min": r["y_min"] + origin_y, "y_max": r["y_max"] + origin_y,
                 "ratio": r["ratio"], "source": "FORCED_FLOOR_HOLE_DETECTION",
-            })
+            }
+            if stacks_for_view is not None:
+                if not _validate_floor_hole_with_adjacent_stacks(region_abs, stacks_for_view,
+                                                                    min_height_ratio=min_height_ratio_for_view):
+                    print(f"Floor-hole candidate REJECTED ({view}, fallback_mode={using_fallback_stacks}) - "
+                          f"no adjacent taller cargo stack found (likely just exposed container wall/structure, "
+                          f"not a genuine height difference): x=[{region_abs['x_min']:.0f}-{region_abs['x_max']:.0f}]")
+                    continue
+            regions_abs.append(region_abs)
         result[view] = regions_abs
         if regions_abs:
-            print(f"Floor-hole detection ({view}): {len(regions_abs)} region(s) found")
+            print(f"Floor-hole detection ({view}): {len(regions_abs)} region(s) confirmed (validated against adjacent stacks)")
         else:
-            print(f"Floor-hole detection ({view}): no significant hole found (container appears uniform)")
+            print(f"Floor-hole detection ({view}): no significant validated hole found (container appears uniform, "
+                  f"or no adjacent taller stack to confirm any candidate)")
     return result
 
 
@@ -1248,6 +1399,8 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
                                min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX):
     """ตรวจจับความต่างระดับด้วยการหา 'จุดกระโดด' ระหว่างจุดที่ติดกันบน height-profile
     แล้วตรวจสอบแต่ละ segment ว่า 'เตี้ยกว่าเพื่อนบ้านซ้าย/ขวา' หรือไม่แยกกันเป็นอิสระ"""
+    px = view_img.convert("RGB").load()
+    w_img, h_img = view_img.size
     profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
     if len(profile) < 4:
         return []
@@ -1323,8 +1476,20 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
             if risky_x_min > risky_x_max:
                 risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
             y_ref = min(seg["edge_left"], seg["edge_right"])
+            # v24.12 FIX: เดิมใช้ y_max=container_ymax เสมอ (ยืดกรอบไปจนสุดพื้นตู้เต็ม
+            # ความสูง) ทำให้กรอบสูงเกินจริงมากเมื่อกล่องจริงในบริเวณนั้นเตี้ยกว่าความสูง
+            # ตู้เต็มมาก - แก้ไขด้วยการวัด "พื้นเฉพาะจุด" (local floor) จากพิกเซลจริงใน
+            # ช่วง risky_x_min-risky_x_max แทน เพื่อให้กรอบ "จำกัดแค่ความสูงกล่องจริง"
+            local_floors = []
+            floor_search_bottom = min(h_img, int(container_ymax) + 5)
+            for xs in range(int(risky_x_min), int(risky_x_max), max(1, step)):
+                if 0 <= xs < w_img:
+                    lf = _local_bottom_cargo_y(px, xs, int(y_start), floor_search_bottom)
+                    if lf is not None:
+                        local_floors.append(lf)
+            y_bottom = _median_of(local_floors) if local_floors else container_ymax
             risky_segments.append({"x_min": risky_x_min, "x_max": risky_x_max,
-                                     "y_min": y_ref, "y_max": container_ymax, "ratio": max_ratio})
+                                     "y_min": y_ref, "y_max": y_bottom, "ratio": max_ratio})
 
     risky_segments.sort(key=lambda r: r["x_min"])
     return risky_segments
@@ -1851,10 +2016,6 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
         total_stack_width = sum(s["x1"] - s["x0"] for s in stacks_local)
         coverage_ratio = total_stack_width / cargo_width
-        if coverage_ratio < STACK_COVERAGE_MIN_RATIO:
-            print(f"Per-box segmentation ({view}) REJECTED - coverage_ratio={coverage_ratio:.2f} "
-                  f"< threshold {STACK_COVERAGE_MIN_RATIO} (falling back to AI-only for this view, same as v21)")
-            continue
 
         stacks_abs = []
         for s in stacks_local:
@@ -1870,8 +2031,36 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
                 "top_y": s["top_y"] + origin_y, "floor_y": s["floor_y"] + origin_y,
                 "boxes": abs_boxes,
             })
-        result[view] = stacks_abs
+
+        # v24.12 NEW: FALLBACK สำหรับ view ที่ coverage ต่ำ (เช่น BACK view ที่มักมี
+        # occlusion มากกว่า FRONT ทำให้แบ่งกล่องได้ไม่ครอบคลุมพอ) - ROOT CAUSE ที่พบ:
+        # เดิมเมื่อ coverage_ratio < STACK_COVERAGE_MIN_RATIO จะ "continue" ทิ้ง
+        # ผลลัพธ์การแบ่งกล่องของ view นั้นไปทั้งหมด (result[view] ค้างเป็น [] และไม่เคย
+        # ตั้งค่า coverage_ratio เลย) ทำให้ floor-hole validation
+        # (_validate_floor_hole_with_adjacent_stacks) หาตั้งไม่เจอเลย จึงปฏิเสธทุก
+        # candidate ของ view นั้นเสมอ แม้จะเป็นความเสี่ยงจริงก็ตาม (เช่น กรณีที่ FRONT
+        # พบตั้งเตี้ยหัวตู้ได้ แต่ BACK ที่มีตั้งเตี้ยแบบเดียวกันกลับไม่ถูกตรวจพบเลย)
+        #
+        # วิธีแก้: เก็บผลการแบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์ coverage) ไว้ในคีย์แยก
+        # ต่างหาก (f"{view}_raw_stacks") เสมอ เพื่อให้ floor-hole validation มีข้อมูล
+        # อย่างน้อยที่สุด (best-effort) ให้ใช้ตรวจสอบได้ - ใช้ควบคู่กับเกณฑ์ที่เข้มงวด
+        # ขึ้น (FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
+        # ของการแบ่งกล่องคุณภาพต่ำ (ดู detect_floor_hole_regions_per_view)
+        #
+        # สำคัญ: result[view] หลัก (ที่ OVERHANG_RISK/TALL_UNSTABLE_RISK/
+        # REAR_LATERAL_IMBALANCE/cross-view veto-mirror ใช้) ยังคงพฤติกรรมเดิมทุก
+        # ประการ (ว่างเปล่าเมื่อ coverage ต่ำ) - ไม่ได้รับผลกระทบจากการแก้ไขนี้เลย
+        result[f"{view}_raw_stacks"] = stacks_abs
         result[f"{view}_coverage_ratio"] = coverage_ratio
+
+        if coverage_ratio < STACK_COVERAGE_MIN_RATIO:
+            print(f"Per-box segmentation ({view}) REJECTED for high-confidence risk types "
+                  f"(OVERHANG/TALL_UNSTABLE/LATERAL_IMBALANCE/cross-view) - coverage_ratio={coverage_ratio:.2f} "
+                  f"< threshold {STACK_COVERAGE_MIN_RATIO} (raw segmentation still saved as "
+                  f"'{view}_raw_stacks' - used ONLY as best-effort fallback for FLOOR-HOLE validation)")
+            continue
+
+        result[view] = stacks_abs
         print(f"Per-box segmentation ({view}): coverage_ratio={coverage_ratio:.2f}, "
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
@@ -1961,6 +2150,60 @@ def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
         return (abs_xmin, abs_ymin, abs_xmax, abs_ymax)
     except Exception:
         return None
+
+
+# v24.12 NEW: จำกัดขนาดกรอบความเสี่ยงทุกประเภทให้ "ใกล้เคียงขนาดจริงของกล่อง/บริเวณ
+# ที่วิเคราะห์ว่ามีความเสี่ยง" (ไม่ใช่ขยายเกินจำเป็นแบบที่เคยเกิดกับ STEP_DOWN_RISK ที่
+# เคยยืดกรอบไปจนสุดพื้นตู้เต็มความสูง) ตามคำขอผู้ใช้ - ขยายออกเล็กน้อยเท่านั้น
+# ("เลยมาได้นิดหน่อย") เพื่อไม่ให้กรอบแนบชิดขอบกล่องจนบังรายละเอียดขอบภาพ
+REGION_BOX_PAD_PX = 6
+
+
+def _region_to_padded_normalized_box(x_min, y_min, x_max, y_max, crop_w, crop_h, crop_y_start,
+                                       view_label, layout, pad_px=REGION_BOX_PAD_PX):
+    """
+    v24.12 NEW: แปลง region พิกัดสัมบูรณ์ (x_min,y_min,x_max,y_max) เป็น box_2d
+    normalized (0-1000) พร้อม 'ขยายออกเล็กน้อย' (pad_px) จากขอบเขตที่วัดได้จริง - ใช้
+    แทนที่การแปลงพิกัดแบบ inline ที่เคยกระจายอยู่หลายจุดใน process_request() เพื่อให้
+    ทุกประเภทความเสี่ยง (STEP_DOWN, OVERHANG, TALL_UNSTABLE, LATERAL_GAP ฯลฯ) ใช้
+    หลักการเดียวกัน: กรอบต้อง "จำกัดแค่ความสูง/ความกว้างของบริเวณที่วิเคราะห์จริง"
+    ไม่ขยายเกินความจำเป็น (ดู CHANGELOG - แก้ไข STEP_DOWN_RISK ที่เคยยืดกรอบไปจนสุด
+    พื้นตู้เต็มความสูงด้วย) โดยยอมให้ขยายออกเล็กน้อยเพื่อความสวยงาม/มองเห็นขอบชัดเจน
+
+    จะจำกัด (clip) ไม่ให้กรอบที่ขยายแล้วล้ำเข้าไปในครึ่งภาพของอีก view (FRONT/BACK)
+    หรือล้ำออกนอกขอบเขตภาพทั้งหมด
+    """
+    x_min = x_min - pad_px
+    x_max = x_max + pad_px
+    y_min = y_min - pad_px
+    y_max = y_max + pad_px
+
+    if layout == "TOP_BOTTOM":
+        mid_y = crop_y_start + crop_h // 2
+        if view_label == "FRONT":
+            y_min = max(crop_y_start, y_min)
+            y_max = min(mid_y, y_max)
+        else:
+            y_min = max(mid_y, y_min)
+            y_max = min(crop_y_start + crop_h, y_max)
+        x_min = max(0, x_min)
+        x_max = min(crop_w, x_max)
+    else:
+        mid_x = crop_w // 2
+        if view_label == "FRONT":
+            x_min = max(0, x_min)
+            x_max = min(mid_x, x_max)
+        else:
+            x_min = max(mid_x, x_min)
+            x_max = min(crop_w, x_max)
+        y_min = max(crop_y_start, y_min)
+        y_max = min(crop_y_start + crop_h, y_max)
+
+    ymin_norm = ((y_min - crop_y_start) / crop_h) * 1000
+    ymax_norm = ((y_max - crop_y_start) / crop_h) * 1000
+    xmin_norm = (x_min / crop_w) * 1000
+    xmax_norm = (x_max / crop_w) * 1000
+    return [ymin_norm, xmin_norm, ymax_norm, xmax_norm]
 
 
 def _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view, overlap_threshold=0.10):
@@ -2906,196 +3149,21 @@ def _merge_same_area_risks(all_risks):
 
 
 # ---------------------------------------------------------------------------
-# ISOMETRIC-ALIGNED QUADRILATERAL BOUNDING BOXES (v24.9 NEW)
-#
-# ตามคำขอของผู้ใช้: ให้กรอบความเสี่ยงทุกสีเป็น "สี่เหลี่ยมด้านขนานเอียง" (parallelogram)
-# ที่สอดคล้องกับมุมมอง isometric ของกล่องสินค้าในไดอะแกรม แทนที่จะเป็นสี่เหลี่ยมผืนผ้า
-# ตรงแบบเดิม (axis-aligned rectangle) ที่ดูขัดกับภาพ 3 มิติ
-#
-# ROOT INSIGHT (ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02): ภายในกล่องเดียวกัน ความสูงจริง
-# (แนวตั้ง) คงที่ตลอดความกว้าง แต่ทั้งขอบบนและขอบล่างของกล่อง "เอียงไปทิศทางเดียวกัน"
-# ตามมุมมอง isometric (เช่น ตั้งม่วง x=636-704: top_y จาก 404->370, bottom_y จาก
-# 691->657 - ทั้งคู่ลดลง 34px เท่ากันพอดี เพราะเป็นกล่องเดียวกัน ความสูงคงที่ 287px)
-#
-# วิธีแก้: แทนที่จะเดามุมเอียงคงที่ (fixed skew constant) ซึ่งอาจไม่ตรงกับทุกไฟล์/ทุก
-# ตำแหน่ง ใช้การ "วัดขอบจริงจากพิกเซล" ที่ตำแหน่ง x0 และ x1 ของแต่ละกรอบโดยตรง (median
-# จากหลายคอลัมน์ใกล้เคียงเพื่อกันสัญญาณรบกวน) แล้ววาดเป็น polygon 4 มุมแทนสี่เหลี่ยม
-# ตรง - ทำให้กรอบเอียงตรงตามภาพจริงเสมอ ไม่ว่าไฟล์จะมีมุมมอง isometric แบบใดก็ตาม
-#
-# กรณี "พื้นที่ว่าง" (REAR_EMPTY_RISK, FRONT_EMPTY_RISK, LATERAL_GAP_RISK ฯลฯ ที่ไม่มี
-# คาร์โก้ให้วัดขอบ) จะ fallback ไปวัดขอบ "โครงสร้างตู้" (พื้น/ผนัง, saturated color)
-# แทน ซึ่งก็เอียงตามมุมมอง isometric เดียวกัน (ยืนยันด้วยพิกเซลจริงเช่นกัน)
-#
-# หากวัดขอบไม่สำเร็จเลย (ไม่พบทั้งคาร์โก้และโครงสร้างตู้ในบริเวณนั้น) จะ fallback
-# กลับไปวาดสี่เหลี่ยมผืนผ้าตรงแบบเดิม (ปลอดภัย ไม่มีการพังหรือกรอบหายไป)
+# v24.11 ROLLBACK: กลับไปใช้ "สี่เหลี่ยมผืนผ้าตรง" (axis-aligned rectangle) แบบ v24.8
+# ตามคำขอผู้ใช้ - ตัดฟีเจอร์ quad-corner/parallelogram (v24.9) และ halo effect (v24.10)
+# ออกทั้งหมด เนื่องจากผู้ใช้ทดสอบแล้วเห็นว่ารูปทรงสี่เหลี่ยมธรรมดาดูดีกว่า/อ่านง่ายกว่า
 # ---------------------------------------------------------------------------
 
-QUAD_EDGE_SEARCH_MARGIN_PX = 35   # ขยายขอบเขตค้นหา (บน/ล่าง) จากกรอบเดิมเผื่อขอบจริง
-                                   # อยู่นอกกรอบที่คำนวณไว้เดิมเล็กน้อย
-QUAD_EDGE_SAMPLE_SPREAD = 3       # จำนวนคอลัมน์ข้างเคียงที่สุ่มตรวจ (median) ต่อจุดมุม
-                                   # เพื่อกันสัญญาณรบกวนจาก anti-aliasing/ตัวอักษร
-
-
-def _measure_edge_y_at_x(px, x, y_search_top, y_search_bottom, find_top, is_edge_fn):
-    """หาตำแหน่ง y ของขอบ (find_top=True: จุดแรกที่พบ, False: จุดสุดท้ายที่พบ) ของ
-    เงื่อนไข is_edge_fn ภายในช่วง [y_search_top, y_search_bottom) ที่คอลัมน์ x เดียว"""
-    if find_top:
-        for y in range(y_search_top, y_search_bottom):
-            if is_edge_fn(px[x, y]):
-                return y
-        return None
-    else:
-        last = None
-        for y in range(y_search_top, y_search_bottom):
-            if is_edge_fn(px[x, y]):
-                last = y
-        return last
-
-
-def _measure_edge_y_median(px, x_center, w, y_search_top, y_search_bottom, find_top,
-                             is_edge_fn, spread=QUAD_EDGE_SAMPLE_SPREAD):
-    """วัดตำแหน่งขอบที่ x_center ด้วยค่ามัธยฐานจากคอลัมน์ข้างเคียง (x_center±spread)
-    เพื่อความทนทานต่อสัญญาณรบกวนเฉพาะจุด (เช่น ตัวอักษร/ไฮไลท์)"""
-    vals = []
-    for dx in range(-spread, spread + 1):
-        x = x_center + dx
-        if not (0 <= x < w):
-            continue
-        v = _measure_edge_y_at_x(px, x, y_search_top, y_search_bottom, find_top, is_edge_fn)
-        if v is not None:
-            vals.append(v)
-    if not vals:
-        return None
-    vals.sort()
-    return vals[len(vals) // 2]
-
-
-def compute_quad_corners_for_region(full_img, x0, y0, x1, y1, margin=QUAD_EDGE_SEARCH_MARGIN_PX):
-    """
-    คำนวณมุมทั้ง 4 ของ 'สี่เหลี่ยมด้านขนานเอียง' (parallelogram) ที่สอดคล้องกับขอบจริง
-    ของกล่อง/โครงสร้างตู้ในบริเวณ [x0,y0,x1,y1] (พิกัดสัมบูรณ์บนภาพเต็ม full_img)
-
-    วิธีการ: วัดขอบบน/ล่างจริงจากพิกเซลที่ตำแหน่ง x0 และ x1 (ใช้ median จากคอลัมน์
-    ข้างเคียงกันสัญญาณรบกวน) โดยลองใช้ "ขอบคาร์โก้" (_is_vivid_cargo_color) ก่อน หาก
-    ไม่พบคาร์โก้เลยในบริเวณนั้น (เช่น เป็นพื้นที่ว่างของ REAR_EMPTY_RISK) จะ fallback
-    ไปใช้ "ขอบโครงสร้างตู้" (_is_saturated_color) แทน ซึ่งเอียงตามมุมมอง isometric
-    เดียวกัน (ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02)
-
-    คืนค่า list ของ 4 จุด [(x0,top_left_y), (x1,top_right_y), (x1,bottom_right_y),
-    (x0,bottom_left_y)] เรียงตามเข็มนาฬิกาเริ่มจากมุมบนซ้าย พร้อมใช้กับ draw.polygon()
-    โดยตรง - คืนค่า None ถ้าวัดขอบไม่สำเร็จเลย (ผู้เรียกใช้ควร fallback เป็นสี่เหลี่ยม
-    ผืนผ้าตรงแทน)
-    """
-    try:
-        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
-        w, h = full_img.size
-        x0 = max(0, min(x0, w - 1)); x1 = max(x0 + 1, min(x1, w))
-        if x1 <= x0:
-            return None
-        y_search_top = max(0, y0 - margin)
-        y_search_bottom = min(h, y1 + margin)
-        if y_search_bottom <= y_search_top:
-            return None
-        px = full_img.convert("RGB").load()
-
-        for edge_test_fn in (_is_vivid_cargo_color, _is_saturated_color):
-            top_l = _measure_edge_y_median(px, x0, w, y_search_top, y_search_bottom, True, edge_test_fn)
-            top_r = _measure_edge_y_median(px, x1 - 1, w, y_search_top, y_search_bottom, True, edge_test_fn)
-            bot_l = _measure_edge_y_median(px, x0, w, y_search_top, y_search_bottom, False, edge_test_fn)
-            bot_r = _measure_edge_y_median(px, x1 - 1, w, y_search_top, y_search_bottom, False, edge_test_fn)
-            if None not in (top_l, top_r, bot_l, bot_r) and bot_l > top_l and bot_r > top_r:
-                return [(x0, top_l), (x1, top_r), (x1, bot_r), (x0, bot_l)]
-        return None
-    except Exception as e:
-        print(f"WARNING: compute_quad_corners_for_region failed ({e}) - falling back to rectangle")
-        return None
-
-
-def _inset_quad_corners(corners, inset_px):
-    """หด polygon 4 มุมเข้าด้านในตามระยะ inset_px (โดยประมาณ - สมมติรูปทรงไม่เอียงมาก
-    เกินไป) ใช้สำหรับวาดกรอบสีที่ 2 (inner outline) ในกรณี COMBINED_AREA_RISK"""
-    (tlx, tly), (trx, tr_y), (brx, bry), (blx, bly) = corners
-    return [
-        (tlx + inset_px, tly + inset_px),
-        (trx - inset_px, tr_y + inset_px),
-        (brx - inset_px, bry - inset_px),
-        (blx + inset_px, bly - inset_px),
-    ]
-
-
-def _contrasting_halo_color(color):
-    """
-    v24.10 NEW: คำนวณ 'สีขอบตัดกัน' (halo) ที่เหมาะสมที่สุดสำหรับสีกรอบที่กำหนด -
-    ใช้ luminance (ความสว่างที่รับรู้ได้) ของสีนั้นเพื่อเลือกว่าควรใช้ halo สีดำ (ถ้า
-    สีกรอบสว่าง) หรือสีขาว (ถ้าสีกรอบเข้ม) เพื่อให้ตัดกันชัดเจนที่สุดเสมอ
-
-    ROOT CAUSE ที่แก้ไข: ทดสอบยืนยันด้วยภาพจริงว่าเส้นกรอบสีเดียวล้วน (เช่น สีม่วง)
-    จะ "กลืนหายไปกับพื้นหลัง" เมื่อตกอยู่บนกล่องคาร์โก้สีเดียวกัน (เกิดขึ้นบ่อยเพราะ
-    ไดอะแกรมประเภทนี้ใช้สีสันสดใสหลากหลายสำหรับกล่องแต่ละ SKU) การเพิ่ม halo (คล้าย
-    เทคนิค outline บนแผนที่/ป้ายจราจร) ทำให้กรอบมองเห็นชัดเจนเสมอไม่ว่าพื้นหลังจะเป็น
-    สีอะไรก็ตาม
-    """
-    try:
-        r, g, b = PIL.ImageColor.getrgb(color)
-    except Exception:
-        return "black"
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    return "black" if luminance > 140 else "white"
-
-
-def _draw_ring_with_halo(draw, corners_or_rect, color, width, is_polygon):
-    """วาด 'วงแหวน' เดียว (polygon หรือ rectangle) พร้อม halo ด้านนอก - halo กว้างกว่า
-    เส้นสีจริง ~5px ทำให้เกิดขอบตัดกันรอบเส้นสีทั้ง 2 ด้าน (ด้านในและด้านนอกของเส้น)"""
-    halo_color = _contrasting_halo_color(color)
-    halo_width = width + 5
-    if is_polygon:
-        draw.polygon(corners_or_rect, outline=halo_color, width=halo_width)
-        draw.polygon(corners_or_rect, outline=color, width=width)
-    else:
-        draw.rectangle(corners_or_rect, outline=halo_color, width=halo_width)
-        draw.rectangle(corners_or_rect, outline=color, width=width)
-
-
-def _draw_single_or_dual_rectangle(draw, coords, outline_color, draw_colors=None, full_img=None,
-                                     line_width=DEFAULT_RISK_LINE_WIDTH):
-    """
-    วาดกรอบความเสี่ยง:
-    - v24.9: พยายามวาดเป็น 'สี่เหลี่ยมด้านขนานเอียง' (parallelogram) ที่สอดคล้องกับ
-      มุมมอง isometric ก่อนเสมอ (ถ้ามี full_img ให้วัดขอบจริงได้) หากวัดขอบไม่สำเร็จ
-      (คืนค่า None) จะ fallback ไปวาดสี่เหลี่ยมผืนผ้าตรงแบบเดิม (ปลอดภัย)
-    - v24.10: ทุกเส้นกรอบวาดพร้อม 'halo' (ขอบตัดกันสีขาว/ดำอัตโนมัติ) เสมอ เพื่อให้
-      มองเห็นชัดเจนไม่ว่าพื้นหลังจะเป็นสีอะไร (ดู _contrasting_halo_color) และใช้ความ
-      หนาเส้น (line_width) ตามระดับความรุนแรงของความเสี่ยงแต่ละประเภท (RISK_LINE_WIDTH)
-    """
+def _draw_single_or_dual_rectangle(draw, coords, outline_color, draw_colors=None):
     x0, y0, x1, y1 = map(int, coords)
-    corners = None
-    if full_img is not None:
-        corners = compute_quad_corners_for_region(full_img, x0, y0, x1, y1)
-
-    if corners is not None:
-        if draw_colors and len(draw_colors) >= 2:
-            c1, c2 = draw_colors[0], draw_colors[1]
-            _draw_ring_with_halo(draw, corners, c1, line_width, is_polygon=True)
-            inner_width = max(4, line_width - 2)
-            inner = _inset_quad_corners(corners, line_width + 4)
-            # เช็คว่า inset แล้วยังเป็นรูปทรงที่สมเหตุสมผล (ไม่กลับด้าน) ก่อนวาด
-            if inner[2][0] > inner[0][0] and inner[2][1] > inner[0][1]:
-                _draw_ring_with_halo(draw, inner, c2, inner_width, is_polygon=True)
-        else:
-            _draw_ring_with_halo(draw, corners, outline_color, line_width, is_polygon=True)
-        return
-
-    # --- FALLBACK: สี่เหลี่ยมผืนผ้าตรงแบบเดิม (เมื่อวัดขอบจริงไม่ได้) ---
     if draw_colors and len(draw_colors) >= 2:
         c1, c2 = draw_colors[0], draw_colors[1]
-        _draw_ring_with_halo(draw, [x0, y0, x1, y1], c1, line_width, is_polygon=False)
-        inner_width = max(4, line_width - 2)
-        inset = line_width + 4
+        draw.rectangle([x0, y0, x1, y1], outline=c1, width=8)
+        inset = 9
         if x1 - x0 > inset * 2 and y1 - y0 > inset * 2:
-            _draw_ring_with_halo(draw, [x0 + inset, y0 + inset, x1 - inset, y1 - inset], c2, inner_width, is_polygon=False)
+            draw.rectangle([x0 + inset, y0 + inset, x1 - inset, y1 - inset], outline=c2, width=6)
     else:
-        _draw_ring_with_halo(draw, [x0, y0, x1, y1], outline_color, line_width, is_polygon=False)
-
+        draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
 def _convert_zoom_box_to_absolute(zoom_box_2d, crop_x0, crop_y0, crop_x1, crop_y1):
     try:
@@ -3223,8 +3291,11 @@ def process_request(request):
         # นำผลลัพธ์ไปรวมกับ step_down_regions ที่ตรวจพบจาก height-profile method เดิม
         # (ไม่ซ้ำซ้อนกัน เพราะเป็นสัญญาณคนละแหล่งที่มา) แล้วให้ผ่านการตรวจสอบ
         # CROSS-VIEW VERIFICATION (v24.6) เหมือนกันทุกจุด ก่อนยอมรับเป็นความเสี่ยงจริง
+        # v24.11 FIX: ส่ง stack_box_model เข้าไปด้วยเสมอ เพื่อให้ validate กับตั้งข้างเคียง
+        # ก่อนยอมรับ candidate ใดๆ (แก้บั๊กที่เคยจับผนังตู้ผิดพลาดเป็น STEP_DOWN_RISK)
         floor_hole_regions = detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h,
-                                                                   crop_y_start, container_bounds, cargo_extent)
+                                                                   crop_y_start, container_bounds, cargo_extent,
+                                                                   stack_box_model=stack_box_model)
         for view_label in ("FRONT", "BACK"):
             existing = step_down_regions.get(view_label, [])
             for hole_region in floor_hole_regions.get(view_label, []):
@@ -3357,15 +3428,13 @@ def process_request(request):
                     continue
                 if _view_already_has_overlapping_claim(view_label, "OVERHANG_RISK", region, all_risks):
                     continue
-                ymin_norm = ((region["y_min"] - crop_y_start) / crop_h) * 1000
-                ymax_norm = ((region["y_max"] - crop_y_start) / crop_h) * 1000
-                xmin_norm = (region["x_min"] / crop_w) * 1000
-                xmax_norm = (region["x_max"] / crop_w) * 1000
+                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, view_label, layout)
                 print(f"FORCED OVERHANG_RISK ({view_label}) from deterministic per-box segmentation "
                       f"(overhang_ratio={region['ratio']*100:.0f}%)")
                 all_risks.append({
                     "view": view_label, "risk_type": "OVERHANG_RISK",
-                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "box_2d": box_2d,
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_OVERHANG",
                     "description": f"พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างกล่องล่าง (ตรวจจับจาก per-box segmentation)",
                 })
@@ -3374,15 +3443,13 @@ def process_request(request):
                     continue
                 if _view_already_has_overlapping_claim(view_label, "TALL_UNSTABLE_RISK", region, all_risks):
                     continue
-                ymin_norm = ((region["y_min"] - crop_y_start) / crop_h) * 1000
-                ymax_norm = ((region["y_max"] - crop_y_start) / crop_h) * 1000
-                xmin_norm = (region["x_min"] / crop_w) * 1000
-                xmax_norm = (region["x_max"] / crop_w) * 1000
+                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, view_label, layout)
                 print(f"FORCED TALL_UNSTABLE_RISK ({view_label}) from deterministic per-box segmentation "
                       f"(height_diff_ratio={region['ratio']*100:.0f}%)")
                 all_risks.append({
                     "view": view_label, "risk_type": "TALL_UNSTABLE_RISK",
-                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "box_2d": box_2d,
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_TALL_UNSTABLE",
                     "description": f"พบกองสินค้าสูงโดดเดี่ยวไม่มีตั้งข้างค้ำยัน (ต่างจากเพื่อนบ้านประมาณ {region['ratio']*100:.0f}%) (ตรวจจับจาก per-box segmentation)",
                 })
@@ -3639,12 +3706,8 @@ def process_request(request):
             precise_lateral_box_2d = None
             if precise_abs_box:
                 px0, py0, px1, py1 = precise_abs_box
-                precise_lateral_box_2d = [
-                    ((py0 - crop_y_start) / crop_h) * 1000,
-                    (px0 / crop_w) * 1000,
-                    ((py1 - crop_y_start) / crop_h) * 1000,
-                    (px1 / crop_w) * 1000,
-                ]
+                precise_lateral_box_2d = _region_to_padded_normalized_box(px0, py0, px1, py1,
+                                                                            crop_w, crop_h, crop_y_start, view_label, layout)
 
             if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
@@ -3661,17 +3724,16 @@ def process_request(request):
                                    "box_2d": precise_lateral_box_2d})
             elif (local_depth_gap_regions.get(view_label) and view_label not in _existing_risk_views("LATERAL_GAP")):
                 best_region = max(local_depth_gap_regions[view_label], key=lambda r: r["max_gap_px"])
-                ymin_norm = ((best_region["y_min"] - crop_y_start) / crop_h) * 1000
-                ymax_norm = ((best_region["y_max"] - crop_y_start) / crop_h) * 1000
-                xmin_norm = (best_region["x_min"] / crop_w) * 1000
-                xmax_norm = (best_region["x_max"] / crop_w) * 1000
+                box_2d = _region_to_padded_normalized_box(best_region["x_min"], best_region["y_min"],
+                                                            best_region["x_max"], best_region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, view_label, layout)
                 print(f"FORCED LATERAL_GAP_RISK ({view_label}) from LOCAL DEPTH-GAP SCAN "
                       f"(x=[{best_region['x_min']:.0f}-{best_region['x_max']:.0f}], "
                       f"max_local_gap={best_region['max_gap_px']:.0f}px, width={best_region['width_px']:.0f}px)")
                 all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A",
                                    "reasoning": "FORCED_BY_LOCAL_DEPTH_GAP_SCAN",
                                    "description": f"พบหลุมเฉพาะจุดบนพื้นตู้ (ตำแหน่งเดียว ไม่ใช่ทั้งโหลด) ลึกประมาณ {best_region['max_gap_px']:.0f}px กว้าง {best_region['width_px']:.0f}px (ตรวจจับจาก local depth-gap scan)",
-                                   "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm]})
+                                   "box_2d": box_2d})
 
         if unused_floor_mm is not None and unused_floor_mm >= UNUSED_FLOOR_MIN_MM:
             for gap_risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
@@ -3718,17 +3780,14 @@ def process_request(request):
                         continue
                 if already_covered:
                     continue
-                x0, y0, x1, y1 = region["x_min"], region["y_min"], region["x_max"], region["y_max"]
-                ymin_norm = ((y0 - crop_y_start) / crop_h) * 1000
-                ymax_norm = ((y1 - crop_y_start) / crop_h) * 1000
-                xmin_norm = (x0 / crop_w) * 1000
-                xmax_norm = (x1 / crop_w) * 1000
+                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, view_label, layout)
                 source_tag = region.get("source", "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP")
                 print(f"FORCED STEP_DOWN_RISK ({view_label}) from {source_tag} "
                       f"(height_diff_ratio={region['ratio']*100:.1f}%)")
                 all_risks.append({
                     "view": view_label, "risk_type": "STEP_DOWN_RISK",
-                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                    "box_2d": box_2d,
                     "reasoning": source_tag,
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis / cross-view verification)",
                 })
@@ -3738,6 +3797,11 @@ def process_request(request):
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
         reported_risk_keys = set()
+        # v24.12 NEW: risk_groups ใช้จัดกลุ่มคำอธิบายข้อความตาม "ประเภทความเสี่ยง"
+        # เท่านั้น (ไม่รวมตำแหน่ง/view) เพื่อแสดงคำอธิบายเพียงครั้งเดียวแม้จะพบความ
+        # เสี่ยงประเภทเดียวกันหลายจุด (แยกจาก reported_risk_keys ที่ใช้นับจำนวนจุดจริง)
+        risk_groups = {}
+        group_order = []
 
         half_h_local = crop_h // 2
         mid_y_local = crop_y_start + half_h_local
@@ -3762,19 +3826,6 @@ def process_request(request):
             draw_colors = risk.get("draw_colors", None)
             outline_color = RISK_COLORS.get(risk_type, "red")
 
-            # v24.10 NEW: คำนวณความหนาเส้นตามระดับความรุนแรงของความเสี่ยงประเภทนั้น
-            # (ดู RISK_LINE_WIDTH) - สำหรับ COMBINED_AREA_RISK (กรอบ 2 สี ที่รวมหลาย
-            # ความเสี่ยงในบริเวณเดียวกัน) ใช้ค่าความหนาสูงสุดของความเสี่ยงที่ถูกรวม
-            # เข้าด้วยกัน เพื่อให้สะท้อนความรุนแรงที่แท้จริงของจุดนั้น
-            if risk_type == "COMBINED_AREA_RISK":
-                merged_types_for_width = risk.get("merged_risk_types", [])
-                if merged_types_for_width:
-                    line_width = max(RISK_LINE_WIDTH.get(t, DEFAULT_RISK_LINE_WIDTH) for t in merged_types_for_width)
-                else:
-                    line_width = RISK_LINE_WIDTH.get("COMBINED_AREA_RISK", DEFAULT_RISK_LINE_WIDTH)
-            else:
-                line_width = RISK_LINE_WIDTH.get(risk_type, DEFAULT_RISK_LINE_WIDTH)
-
             resolved_view = view_name if view_name != "GENERAL" else "FRONT"
             box = risk.get("box_2d") or risk.get("boundingBox") or risk.get("box")
             if view_name == "GENERAL" and box and isinstance(box, list) and len(box) == 4:
@@ -3797,7 +3848,7 @@ def process_request(request):
             if is_zone_based and risk_type != "COMBINED_AREA_RISK":
                 precise = precise_boxes.get((resolved_view, risk_type))
                 if precise:
-                    _draw_single_or_dual_rectangle(draw, precise, outline_color, draw_colors, full_img=img, line_width=line_width)
+                    _draw_single_or_dual_rectangle(draw, precise, outline_color, draw_colors)
                     drawn = True
 
             if not drawn and not is_zone_based and box and isinstance(box, list) and len(box) == 4:
@@ -3824,7 +3875,7 @@ def process_request(request):
                     if box_too_small or box_too_large:
                         raise ValueError(f"box size invalid (w={box_w_ratio:.2f}, h={box_h_ratio:.2f}) - rejected")
 
-                    _draw_single_or_dual_rectangle(draw, [abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline_color, draw_colors, full_img=img, line_width=line_width)
+                    _draw_single_or_dual_rectangle(draw, [abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline_color, draw_colors)
                     drawn = True
                 except Exception as e:
                     print(f"box_2d rejected for {risk_type} ({resolved_view}): {e}")
@@ -3833,22 +3884,22 @@ def process_request(request):
                 fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
                                               container_bounds=container_bounds, cargo_extent=cargo_extent)
                 if fallback:
-                    _draw_single_or_dual_rectangle(draw, fallback, outline_color, draw_colors, full_img=img, line_width=line_width)
+                    _draw_single_or_dual_rectangle(draw, fallback, outline_color, draw_colors)
                     drawn = True
             if not drawn:
                 print(f"Could not draw box for {risk_type} ({resolved_view})")
 
-            # v24.8 FIX: เดิม report_key = risk_type เพียงอย่างเดียว ทำให้ 2 จุดที่เป็น
-            # ความเสี่ยงประเภทเดียวกัน (เช่น STEP_DOWN_RISK) แต่อยู่คนละ view/ตำแหน่ง
-            # จริง (เช่น FRONT กับ BACK ที่ตรวจพบพร้อมกันหลังเพิ่ม FLOOR-HOLE DETECTION
-            # v24.8) ถูกมองว่า "ซ้ำกัน" และถูกตัดออกจากรายงานข้อความไปเพียงจุดเดียว
-            # (แม้กรอบภาพจะยังวาดครบทั้ง 2 จุดก็ตาม เพราะการวาดเกิดก่อนจุดนี้) แก้ไข
-            # โดยรวม view + ตำแหน่งกล่อง (ปัดเศษ) เข้าไปใน key ด้วย สำหรับ risk ประเภท
-            # ที่อ้างอิงตำแหน่งกล่องเฉพาะจุด (BOX_BASED_RISK_TYPES) เพื่อให้ 2 จุดที่
-            # ตำแหน่งต่างกันจริงถูกรายงานแยกกันอย่างถูกต้อง (zone-based risk type เช่น
-            # REAR_EMPTY_RISK ยังคงพฤติกรรมเดิม เพราะมีแค่ 1 โซนต่อ view อยู่แล้ว)
+            # v24.8: instance-level key (position-aware) - ป้องกันการนับจุดเดียวกัน
+            # ซ้ำ (เช่น ถ้า merge-dedup พลาดไปบ้าง) ใช้สำหรับ "นับจำนวนจุดเสี่ยงจริง"
+            # (hazardCount) เท่านั้น - ไม่เกี่ยวกับการจัดกลุ่มข้อความ (ดู v24.12 ด้านล่าง)
             if risk_type == "COMBINED_AREA_RISK":
-                report_key = "+".join(risk.get("merged_risk_types", [risk_type]))
+                instance_key = "+".join(risk.get("merged_risk_types", [risk_type]))
+                if box and isinstance(box, list) and len(box) == 4:
+                    try:
+                        _y0, _x0, _y1, _x1 = map(float, box)
+                        instance_key += f"_{round(_x0/50)}_{round(_y0/50)}"
+                    except Exception:
+                        pass
             elif risk_type in BOX_BASED_RISK_TYPES:
                 pos_tag = ""
                 if box and isinstance(box, list) and len(box) == 4:
@@ -3857,29 +3908,58 @@ def process_request(request):
                         pos_tag = f"_{round(_x0/50)}_{round(_y0/50)}"
                     except Exception:
                         pos_tag = ""
-                report_key = f"{risk_type}_{resolved_view}{pos_tag}"
+                instance_key = f"{risk_type}_{resolved_view}{pos_tag}"
             else:
-                report_key = risk_type
-            if report_key not in reported_risk_keys:
-                reported_risk_keys.add(report_key)
+                instance_key = f"{risk_type}_{resolved_view}"
+
+            if instance_key in reported_risk_keys:
+                continue  # จุดเดียวกันซ้ำ (duplicate instance) - ข้ามไปเลย ไม่นับซ้ำ
+            reported_risk_keys.add(instance_key)
+
+            # v24.12 NEW: GROUP KEY (ไม่รวมตำแหน่ง/view) - ใช้จัดกลุ่มสำหรับคำอธิบาย
+            # ข้อความเท่านั้น ตามคำขอผู้ใช้: "ระบุรายงานอธิบายความเสี่ยง แค่อันเดียว
+            # แม้ว่าจะมากกว่า 1 เคส เช่น พบ STEP_DOWN_RISK จำนวน 2 เคส ระบุตัวเลข 2
+            # แต่คำอธิบายด้านล่างมีแค่ 1 อันพอ ไม่ต้องเขียนซ้ำตามจำนวนเคสที่เหมือนกัน"
+            # - แยก "การนับจำนวนจุดเสี่ยง" (instance_key ด้านบน, ใช้กับ hazardCount)
+            # ออกจาก "การแสดงคำอธิบาย" (group_key นี้, ใช้กับ action_text) โดยเจตนา
+            if risk_type == "COMBINED_AREA_RISK":
+                merged_names_for_group = risk.get("merged_risk_types", [])
+                group_key = "COMBINED:" + "+".join(sorted(merged_names_for_group))
+            elif risk_type == "REAR_COMBINED_RISK":
+                group_key = "REAR_COMBINED_RISK"
+            else:
+                group_key = risk_type
+
+            if group_key not in risk_groups:
                 if risk_type == "COMBINED_AREA_RISK":
                     merged_names = risk.get("merged_risk_types", [])
-                    title = "ความเสี่ยงร่วม: " + " + ".join(merged_names)
+                    title_base = "ความเสี่ยงร่วม: " + " + ".join(merged_names)
                     parts = [generate_action_report(rt, "", sku_str) for rt in merged_names]
                     detail = "\n\n".join(parts) if parts else (risk.get("description", "") or "พบหลายความเสี่ยงในบริเวณเดียวกัน")
                 elif risk_type == "REAR_COMBINED_RISK":
-                    title = "ความเสี่ยง: REAR_EMPTY_RISK + REAR_LATERAL_IMBALANCE (บริเวณประตูท้ายตู้เดียวกัน)"
+                    title_base = "ความเสี่ยง: REAR_EMPTY_RISK + REAR_LATERAL_IMBALANCE (บริเวณประตูท้ายตู้เดียวกัน)"
                     detail = generate_action_report(risk_type, risk.get("description", ""), sku_str)
                 else:
-                    title = f"ความเสี่ยง: {risk_type}"
+                    title_base = f"ความเสี่ยง: {risk_type}"
                     detail = generate_action_report(risk_type, risk.get("description", ""), sku_str)
-                detected_hazards.append({"title": title, "detail": detail, "is_error": False})
+                risk_groups[group_key] = {"title_base": title_base, "detail": detail, "count": 0}
+                group_order.append(group_key)
+            else:
+                print(f"Grouped duplicate description for '{group_key}' (instance #{risk_groups[group_key]['count']+1}) "
+                      f"- description text shown only once, count will be incremented")
+            risk_groups[group_key]["count"] += 1
 
+        for group_key in group_order:
+            info = risk_groups[group_key]
+            title = f"{info['title_base']} (พบ {info['count']} จุด)" if info["count"] > 1 else info["title_base"]
+            detected_hazards.append({"title": title, "detail": info["detail"], "is_error": False})
+
+        total_instance_count = sum(g["count"] for g in risk_groups.values())
         real_hazards = [h for h in detected_hazards if not h.get("is_error")]
         error_hazards = [h for h in detected_hazards if h.get("is_error")]
         sep = "\n\n" + "-" * 50 + "\n\n"
         if real_hazards:
-            status_text = f"พบจุดเสี่ยงอันตราย ({len(real_hazards)} จุด)"
+            status_text = f"พบจุดเสี่ยงอันตราย ({total_instance_count} จุด)"
             action_text = sep.join(f"[{h['title']}]\n{h['detail']}" for h in real_hazards)
         elif error_hazards:
             status_text = "เกิดข้อผิดพลาดในการวิเคราะห์ AI"
@@ -3892,7 +3972,7 @@ def process_request(request):
         img.save(buffered, format="JPEG", quality=80)
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
-        return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url}, 200, headers)
+        return ({"status": status_text, "hazardCount": total_instance_count, "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
