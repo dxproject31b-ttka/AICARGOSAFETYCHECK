@@ -16,23 +16,58 @@ import PIL.ImageColor
 import fitz  # PyMuPDF
 import functions_framework
 import google.generativeai as genai
-import difflib
-
-# v24.7 NEW: OCR dependencies (opencv, pytesseract) - โหลดแบบ optional/graceful
-# เพราะ OCR เป็นฟีเจอร์เสริม (best-effort) ไม่ใช่ dependency บังคับ หากไม่มีติดตั้งไว้
-# ในสภาพแวดล้อม deploy ใดๆ ระบบยังคงทำงานได้ปกติ (แค่ไม่ได้ประโยชน์จาก SKU-matching)
-try:
-    import numpy as np
-    import cv2
-    import pytesseract
-    OCR_AVAILABLE = True
-except Exception as _ocr_import_err:
-    OCR_AVAILABLE = False
-    print(f"WARNING: OCR dependencies unavailable ({_ocr_import_err}) - "
-          f"SKU-based cross-view matching disabled, will use depth-ratio only")
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.12
+# AI Cargo Safety Checker - High Precision v24.13
+#
+# v24.13 - 3 การแก้ไขตามคำขอผู้ใช้หลังทดสอบ v24.12 จริง:
+#   ("1. step down risk - ตีกรอบจุดเสี่ยงมั่วมาก ต้องการให้ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า
+#     ตั้งของกล่องด้านข้าง 2. กรอบฟ้า กรอบเหลือง ตีกรอบใหญ่เกิน แตกต่างจากกรอบสีชมพู
+#     3. กล่องสินค้าเต็มตู้ หน้าเรียบ ระบุว่ามีความเสี่ยง (แตกต่างจาก version23)
+#     น่าจะปัญหาจาก step down risk")
+#
+#   ส่วนที่ 1 (แก้ปัญหา 1 และ 3) - STEP_DOWN_RISK: เปลี่ยนวิธีตรวจจับทั้งหมด จาก
+#   "pixel/height-profile scan" (v24.1/v24.4/v24.5) + "floor-hole scan"
+#   (v24.8/v24.11) + "cross-view mirror/veto" (v24.6/v24.7) ซึ่งล้วนอ่านค่าสี/
+#   ความสูงจาก pixel โดยตรงและไวต่อสัญญาณรบกวน (anti-aliasing, เส้นขอบ, ป้าย
+#   ข้อความ, สีโครงสร้างตู้ที่ใกล้เคียงคาร์โก้) จึงสร้างจุดเสี่ยงเท็จจำนวนมาก (ROOT
+#   CAUSE ของปัญหาที่ 1 "ตีกรอบมั่ว" และปัญหาที่ 3 "กล่องเต็มตู้หน้าเรียบก็ยังโดนตีว่า
+#   มีความเสี่ยง") ไปใช้วิธีเดียวกับที่ผู้ใช้ยืนยันแล้วว่าแม่นยำ/เชื่อถือได้มาตลอด
+#   (ใช้กับ OVERHANG_RISK/TALL_UNSTABLE_RISK/REAR_LATERAL_IMBALANCE มาตั้งแต่
+#   v22-v24): เปรียบเทียบ "ความสูงรวมของตั้งกล่อง" (per-box stack model จาก
+#   build_stack_box_model_per_view) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ฟังก์ชันใหม่
+#   detect_step_down_regions_from_stacks) - ตามคำขอผู้ใช้ตรงตัว: "ค้นหาแค่ตั้งของ
+#   กล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" กรอบผลลัพธ์ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า"
+#   เท่านั้น (ไม่ยืดไปคลุมตั้งข้างเคียงหรือพื้นตู้เต็มความสูง)
+#   ผลลัพธ์ที่คาดหวัง: (ก) คอนเทนเนอร์ที่โหลดเต็ม/หน้าเรียบสม่ำเสมอ (ทุกตั้งสูง
+#   เท่ากัน) จะไม่มีคู่ตั้งใดต่างความสูงเกินเกณฑ์เลย -> ไม่มี STEP_DOWN_RISK เท็จอีก
+#   ต่อไป (แก้ปัญหาที่ 3) (ข) กรอบที่วาดออกมาจะจำกัดเฉพาะตั้งกล่องที่เตี้ยกว่าจริง
+#   เท่านั้น ไม่กระจัดกระจายไปยังตำแหน่งอื่นที่ไม่เกี่ยวข้อง (แก้ปัญหาที่ 1) ฟังก์ชัน
+#   เดิมทั้งหมด (_detect_height_profile, _detect_step_down_regions,
+#   detect_step_down_regions_per_view, detect_floor_hole_regions*,
+#   cross_view_check_step_down, build_cross_view_mirrored_step_down_regions,
+#   annotate_boxes_with_sku_per_view ฯลฯ) ยังคงอยู่ในโค้ด (ไม่ลบทิ้ง เผื่อต้องการ
+#   นำกลับมาใช้ในอนาคต) แต่ไม่ถูกเรียกใช้ใน pipeline หลักอีกต่อไป
+#
+#   ส่วนที่ 2 (แก้ปัญหา 2) - LATERAL_GAP_RISK (กรอบฟ้า) ตีกรอบใหญ่เกิน: ROOT CAUSE
+#   ที่พบ (ยืนยันจากโค้ด get_precise_lateral_gap_box เดิม): กรอบใช้ x0,x1 = ขอบเขต
+#   คาร์โก้ "ทั้งหมด" เสมอ (เท่ากับความยาวคาร์โก้เต็มคัน) โดยไม่เคยตรวจสอบว่าช่องว่าง
+#   จริงอยู่ที่ตำแหน่งใดของความยาว ทำให้กรอบยืดเต็มความยาวคาร์โก้เสมอไม่ว่าช่องว่าง
+#   จริงจะมีขนาดเท่าใด (ต่างจากกรอบสีชมพู REAR_LATERAL_IMBALANCE ที่มาจาก AI zoom +
+#   cargo-pixel-ratio validation ซึ่งจำกัดเฉพาะบริเวณจริง) วิธีแก้ (ฟังก์ชันใหม่
+#   _localize_lateral_gap_x_range): สแกน pixel ในแนวคอลัมน์ (เหมือนหลักการ
+#   LOCAL_GAP/FLOOR_HOLE scan ที่ใช้อยู่แล้ว) ภายในแถบความสูงที่เป็นช่องว่างจริง
+#   (gap_y0-gap_y1 ที่คำนวณไว้แล้ว) หาช่วง x ที่ "ไม่มีคาร์โก้อยู่ในแถบนั้นจริง"
+#   ต่อเนื่องยาวที่สุด แล้วใช้ช่วงนั้นแทนความยาวคาร์โก้เต็มคัน (fallback กลับไปใช้
+#   ความยาวเต็มเหมือนเดิมเฉพาะเมื่อหาช่วงที่ชัดเจนไม่ได้ - ปลอดภัย ไม่ทำให้กรอบหายไป)
+#
+#   FRONT_EMPTY_RISK/REAR_EMPTY_RISK (กรอบเหลือง) ตีกรอบใหญ่เกิน: ROOT CAUSE ที่พบ
+#   ใน _get_fallback_box (จุดที่กรอบเหล่านี้ตกไปใช้เมื่อ AI ไม่ได้ยืนยันด้วย zoom-box
+#   ตรงๆ - เช่นกรณี FORCED by printed 'Unused Floor' ซึ่งส่ง box_2d=None เสมอ): เดิม
+#   คำนวณความสูงกรอบ (y0,y1) จาก "min/max ระหว่างขอบเขตตู้กับขอบเขตคาร์โก้รวมกัน"
+#   ทำให้กรอบยืดเต็มความสูงของภาพในทุกกรณี วิธีแก้: ใช้เฉพาะขอบเขตความสูงของคาร์โก้
+#   จริง (view_cargo) + padding เล็กน้อยเท่านั้น (ไม่รวม container ymin/ymax เข้ามา
+#   ด้วย) ทำให้กรอบจำกัดเฉพาะบริเวณที่คาร์โก้ปรากฏจริง
 #
 # v24.12 - 3 การแก้ไขตามคำขอผู้ใช้หลังทดสอบ v24.11:
 #
@@ -65,222 +100,25 @@ except Exception as _ocr_import_err:
 #      ตำแหน่ง) แสดงคำอธิบายเพียง 1 ครั้งต่อประเภท พร้อมต่อท้ายชื่อเรื่องด้วย
 #      "(พบ N จุด)" เมื่อ N > 1 - hazardCount ยังคงเป็นจำนวนจุดเสี่ยงจริงทั้งหมดเหมือนเดิม
 #
-# v24.11 - ROLLBACK + FIX ตามคำขอผู้ใช้หลังทดสอบ v24.9/v24.10 จริง:
-#   ("24.10,24.9 ไม่ดี รูปทรงสี่เหลี่ยมดีกว่า / 24.8 รูโบ๋ ไปจับผนังตู้ ไม่จับ
-#   กล่องสูงต่ำวางติดกัน / ให้ตั้งต้นใหม่ นำ24.8มาแก้ไข")
+# v24.11 - ROLLBACK ภาพ (ตัด v24.9 quad-corner/parallelogram + v24.10 halo effect
+#   ออก กลับไปใช้สี่เหลี่ยมผืนผ้าตรง + สีชื่อมาตรฐานแบบ v24.8) และเพิ่มการตรวจสอบไขว้กับ
+#   per-box stack model ก่อนยอมรับ floor-hole candidate (กันจับผนังตู้เปล่าผิดพลาด)
+# v24.10 - [ROLLED BACK] เคยเพิ่ม halo/outline effect + hex-color scheme ให้กรอบ
+# v24.9 - [REMOVED] เคยเปลี่ยนกรอบเป็น parallelogram เอียงตามมุมมอง isometric
+# v24.8 - [REMOVED ใน v24.13] เคยเพิ่ม FLOOR-HOLE DETECTION (ตรวจจับ "รูโบ๋" จาก
+#   ระยะห่างพื้น/ผนังตู้ที่โผล่ให้เห็น) เป็นสัญญาณเสริมสำหรับ STEP_DOWN_RISK
+# v24.7 - [REMOVED ใน v24.13] เคยเพิ่ม OCR-BASED SKU MATCHING (Tesseract) เป็นชั้น
+#   เสริมให้ cross-view verification - พบว่าอ่านฟอนต์ตกแต่งของ MaxLoad Pro ไม่ได้เลย
+#   (0% success rate) จึงไม่มีผลใช้งานจริง
+# v24.6 - [REMOVED ใน v24.13] เคยเพิ่ม CROSS-VIEW VERIFICATION (เปรียบเทียบตำแหน่ง
+#   ทางกายภาพระหว่าง FRONT/BACK view ด้วย depth-ratio mapping) สำหรับ veto/mirror
+#   STEP_DOWN_RISK - ทั้ง v24.6/v24.7/v24.8 ถูกแทนที่ด้วยวิธีเปรียบเทียบความสูงตั้งกล่อง
+#   ที่ติดกันโดยตรง (detect_step_down_regions_from_stacks, v24.13) ซึ่งแม่นยำกว่าและ
+#   ใช้โค้ดน้อยกว่ามาก - ดู CHANGELOG v24.13 ด้านบนสำหรับรายละเอียดเต็ม
 #
-#   ส่วนที่ 1 - ROLLBACK ภาพ: ตัด v24.9 (quad-corner/parallelogram) และ v24.10
-#   (halo effect + hex-color/line-width scheme) ออกทั้งหมด กลับไปใช้ "สี่เหลี่ยม
-#   ผืนผ้าตรง" (axis-aligned rectangle) + สีชื่อมาตรฐาน (red/orange/purple/ฯลฯ)
-#   แบบ v24.8 ตามที่ผู้ใช้ยืนยันว่าดูดีกว่า/อ่านง่ายกว่า
-#
-#   ส่วนที่ 2 - FIX Floor-Hole Detection (v24.8): ROOT CAUSE ที่ผู้ใช้ชี้ - เดิม
-#   detect_floor_hole_regions() ตัดสินจากสี pixel ล้วนๆ (hole_depth/width/roughness)
-#   โดยไม่เคยตรวจสอบว่ามี "กล่องข้างเคียงที่สูงกว่าจริง" หรือไม่เลย ทำให้กรณีที่เห็น
-#   ผนัง/พื้นตู้โผล่โดยไม่มีตั้งข้างเคียงให้เทียบ (เช่น ขอบเขตนอกสุดของคาร์โก้ที่ติด
-#   ผนัง) ถูกเข้าใจผิดว่าเป็น STEP_DOWN_RISK ทั้งที่ไม่มีกล่องสูงต่ำวางติดกันจริง
-#
-#   วิธีแก้ (_validate_floor_hole_with_adjacent_stacks): เพิ่มขั้นตอนตรวจสอบไขว้กับ
-#   per-box stack model (build_stack_box_model_per_view, ซึ่งคำนวณเสร็จก่อนหน้านี้
-#   แล้วในลำดับการทำงาน) ก่อนยอมรับ floor-hole candidate ใดๆ - ต้องผ่านครบ 3 เงื่อนไข:
-#     1. มีตั้งที่ hole_region ทับซ้อนอยู่จริง เป็นคาร์โก้จริง วัดความสูงได้
-#     2. มีตั้งข้างเคียง (ซ้ายหรือขวา ติดกันโดยตรง) ที่เป็นคาร์โก้จริงเช่นกัน
-#     3. ตั้งข้างเคียงอย่างน้อย 1 ฝั่งสูงกว่าตั้งที่มีรูอย่างมีนัยสำคัญ
-#        (>= FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO = 30%)
-#   หากไม่ผ่านครบทั้ง 3 ข้อ จะถูกปฏิเสธทันที (ถือเป็นแค่ผนังตู้/โครงสร้างที่โผล่ ไม่ใช่
-#   ความเสี่ยงจริง) - detect_floor_hole_regions_per_view() รับ stack_box_model เป็น
-#   พารามิเตอร์เพิ่มเติม (optional, None=ข้ามการ validate เพื่อ backward compatibility)
-#
-#   ผลลัพธ์ที่คาดหวัง: Floor-Hole ยังคงจับ "กล่องสูงต่ำวางติดกันจริง" ได้เหมือนเดิม
-#   (เช่นกรณี ED85-02 ที่เคยยืนยันแล้ว) แต่จะไม่จับ "ผนังตู้เปล่าๆ ที่ไม่มีตั้งข้างเคียง
-#   ให้เทียบ" อีกต่อไป
-#
-# v24.10 - [ROLLED BACK - ดูด้านบน] ปรับปรุงความชัดเจนของสีและความหนาของกรอบความเสี่ยงทุกประเภท ตามคำขอผู้ใช้
-#   ("ปรับสีและความหนาของกรอบให้เหมาะสมกับแต่ละสี")
-#
-#   ROOT CAUSE ที่พบ (ยืนยันด้วยภาพจริงจากไฟล์ ED85-02): สีกรอบเดิมหลายสี (purple,
-#   yellow, cyan, magenta, lime) ตรงกับสีกล่องสินค้าจริงที่พบได้ทั่วไปในไดอะแกรมประเภท
-#   นี้ (เช่น กล่อง TGT1G-BN สีม่วง, AIT1A-BN สีเหลือง, ATC1C สีฟ้า) ทำให้เมื่อกรอบไป
-#   ตกอยู่บนกล่องสีเดียวกัน เส้นกรอบจะ "กลืนหายไปกับพื้นหลัง" มองแทบไม่เห็นเลย (ทดสอบ
-#   วาดกรอบสีม่วงล้วนบนกล่องสีม่วง - เส้นแทบมองไม่เห็นด้วยตาเลย)
-#
-#   วิธีแก้ (2 ส่วน):
-#     1. HALO/OUTLINE EFFECT (_contrasting_halo_color): ทุกกรอบตอนนี้วาด 2 ชั้นเสมอ -
-#        ชั้นนอก (halo) เป็นสีขาว/ดำ (เลือกอัตโนมัติจากความสว่างของสีกรอบเอง เพื่อให้
-#        ตัดกันชัดที่สุด) ขนาดใหญ่กว่าเล็กน้อย แล้ววาดสีกรอบจริงทับด้านบน - เทคนิคนี้
-#        (เหมือนกับเส้น outline บนแผนที่/ป้ายจราจร) ทำให้กรอบมองเห็นชัดเจนเสมอไม่ว่าจะ
-#        ตกอยู่บนพื้นหลังสีอะไรก็ตาม (คาร์โก้สีเดียวกันกับกรอบ, พื้นขาว, โครงสร้างตู้
-#        ฯลฯ) ทดสอบยืนยันแล้วว่าทำให้กรอบที่เคยมองไม่เห็นเลย กลับมาเห็นชัดเจนมาก
-#     2. ปรับสีให้มีระยะห่างจากสีคาร์โก้ทั่วไปมากขึ้น + ความหนาเส้นตามระดับความรุนแรง
-#        (RISK_LINE_WIDTH) - ความเสี่ยงที่มีโอกาสทำให้สินค้าล้ม/ตกจริง (STEP_DOWN_RISK,
-#        OVERHANG_RISK, TALL_UNSTABLE_RISK) ใช้เส้นหนาสุด (10px) เพื่อดึงดูดความสนใจ
-#        มากที่สุด ส่วนความเสี่ยงเชิงพื้นที่ว่าง/การจัดวาง (REAR_EMPTY_RISK,
-#        FRONT_EMPTY_RISK, LATERAL_GAP_RISK) ใช้เส้นบางกว่าเล็กน้อย (7px)
-#
-#   สำหรับกรอบ 2 สี (COMBINED_AREA_RISK) แต่ละวงแหวน (ชั้นนอก/ชั้นใน) มี halo ของ
-#   ตัวเองแยกกัน และความหนารวมใช้ค่าสูงสุดของความเสี่ยงที่ถูกรวมเข้าด้วยกัน
-#
-#   ไม่กระทบตำแหน่ง/รูปทรง quad-corner (v24.9) หรือตรรกะการตรวจจับความเสี่ยงใดๆ เลย -
-#   ปรับปรุงเฉพาะการวาด (สไตล์ภาพ) เท่านั้น
-#
-# v24.9 - เปลี่ยนกรอบความเสี่ยงทุกสีจาก "สี่เหลี่ยมผืนผ้าตรง" (axis-aligned rectangle)
-#   เป็น "สี่เหลี่ยมด้านขนานเอียง" (parallelogram) ที่สอดคล้องกับมุมมอง isometric ของ
-#   กล่องสินค้าในไดอะแกรม ตามคำขอผู้ใช้ (ด้านความสวยงาม/ความสอดคล้องของภาพ)
-#
-#   ROOT INSIGHT (ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02): ภายในกล่องเดียวกัน ความสูงจริง
-#   (แนวตั้ง) คงที่ตลอดความกว้าง แต่ทั้งขอบบนและขอบล่างของกล่อง "เอียงไปทิศทางเดียวกัน"
-#   ตามมุมมอง isometric (ตัวอย่าง: ตั้งม่วง x=636-704 มี top_y จาก 404->370, bottom_y
-#   จาก 691->657 - ทั้งคู่ลดลง 34px เท่ากันพอดี เพราะเป็นกล่องเดียวกันความสูงคงที่ 287px)
-#
-#   วิธีแก้ (compute_quad_corners_for_region): แทนที่จะเดามุมเอียงคงที่ (fixed skew
-#   constant ซึ่งอาจไม่ตรงกับทุกไฟล์/ตำแหน่ง) ใช้การ "วัดขอบจริงจากพิกเซล" ที่ตำแหน่ง
-#   x0 และ x1 ของแต่ละกรอบโดยตรง (median จากหลายคอลัมน์ข้างเคียงกันสัญญาณรบกวน) แล้ว
-#   วาดเป็น polygon 4 มุมแทนสี่เหลี่ยมตรง - รับประกันว่ากรอบเอียงตรงตามภาพจริงเสมอ
-#
-#   ลำดับการลองวัดขอบ: (1) ขอบคาร์โก้จริง (_is_vivid_cargo_color) ก่อน สำหรับกรอบที่
-#   ครอบคลุมกล่องสินค้า (STEP_DOWN, OVERHANG, TALL_UNSTABLE ฯลฯ) (2) หากไม่พบคาร์โก้
-#   เลยในบริเวณนั้น (เช่น พื้นที่ว่างของ REAR_EMPTY_RISK/FRONT_EMPTY_RISK/
-#   LATERAL_GAP_RISK) fallback ไปวัด "ขอบโครงสร้างตู้" (_is_saturated_color) แทน ซึ่ง
-#   เอียงตามมุมมอง isometric เดียวกัน (ยืนยันด้วยพิกเซลจริงเช่นกันที่โซน floor-hole)
-#   (3) หากวัดขอบไม่สำเร็จเลยทั้ง 2 วิธี (ไม่พบทั้งคาร์โก้และโครงสร้างตู้ในบริเวณนั้น)
-#   จะ fallback กลับไปวาดสี่เหลี่ยมผืนผ้าตรงแบบเดิม (ปลอดภัย ไม่มีการพังหรือกรอบหายไป)
-#
-#   สำหรับกรอบ 2 สี (COMBINED_AREA_RISK) กรอบด้านในใช้วิธีหด (inset) มุมทั้ง 4 ของ
-#   polygon ด้านนอกเข้ามาตามสัดส่วน (แทนการวาดสี่เหลี่ยมตรงด้านในแบบเดิม)
-#
-#   ทดสอบยืนยันด้วยภาพจริงแล้วว่ากรอบที่วาดออกมาเอียงตรงตามขอบกล่องสินค้า/โครงสร้าง
-#   ตู้ในภาพจริงพอดี ไม่มีการเปลี่ยนแปลงตำแหน่ง/ตรรกะการตรวจจับความเสี่ยงใดๆ เลย
-#   (เปลี่ยนแค่รูปทรงการวาดกรอบเท่านั้น)
-#
-# v24.8 - เพิ่ม FLOOR-HOLE DETECTION (ตรวจจับ "รูโบ๋") เป็นสัญญาณใหม่สำหรับ
-#   STEP_DOWN_RISK ที่ทำงานได้ภายใน "view เดียว" โดยไม่ต้องพึ่งพา cross-view matching
-#   หรือ OCR เลย - ไอเดียนี้มาจากผู้ใช้ที่สังเกตว่า "บริเวณสีฟ้าอ่อนใกล้ผนังหัวตู้ (BACK
-#   view) มองเห็นเป็นรูโบ๋" (พื้นที่ที่ควรมีคาร์โก้แต่กลับเห็นโครงสร้างตู้แทน)
-#
-#   หลักการ: เมื่อตั้งหนึ่งเตี้ย/สั้นกว่าตั้งข้างเคียงในทิศทางความลึก (z-depth) ของ
-#   มุมมอง isometric พื้นที่ด้านล่าง-ด้านหลังของตั้งเตี้ยนั้น (ที่ตั้งสูงข้างเคียงควร
-#   จะบังไว้ถ้าสูงเท่ากัน) จะเผยให้เห็น "พื้น/ผนังตู้" (structure color) แทนคาร์โก้ -
-#   วัดได้จาก "hole_depth" = ตำแหน่ง y ล่างสุดของโครงสร้างตู้ที่มองเห็น ลบด้วยตำแหน่ง
-#   y ล่างสุดของคาร์โก้ที่มองเห็นจริง ในแต่ละคอลัมน์ x เดียวกัน
-#
-#   ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02 (ผลชัดเจนกว่าวิธีเดิมทั้งหมด):
-#     - BACK view ตำแหน่งตั้งเตี้ย (x=573-635, ATC1C/AIT1A area): hole_depth=166px
-#       สม่ำเสมอต่อเนื่องตลอดความกว้าง ~63px (คิดเป็น ~41% ของความสูงตู้)
-#     - BACK view ตำแหน่งตั้งสูงข้างเคียง (x=638 เป็นต้นไป): hole_depth=2-3px (ปกติ)
-#     - FRONT view จุด false-positive เดิม (purple-maroon, x=780-839): hole_depth
-#       สูงสุดแค่ 42px และเป็นแค่จุดเดียวโดดๆ (ไม่ต่อเนื่อง กว้างไม่ถึง 10px) - ไม่ผ่าน
-#       เกณฑ์ความกว้างขั้นต่ำ ไม่เกิด false positive
-#     - FRONT view จุด genuine เดิม (blue-cyan, x=904-1035): มี noise คล้ายกัน (spike
-#       สูงสุด 43-62px แต่แคบมาก ~9px) - สรุปว่า floor-hole ไม่ใช่สัญญาณหลักของจุดนี้
-#       (จุดนี้ตรวจพบได้ดีอยู่แล้วจาก height-profile method เดิม)
-#
-#   วิธีนี้แข็งแกร่งกว่า height-profile scan (v24.1/v24.5) เพราะไม่ต้องอาศัยการหา
-#   "จุดบนสุดของตั้ง" (top_y) ที่มีปัญหาเรื่อง perspective/occlusion/มุมกล่อง - เพียง
-#   แค่วัดระยะห่างระหว่าง "จุดล่างสุดที่มองเห็นคาร์โก้" กับ "จุดล่างสุดที่มองเห็น
-#   โครงสร้างตู้" ซึ่งเป็นสัญญาณที่ตรงไปตรงมากว่ามาก
-#
-#   วิธีกรอง noise (คล้าย LOCAL_GAP_SCAN v24.3 แต่ปรับให้เหมาะกับ pattern นี้):
-#     1. Median smoothing (window=7) กรอง spike จากป้ายบอกระยะทาง/ตัวอักษร
-#     2. เกณฑ์ "ความกว้างขั้นต่ำที่ต่อเนื่อง" (FLOOR_HOLE_MIN_WIDTH_PX) - หลุมจริงกว้าง
-#        ต่อเนื่อง ~60px+ ในขณะที่ noise เป็นแค่จุดแคบๆ (<10-20px) เท่านั้น
-#     3. เกณฑ์ "ความลึกขั้นต่ำเทียบสัดส่วนความสูงตู้" (FLOOR_HOLE_MIN_RATIO) - กรอง
-#        ความคลาดเคลื่อนเล็กน้อยจาก anti-aliasing/ขอบกล่องออก
-#     4. Roughness check (เหมือน LOCAL_GAP_SCAN) - หลุมจริงมีค่าคงที่/ราบเรียบตลอด
-#        ความกว้าง ในขณะที่ noise จะกระโดดสลับ
-#
-#   สำคัญ: ต่างจาก LOCAL_GAP_SCAN (v24.3) ที่ออกแบบมาสำหรับ LATERAL_GAP_RISK และ
-#   "ตัดโซนผนังหัวตู้ออกโดยเจตนา" (เพราะมีสัญญาณรบกวนจากป้ายบอกระยะทาง) - ฟังก์ชันใหม่
-#   นี้ (detect_floor_hole_regions) สแกน "ตลอดความกว้างคาร์โก้เต็มรูปแบบ รวมโซนใกล้
-#   ผนังหัวตู้ด้วย" เพราะรอยรั่ว/รูโบ๋มักเกิดใกล้ผนังหัวตู้พอดี (จุดที่ LOCAL_GAP_SCAN
-#   เคยตัดออกไป) - ผลลัพธ์จากฟังก์ชันนี้จะถูกป้อนเข้า step_down_regions เป็นอีกหนึ่ง
-#   ช่องทางตรวจจับ (ควบคู่กับ height-profile method เดิม) แล้วผ่านการตรวจสอบ
-#   CROSS-VIEW VERIFICATION (v24.6) เช่นเดียวกันก่อนยอมรับเป็นความเสี่ยงจริง
-#
-# v24.7 - เพิ่ม OCR-BASED SKU MATCHING เป็นชั้นเสริม (best-effort layer) ให้กับ
-#   CROSS-VIEW VERIFICATION (v24.6) เพื่อจับคู่ตำแหน่งกล่องระหว่าง FRONT/BACK ด้วย
-#   "ชื่อ SKU ที่พิมพ์อยู่บนกล่องจริง" แทน/เสริมการเดาจาก depth-ratio (เรขาคณิต) ล้วนๆ
-#   ตามที่ผู้ใช้ร้องขอ พร้อมกลไกป้องกัน 2 อย่างตามที่ผู้ใช้ระบุ:
-#
-#   ป้องกันที่ 1 (ข้อความที่ไม่ใช่ชื่อกล่องสินค้า): ผลลัพธ์ OCR แบบดิบ (ซึ่งมักเพี้ยน/
-#   ไม่สมบูรณ์) จะถูกนำไป FUZZY-MATCH (difflib.SequenceMatcher) เทียบกับ "รายชื่อ SKU
-#   ที่รู้จักแน่นอน" ซึ่งดึงจาก PDF text โดยตรง (extract_sku_from_pdf - อ่านจากส่วน
-#   Load Summary ของเอกสาร แม่นยำ 100% ไม่ต้องพึ่ง OCR เลย) เฉพาะผลที่คะแนนความคล้าย
-#   ผ่านเกณฑ์ (OCR_SKU_MIN_CONFIDENCE=0.65) เท่านั้นจึงจะยอมรับ - ข้อความอื่นที่ไม่ใช่
-#   SKU (เช่น ตัวเลขบอกระยะทาง "7200(mm)", ป้าย "Front"/"Back") จะไม่มีทางผ่านเกณฑ์นี้
-#   ได้เลยเพราะไม่คล้าย SKU code ใดๆ ในรายการ
-#
-#   ป้องกันที่ 2 (SKU ของกล่องอื่นมาปน): OCR สแกนเฉพาะ "ภายในขอบเขตพิกเซลของกล่องนั้น
-#   โดยตรง" (จาก per-box segmentation model ที่มีอยู่แล้ว, ไม่ใช่พื้นที่กว้างๆ ที่อาจ
-#   ครอบคลุมกล่องข้างเคียงด้วย) ทำให้ข้อความที่อ่านได้ (ถ้ามี) ต้องเป็นของกล่องใบนั้น
-#   จริงๆ เท่านั้น
-#
-#   ROOT FINDING จากการทดสอบไฟล์จริง ED85-02 (สำคัญ - ต้องแจ้งผู้ใช้ตรงไปตรงมา):
-#   ทดสอบ OCR อย่างละเอียด 15+ วิธี (DPI 180-900, Otsu/adaptive threshold, กวาดมุม
-#   หมุน -35° ถึง +35°, PSM 6/7/8/11/12/13, OEM 1/3, character whitelist, morphological
-#   closing) กับขอบเขตกล่องจริงทั้ง 9 กล่องใน FRONT+BACK view พบว่า Tesseract (เอนจิน
-#   OCR มาตรฐาน) "อ่านฟอนต์ตกแต่งแบบ stencil/blackletter ที่ MaxLoad Pro ใช้พิมพ์ชื่อ
-#   SKU ไม่ได้เลย" (0% success rate ทุกกล่องที่ทดสอบ, คะแนน fuzzy-match สูงสุดที่ได้
-#   คือ 0.22 ซึ่งต่ำกว่าเกณฑ์ยอมรับมาก) เป็นข้อจำกัดทางเทคนิคจริงของฟอนต์เฉพาะทาง
-#   ไม่ใช่บั๊กของโค้ด - เอกสารอื่นที่ใช้ฟอนต์มาตรฐานกว่าอาจได้ผลดีกว่านี้
-#
-#   ด้วยเหตุนี้ระบบจึงออกแบบให้ "OCR เป็นชั้นเสริมที่ล้มเหลวอย่างปลอดภัย" (graceful
-#   degradation): พยายาม OCR+SKU-match ก่อนเสมอ หากไม่พบ SKU ที่มั่นใจพอ (คะแนนต่ำกว่า
-#   เกณฑ์ หรือไม่มี dependency ติดตั้ง) จะ fallback กลับไปใช้วิธี DEPTH-RATIO เดิม
-#   (v24.6, ยืนยันแล้วว่าใช้งานได้จริงกับไฟล์ ED85-02 - VETO false-positive สำเร็จ)
-#   โดยอัตโนมัติ ไม่กระทบผลลัพธ์เดิมแต่อย่างใด เป็นการ "เสริม" ไม่ใช่ "แทนที่"
-#
-#   ฟังก์ชันใหม่: _ocr_read_sku_in_region, annotate_boxes_with_sku_per_view,
-#   find_stack_by_sku - ดูรายละเอียดแต่ละฟังก์ชันในโค้ด
-#
-# v24.6 - เพิ่ม CROSS-VIEW VERIFICATION (ตรวจสอบไขว้ระหว่าง FRONT/BACK view) เพื่อแก้
-#   ปัญหา 2 ข้อที่ผู้ใช้พบพร้อมกันในไฟล์เดียว (ED85-02):
-#     1. FRONT view ตีกรอบ STEP_DOWN_RISK ผิดที่รอยต่อกล่องม่วง-น้ำตาลเข้ม (สูงเท่ากัน
-#        จริง ยืนยันด้วยภาพ - เป็น false positive จาก perspective noise)
-#     2. BACK view ไม่ตีกรอบที่ตั้งสีฟ้าอ่อน (ATC1C) ซึ่งเตี้ยกว่าตั้งสีเหลือง (AIT1A-BN)
-#        ข้างเคียงจริง (false negative)
-#
-#   ROOT INSIGHT: FRONT และ BACK view เป็นภาพมุมมองของ "ตู้คอนเทนเนอร์เดียวกัน" มองจาก
-#   2 ด้านตรงข้ามกัน (isometric) ดังนั้น "ตำแหน่งทางกายภาพ" (ระยะห่างจากผนังหัวตู้ เป็น
-#   สัดส่วน 0=ติดผนัง ถึง 1=ติดประตู) ของกล่องใดๆ ควรคำนวณได้จากทั้ง 2 view และต้อง
-#   สอดคล้องกัน - ถ้าตั้งหนึ่งมีความสูงจริงต่ำกว่าเพื่อนบ้าน ควรเห็นผลกระทบ (แม้จะมาก
-#   น้อยต่างกันเพราะมุมมอง/การบัง) ในทั้ง 2 view โดยหลักการนี้ใช้ตรวจสอบไขว้ได้ว่า:
-#     - ถ้า view หนึ่งอ้างว่ามี STEP_DOWN_RISK ที่ตำแหน่งกายภาพ D แต่ view ตรงข้าม (ที่
-#       ตำแหน่งกายภาพ D เดียวกัน หลังแปลงพิกัดด้วย depth-ratio mapping) กลับแสดงความสูง
-#       สม่ำเสมอ (ไม่มีรอยต่อ) -> เป็นหลักฐานคัดค้าน (CONTRADICT) ให้ VETO การอ้างนั้น
-#     - ถ้า view หนึ่งมีความไม่ต่อเนื่องจริงที่ตำแหน่ง D แต่การแบ่งกล่องภายใน view ตรงข้าม
-#       เอง "พลาด" ไม่ตรวจพบที่ตำแหน่งเดียวกัน (เพราะการแบ่งกล่อง/สีในบริเวณนั้นของอีก
-#       view ล้มเหลว) -> "สะท้อนกรอบ" (MIRROR) ไปยัง view ที่พลาด โดยใช้ตำแหน่ง y จาก
-#       per-box stack model ของ view นั้นเอง (ไม่ใช่เดาสุ่ม)
-#
-#   ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02 (บันทึกจากการตรวจสอบก่อนหน้า):
-#     - FRONT genuine boundary (blue->cyan) x=969-974 -> depth_ratio=0.126
-#     - BACK ที่ผู้ใช้ชี้ (yellow->cyan) x=630 -> depth_ratio=0.123
-#     - ผลต่าง depth_ratio เพียง 0.003 (แทบเป็นศูนย์) = ยืนยันว่าเป็น "ตั้งเดียวกันทาง
-#       กายภาพ" ที่ FRONT ตรวจพบถูกต้องอยู่แล้ว แต่ BACK พลาดไป (local segmentation
-#       ล้มเหลวในบริเวณนั้นของ BACK) -> ตรงเป้าสำหรับกลไก MIRROR
-#     - FRONT false-positive (purple->maroon) x=839 -> depth_ratio=0.372 -> เมื่อแปลง
-#       ไปตรวจสอบใน BACK ที่ x≈746 หาก BACK แสดงความสูงสม่ำเสมอ จะยืนยัน CONTRADICT
-#       และ VETO claim นี้ (ตรงกับที่ผู้ใช้ยืนยันด้วยภาพว่าสูงเท่ากันจริง)
-#
-#   ฟังก์ชันใหม่: _screen_x_to_depth_ratio, _depth_ratio_to_screen_x,
-#   get_stack_pair_straddling_depth, cross_view_check_step_down,
-#   build_cross_view_mirrored_step_down_regions - ดูรายละเอียดแต่ละฟังก์ชันในโค้ด
-#
-#   ข้อจำกัดที่ทราบ: กลไกนี้ต้องพึ่งพา per-box stack model ที่มี coverage เพียงพอในทั้ง
-#   2 view จึงจะทำงานได้เต็มประสิทธิภาพ หาก view ใด view หนึ่งมี coverage ต่ำเกินไป
-#   (ถูก reject จาก STACK_COVERAGE_MIN_RATIO) จะถือเป็น NEUTRAL (ไม่ veto ไม่ mirror)
-#   เพื่อความปลอดภัย - ไม่เสี่ยงต่อการตัดสินใจผิดพลาดจากข้อมูลที่ไม่น่าเชื่อถือ
-#
-# v24.5 - แก้ปัญหา STEP_DOWN_RISK ตีกรอบผิดตำแหน่งที่กล่องม่วง (ไฟล์ ED85-02) - พบ
-#   ROOT CAUSE 2 จุดที่ทำให้ _detect_height_profile() วัด top_y ผิดตำแหน่ง:
-#   1. "ขอบหลังคาตู้" สีเขียวมะกอกเข้ม (179,179,90, saturation 0.497) หลุดผ่านการกรอง
-#      เดิม (v24.4 จำกัดแค่ r,g>=230) แก้ไขเป็นเกณฑ์ saturation-based (0.25-0.62)
-#   2. "Anti-aliasing ของตัวอักษร/ป้ายบอกระยะทาง" สีเทา (135,135,135) เพิ่ม
-#      _is_grayscale_color() กรองออก
-#   เพิ่ม STEP_DOWN_MIN_CONSISTENT_RUN (10->20) + ปรับ edge_zone ให้แคบลง (~50px)
-#
-# v24.4 - เพิ่มการกรอง "สีโครงสร้างตู้" ออกจากการตรวจจับคาร์โก้แบบผ่อนปรน (lenient)
-#   สำหรับ STEP_DOWN_RISK height-profile scan โดยเฉพาะ
+# v24.5/v24.4 - [REMOVED ใน v24.13] เคยปรับปรุง _detect_height_profile() (pixel/
+#   color filtering) สำหรับ STEP_DOWN_RISK height-profile scan - แทนที่ทั้งหมดด้วย
+#   detect_step_down_regions_from_stacks() ใน v24.13 (ดู CHANGELOG ด้านบน)
 #
 # v24.3 - เพิ่ม LOCAL DEPTH-GAP SCAN ตรวจจับ "หลุมเฉพาะจุด" ที่ compute_lateral_gap_ratio
 #   (whole-container average) พลาดไป - ยืนยันจาก EC50-01/EC51-02
@@ -368,81 +206,9 @@ LOCAL_GAP_MAX_ROUGHNESS = 0.35
 LOCAL_GAP_WALL_ZONE_MARGIN_RATIO = 0.20
 LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO = 0.15
 
-# v24.8 NEW: FLOOR-HOLE DETECTION constants - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
-# root finding และผลการทดสอบเต็มรูปแบบกับไฟล์จริง ED85-02 (ไอเดียจากผู้ใช้)
-FLOOR_HOLE_SAMPLE_STEP_PX = 3            # ใช้ step ละเอียดกว่า LOCAL_GAP (5px) เพราะ
-                                          # ต้องการตำแหน่งขอบเขต (boundary) ที่แม่นยำ
-FLOOR_HOLE_SMOOTH_WINDOW = 7              # กรอง spike จากป้ายบอกระยะทาง/ตัวอักษร (ยืนยัน
-                                          # จากไฟล์จริงว่า window=7 กรอง noise ได้ดี)
-FLOOR_HOLE_MIN_RATIO = 0.15               # hole_depth ต้อง >= 15% ของความสูงตู้ จึงถือ
-                                          # ว่ามีนัยสำคัญ (ค่าจริงที่พบ = 41% สูงกว่า
-                                          # เกณฑ์นี้มาก มี margin ปลอดภัยเหลือเฟือ)
-FLOOR_HOLE_MIN_WIDTH_PX = 45              # ความกว้างต่อเนื่องขั้นต่ำ - หลุมจริงกว้าง
-                                          # ~63px ในขณะที่ noise ใน FRONT view กว้างแค่
-                                          # ~6-9px เท่านั้น (มี margin มากพอจะแยกได้ชัด)
-FLOOR_HOLE_MIN_RAW_COVERAGE = 0.70         # สัดส่วนจุดข้อมูลดิบที่ต้องผ่านเกณฑ์ความลึก
-                                          # ขั้นต่ำ (กัน noise แทรกในหลุมที่ควรจะสม่ำเสมอ)
-FLOOR_HOLE_MAX_ROUGHNESS = 0.30            # ความขรุขระสูงสุดที่ยอมรับได้ (หลุมจริงราบ
-                                          # เรียบมาก ยืนยันจากไฟล์จริง roughness≈0)
-
-# v24.11 NEW: FLOOR-HOLE ADJACENT-STACK VALIDATION - แก้บั๊กที่ผู้ใช้พบ ("รูโบ๋ ไปจับ
-# ผนังตู้ ไม่จับ กล่องสูงต่ำวางติดกัน") ROOT CAUSE: detect_floor_hole_regions() เดิม
-# ตัดสินจากสี pixel ล้วนๆ (hole_depth/width/roughness) โดยไม่เคยตรวจสอบว่ามี "กล่อง
-# ข้างเคียงที่สูงกว่าจริง" หรือไม่ ทำให้กรณีที่เห็นผนัง/พื้นตู้โผล่ (เช่น ขอบเขตนอกสุด
-# ของคาร์โก้ที่ติดผนัง แต่ไม่มีตั้งข้างเคียงอีกฝั่งให้เทียบ) ถูกเข้าใจผิดว่าเป็น
-# STEP_DOWN_RISK ทั้งที่ไม่มีกล่องสูงต่ำวางติดกันจริงตามที่ผู้ใช้ต้องการตรวจจับ
-#
-# วิธีแก้: เพิ่มขั้นตอนตรวจสอบไขว้กับ per-box stack model (build_stack_box_model_per_
-# view) ก่อนยอมรับ floor-hole candidate ใดๆ - ต้องมี (1) ตั้งที่ hole_region ทับซ้อน
-# อยู่จริง เป็นคาร์โก้จริง (2) มีตั้งข้างเคียง (ซ้ายหรือขวา) ที่เป็นคาร์โก้จริงเช่นกัน
-# และ (3) ตั้งข้างเคียงสูงกว่าตั้งที่มีรูอย่างมีนัยสำคัญ (>= เกณฑ์นี้) - ถ้าไม่ผ่านครบ
-# ทั้ง 3 เงื่อนไข จะถูกปฏิเสธทันที (ถือเป็นแค่ผนังตู้/โครงสร้างที่โผล่ ไม่ใช่ความเสี่ยง)
-FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO = 0.30
-
-# v24.12 NEW: เกณฑ์ที่เข้มงวดกว่า (สูงกว่า) ใช้เฉพาะเมื่อต้อง fallback ไปใช้ "raw
-# stacks" (การแบ่งกล่องคุณภาพต่ำที่ coverage ไม่ผ่านเกณฑ์ปกติ) เพื่อชดเชยความไม่
-# น่าเชื่อถือของข้อมูล - ต้องการความต่างความสูงที่ชัดเจนกว่าปกติมากจึงจะยอมรับ ลด
-# ความเสี่ยงจาก false positive ที่อาจเกิดจากการแบ่งกล่องที่ไม่สมบูรณ์
-FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK = 0.45
-
-MIN_STEP_DOWN_RATIO = 0.075
-STEP_DOWN_PROFILE_STEP_PX = 5
-STEP_DOWN_MIN_CONSISTENT_RUN = 20
-STEP_DOWN_MIN_FLAT_WIDTH_PX = 12
+# STEP_DOWN_CLAIM_OVERLAP_THRESHOLD: ใช้เป็น gate สำหรับตรวจสอบว่า Gemini AI claim
+# ทับซ้อนกับ deterministic region (จาก per-box stack model, v24.13) หรือไม่
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10
-STEP_DOWN_EDGE_ZONE_RATIO = 0.05
-STEP_DOWN_EDGE_ZONE_MIN_PX = 50
-
-# v24.6 NEW: CROSS-VIEW VERIFICATION - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียดเต็ม
-CROSS_VIEW_DEPTH_TOLERANCE_PX = 60      # หน้าต่างค้นหา (พิกเซล) เมื่อแปลงตำแหน่งจาก
-                                         # view หนึ่งไปหาตำแหน่งที่ตรงกันในอีก view -
-                                         # ยอมรับความคลาดเคลื่อนได้บ้างจากการวัด/ปัดเศษ
-CROSS_VIEW_UNIFORM_MAX_RATIO = 0.15     # ถ้าอีก view วัดความต่างน้อยกว่านี้ = "สม่ำเสมอ"
-                                         # (เพียงพอจะใช้ "คัดค้าน" claim ของอีกฝั่งได้)
-CROSS_VIEW_CONFIRM_MIN_RATIO = 0.10     # ถ้าอีก view วัดความต่างมากกว่านี้ = "ยืนยัน"
-                                         # ว่ามีความไม่ต่อเนื่องจริงที่ตำแหน่งเดียวกัน
-                                         # (ตั้งค่าต่ำกว่า MIN_STEP_DOWN_RATIO เล็กน้อย
-                                         # เพราะมุมมอง/การบังอาจทำให้เห็นความต่างน้อยกว่า
-                                         # ที่ควรจะเป็นจริงได้)
-
-# v24.7 NEW: OCR-BASED SKU MATCHING constants - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
-# root finding และเหตุผลของค่าที่เลือกแต่ละตัว (ยืนยันด้วยการทดสอบไฟล์จริง ED85-02)
-OCR_RENDER_DPI = 600                    # DPI สูงกว่าค่าหลัก (180) มาก - จำเป็นสำหรับให้
-                                         # ตัวอักษร SKU บนกล่อง (มักเล็กและมีลวดลาย
-                                         # ตกแต่ง) มีความคมชัดพอจะ OCR ได้ (ทดสอบแล้วว่า
-                                         # ที่ 180 DPI อ่านไม่ออกเลยแม้แต่ด้วยตาเปล่า)
-OCR_ANGLE_SWEEP = range(-30, 31, 10)     # กวาดมุมหมุน -30° ถึง +30° ทุก 10° (7 มุม) -
-                                         # เพราะข้อความบนกล่องแต่ละใบเอียงไม่เท่ากัน
-                                         # ตามตำแหน่ง/มุมมอง isometric ของกล่องนั้น
-OCR_PSM_MODES = (7, 8)                   # ทดสอบ 2 psm mode ต่อมุมหมุน (7=single line,
-                                         # 8=single word) เพิ่มโอกาสอ่านถูกต้อง
-OCR_SKU_MIN_CONFIDENCE = 0.65            # เกณฑ์ fuzzy-match score ขั้นต่ำ (0-1) ที่จะ
-                                         # ยอมรับผลลัพธ์ OCR ว่าเป็น SKU นั้นจริง - ทดสอบ
-                                         # ยืนยันแล้วว่าฟอนต์ตกแต่งของไฟล์ ED85-02 ให้
-                                         # คะแนนสูงสุดแค่ 0.22 (ต่ำกว่าเกณฑ์มาก) จึงถูก
-                                         # ปฏิเสธอย่างถูกต้องทุกกล่อง (ไม่มี false accept)
-OCR_MIN_RAW_LENGTH = 3                   # ความยาวข้อความ OCR ดิบขั้นต่ำก่อนนำไป fuzzy-
-                                         # match (กันข้อความสั้นเกินไปที่ match มั่วได้ง่าย)
 
 
 def get_api_keys_pool():
@@ -965,7 +731,58 @@ def compute_lateral_gap_ratio(view_container, view_cargo):
     return gap_y_px / container_y_span
 
 
-def get_precise_lateral_gap_box(view_container, view_cargo):
+LATERAL_GAP_BOX_MIN_WIDTH_PX = 40   # ความกว้างขั้นต่ำของช่วง x ที่ยอมรับว่าเป็น "ช่วงว่าง
+                                     # จริง" ที่หาเจอจาก pixel scan - กันสัญญาณรบกวน
+                                     # (เช่น เส้นขอบบางๆ ระหว่างกล่อง 2 ใบ) ที่แคบเกินไป
+
+
+def _localize_lateral_gap_x_range(full_img, cargo_xmin, cargo_xmax, gap_y0, gap_y1):
+    """
+    v24.13 NEW: หาช่วง x (พิกัดสัมบูรณ์บนภาพเต็ม) ที่ "ว่างจริง" ภายในแถบความสูง
+    gap_y0-gap_y1 (แถบที่คำนวณไว้แล้วว่าเป็นช่องว่างระหว่างขอบเขตคาร์โก้กับขอบเขตตู้)
+    แทนที่จะสมมติว่าช่องว่างนี้กว้างเท่ากับคาร์โก้ทั้งหมดเสมอ (แก้บั๊ก v24.12 ที่กรอบ
+    LATERAL_GAP_RISK ยืดเต็มความยาวคาร์โก้เสมอ - ตามคำขอผู้ใช้ "กรอบฟ้าใหญ่เกินไป")
+
+    วิธีตรวจสอบ (pixel-verified, deterministic เหมือนหลักการ LOCAL_GAP/FLOOR_HOLE scan
+    ที่ใช้อยู่แล้วในโค้ดนี้): สแกนทีละคอลัมน์ x ภายในช่วงคาร์โก้ ตรวจสอบว่ามี pixel สี
+    คาร์โก้ปรากฏอยู่ภายในแถบ gap_y0-gap_y1 หรือไม่ - คอลัมน์ที่ "ไม่มีคาร์โก้อยู่ในแถบ
+    นั้นเลย" ถือเป็นส่วนหนึ่งของช่องว่างจริง แล้วหา run ต่อเนื่องที่ยาวที่สุด
+
+    คืนค่า (x_min, x_max) พิกัดสัมบูรณ์ หรือ None หากหาช่วงที่มีนัยสำคัญไม่ได้ (ผู้เรียก
+    ควร fallback ไปใช้คาร์โก้เต็มความกว้างเป็นทางเลือกสุดท้ายเพื่อไม่ให้กรอบหายไปเลย)
+    """
+    try:
+        px = full_img.convert("RGB").load()
+        w, h = full_img.size
+        x0 = max(0, int(cargo_xmin)); x1 = min(w, int(cargo_xmax))
+        y0 = max(0, int(gap_y0)); y1 = min(h, int(gap_y1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        best_start, best_len = None, 0
+        cur_start, cur_len = None, 0
+        for x in range(x0, x1):
+            has_cargo = any(_is_vivid_cargo_color(px[x, y]) for y in range(y0, y1))
+            is_empty = not has_cargo
+            if is_empty:
+                if cur_start is None:
+                    cur_start = x
+                cur_len += 1
+                if cur_len > best_len:
+                    best_len = cur_len
+                    best_start = cur_start
+            else:
+                cur_start, cur_len = None, 0
+
+        if best_start is None or best_len < LATERAL_GAP_BOX_MIN_WIDTH_PX:
+            return None
+        return (best_start, best_start + best_len)
+    except Exception as e:
+        print(f"WARNING: Lateral-gap x-range localization failed ({e}) - falling back to full cargo width")
+        return None
+
+
+def get_precise_lateral_gap_box(view_container, view_cargo, full_img=None):
     """v24.2: คำนวณตำแหน่งกรอบแม่นยำสำหรับ LATERAL_GAP_RISK โดยเปรียบเทียบช่องว่าง
     บน-ล่างแยกกัน แล้ววาดกรอบเฉพาะฝั่งที่มีช่องว่างจริงมากกว่า"""
     if not view_container or not view_cargo:
@@ -980,6 +797,16 @@ def get_precise_lateral_gap_box(view_container, view_cargo):
     else:
         return None
     pad = max(3, int((y1 - y0) * 0.15))
+    # v24.13 FIX: เดิม x0,x1 = คาร์โก้ทั้งหมด (เต็มความยาว) เสมอ ทำให้กรอบใหญ่เกินจริง
+    # (ตามที่ผู้ใช้ระบุ "กรอบฟ้าใหญ่เกิน") - พยายามหาช่วง x เฉพาะจุดที่ว่างจริงก่อน
+    # (pixel-verified) มีเพียงเมื่อหาไม่พบเท่านั้นจึง fallback กลับไปใช้เต็มความยาว
+    # คาร์โก้เหมือนเดิม (ปลอดภัย ไม่ทำให้กรอบหายไป)
+    if full_img is not None:
+        localized = _localize_lateral_gap_x_range(full_img, x0, x1, y0, y1)
+        if localized:
+            print(f"LATERAL_GAP_RISK box localized (pixel-verified): x=[{localized[0]}-{localized[1]}] "
+                  f"(was full cargo width x=[{x0}-{x1}])")
+            x0, x1 = localized
     return (x0, max(0, y0 - pad), x1, y1 + pad)
 
 
@@ -1143,411 +970,12 @@ def detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h, crop_y
     return result
 
 
-# ---------------------------------------------------------------------------
-# FLOOR-HOLE DETECTION (v24.8 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด root
-# finding และผลการทดสอบเต็มรูปแบบกับไฟล์จริง ED85-02 (ไอเดียจากผู้ใช้: "รูโบ๋")
-# ---------------------------------------------------------------------------
-
-def detect_floor_hole_regions(view_img, cargo_xmin, cargo_xmax, container_ymax, cargo_ymin,
-                                step=FLOOR_HOLE_SAMPLE_STEP_PX,
-                                min_hole_ratio=FLOOR_HOLE_MIN_RATIO,
-                                min_width_px=FLOOR_HOLE_MIN_WIDTH_PX,
-                                min_raw_coverage=FLOOR_HOLE_MIN_RAW_COVERAGE,
-                                max_roughness=FLOOR_HOLE_MAX_ROUGHNESS):
-    """
-    ตรวจจับ "รูโบ๋" (floor-hole) - บริเวณที่ตั้งหนึ่งเตี้ย/สั้นกว่าตั้งข้างเคียงใน
-    ทิศทางความลึกของมุมมอง isometric จนเผยให้เห็นโครงสร้างตู้ (พื้น/ผนัง) แทนคาร์โก้
-    ในตำแหน่งที่ปกติควรถูกคาร์โก้บังไว้
-
-    วัดจาก hole_depth(x) = (ตำแหน่ง y ล่างสุดที่เห็นโครงสร้างตู้) - (ตำแหน่ง y ล่างสุด
-    ที่เห็นคาร์โก้จริง) ในแต่ละคอลัมน์ x - สแกน "ตลอดความกว้างคาร์โก้เต็มรูปแบบ" (ไม่
-    ตัดโซนผนังหัวตู้ออกเหมือน detect_local_depth_gap_regions เพราะรอยรั่วแบบนี้มักเกิด
-    ใกล้ผนังหัวตู้พอดี)
-
-    คืนค่า list ของ region dict: {"x_min","x_max","y_min","y_max","max_hole_px",
-    "avg_hole_px","width_px","ratio"} เป็นพิกัด "สัมพัทธ์กับ view_img"
-    """
-    px = view_img.convert("RGB").load()
-    w, h = view_img.size
-    cargo_xmin = max(0, int(cargo_xmin)); cargo_xmax = min(w, int(cargo_xmax))
-    if cargo_xmax <= cargo_xmin:
-        return []
-
-    y_top = max(0, int(cargo_ymin) - 10)
-    y_bot = min(h, int(container_ymax) + 30)
-    if y_bot <= y_top:
-        return []
-    container_y_span_px = max(1, int(container_ymax) - y_top)
-
-    raw_profile = _raw_local_gap_profile(px, (cargo_xmin, cargo_xmax), (y_top, y_bot), step=step)
-    if len(raw_profile) < 4:
-        return []
-    smoothed_vals = _median_smooth_gap_profile(raw_profile, window=FLOOR_HOLE_SMOOTH_WINDOW)
-
-    min_hole_px = container_y_span_px * min_hole_ratio
-    regions = []
-    n = len(raw_profile)
-    i = 0
-    min_samples = max(1, min_width_px // step)
-    while i < n:
-        g = smoothed_vals[i]
-        if g is not None and g >= min_hole_px:
-            j = i
-            while j < n and smoothed_vals[j] is not None and smoothed_vals[j] >= min_hole_px:
-                j += 1
-            width_samples = j - i
-            if width_samples >= min_samples:
-                raw_vals = [raw_profile[k][1] for k in range(i, j) if raw_profile[k][1] is not None]
-                coverage = sum(1 for v in raw_vals if v >= min_hole_px * 0.5) / len(raw_vals) if raw_vals else 0
-                roughness = _compute_gap_roughness(raw_vals)
-                if coverage >= min_raw_coverage and roughness <= max_roughness:
-                    xs = [raw_profile[k][0] for k in range(i, j)]
-                    cargo_bottoms = [raw_profile[k][2] for k in range(i, j) if raw_profile[k][2] is not None]
-                    struct_bottoms = [raw_profile[k][3] for k in range(i, j) if raw_profile[k][3] is not None]
-                    region_x_min, region_x_max = min(xs), max(xs)
-                    region_y_min = min(cargo_bottoms) if cargo_bottoms else y_top
-                    region_y_max = max(struct_bottoms) if struct_bottoms else y_bot
-                    max_hole = max(smoothed_vals[k] for k in range(i, j))
-                    avg_hole = sum(smoothed_vals[k] for k in range(i, j)) / width_samples
-                    ratio = max_hole / container_y_span_px if container_y_span_px > 0 else 0
-                    print(f"Floor-hole ACCEPTED: x=[{region_x_min}-{region_x_max}] width={region_x_max-region_x_min}px "
-                          f"max_hole={max_hole:.0f}px ratio={ratio*100:.0f}% raw_coverage={coverage:.2f} roughness={roughness:.2f}")
-                    regions.append({
-                        "x_min": region_x_min, "x_max": region_x_max,
-                        "y_min": region_y_min, "y_max": region_y_max,
-                        "max_hole_px": max_hole, "avg_hole_px": avg_hole,
-                        "width_px": region_x_max - region_x_min, "ratio": ratio,
-                    })
-                else:
-                    xs = [raw_profile[k][0] for k in range(i, j)]
-                    print(f"Floor-hole REJECTED (likely noise from dimension text/label): "
-                          f"x=[{min(xs)}-{max(xs)}] raw_coverage={coverage:.2f} roughness={roughness:.2f}")
-            i = j
-        else:
-            i += 1
-    return regions
-
-
-def _validate_floor_hole_with_adjacent_stacks(hole_region, stacks, min_height_ratio=FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO):
-    """
-    v24.11 NEW: ตรวจสอบว่า floor-hole candidate มีหลักฐานจาก per-box stack model ว่า
-    เป็น "กล่องเตี้ยวางติดกับกล่องสูง" จริง ไม่ใช่แค่ผนังตู้/พื้นที่ว่างเปล่าที่ไม่มี
-    คู่เทียบให้ยืนยัน (เช่น ขอบเขตนอกสุดของคาร์โก้ที่ติดผนังตู้แต่ไม่มีกล่องข้างเคียง
-    อีกฝั่งให้เปรียบเทียบด้วย) - ดู CHANGELOG ที่ FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO
-    สำหรับรายละเอียด root cause
-
-    เงื่อนไขที่ต้องผ่านครบทั้งหมดจึงจะยอมรับ (คืนค่า True):
-      1. มีตั้ง (stack) ที่ x-range ทับซ้อนกับ hole_region จริง (คือ "ตั้งเตี้ย" ที่มีรู)
-         และตั้งนั้นต้องมีกล่องคาร์โก้จริง วัดความสูงได้
-      2. มีตั้งข้างเคียง (ซ้ายหรือขวา ที่ติดกันโดยตรงตามลำดับ x) ที่เป็นคาร์โก้จริงด้วย
-      3. ตั้งข้างเคียงอย่างน้อย 1 ฝั่งต้องสูงกว่าตั้งเตี้ยอย่างมีนัยสำคัญ
-         (>= min_height_ratio) - นี่คือหลักฐานว่า "กล่องสูงต่ำวางติดกันจริง"
-    """
-    if not stacks:
-        return False
-    hole_x_mid = (hole_region["x_min"] + hole_region["x_max"]) / 2
-    sorted_stacks = sorted(stacks, key=lambda s: s["x0"])
-
-    low_stack = None
-    low_idx = None
-    for idx, s in enumerate(sorted_stacks):
-        if s["x0"] - 10 <= hole_x_mid <= s["x1"] + 10:
-            low_stack = s
-            low_idx = idx
-            break
-    if low_stack is None or not low_stack.get("boxes"):
-        return False
-    low_height = _stack_total_height(low_stack)
-    if low_height is None:
-        return False
-
-    neighbors = []
-    if low_idx > 0:
-        neighbors.append(sorted_stacks[low_idx - 1])
-    if low_idx < len(sorted_stacks) - 1:
-        neighbors.append(sorted_stacks[low_idx + 1])
-
-    for neighbor in neighbors:
-        if not neighbor.get("boxes"):
-            continue
-        neighbor_height = _stack_total_height(neighbor)
-        if neighbor_height is None or neighbor_height <= low_height:
-            continue
-        diff_ratio = 1 - (low_height / neighbor_height)
-        if diff_ratio >= min_height_ratio:
-            return True
-    return False
-
-
-def detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent,
-                                         stack_box_model=None):
-    """เรียก detect_floor_hole_regions() สำหรับทั้ง FRONT และ BACK view โดยแปลงพิกัด
-    ผลลัพธ์เป็น 'สัมบูรณ์บนภาพเต็ม' (เช่นเดียวกับ container_bounds/cargo_extent)
-
-    v24.11 NEW: หากมี stack_box_model ส่งเข้ามา จะตรวจสอบทุก candidate ด้วย
-    _validate_floor_hole_with_adjacent_stacks() ก่อนยอมรับเสมอ (ปฏิเสธ candidate ที่
-    ไม่มีหลักฐานว่าเป็น "กล่องสูงต่ำวางติดกันจริง" - แก้บั๊กที่เคยจับผนังตู้ผิดพลาด)
-    """
-    result = {"FRONT": [], "BACK": []}
-    for view in ("FRONT", "BACK"):
-        cb = container_bounds.get(view)
-        ce = cargo_extent.get(view)
-        if not cb or not ce:
-            continue
-        if layout == "TOP_BOTTOM":
-            mid_y = crop_h // 2
-            if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, crop_w, mid_y)); origin_x, origin_y = 0, crop_y_start
-            else:
-                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h)); origin_x, origin_y = 0, crop_y_start + mid_y
-        else:
-            half_w = crop_w // 2
-            if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, half_w, crop_h)); origin_x, origin_y = 0, crop_y_start
-            else:
-                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h)); origin_x, origin_y = half_w, crop_y_start
-
-        rel_cargo_xmin = ce["xmin"] - origin_x
-        rel_cargo_xmax = ce["xmax"] - origin_x
-        rel_cargo_ymin = ce["ymin"] - origin_y
-        rel_container_ymax = cb["ymax"] - origin_y
-
-        try:
-            regions_rel = detect_floor_hole_regions(view_img, rel_cargo_xmin, rel_cargo_xmax,
-                                                       rel_container_ymax, rel_cargo_ymin)
-        except Exception as e:
-            print(f"WARNING: Floor-hole detection failed for {view} ({e})")
-            regions_rel = []
-
-        # v24.12 NEW: FALLBACK สำหรับ view ที่ per-box segmentation ปกติ (high-
-        # confidence, coverage >= threshold) ถูก reject ไป - ลองใช้ "raw_stacks"
-        # (best-effort, ไม่ผ่านเกณฑ์ coverage) แทน พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น
-        # (FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอนของ
-        # การแบ่งกล่องคุณภาพต่ำ - ดู CHANGELOG ที่ build_stack_box_model_per_view
-        # สำหรับรายละเอียด root cause (แก้บั๊กที่ BACK view ไม่เคยถูกตรวจพบเลยเมื่อ
-        # per-box segmentation ของ BACK ถูก reject เพราะ occlusion)
-        stacks_for_view = None
-        min_height_ratio_for_view = FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO
-        using_fallback_stacks = False
-        if stack_box_model is not None:
-            stacks_for_view = stack_box_model.get(view, [])
-            if not stacks_for_view:
-                fallback_stacks = stack_box_model.get(f"{view}_raw_stacks", [])
-                if fallback_stacks:
-                    stacks_for_view = fallback_stacks
-                    min_height_ratio_for_view = FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK
-                    using_fallback_stacks = True
-                    print(f"Floor-hole validation ({view}): high-confidence stack model unavailable "
-                          f"(coverage too low), using RAW fallback stacks with stricter threshold "
-                          f"({FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK*100:.0f}%)")
-
-        regions_abs = []
-        for r in regions_rel:
-            region_abs = {
-                "x_min": r["x_min"] + origin_x, "x_max": r["x_max"] + origin_x,
-                "y_min": r["y_min"] + origin_y, "y_max": r["y_max"] + origin_y,
-                "ratio": r["ratio"], "source": "FORCED_FLOOR_HOLE_DETECTION",
-            }
-            if stacks_for_view is not None:
-                if not _validate_floor_hole_with_adjacent_stacks(region_abs, stacks_for_view,
-                                                                    min_height_ratio=min_height_ratio_for_view):
-                    print(f"Floor-hole candidate REJECTED ({view}, fallback_mode={using_fallback_stacks}) - "
-                          f"no adjacent taller cargo stack found (likely just exposed container wall/structure, "
-                          f"not a genuine height difference): x=[{region_abs['x_min']:.0f}-{region_abs['x_max']:.0f}]")
-                    continue
-            regions_abs.append(region_abs)
-        result[view] = regions_abs
-        if regions_abs:
-            print(f"Floor-hole detection ({view}): {len(regions_abs)} region(s) confirmed (validated against adjacent stacks)")
-        else:
-            print(f"Floor-hole detection ({view}): no significant validated hole found (container appears uniform, "
-                  f"or no adjacent taller stack to confirm any candidate)")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# STEP_DOWN_RISK deterministic detection - height-profile discontinuity
-# ---------------------------------------------------------------------------
-
-def _detect_height_profile(view_img, x_start, x_end, y_start, y_end,
-                            step=STEP_DOWN_PROFILE_STEP_PX, min_consistent_run=STEP_DOWN_MIN_CONSISTENT_RUN):
-    """v24.4/v24.5: ใช้ _is_cargo_pixel_lenient() (ผ่อนปรนกว่า _is_vivid_cargo_color
-    แต่กรองสีโครงสร้าง/ข้อความ/ลูกศรออกอย่างรัดกุมแล้ว)"""
-    px = view_img.convert("RGB").load()
-    w, h = view_img.size
-    x_start = max(0, int(x_start)); x_end = min(w, int(x_end))
-    y_start = max(0, int(y_start)); y_end = min(h, int(y_end))
-    profile = []
-    for x in range(x_start, x_end, step):
-        top_y = None
-        y = y_start
-        while y < y_end:
-            if _is_cargo_pixel_lenient(px[x, y]):
-                check_end = min(y + min_consistent_run, y_end)
-                consistent_count = sum(1 for yy in range(y, check_end) if _is_cargo_pixel_lenient(px[x, yy]))
-                if consistent_count >= min_consistent_run * 0.6:
-                    top_y = y
-                    break
-            y += 1
-        if top_y is not None:
-            profile.append((x, top_y))
-    return profile
-
-
-def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, container_ymax, container_y_span_px,
-                               step=STEP_DOWN_PROFILE_STEP_PX, min_ratio=MIN_STEP_DOWN_RATIO,
-                               min_flat_width_px=STEP_DOWN_MIN_FLAT_WIDTH_PX):
-    """ตรวจจับความต่างระดับด้วยการหา 'จุดกระโดด' ระหว่างจุดที่ติดกันบน height-profile
-    แล้วตรวจสอบแต่ละ segment ว่า 'เตี้ยกว่าเพื่อนบ้านซ้าย/ขวา' หรือไม่แยกกันเป็นอิสระ"""
-    px = view_img.convert("RGB").load()
-    w_img, h_img = view_img.size
-    profile = _detect_height_profile(view_img, x_start, x_end, y_start, y_end, step)
-    if len(profile) < 4:
-        return []
-    threshold_px = container_y_span_px * min_ratio
-    boundaries = []
-    for i in range(len(profile) - 1):
-        x0, y0 = profile[i]
-        x1, y1 = profile[i + 1]
-        delta = y1 - y0
-        if abs(delta) >= threshold_px:
-            boundaries.append(i)
-    if not boundaries:
-        return []
-
-    segments = []
-    start_idx = 0
-    for b in boundaries:
-        segments.append(profile[start_idx:b + 1])
-        start_idx = b + 1
-    segments.append(profile[start_idx:])
-
-    # v24.1: EDGE-BASED comparison แทน whole-segment AVERAGE (ป้องกัน perspective drift
-    # ภายใน segment ทำให้เกิด false STEP_DOWN กว้างเกินจริง)
-    EDGE_SAMPLE_N = 4
-
-    def _edge_value(seg, from_start):
-        pts = seg[:EDGE_SAMPLE_N] if from_start else seg[-EDGE_SAMPLE_N:]
-        ys = [p[1] for p in pts]
-        return sum(ys) / len(ys)
-
-    seg_info = []
-    for seg in segments:
-        if len(seg) < 1:
-            continue
-        xs = [p[0] for p in seg]
-        width = (max(xs) - min(xs)) if len(xs) > 1 else step
-        seg_info.append({
-            "x_min": min(xs), "x_max": max(xs), "width": width,
-            "edge_left": _edge_value(seg, from_start=True),
-            "edge_right": _edge_value(seg, from_start=False),
-        })
-    seg_info.sort(key=lambda s: s["x_min"])
-
-    risky_segments = []
-    n = len(seg_info)
-    for i in range(n):
-        seg = seg_info[i]
-        if seg["width"] < min_flat_width_px:
-            continue
-        is_risky = False
-        max_ratio = 0
-        risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
-        # v24.5: edge_zone แคบลง (~50px) ไม่ขยายเข้าไปในเนื้อกล่องข้างเคียงลึกเกินจำเป็น
-        edge_zone_width = min(seg["width"], max(STEP_DOWN_EDGE_ZONE_MIN_PX,
-                                                  int(container_y_span_px * STEP_DOWN_EDGE_ZONE_RATIO)))
-        if i > 0:
-            left = seg_info[i - 1]
-            diff = abs(seg["edge_left"] - left["edge_right"])
-            ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
-            if seg["edge_left"] > left["edge_right"] and ratio >= min_ratio:
-                is_risky = True
-                max_ratio = max(max_ratio, ratio)
-                risky_x_max = min(risky_x_max, seg["x_min"] + edge_zone_width)
-        if i < n - 1:
-            right = seg_info[i + 1]
-            diff = abs(seg["edge_right"] - right["edge_left"])
-            ratio = diff / container_y_span_px if container_y_span_px > 0 else 0
-            if seg["edge_right"] > right["edge_left"] and ratio >= min_ratio:
-                is_risky = True
-                max_ratio = max(max_ratio, ratio)
-                risky_x_min = max(risky_x_min, seg["x_max"] - edge_zone_width)
-        if is_risky:
-            if risky_x_min > risky_x_max:
-                risky_x_min, risky_x_max = seg["x_min"], seg["x_max"]
-            y_ref = min(seg["edge_left"], seg["edge_right"])
-            # v24.12 FIX: เดิมใช้ y_max=container_ymax เสมอ (ยืดกรอบไปจนสุดพื้นตู้เต็ม
-            # ความสูง) ทำให้กรอบสูงเกินจริงมากเมื่อกล่องจริงในบริเวณนั้นเตี้ยกว่าความสูง
-            # ตู้เต็มมาก - แก้ไขด้วยการวัด "พื้นเฉพาะจุด" (local floor) จากพิกเซลจริงใน
-            # ช่วง risky_x_min-risky_x_max แทน เพื่อให้กรอบ "จำกัดแค่ความสูงกล่องจริง"
-            local_floors = []
-            floor_search_bottom = min(h_img, int(container_ymax) + 5)
-            for xs in range(int(risky_x_min), int(risky_x_max), max(1, step)):
-                if 0 <= xs < w_img:
-                    lf = _local_bottom_cargo_y(px, xs, int(y_start), floor_search_bottom)
-                    if lf is not None:
-                        local_floors.append(lf)
-            y_bottom = _median_of(local_floors) if local_floors else container_ymax
-            risky_segments.append({"x_min": risky_x_min, "x_max": risky_x_max,
-                                     "y_min": y_ref, "y_max": y_bottom, "ratio": max_ratio})
-
-    risky_segments.sort(key=lambda r: r["x_min"])
-    return risky_segments
-
-
-def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
-    results = {"FRONT": [], "BACK": []}
-    for view in ("FRONT", "BACK"):
-        cb = container_bounds.get(view)
-        ce = cargo_extent.get(view)
-        if not cb or not ce:
-            continue
-        if layout == "TOP_BOTTOM":
-            mid_y = crop_h // 2
-            if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, crop_w, mid_y))
-                origin_x, origin_y = 0, crop_y_start
-            else:
-                view_img = diagram_crop.crop((0, mid_y, crop_w, crop_h))
-                origin_x, origin_y = 0, crop_y_start + mid_y
-        else:
-            half_w = crop_w // 2
-            if view == "FRONT":
-                view_img = diagram_crop.crop((0, 0, half_w, crop_h))
-                origin_x, origin_y = 0, crop_y_start
-            else:
-                view_img = diagram_crop.crop((half_w, 0, crop_w, crop_h))
-                origin_x, origin_y = half_w, crop_y_start
-
-        cb_rel_ymin = cb["ymin"] - origin_y
-        cb_rel_ymax = cb["ymax"] - origin_y
-        ce_rel_xmin = ce["xmin"] - origin_x
-        ce_rel_xmax = ce["xmax"] - origin_x
-        container_y_span_px = cb_rel_ymax - cb_rel_ymin
-        if container_y_span_px <= 0:
-            continue
-
-        try:
-            regions = _detect_step_down_regions(view_img, ce_rel_xmin, ce_rel_xmax, cb_rel_ymin, cb_rel_ymax,
-                                                  cb_rel_ymax, container_y_span_px)
-        except Exception as e:
-            print(f"WARNING: Step-down detection failed for {view} ({e})")
-            regions = []
-
-        for r in regions:
-            abs_region = {
-                "x_min": origin_x + r["x_min"], "x_max": origin_x + r["x_max"],
-                "y_min": origin_y + r["y_min"], "y_max": origin_y + r["y_max"],
-                "ratio": r["ratio"],
-            }
-            print(f"Deterministic STEP_DOWN_RISK candidate ({view}): "
-                  f"x=[{abs_region['x_min']:.0f}-{abs_region['x_max']:.0f}] "
-                  f"y=[{abs_region['y_min']:.0f}-{abs_region['y_max']:.0f}] "
-                  f"height_diff_ratio={abs_region['ratio']*100:.1f}% (threshold={MIN_STEP_DOWN_RATIO*100:.1f}%)")
-            results[view].append(abs_region)
-        if not regions:
-            print(f"Deterministic STEP_DOWN_RISK: no discontinuity found for {view} (container appears uniform)")
-    return results
+# NOTE (v24.13): FLOOR-HOLE DETECTION (detect_floor_hole_regions,
+# _validate_floor_hole_with_adjacent_stacks, detect_floor_hole_regions_per_view) and
+# the old pixel/height-profile STEP_DOWN_RISK scan (_detect_height_profile,
+# _detect_step_down_regions, detect_step_down_regions_per_view) were REMOVED here -
+# replaced by detect_step_down_regions_from_stacks() (per-box stack-height
+# comparison, see CHANGELOG v24.13 above) which is simpler and more reliable.
 
 
 def _box_iou_absolute(box_a, box_b):
@@ -2032,32 +1460,12 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
                 "boxes": abs_boxes,
             })
 
-        # v24.12 NEW: FALLBACK สำหรับ view ที่ coverage ต่ำ (เช่น BACK view ที่มักมี
-        # occlusion มากกว่า FRONT ทำให้แบ่งกล่องได้ไม่ครอบคลุมพอ) - ROOT CAUSE ที่พบ:
-        # เดิมเมื่อ coverage_ratio < STACK_COVERAGE_MIN_RATIO จะ "continue" ทิ้ง
-        # ผลลัพธ์การแบ่งกล่องของ view นั้นไปทั้งหมด (result[view] ค้างเป็น [] และไม่เคย
-        # ตั้งค่า coverage_ratio เลย) ทำให้ floor-hole validation
-        # (_validate_floor_hole_with_adjacent_stacks) หาตั้งไม่เจอเลย จึงปฏิเสธทุก
-        # candidate ของ view นั้นเสมอ แม้จะเป็นความเสี่ยงจริงก็ตาม (เช่น กรณีที่ FRONT
-        # พบตั้งเตี้ยหัวตู้ได้ แต่ BACK ที่มีตั้งเตี้ยแบบเดียวกันกลับไม่ถูกตรวจพบเลย)
-        #
-        # วิธีแก้: เก็บผลการแบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์ coverage) ไว้ในคีย์แยก
-        # ต่างหาก (f"{view}_raw_stacks") เสมอ เพื่อให้ floor-hole validation มีข้อมูล
-        # อย่างน้อยที่สุด (best-effort) ให้ใช้ตรวจสอบได้ - ใช้ควบคู่กับเกณฑ์ที่เข้มงวด
-        # ขึ้น (FLOOR_HOLE_ADJACENT_MIN_HEIGHT_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
-        # ของการแบ่งกล่องคุณภาพต่ำ (ดู detect_floor_hole_regions_per_view)
-        #
-        # สำคัญ: result[view] หลัก (ที่ OVERHANG_RISK/TALL_UNSTABLE_RISK/
-        # REAR_LATERAL_IMBALANCE/cross-view veto-mirror ใช้) ยังคงพฤติกรรมเดิมทุก
-        # ประการ (ว่างเปล่าเมื่อ coverage ต่ำ) - ไม่ได้รับผลกระทบจากการแก้ไขนี้เลย
-        result[f"{view}_raw_stacks"] = stacks_abs
         result[f"{view}_coverage_ratio"] = coverage_ratio
 
         if coverage_ratio < STACK_COVERAGE_MIN_RATIO:
             print(f"Per-box segmentation ({view}) REJECTED for high-confidence risk types "
-                  f"(OVERHANG/TALL_UNSTABLE/LATERAL_IMBALANCE/cross-view) - coverage_ratio={coverage_ratio:.2f} "
-                  f"< threshold {STACK_COVERAGE_MIN_RATIO} (raw segmentation still saved as "
-                  f"'{view}_raw_stacks' - used ONLY as best-effort fallback for FLOOR-HOLE validation)")
+                  f"(OVERHANG/TALL_UNSTABLE/LATERAL_IMBALANCE/STEP_DOWN) - coverage_ratio={coverage_ratio:.2f} "
+                  f"< threshold {STACK_COVERAGE_MIN_RATIO}")
             continue
 
         result[view] = stacks_abs
@@ -2136,6 +1544,98 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
         ratio = 1 - (shorter / taller)
         max_ratio = max(max_ratio, ratio)
     return max_ratio
+
+
+# ---------------------------------------------------------------------------
+# STEP_DOWN_RISK - v24.13 NEW: DETERMINISTIC STACK-HEIGHT COMPARISON
+# ตามคำขอผู้ใช้ตรงตัว: "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" - ใช้
+# per-box stack model เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK/
+# REAR_LATERAL_IMBALANCE (เชื่อถือได้/แม่นยำกว่า pixel/height-profile scan เดิมมาก)
+# แทนที่วิธีเดิมทั้งหมด (height-profile scan v24.1/v24.4/v24.5, floor-hole scan
+# v24.8/v24.11, cross-view mirror/veto v24.6/v24.7) ดู CHANGELOG หัวไฟล์ v24.13
+# ---------------------------------------------------------------------------
+
+STEP_DOWN_STACK_MIN_RATIO = 0.30          # ตั้งข้างเคียงต้องสูงกว่าตั้งที่พิจารณาอยู่
+                                            # อย่างน้อย 30% ของความสูงตั้งที่สูงกว่า
+                                            # จึงจะถือว่าเป็น step-down จริง (สูงกว่า
+                                            # OVERHANG_MIN_RATIO=20% เพราะ STEP_DOWN
+                                            # ไม่ได้บังคับว่าต้องมีตั้งซ้อนทับ/overhang
+                                            # ด้วย จึงต้องการหลักฐานความต่างที่ชัดเจน
+                                            # กว่าเพื่อกันสัญญาณรบกวนจาก perspective/
+                                            # การแบ่งกล่องที่คลาดเคลื่อนเล็กน้อย)
+STEP_DOWN_STACK_MIN_HEIGHT_PX = 15         # ตั้งที่เตี้ยเกินไป (วัดความสูงไม่น่าเชื่อถือ
+                                            # พอ) จะไม่ถูกนำมาเปรียบเทียบเลย
+
+
+def detect_step_down_regions_from_stacks(stacks, min_ratio=STEP_DOWN_STACK_MIN_RATIO,
+                                          min_height_px=STEP_DOWN_STACK_MIN_HEIGHT_PX):
+    """
+    v24.13 NEW: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ "ความสูงรวมของตั้งกล่อง"
+    (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ซ้ายหรือขวา) - ไม่ใช้
+    pixel/height-profile scan หรือ floor-hole scan อีกต่อไป (ดู CHANGELOG v24.13)
+
+    หลักการ: สำหรับตั้งกล่องแต่ละตั้ง (เรียงตามแนวนอน x) เปรียบเทียบความสูงรวมกับตั้ง
+    ข้างเคียงที่ติดกันโดยตรง (ซ้าย/ขวา) ถ้าตั้งข้างเคียงฝั่งใดฝั่งหนึ่งสูงกว่าตั้งนี้
+    อย่างมีนัยสำคัญ (>= min_ratio ของความสูงตั้งที่สูงกว่า) แสดงว่าตั้งนี้คือ "ตั้งของ
+    กล่องที่ต่ำกว่าตั้งของกล่องด้านข้าง" ตามที่ผู้ใช้ต้องการตรวจจับพอดี
+
+    กรอบผลลัพธ์ (region) ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า" เท่านั้น (x0-x1 ของตั้งนั้น,
+    y จาก top_y ถึง floor_y ของตั้งนั้นจริง) - ไม่ยืดไปคลุมตั้งข้างเคียงหรือพื้นตู้เต็ม
+    ความสูงเหมือนวิธีเดิม ทำให้กรอบที่วาดออกมาแม่นยำและไม่ใหญ่เกินจริง
+    """
+    regions = []
+    if not stacks or len(stacks) < 2:
+        return regions
+    sorted_stacks = sorted(stacks, key=lambda s: s["x0"])
+    heights = [(_stack_total_height(s) if s.get("boxes") else None) for s in sorted_stacks]
+    n = len(sorted_stacks)
+    for i in range(n):
+        h_this = heights[i]
+        if h_this is None or h_this < min_height_px:
+            continue
+        neighbor_idxs = []
+        if i > 0:
+            neighbor_idxs.append(i - 1)
+        if i < n - 1:
+            neighbor_idxs.append(i + 1)
+        best_ratio = 0.0
+        for j in neighbor_idxs:
+            h_neighbor = heights[j]
+            if h_neighbor is None or h_neighbor < min_height_px:
+                continue
+            if h_neighbor <= h_this:
+                continue  # เพื่อนบ้านไม่ได้สูงกว่า -> ตั้งนี้ไม่ใช่ตั้งเตี้ยเทียบตั้งนั้น
+            ratio = 1 - (h_this / h_neighbor)
+            best_ratio = max(best_ratio, ratio)
+        if best_ratio >= min_ratio:
+            s = sorted_stacks[i]
+            regions.append({
+                "x_min": s["x0"], "y_min": s["top_y"],
+                "x_max": s["x1"], "y_max": s["floor_y"],
+                "ratio": best_ratio,
+                "source": "FORCED_DETERMINISTIC_STACK_HEIGHT_STEP_DOWN",
+            })
+    return regions
+
+
+def detect_step_down_regions_from_stack_model_per_view(stack_box_model):
+    """เรียก detect_step_down_regions_from_stacks() สำหรับทั้ง FRONT และ BACK view -
+    stacks ใน stack_box_model เก็บพิกัดแบบ "สัมบูรณ์บนภาพเต็ม" อยู่แล้ว จึงไม่ต้องแปลง
+    พิกัดเพิ่มเติม (ต่างจาก detect_step_down_regions_per_view เดิมที่ต้องแปลงพิกัดจาก
+    view-relative เป็น absolute)"""
+    results = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        stacks = stack_box_model.get(view, [])
+        regions = detect_step_down_regions_from_stacks(stacks)
+        results[view] = regions
+        for r in regions:
+            print(f"Deterministic STEP_DOWN_RISK candidate ({view}) [STACK-HEIGHT COMPARISON v24.13]: "
+                  f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
+                  f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={STEP_DOWN_STACK_MIN_RATIO*100:.0f}%)")
+        if not regions:
+            print(f"Deterministic STEP_DOWN_RISK: no adjacent-stack height difference found for {view} "
+                  f"(container appears uniform based on per-box stack comparison)")
+    return results
 
 
 def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
@@ -2219,439 +1719,12 @@ def _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_vi
     return False
 
 
-# ---------------------------------------------------------------------------
-# CROSS-VIEW VERIFICATION (v24.6 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียดเต็ม
-#
-# แนวคิดหลัก: FRONT และ BACK view เป็นภาพของ "ตู้คอนเทนเนอร์เดียวกัน" มองจาก 2 ด้าน
-# ตรงข้ามกัน ดังนั้นตำแหน่ง "ทางกายภาพ" (ระยะห่างจากผนังหัวตู้ คิดเป็นสัดส่วน 0-1)
-# ของกล่องใดๆ คำนวณได้จากทั้ง 2 view และต้องสอดคล้องกัน ใช้หลักการนี้:
-#   1. VETO: ถ้า view หนึ่งอ้างว่ามี STEP_DOWN_RISK ที่ตำแหน่งกายภาพ D แต่ view ตรงข้าม
-#      (ที่ตำแหน่งกายภาพ D เดียวกัน) กลับแสดงความสูงสม่ำเสมอ (ไม่มีรอยต่อ) -> veto
-#   2. MIRROR: ถ้า view หนึ่งมีความไม่ต่อเนื่องจริงที่ตำแหน่ง D แต่การแบ่งกล่องของอีก
-#      view เองพลาดไม่ตรวจพบที่ตำแหน่งเดียวกัน -> สะท้อนกรอบไปยัง view ที่พลาด โดยใช้
-#      ตำแหน่ง y จาก per-box stack model ของ view นั้นเอง (ไม่ใช่เดา)
-#
-# ยืนยันด้วยพิกเซลจริงจากไฟล์ ED85-02: FRONT genuine boundary x=969-974 (depth=0.126)
-# ตรงกับ BACK ที่ผู้ใช้ชี้ x=630 (depth=0.123) ต่างกันแค่ 0.003 - ยืนยันเป็นตั้งเดียวกัน
-# ---------------------------------------------------------------------------
-
-def _screen_x_to_depth_ratio(x, container_bounds_view, rear_side):
-    """แปลงตำแหน่ง x บนภาพ (screen coordinate) เป็น 'สัดส่วนระยะห่างจากผนังหัวตู้'
-    (depth_ratio: 0=ที่ผนังหัวตู้/head-wall, 1=ที่ประตูท้ายตู้/door)"""
-    xmin, xmax = container_bounds_view["xmin"], container_bounds_view["xmax"]
-    span = max(1, xmax - xmin)
-    if rear_side == "LEFT":
-        return (xmax - x) / span
-    else:
-        return (x - xmin) / span
-
-
-def _depth_ratio_to_screen_x(depth_ratio, container_bounds_view, rear_side):
-    """ผกผันของ _screen_x_to_depth_ratio - แปลง depth_ratio กลับเป็นตำแหน่ง x บนภาพ
-    ของ view ที่กำหนด (ใช้ container_bounds ของ view นั้นเอง)"""
-    xmin, xmax = container_bounds_view["xmin"], container_bounds_view["xmax"]
-    span = xmax - xmin
-    if rear_side == "LEFT":
-        return xmax - depth_ratio * span
-    else:
-        return xmin + depth_ratio * span
-
 
 def _stack_total_height(s):
     if not s.get("boxes"):
         return None
     h = s["floor_y"] - s["top_y"]
     return h if h > 0 else None
-
-
-# ---------------------------------------------------------------------------
-# OCR-BASED SKU MATCHING (v24.7 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด root
-# finding และผลการทดสอบเต็มรูปแบบกับไฟล์จริง ED85-02
-# ---------------------------------------------------------------------------
-
-def _ocr_read_sku_in_region(high_res_img, x0, y0, x1, y1, known_skus,
-                              angle_range=OCR_ANGLE_SWEEP, psm_modes=OCR_PSM_MODES,
-                              min_confidence=OCR_SKU_MIN_CONFIDENCE):
-    """
-    พยายามอ่านชื่อ SKU ที่พิมพ์อยู่ในขอบเขตพิกเซล [x0,y0,x1,y1] ของ high_res_img
-    (ภาพที่ render ที่ DPI สูง เช่น OCR_RENDER_DPI) แล้ว fuzzy-match กับ known_skus
-
-    ป้องกันที่ 1 (กรองข้อความที่ไม่ใช่ชื่อกล่องสินค้า): ผลลัพธ์ OCR ดิบทุกตัวจะถูกนำไป
-    เทียบกับ known_skus (รายชื่อ SKU จริงที่ดึงจาก PDF text โดยตรง ไม่ใช่ OCR) ด้วย
-    difflib.SequenceMatcher เฉพาะที่คะแนนความคล้าย >= min_confidence เท่านั้นจึงจะ
-    ยอมรับ - ข้อความอื่น (ตัวเลขระยะทาง, ป้าย Front/Back ฯลฯ) จะไม่ผ่านเกณฑ์นี้เพราะ
-    ไม่มีความคล้ายกับ SKU code ใดๆ ในรายการเลย
-
-    ป้องกันที่ 2 (SKU ของกล่องอื่นมาปน): ฟังก์ชันนี้รับพิกัด [x0,y0,x1,y1] ที่เป็น
-    "ขอบเขตของกล่องใบนั้นโดยตรง" (จาก per-box segmentation model) เท่านั้น ไม่ใช่พื้นที่
-    กว้างๆ ที่อาจครอบคลุมกล่องข้างเคียง - ผู้เรียกใช้ต้องส่งขอบเขตที่ตรงกับกล่องเป้าหมาย
-    เท่านั้น (ดู annotate_boxes_with_sku_per_view ที่เรียกใช้ฟังก์ชันนี้)
-
-    คืนค่า (best_sku, best_score, best_raw_text) - best_sku=None ถ้าไม่มีผลลัพธ์ใด
-    ผ่านเกณฑ์ min_confidence (รวมถึงกรณี OCR_AVAILABLE=False)
-    """
-    if not OCR_AVAILABLE:
-        return None, 0.0, ""
-    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
-    if x1 <= x0 or y1 <= y0:
-        return None, 0.0, ""
-    try:
-        region = high_res_img.crop((x0, y0, x1, y1))
-        if region.width < 10 or region.height < 10:
-            return None, 0.0, ""
-        gray = np.array(region.convert("L")).astype(np.uint8)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        pil_bin = PIL.Image.fromarray(binary)
-
-        best_sku, best_score, best_raw = None, 0.0, ""
-        for angle in angle_range:
-            rotated = pil_bin.rotate(angle, expand=True, fillcolor=255, resample=PIL.Image.BICUBIC)
-            padded = PIL.ImageOps.expand(rotated, border=30, fill=255)
-            for psm in psm_modes:
-                try:
-                    raw = pytesseract.image_to_string(
-                        padded,
-                        config=f'--psm {psm} --oem 1 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-'
-                    ).strip().upper()
-                except Exception:
-                    continue
-                raw_clean = re.sub(r'[^A-Z0-9-]', '', raw)
-                if len(raw_clean) < OCR_MIN_RAW_LENGTH:
-                    continue
-                for sku in known_skus:
-                    score = difflib.SequenceMatcher(None, raw_clean, sku).ratio()
-                    if score > best_score:
-                        best_score = score
-                        best_sku = sku
-                        best_raw = raw_clean
-        if best_score >= min_confidence:
-            return best_sku, best_score, best_raw
-        return None, best_score, best_raw
-    except Exception as e:
-        print(f"WARNING: OCR region read failed ({e})")
-        return None, 0.0, ""
-
-
-def annotate_boxes_with_sku_per_view(pdf_bytes, stack_box_model, known_skus,
-                                       base_dpi=180, ocr_dpi=OCR_RENDER_DPI):
-    """
-    วนลูปทุกกล่องในทุกตั้งของทั้ง FRONT และ BACK view ใน stack_box_model แล้วพยายาม
-    อ่าน SKU ด้วย OCR (best-effort) - แนบผลลัพธ์ไว้ใน box dict เป็น box["sku"] และ
-    box["sku_confidence"] (None/0.0 ถ้าอ่านไม่ได้/ไม่มั่นใจพอ)
-
-    เรียก render หน้า PDF ใหม่ที่ ocr_dpi (สูงกว่า base_dpi ที่ใช้สร้าง stack_box_model
-    มาก) แล้วคำนวณ scale factor เพื่อแปลงพิกัดกล่อง (ที่เก็บไว้ที่ base_dpi) ไปเป็น
-    พิกัดที่ถูกต้องในภาพความละเอียดสูงนี้
-
-    หาก OCR_AVAILABLE=False หรือ known_skus ว่างเปล่า จะข้ามการ OCR ทั้งหมด (ทุกกล่อง
-    จะมี sku=None) - ระบบ cross-view จะ fallback ไปใช้ depth-ratio โดยอัตโนมัติ
-    """
-    if not OCR_AVAILABLE or not known_skus:
-        reason = "OCR dependencies unavailable" if not OCR_AVAILABLE else "no known SKU list extracted from PDF"
-        print(f"OCR-based SKU matching SKIPPED ({reason}) - will rely on depth-ratio cross-view method only")
-        for view in ("FRONT", "BACK"):
-            for s in stack_box_model.get(view, []):
-                for b in s.get("boxes", []):
-                    b["sku"] = None
-                    b["sku_confidence"] = 0.0
-        return stack_box_model
-
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        page_index = 1 if len(doc) >= 2 else 0
-        page = doc[page_index]
-        pix = page.get_pixmap(dpi=ocr_dpi)
-        mode = "RGBA" if pix.alpha else "RGB"
-        high_res_img = PIL.Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-        if mode == "RGBA":
-            high_res_img = high_res_img.convert("RGB")
-    except Exception as e:
-        print(f"WARNING: Could not render high-DPI image for OCR ({e}) - skipping SKU matching")
-        for view in ("FRONT", "BACK"):
-            for s in stack_box_model.get(view, []):
-                for b in s.get("boxes", []):
-                    b["sku"] = None
-                    b["sku_confidence"] = 0.0
-        return stack_box_model
-
-    scale = ocr_dpi / float(base_dpi)
-    total_boxes = 0
-    matched_boxes = 0
-    for view in ("FRONT", "BACK"):
-        for s in stack_box_model.get(view, []):
-            for b in s.get("boxes", []):
-                total_boxes += 1
-                x0, y0 = b["x_left"] * scale, b["y_min"] * scale
-                x1, y1 = b["x_right"] * scale, b["y_max"] * scale
-                sku, score, raw = _ocr_read_sku_in_region(high_res_img, x0, y0, x1, y1, known_skus)
-                b["sku"] = sku
-                b["sku_confidence"] = score
-                if sku:
-                    matched_boxes += 1
-                    print(f"OCR SKU match ({view}, box x=[{b['x_left']:.0f}-{b['x_right']:.0f}]): "
-                          f"sku={sku} confidence={score:.2f} raw='{raw}'")
-    print(f"OCR-based SKU matching complete: {matched_boxes}/{total_boxes} boxes matched with "
-          f"confidence >= {OCR_SKU_MIN_CONFIDENCE} (unmatched boxes will use depth-ratio cross-view fallback)")
-    return stack_box_model
-
-
-def find_stack_by_sku(stacks, target_sku):
-    """หาตั้ง (stack) ที่มีกล่องใบใดใบหนึ่งที่มี box['sku'] == target_sku คืนค่า stack
-    dict นั้น หรือ None ถ้าไม่พบ (ใช้จับคู่ตำแหน่งกล่องเดียวกันระหว่าง FRONT/BACK ด้วย
-    identity ของ SKU แทนการเดาจาก depth-ratio เรขาคณิต)"""
-    if not target_sku:
-        return None
-    for s in stacks:
-        for b in s.get("boxes", []):
-            if b.get("sku") == target_sku:
-                return s
-    return None
-
-
-def get_stack_pair_straddling_x(stacks, target_x, search_window_px=CROSS_VIEW_DEPTH_TOLERANCE_PX):
-    """หาคู่ตั้ง (stack) ที่อยู่ติดกันซึ่งมีรอยต่อ (boundary) ใกล้ตำแหน่ง target_x มาก
-    ที่สุด (ภายในหน้าต่าง search_window_px) คืนค่า (stack_left, stack_right) หรือ
-    None ถ้าไม่พบคู่ที่ใกล้พอ - ใช้เปรียบเทียบความสูงของ 2 ตั้งที่อยู่คนละฝั่งของ
-    ตำแหน่งเป้าหมาย (ซึ่งควรตรงกับตำแหน่งรอยต่อที่ตรวจพบในอีก view)"""
-    if not stacks or len(stacks) < 2:
-        return None
-    sorted_stacks = sorted(stacks, key=lambda s: s["x0"])
-    best_pair = None
-    best_dist = None
-    for i in range(len(sorted_stacks) - 1):
-        a, b = sorted_stacks[i], sorted_stacks[i + 1]
-        boundary_mid = (a["x1"] + b["x0"]) / 2
-        dist = abs(boundary_mid - target_x)
-        if dist <= search_window_px and (best_dist is None or dist < best_dist):
-            best_dist = dist
-            best_pair = (a, b)
-    return best_pair
-
-
-def _get_skus_of_stacks_adjacent_to_x(stacks, x_mid):
-    """หาตั้ง 2 ตั้งที่อยู่ติดกันคร่อมตำแหน่ง x_mid (ภายใน view เดียวกัน) แล้วดึงชื่อ
-    SKU (ถ้ามี, เลือกจากกล่องที่ sku_confidence สูงสุดในตั้งนั้น) ของแต่ละตั้ง คืนค่า
-    (sku_left, sku_right) - เป็น None ถ้าตั้งนั้นไม่มีกล่องที่ระบุ SKU ได้"""
-    pair = get_stack_pair_straddling_x(stacks, x_mid, search_window_px=10**9)
-    if not pair:
-        return None, None
-
-    def _best_sku(stack):
-        boxes_with_sku = [b for b in stack.get("boxes", []) if b.get("sku")]
-        if not boxes_with_sku:
-            return None
-        best = max(boxes_with_sku, key=lambda b: b.get("sku_confidence", 0.0))
-        return best.get("sku")
-
-    left, right = pair
-    return _best_sku(left), _best_sku(right)
-
-
-def _cross_view_check_step_down_via_sku(region_x_mid, source_view, stack_box_model):
-    """
-    v24.7 NEW: พยายามตรวจสอบไขว้ด้วย "การจับคู่ตัวตนของ SKU" (แม่นยำกว่าเดาจาก
-    depth-ratio เรขาคณิต) - ระบุชื่อ SKU ของตั้ง 2 ตั้งที่อยู่ติดกับ region ใน
-    source_view ก่อน แล้วค้นหาตั้งเดียวกัน (โดย SKU) ใน other_view โดยตรง จากนั้น
-    เปรียบเทียบความสูงของตั้งที่จับคู่ได้
-
-    คืนค่า tuple เหมือน cross_view_check_step_down หรือ None ถ้าไม่มีข้อมูล SKU
-    เพียงพอจะตัดสิน (ผู้เรียกใช้ควร fallback ไปใช้ depth-ratio method แทน)
-    """
-    other_view = "BACK" if source_view == "FRONT" else "FRONT"
-    source_stacks = stack_box_model.get(source_view, [])
-    other_stacks = stack_box_model.get(other_view, [])
-    sku_left, sku_right = _get_skus_of_stacks_adjacent_to_x(source_stacks, region_x_mid)
-    if not sku_left and not sku_right:
-        return None  # ไม่มี SKU ให้ใช้เลย - ให้ fallback ไปใช้ depth-ratio
-
-    other_coverage = stack_box_model.get(f"{other_view}_coverage_ratio")
-    if other_coverage is None or other_coverage < STACK_COVERAGE_MIN_RATIO:
-        return None
-
-    candidates = []
-    for sku in (sku_left, sku_right):
-        if not sku:
-            continue
-        matched_stack = find_stack_by_sku(other_stacks, sku)
-        if matched_stack:
-            candidates.append((sku, matched_stack))
-
-    if not candidates:
-        return None  # มี SKU แต่หาตั้งที่ตรงกันใน other_view ไม่เจอ - fallback
-
-    # ถ้าจับคู่ได้แค่ตั้งเดียว ใช้เพื่อนบ้านของมันใน other_view เป็นฝั่งเปรียบเทียบ
-    matched_stack = candidates[0][1]
-    other_sorted = sorted(other_stacks, key=lambda s: s["x0"])
-    idx = other_sorted.index(matched_stack) if matched_stack in other_sorted else None
-    if idx is None:
-        return None
-    neighbor = None
-    if idx > 0:
-        neighbor = other_sorted[idx - 1]
-    elif idx < len(other_sorted) - 1:
-        neighbor = other_sorted[idx + 1]
-    if neighbor is None:
-        return None
-
-    h_matched = _stack_total_height(matched_stack)
-    h_neighbor = _stack_total_height(neighbor)
-    if h_matched is None or h_neighbor is None:
-        return None
-    taller, shorter = max(h_matched, h_neighbor), min(h_matched, h_neighbor)
-    ratio = 1 - (shorter / taller)
-    matched_sku = candidates[0][0]
-    other_x_mid = (matched_stack["x0"] + matched_stack["x1"]) / 2
-    print(f"Cross-view SKU-MATCH ({source_view}->{other_view}): identified SKU='{matched_sku}' "
-          f"stack in {other_view} x=[{matched_stack['x0']:.0f}-{matched_stack['x1']:.0f}], "
-          f"compared vs neighbor -> ratio={ratio*100:.1f}%")
-    if ratio >= CROSS_VIEW_CONFIRM_MIN_RATIO:
-        return ("CONFIRM", ratio, other_view, other_x_mid)
-    if ratio <= CROSS_VIEW_UNIFORM_MAX_RATIO:
-        return ("CONTRADICT", ratio, other_view, other_x_mid)
-    return ("NEUTRAL", ratio, other_view, other_x_mid)
-
-
-def cross_view_check_step_down(region_x_mid, source_view, container_bounds, stack_box_model):
-    """ตรวจสอบตำแหน่งเดียวกันทางกายภาพในอีก view หนึ่ง (view ตรงข้ามกับ source_view)
-    คืนค่า tuple (verdict, ratio, other_view, other_x):
-       verdict="CONTRADICT" - อีก view เห็นความสูงสม่ำเสมอ (ควร VETO claim นี้)
-       verdict="CONFIRM"    - อีก view ก็เห็นความต่างชัดเจนที่ตำแหน่งเดียวกัน (ยืนยัน)
-       verdict="NEUTRAL"    - ไม่มีข้อมูลเพียงพอจะตัดสิน (ไม่ veto ไม่ confirm)
-
-    v24.7: พยายามใช้ SKU-BASED MATCHING ก่อนเสมอ (แม่นยำกว่าเพราะอิงตัวตนกล่องจริง
-    ไม่ใช่เดาจากเรขาคณิต) หากไม่มีข้อมูล SKU เพียงพอ (OCR อ่านไม่ได้/ไม่มั่นใจพอ ซึ่ง
-    เป็นกรณีปกติสำหรับเอกสารที่ใช้ฟอนต์ตกแต่ง - ดู CHANGELOG) จะ fallback ไปใช้วิธี
-    DEPTH-RATIO เดิม (v24.6) โดยอัตโนมัติ
-    """
-    other_view = "BACK" if source_view == "FRONT" else "FRONT"
-
-    sku_result = _cross_view_check_step_down_via_sku(region_x_mid, source_view, stack_box_model)
-    if sku_result is not None:
-        return sku_result
-
-    # --- FALLBACK: DEPTH-RATIO method (v24.6, ยืนยันแล้วว่าใช้งานได้จริง) ---
-    cb_source = container_bounds.get(source_view)
-    cb_other = container_bounds.get(other_view)
-    if not cb_source or not cb_other:
-        return ("NEUTRAL", None, other_view, None)
-    rear_source = HARDCODED_REAR_SIDE[source_view]
-    rear_other = HARDCODED_REAR_SIDE[other_view]
-    d = _screen_x_to_depth_ratio(region_x_mid, cb_source, rear_source)
-    if not (0.0 <= d <= 1.0):
-        return ("NEUTRAL", None, other_view, None)
-    other_x = _depth_ratio_to_screen_x(d, cb_other, rear_other)
-    other_stacks = stack_box_model.get(other_view, [])
-    other_coverage = stack_box_model.get(f"{other_view}_coverage_ratio")
-    if other_coverage is None or other_coverage < STACK_COVERAGE_MIN_RATIO:
-        # per-box segmentation ของอีก view ไม่น่าเชื่อถือพอ - ถือเป็น NEUTRAL เพื่อ
-        # ความปลอดภัย (ไม่เสี่ยง veto/confirm จากข้อมูลที่ไม่น่าเชื่อถือ)
-        return ("NEUTRAL", None, other_view, other_x)
-    pair = get_stack_pair_straddling_x(other_stacks, other_x)
-    if not pair:
-        return ("NEUTRAL", None, other_view, other_x)
-    a, b = pair
-    ha, hb = _stack_total_height(a), _stack_total_height(b)
-    if ha is None or hb is None:
-        return ("NEUTRAL", None, other_view, other_x)
-    taller, shorter = max(ha, hb), min(ha, hb)
-    ratio = 1 - (shorter / taller)
-    if ratio >= CROSS_VIEW_CONFIRM_MIN_RATIO:
-        return ("CONFIRM", ratio, other_view, other_x)
-    if ratio <= CROSS_VIEW_UNIFORM_MAX_RATIO:
-        return ("CONTRADICT", ratio, other_view, other_x)
-    return ("NEUTRAL", ratio, other_view, other_x)
-
-
-def build_cross_view_mirrored_step_down_regions(step_down_regions, container_bounds, stack_box_model):
-    """สำหรับแต่ละ STEP_DOWN region ที่ตรวจพบแบบ deterministic ในแต่ละ view (ที่ผ่าน
-    เกณฑ์ ratio สูงพอจะถือว่า 'ยืนยันแล้ว') ตรวจสอบว่าอีก view มีการตรวจพบของตัวเองที่
-    ตำแหน่งกายภาพเดียวกันอยู่แล้วหรือไม่ - ถ้าไม่มี (การแบ่งกล่องในบริเวณนั้นของอีก
-    view ล้มเหลว/พลาดไป) ให้ 'สร้างกรอบคู่แฝด' (mirror) ขึ้นในอีก view โดยใช้ตำแหน่ง y
-    จาก per-box stack model ของ view นั้นเอง (แม่นยำกว่าเดาตำแหน่ง)
-
-    คืนค่า dict {"FRONT": [...], "BACK": [...]} รูปแบบเดียวกับ step_down_regions
-    """
-    mirrored = {"FRONT": [], "BACK": []}
-    for src_view in ("FRONT", "BACK"):
-        other_view = "BACK" if src_view == "FRONT" else "FRONT"
-        cb_src = container_bounds.get(src_view)
-        cb_other = container_bounds.get(other_view)
-        if not cb_src or not cb_other:
-            continue
-        rear_src = HARDCODED_REAR_SIDE[src_view]
-        rear_other = HARDCODED_REAR_SIDE[other_view]
-        other_coverage = stack_box_model.get(f"{other_view}_coverage_ratio")
-        if other_coverage is None or other_coverage < STACK_COVERAGE_MIN_RATIO:
-            # per-box segmentation ของ view ปลายทางไม่น่าเชื่อถือพอจะวาง mirror ได้
-            # อย่างแม่นยำ - ข้ามไปเพื่อความปลอดภัย
-            continue
-        for region in step_down_regions.get(src_view, []):
-            if region["ratio"] < CROSS_VIEW_CONFIRM_MIN_RATIO:
-                continue
-            mid_x = (region["x_min"] + region["x_max"]) / 2
-
-            # v24.7 NEW: พยายามใช้ SKU-BASED MATCHING ก่อนเพื่อหาตำแหน่ง mirror ที่
-            # แม่นยำกว่า (อิงตัวตนกล่องจริงแทนเรขาคณิต) - ถ้าไม่มีข้อมูล SKU เพียงพอ
-            # จะ fallback ไปใช้ depth-ratio เหมือนเดิม (ดู comment ที่
-            # _cross_view_check_step_down_via_sku และ CHANGELOG หัวไฟล์)
-            sku_left, sku_right = _get_skus_of_stacks_adjacent_to_x(
-                stack_box_model.get(src_view, []), mid_x)
-            matched_stack_via_sku = None
-            matched_sku_label = None
-            for sku in (sku_left, sku_right):
-                if sku:
-                    ms = find_stack_by_sku(stack_box_model.get(other_view, []), sku)
-                    if ms:
-                        matched_stack_via_sku = ms
-                        matched_sku_label = sku
-                        break
-
-            if matched_stack_via_sku is not None:
-                other_x = (matched_stack_via_sku["x0"] + matched_stack_via_sku["x1"]) / 2
-                depth_label = f"SKU='{matched_sku_label}'"
-            else:
-                d = _screen_x_to_depth_ratio(mid_x, cb_src, rear_src)
-                if not (0.0 <= d <= 1.0):
-                    continue
-                other_x = _depth_ratio_to_screen_x(d, cb_other, rear_other)
-                depth_label = f"depth_ratio={d:.3f}"
-
-            # ข้ามถ้าอีก view มีการตรวจพบของตัวเองใกล้ตำแหน่งนี้อยู่แล้ว (ไม่ต้อง mirror)
-            already_has_own = any(
-                abs(((r["x_min"] + r["x_max"]) / 2) - other_x) <= CROSS_VIEW_DEPTH_TOLERANCE_PX
-                for r in step_down_regions.get(other_view, [])
-            )
-            if already_has_own:
-                continue
-            other_stacks = stack_box_model.get(other_view, [])
-            pair = get_stack_pair_straddling_x(other_stacks, other_x)
-            if not pair:
-                print(f"Cross-view MIRROR skipped ({src_view}->{other_view}): no matching stack pair "
-                      f"found near {depth_label} (x={other_x:.0f})")
-                continue
-            a, b = pair
-            ha, hb = _stack_total_height(a), _stack_total_height(b)
-            if ha is None or hb is None:
-                continue
-            taller, shorter = max(ha, hb), min(ha, hb)
-            mirrored_ratio = 1 - shorter / taller
-            if mirrored_ratio < CROSS_VIEW_UNIFORM_MAX_RATIO:
-                # อีก view เห็นว่าสม่ำเสมอที่ตำแหน่งนี้จริง - ไม่ควร mirror (อาจเป็นแค่
-                # ความคลาดเคลื่อนจากมุมมอง/perspective ในฝั่งต้นทางเท่านั้น)
-                print(f"Cross-view MIRROR skipped ({src_view}->{other_view}): {other_view} shows "
-                      f"uniform height at matching {depth_label} (ratio={mirrored_ratio:.2f} < {CROSS_VIEW_UNIFORM_MAX_RATIO})")
-                continue
-            y_min = min(a["top_y"], b["top_y"])
-            y_max = max(a["floor_y"], b["floor_y"])
-            x_min_m = min(a["x0"], b["x0"])
-            x_max_m = max(a["x1"], b["x1"])
-            print(f"Cross-view MIRROR: {src_view} region ({depth_label}, ratio={region['ratio']*100:.0f}%) "
-                  f"-> mirrored to {other_view} x=[{x_min_m:.0f}-{x_max_m:.0f}] (mirrored_ratio={mirrored_ratio*100:.0f}%)")
-            mirrored[other_view].append({
-                "x_min": x_min_m, "x_max": x_max_m, "y_min": y_min, "y_max": y_max,
-                "ratio": mirrored_ratio,
-            })
-    return mirrored
 
 
 # ---------------------------------------------------------------------------
@@ -2911,9 +1984,13 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
     if risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "REAR_COMBINED_RISK") and view_container and view_cargo:
         c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
         g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
-        y0 = min(view_container["ymin"], view_cargo["ymin"])
-        y1 = max(view_container["ymax"], view_cargo["ymax"])
-        y_pad = (y1 - y0) * 0.05
+        # v24.13 FIX: เดิมใช้ min/max ระหว่างขอบเขตตู้ (container) กับขอบเขตคาร์โก้
+        # (cargo) รวมกัน ทำให้กรอบยืดเต็มความสูงของภาพเสมอ (ตามที่ผู้ใช้ระบุ "กรอบ
+        # เหลืองใหญ่เกิน") - เปลี่ยนไปใช้เฉพาะขอบเขตความสูงของคาร์โก้จริง (view_cargo)
+        # เท่านั้น + padding เล็กน้อย ทำให้กรอบจำกัดเฉพาะบริเวณที่คาร์โก้ปรากฏจริง
+        y0 = view_cargo["ymin"]
+        y1 = view_cargo["ymax"]
+        y_pad = max(4, (y1 - y0) * 0.06)
         box_y0, box_y1 = y0 - y_pad, y1 + y_pad
 
         MIN_GAP_WIDTH = max(20, (c_xmax - c_xmin) * 0.05)
@@ -3254,18 +2331,19 @@ def process_request(request):
         container_bounds = detect_container_bounds_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
         cargo_extent = detect_cargo_extent_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start)
 
-        step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
-                                                                container_bounds, cargo_extent)
-
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
 
-        # v24.7 NEW: พยายามอ่านชื่อ SKU บนแต่ละกล่องด้วย OCR (best-effort) เพื่อใช้เป็น
-        # ข้อมูลจับคู่ตำแหน่งที่แม่นยำกว่าใน CROSS-VIEW VERIFICATION ด้านล่าง - หาก OCR
-        # อ่านไม่ได้/ไม่มั่นใจพอ (พบว่าเป็นกรณีปกติสำหรับเอกสารที่ใช้ฟอนต์ตกแต่ง เช่น
-        # ไฟล์ ED85-02 - ดู CHANGELOG หัวไฟล์) ระบบจะ fallback ไปใช้ depth-ratio โดย
-        # อัตโนมัติในขั้นตอนถัดไป ไม่กระทบผลลัพธ์เดิมแต่อย่างใด
-        stack_box_model = annotate_boxes_with_sku_per_view(pdf_bytes, stack_box_model, sku_list)
+        # v24.13 NEW: STEP_DOWN_RISK ใช้ "การเปรียบเทียบความสูงรวมของตั้งกล่องที่ติดกัน"
+        # (per-box stack model เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK/
+        # REAR_LATERAL_IMBALANCE) เป็นแหล่งข้อมูลเดียวเท่านั้น ตามคำขอผู้ใช้ตรงตัว:
+        # "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" - แทนที่วิธีเดิมทั้งหมด
+        # (height-profile pixel scan v24.1/v24.4/v24.5, floor-hole scan v24.8/v24.11,
+        # cross-view mirror/veto + OCR-SKU matching v24.6/v24.7) ซึ่งอ่านค่าจาก pixel
+        # โดยตรงและไวต่อสัญญาณรบกวนจนสร้างจุดเสี่ยงเท็จจำนวนมาก (ดู CHANGELOG v24.13
+        # สำหรับรายละเอียด root cause ครบถ้วน) - ฟังก์ชันเดิมทั้งหมดยังคงอยู่ในโค้ด
+        # (ไม่ถูกเรียกใช้แล้ว) เผื่อต้องการนำกลับมาใช้ในอนาคต
+        step_down_regions = detect_step_down_regions_from_stack_model_per_view(stack_box_model)
 
         overhang_regions = {}
         tall_unstable_regions = {}
@@ -3285,64 +2363,6 @@ def process_request(request):
         local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
                                                                      crop_y_start, container_bounds, cargo_extent)
 
-        # v24.8 NEW: FLOOR-HOLE DETECTION - สัญญาณเพิ่มเติมสำหรับ STEP_DOWN_RISK ที่
-        # ทำงานได้ภายใน view เดียว (ไม่ต้องพึ่งพา cross-view/OCR) - ดู CHANGELOG หัวไฟล์
-        # สำหรับรายละเอียด root finding (ไอเดียจากผู้ใช้: สังเกต "รูโบ๋" ใกล้ผนังหัวตู้)
-        # นำผลลัพธ์ไปรวมกับ step_down_regions ที่ตรวจพบจาก height-profile method เดิม
-        # (ไม่ซ้ำซ้อนกัน เพราะเป็นสัญญาณคนละแหล่งที่มา) แล้วให้ผ่านการตรวจสอบ
-        # CROSS-VIEW VERIFICATION (v24.6) เหมือนกันทุกจุด ก่อนยอมรับเป็นความเสี่ยงจริง
-        # v24.11 FIX: ส่ง stack_box_model เข้าไปด้วยเสมอ เพื่อให้ validate กับตั้งข้างเคียง
-        # ก่อนยอมรับ candidate ใดๆ (แก้บั๊กที่เคยจับผนังตู้ผิดพลาดเป็น STEP_DOWN_RISK)
-        floor_hole_regions = detect_floor_hole_regions_per_view(diagram_crop, layout, crop_w, crop_h,
-                                                                   crop_y_start, container_bounds, cargo_extent,
-                                                                   stack_box_model=stack_box_model)
-        for view_label in ("FRONT", "BACK"):
-            existing = step_down_regions.get(view_label, [])
-            for hole_region in floor_hole_regions.get(view_label, []):
-                # ข้ามถ้าซ้อนทับกับ region ที่ height-profile method เจอไว้แล้ว (กัน
-                # การรายงานซ้ำซ้อนสำหรับปัญหาเดียวกัน)
-                is_duplicate = any(
-                    _box_iou_absolute(
-                        (hole_region["x_min"], hole_region["y_min"], hole_region["x_max"], hole_region["y_max"]),
-                        (r["x_min"], r["y_min"], r["x_max"], r["y_max"])
-                    ) >= 0.15
-                    for r in existing
-                )
-                if not is_duplicate:
-                    existing.append(hole_region)
-            step_down_regions[view_label] = existing
-
-        # v24.6 NEW: CROSS-VIEW VETO สำหรับ STEP_DOWN_RISK deterministic candidates -
-        # ก่อนใช้ region ใดๆ (ทั้งสร้าง FORCE หรือรับ AI claim) ตรวจสอบไขว้กับอีก view
-        # ก่อนเสมอ - ถ้าอีก view เห็นความสูงสม่ำเสมอที่ตำแหน่งกายภาพเดียวกัน ให้ตัดทิ้ง
-        for view_label in ("FRONT", "BACK"):
-            kept_regions = []
-            for region in step_down_regions.get(view_label, []):
-                mid_x = (region["x_min"] + region["x_max"]) / 2
-                verdict, cross_ratio, other_view, other_x = cross_view_check_step_down(
-                    mid_x, view_label, container_bounds, stack_box_model)
-                if verdict == "CONTRADICT":
-                    print(f"Cross-view VETO: STEP_DOWN_RISK candidate in {view_label} "
-                          f"x=[{region['x_min']:.0f}-{region['x_max']:.0f}] REJECTED - "
-                          f"{other_view} shows uniform height at matching depth "
-                          f"(x≈{other_x:.0f}, cross_ratio={cross_ratio*100:.1f}% <= "
-                          f"{CROSS_VIEW_UNIFORM_MAX_RATIO*100:.0f}%)")
-                    continue
-                if verdict == "CONFIRM":
-                    print(f"Cross-view CONFIRM: STEP_DOWN_RISK candidate in {view_label} "
-                          f"x=[{region['x_min']:.0f}-{region['x_max']:.0f}] corroborated by "
-                          f"{other_view} (x≈{other_x:.0f}, cross_ratio={cross_ratio*100:.1f}%)")
-                kept_regions.append(region)
-            step_down_regions[view_label] = kept_regions
-
-        # v24.6 NEW: CROSS-VIEW MIRROR - หลังกรอง veto แล้ว สำหรับ region ที่ยังเหลืออยู่
-        # (ยืนยันแล้วว่าเป็นของจริง) ตรวจสอบว่าอีก view มีการตรวจพบของตัวเองที่ตำแหน่ง
-        # กายภาพเดียวกันหรือไม่ ถ้าไม่มี (การแบ่งกล่องอีก view พลาดไป) ให้สะท้อนกรอบไป
-        mirrored_step_down = build_cross_view_mirrored_step_down_regions(
-            step_down_regions, container_bounds, stack_box_model)
-        for view_label in ("FRONT", "BACK"):
-            step_down_regions[view_label].extend(mirrored_step_down.get(view_label, []))
-
         raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
         if not isinstance(raw_ai_risks, list):
             raw_ai_risks = []
@@ -3355,28 +2375,14 @@ def process_request(request):
             has_valid_box = view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4
 
             if rt == "STEP_DOWN_RISK":
+                # v24.13: gate เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK ด้านล่าง - ต้อง
+                # overlap กับ deterministic region ที่มาจาก per-box stack-height
+                # comparison เท่านั้น (ไม่มี cross-view veto/mirror อีกต่อไป เพราะแหล่ง
+                # ข้อมูลใหม่นี้เชื่อถือได้อยู่แล้วในตัวเอง - ดู CHANGELOG v24.13)
                 if has_valid_box:
                     regions_for_view = step_down_regions.get(view_of_claim, [])
                     if _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
-                        # v24.6 NEW: แม้ overlap กับ deterministic region แล้ว ยังตรวจสอบ
-                        # ไขว้กับอีก view อีกชั้นหนึ่งเผื่อกรณี AI claim overlap กับ
-                        # deterministic region ที่ (ในทางทฤษฎี) ไม่ควรผ่านมาถึงจุดนี้ได้
-                        # อยู่แล้วถ้าเคย veto ไปแล้วข้างต้น - แต่เป็นการป้องกันซ้ำอีกชั้น
-                        try:
-                            claim_abs = _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start)
-                            claim_mid_x = (claim_abs[0] + claim_abs[2]) / 2 if claim_abs else None
-                        except Exception:
-                            claim_mid_x = None
-                        if claim_mid_x is not None:
-                            verdict, cross_ratio, other_view, other_x = cross_view_check_step_down(
-                                claim_mid_x, view_of_claim, container_bounds, stack_box_model)
-                            if verdict == "CONTRADICT":
-                                print(f"Gemini STEP_DOWN_RISK claim for {view_of_claim} view REJECTED by "
-                                      f"cross-view veto ({other_view} shows uniform height at matching depth)")
-                            else:
-                                all_risks.append(r)
-                        else:
-                            all_risks.append(r)
+                        all_risks.append(r)
                     else:
                         print(f"Gemini STEP_DOWN_RISK claim for {view_of_claim} view REJECTED by deterministic gate "
                               f"(description: {r.get('description', '')[:100]})")
@@ -3702,7 +2708,8 @@ def process_request(request):
             else:
                 print(f"WARNING: Could not compute lateral gap for {view_label} (missing container_bounds or cargo_extent)")
 
-            precise_abs_box = get_precise_lateral_gap_box(container_bounds.get(view_label), cargo_extent.get(view_label))
+            precise_abs_box = get_precise_lateral_gap_box(container_bounds.get(view_label), cargo_extent.get(view_label),
+                                                            full_img=img)
             precise_lateral_box_2d = None
             if precise_abs_box:
                 px0, py0, px1, py1 = precise_abs_box
@@ -3754,7 +2761,11 @@ def process_request(request):
 
         for view_label in ("FRONT", "BACK"):
             for region in step_down_regions.get(view_label, []):
-                if region["ratio"] < MIN_STEP_DOWN_RATIO:
+                # v24.13: threshold ปรับมาใช้ STEP_DOWN_STACK_MIN_RATIO (per-box stack-
+                # height comparison) แทน MIN_STEP_DOWN_RATIO เดิม (pixel-profile scan)
+                # - region ที่มาถึงจุดนี้ผ่านเกณฑ์นี้อยู่แล้วจาก
+                # detect_step_down_regions_from_stacks() แต่เก็บเช็คซ้ำไว้เป็น safety net
+                if region["ratio"] < STEP_DOWN_STACK_MIN_RATIO:
                     continue
                 already_covered = False
                 for r in all_risks:
