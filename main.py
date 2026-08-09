@@ -19,7 +19,16 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.21
+# AI Cargo Safety Checker - High Precision v24.22
+#
+# v24.22 - Fix ตามผลทดสอบ EA06/EA10 หลัง v24.21:
+#   1) เพิ่ม LOW-EXPOSED-STACK detector สำหรับเคสที่เป็นกล่อง/ตั้งชั้นล่างโดดเด่นอยู่ติดกับ
+#      พื้นที่ว่างด้านบน/ด้านข้าง ซึ่งควรระบุเป็น STEP_DOWN_RISK ที่ตำแหน่งกล่องจริงตาม
+#      กรอบสีแดงที่ผู้ใช้วงไว้ ไม่ใช่ปล่อยให้ไม่ระบุจุดเสี่ยง
+#   2) ทำให้ TALL_UNSTABLE_RISK เข้มขึ้นอีกชั้น: ถ้าไม่มี deterministic tall-unstable ที่ผ่าน
+#      box-count/neighbor gate จะไม่ให้กรอบชมพูจาก AI วาดทับตำแหน่งผิด
+#   3) สำหรับ gap marker: ถ้าเป็น LATERAL_GAP แต่ marker มีแนวโน้มไปอยู่ใต้/นอกตู้และไม่มี
+#      local evidence ชัดเจน จะไม่วาด marker เพื่อหลีกเลี่ยงการสื่อสารผิดตำแหน่ง
 #
 # v24.21 - Fix ตามผลทดสอบ v24.20 โดยโฟกัส 3 จุดจากผู้ใช้:
 #   1) ตัด fallback กรอบฟ้า/เขียวสำหรับกลุ่ม gap ที่เคยไปครอบสินค้า: ถ้าเป็น
@@ -321,6 +330,13 @@ GAP_ARROW_LABEL_PADDING_PX = 4        # padding รอบข้อความ�
 # v24.21 NEW: floor-empty marker ใช้แทนกรอบฟ้า/เขียว fallback เมื่อ lateral gap จริงๆ
 # เป็นพื้นที่ว่างบนพื้นท้ายตู้/พื้นด้านหลัง cargo
 FLOOR_EMPTY_MARKER_LABEL_OFFSET_PX = 18
+
+# v24.22 NEW: LOW-EXPOSED-STACK detector - จับตั้ง/กล่องชั้นล่างที่เปิดโล่งด้านบนมาก
+# และติดกับตั้งที่สูงกว่า/พื้นที่ว่าง ควรทำกรอบ STEP_DOWN ตามที่ผู้ใช้วงแดงให้ดู
+LOW_EXPOSED_MIN_TOP_GAP_PX = 80
+LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX = 45
+LOW_EXPOSED_FLOOR_PROXIMITY_PX = 80
+LOW_EXPOSED_MAX_WIDTH_RATIO_OF_MEDIAN = 2.35
 
 
 def get_api_keys_pool():
@@ -1890,6 +1906,72 @@ def detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_ex
     return results
 
 
+
+def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None):
+    """
+    v24.22 NEW: ตรวจจับ "กล่อง/ตั้งชั้นล่างที่เปิดโล่งด้านบน" ซึ่งผู้ใช้ชี้ว่าเป็นจุดเสี่ยง
+    ที่ควรกรอบตามตำแหน่งจริง (เช่น EA10 front: กล่องเขียวชั้นล่างที่อยู่ติดกับพื้นที่ว่าง)
+
+    หลักคิด: ไม่ใช้แค่ pixel-height ratio แบบ STEP_DOWN เดิม เพราะเคสนี้ segmentation อาจ
+    รวมกล่องหรือวัด height เพี้ยนจาก isometric แต่ยังเห็น pattern สำคัญคือ:
+      - top_y ของตั้งนี้ต่ำกว่าขอบบนของ cargo มาก (มีพื้นที่ว่างด้านบนชัดเจน)
+      - floor_y อยู่ใกล้พื้น/ขอบล่าง cargo
+      - มีเพื่อนบ้านที่ top_y สูงกว่าอย่างชัดเจนอย่างน้อย 1 ฝั่ง
+      - ไม่กว้างผิดปกติเกินไปเมื่อเทียบกับ median width (กัน merged stack ใหญ่เกิน)
+    คืนค่า region ที่ใช้เป็น STEP_DOWN_RISK deterministic forced region
+    """
+    regions = []
+    if not stacks or len(stacks) < 2:
+        return regions
+    ss = sorted(stacks, key=lambda s: s["x0"])
+    widths = sorted(_stack_width(s) for s in ss)
+    median_w = widths[len(widths)//2] if widths else 1
+    min_top = min((s["top_y"] for s in ss if s.get("boxes")), default=None)
+    if min_top is None:
+        return regions
+    cargo_ymax = cargo_extent_view.get("ymax") if cargo_extent_view else max(s["floor_y"] for s in ss)
+    for i, st in enumerate(ss):
+        if not st.get("boxes"):
+            continue
+        w = _stack_width(st)
+        if median_w > 0 and w > median_w * LOW_EXPOSED_MAX_WIDTH_RATIO_OF_MEDIAN:
+            continue
+        top_gap = st["top_y"] - min_top
+        if top_gap < LOW_EXPOSED_MIN_TOP_GAP_PX:
+            continue
+        if (cargo_ymax - st["floor_y"]) > LOW_EXPOSED_FLOOR_PROXIMITY_PX:
+            continue
+        neigh = []
+        if i > 0:
+            neigh.append(ss[i-1])
+        if i < len(ss)-1:
+            neigh.append(ss[i+1])
+        if not neigh:
+            continue
+        best_top_diff = max((st["top_y"] - n["top_y"] for n in neigh if n.get("boxes")), default=0)
+        if best_top_diff < LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX:
+            continue
+        regions.append({
+            "x_min": st["x0"], "y_min": st["top_y"],
+            "x_max": st["x1"], "y_max": st["floor_y"],
+            "ratio": min(0.99, max(0.30, top_gap / max(1, cargo_ymax - min_top))),
+            "source": "FORCED_DETERMINISTIC_LOW_EXPOSED_STACK_STEP_DOWN",
+        })
+    return regions
+
+
+def detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent):
+    results = {"FRONT": [], "BACK": []}
+    for view in ("FRONT", "BACK"):
+        stacks = stack_box_model.get(view, [])
+        if not stacks:
+            stacks = stack_box_model.get(f"{view}_raw_stacks", [])
+        regions = detect_low_exposed_step_regions_for_view(stacks, cargo_extent.get(view))
+        results[view] = regions
+        for r in regions:
+            print(f"LOW_EXPOSED STEP_DOWN candidate ({view}): x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}]")
+    return results
+
 def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
     try:
         ymin, xmin, ymax, xmax = map(float, box_2d)
@@ -2882,6 +2964,17 @@ def process_request(request):
         # matching) v24.14-v24.17 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK +
         # ISOLATED-PEAK EXCLUSION + EDGE-ARTIFACT GATE + MERGED-STACK GATE (median-based)
         step_down_regions = detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_extent)
+        # v24.22: เพิ่ม candidate จาก low-exposed stack detector (เช่นกล่องชั้นล่างที่ผู้ใช้วงแดง)
+        low_exposed_step_regions = detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent)
+        for view_label in ("FRONT", "BACK"):
+            existing = step_down_regions.get(view_label, [])
+            for lr in low_exposed_step_regions.get(view_label, []):
+                duplicate = any(_box_iou_absolute((lr["x_min"], lr["y_min"], lr["x_max"], lr["y_max"]),
+                                                  (r["x_min"], r["y_min"], r["x_max"], r["y_max"])) >= 0.15
+                                for r in existing)
+                if not duplicate:
+                    existing.append(lr)
+            step_down_regions[view_label] = existing
 
         overhang_regions = {}
         tall_unstable_regions = {}
