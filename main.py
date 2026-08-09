@@ -18,7 +18,44 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.15
+# AI Cargo Safety Checker - High Precision v24.16
+#
+# v24.16 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.15) พบกรอบแดง (STEP_DOWN_RISK)
+#   เท็จอีกรูปแบบหนึ่งที่ไม่มีความเสี่ยงจริงเลย (ไฟล์ EC50-02) - ผู้ใช้ระบุว่า "ตั้งแต่
+#   วิเคราะห์ภาพ back มาผิดตลอด" (การวิเคราะห์ BACK view ผิดพลาดมาตลอด)
+#
+#   ROOT CAUSE (ยืนยันด้วยการ render PDF จริงและตรวจสอบ pixel data โดยตรง - ไม่ใช่การ
+#   เดา): ที่ตำแหน่งขอบผนังหัวตู้ (head-wall edge) ของ BACK view พบว่า per-box
+#   segmentation สร้าง "ตั้งปลอม" (artifact stacks) 2 ตั้งที่แคบผิดปกติ (74px และ 31px
+#   เทียบกับตั้งจริงทั่วไปที่กว้าง ~132-135px, คิดเป็นเพียง 56% และ 23% ของค่ามัธยฐาน
+#   ความกว้างตั้งในแถวเดียวกัน) - ตรวจสอบ pixel ยืนยันว่าตั้งปลอมทั้ง 2 นี้เกิดจากการวัด
+#   ผิดตำแหน่ง: แทนที่จะวัดจาก "หน้าตรงของกล่อง" (front face) กลับไปวัดจากบริเวณ "มุมบน/
+#   ด้านข้างของกล่องที่มุมตู้" (isometric corner/top-face) ซึ่งเป็นพื้นที่เฉพาะที่ปรากฏ
+#   เฉพาะกล่องใบแรกสุดที่ติดผนังหัวตู้เท่านั้น (มุมมอง isometric ทำให้เห็นทั้งหน้าตรง
+#   และด้านข้าง/บนของกล่องแรกพร้อมกัน) ทำให้ได้ค่า floor_y/top_y ที่ผิดเพี้ยนไปจากตำแหน่ง
+#   พื้นตู้จริงมาก (floor_y กระโดดจากประมาณ 1108-1135 เป็น 1274 อย่างฉับพลันในระยะห่าง
+#   เพียง ~30-70px - ในขณะที่ตั้งจริงที่เหลือมี floor_y เปลี่ยนแปลงอย่างราบรื่นต่อเนื่อง
+#   ตามมุมมอง isometric ปกติ ~65-68px ต่อความกว้างตั้งหนึ่ง)
+#
+#   เมื่อตั้งปลอมนี้ (สูงเพียง 49px และ 106px, ผิดเพี้ยนไปมากจากความสูงจริง) ถูกนำไป
+#   เปรียบเทียบกับตั้งข้างเคียงที่วัดถูกต้อง (สูง 277px) จึงเกิด STEP_DOWN_RISK เท็จ
+#   ที่ตำแหน่งขอบผนังหัวตู้ทุกครั้งที่กล่องแรกสุดมีรูปทรง/สีที่ทำให้เกิดการวัดผิดแบบนี้ -
+#   อธิบายได้ว่าทำไมปัญหานี้ดูเหมือนเกิดกับ "ภาพ back" บ่อยเป็นพิเศษ (ตำแหน่งผนังหัวตู้ของ
+#   BACK view มักตรงกับกล่องที่วางอยู่มุมที่มองเห็น isometric corner ชัดกว่า FRONT)
+#
+#   วิธีแก้ (EDGE-ARTIFACT GATE ใหม่ใน detect_step_down_regions_from_stacks): ก่อนใช้
+#   ตั้งใดๆ เป็นตัวเปรียบเทียบ (ทั้งฝั่ง "ตั้งเตี้ย" ที่พิจารณาอยู่ และฝั่ง "ตั้งข้างเคียง"
+#   ที่อ้างว่าสูงกว่า) ตรวจสอบเงื่อนไขร่วม 2 ข้อ - ต้องเข้าเงื่อนไขทั้งคู่จึงจะถูกคัดออก:
+#     1. ตั้งนั้นอยู่ใกล้ขอบคาร์โก้ (xmin หรือ xmax) ภายในระยะ 1 เท่าของความกว้างตั้ง
+#        มัธยฐานในแถวนั้น (ตำแหน่งที่มุม isometric corner ปรากฏได้)
+#     2. ตั้งนั้นแคบกว่าปกติอย่างมีนัยสำคัญ (< 70% ของความกว้างตั้งมัธยฐานในแถวเดียวกัน)
+#        บ่งชี้ว่าเป็นเพียง "เศษของกล่อง" (fragment) ไม่ใช่กล่องเต็มใบจริง
+#   ตั้งที่กว้างปกติ (>= 70% ของมัธยฐาน) ที่อยู่ใกล้ขอบจะไม่ถูกคัดออก (ยังคงตรวจจับ
+#   STEP_DOWN_RISK ที่ตำแหน่งใกล้ผนังหัวตู้ได้ตามปกติหากเป็นกล่องเต็มใบจริงที่เตี้ยกว่า
+#   จริง) - ทดสอบยืนยันด้วยข้อมูลจริงจากไฟล์ EC50-02: ตั้งปลอมทั้ง 2 (74px=56%<70%,
+#   31px=23%<70% ของมัธยฐาน 132px) ถูกคัดออกสำเร็จ ในขณะที่ตั้งจริงทั้ง 3 ที่เหลือ (132-
+#   135px, ~100-102% ของมัธยฐาน) ยังคงถูกใช้เปรียบเทียบได้ตามปกติ ไม่กระทบ OVERHANG/
+#   TALL_UNSTABLE/REAR_LATERAL_IMBALANCE ซึ่งไม่ได้ใช้ gate นี้เลย
 #
 # v24.15 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.14) พบกรอบแดง (STEP_DOWN_RISK)
 #   เท็จอีกรูปแบบหนึ่ง ("วงกลมสีส้ม คือที่เป็นกรอบแดงเกินมา หาสิ่งผิดปกติ และนำออกไป")
@@ -40,65 +77,15 @@ import google.generativeai as genai
 #   TALL_UNSTABLE_NEIGHBOR_MAX_RATIO) - ถ้าใช่ ให้ข้ามเพื่อนบ้านนั้นไปเลย (ปล่อยให้
 #   TALL_UNSTABLE_RISK เป็นผู้รายงานปรากฏการณ์นี้แต่เพียงผู้เดียว ไม่ซ้ำซ้อนกัน)
 #
-#   ผลลัพธ์ที่คาดหวัง: STEP_DOWN_RISK ยังคงตรวจจับ "ที่ราบ/ขั้นบันได" จริงที่มีตั้ง
-#   หลายใบสูงต่อเนื่องกัน (เช่นกรณี ED85-02/EC20-02 ฝั่งอื่นที่ยืนยันถูกต้องแล้ว) แต่จะ
-#   ไม่ flag ซ้ำกับกรณีที่เป็นตั้งสูงโดดเดี่ยวเดี่ยวๆ ซึ่งควรรายงานเป็น TALL_UNSTABLE_RISK
-#   เพียงอย่างเดียวเท่านั้น
-#
 # v24.14 - แก้ไขตามผลทดสอบใช้งานจริงกับไฟล์หลากหลาย (v24.13) พบ 3 ปัญหา:
-#   ("กรอบสีแดงส่วนหน้ารถ หาพื้นที่ต่ำ ไม่ต้องทำแล้ว ที่ไปหารูโบ๋ ภาพbackผมต้องการให้
-#    หาตั้งสินค้าภาพback ที่ต่ำกว่าตั้งข้างเคียง เช่นที่ตีกรอบภาพfront-กรอบ rear empty
-#    risk ท้ายรถ กรอบควรสั้นเหมือนกรอบสีเหลืองด้านหน้ารถอื่นๆถ้ามี")
-#
-#   ROOT CAUSE ที่พบจากภาพผลลัพธ์จริง 10 ไฟล์ (EC10-03, EC11-01, EC12-01, EC13-01,
-#   EC15-01, EC18-01, EC20-02, EC26-02, ED85-02, ED85-03): กรอบ STEP_DOWN_RISK
-#   (v24.13, เปรียบเทียบความสูงตั้งกล่องที่ติดกัน) ที่ "ถูกต้อง" (เช่น ED85-02,
-#   EC20-02, EC15-01) มีขนาดแคบ/พอดีกับกล่องจริงเสมอ แต่ที่ "ผิด" (เช่น EC10-03,
-#   EC13-01, EC18-01, EC26-02) กลับมีขนาดใหญ่ผิดปกติ ครอบคลุมกล่องหลายใบ/หลายสี
-#   พร้อมกัน - ตรงกับที่ผู้ใช้ระบุว่าเหมือน "หาพื้นที่ต่ำ/รูโบ๋" (พฤติกรรมแบบเดิม)
-#
-#   สาเหตุที่แท้จริง: build_stack_box_model_for_view() (per-box segmentation, v22-v24)
-#   บางครั้ง "รวมกล่องหลายใบสีเดียวกัน/ความสูงเท่ากันเป็นตั้งเดียว" (under-
-#   segmentation) โดยเฉพาะเมื่อกล่องเรียงติดกันแนบสนิทไม่มีเส้นแบ่งชัดเจน - เมื่อตั้งที่
-#   ถูกรวมผิดนี้ (กว้างผิดปกติ) ถูกนำไปเทียบความสูงกับตั้งข้างเคียงจริงที่มีความสูงต่างกัน
-#   (แม้เพียงเล็กน้อย) detect_step_down_regions_from_stacks() (v24.13) จะสร้างกรอบ
-#   ที่กว้างเท่าตั้งที่ถูกรวมผิดทั้งหมด (ครอบคลุมกล่องจริงหลายใบ) แทนที่จะเป็นกล่องเดียว
-#
-#   วิธีแก้ (3 ส่วน):
-#
-#   ส่วนที่ 1 - STACK-WIDTH SANITY GATE (ใหม่): เพิ่มการตรวจสอบว่าตั้งทั้ง 2 ฝั่งที่จะ
-#   นำมาเปรียบเทียบกัน (ทั้งตั้งที่สงสัยว่าเตี้ยกว่า และตั้งข้างเคียงที่อ้างว่าสูงกว่า)
-#   ต้องมีความกว้างไม่เกิน STEP_DOWN_STACK_MAX_WIDTH_RATIO (30%) ของความกว้างคาร์โก้
-#   ทั้งหมดในมุมมองนั้น - หากตั้งใดตั้งหนึ่งกว้างเกินเกณฑ์นี้ (ส่อว่าเป็นการรวมกล่อง
-#   หลายใบผิดพลาด ไม่ใช่กล่องเดียวจริง) จะข้ามการเปรียบเทียบคู่นั้นไปทันที (ถือว่า
-#   ไม่น่าเชื่อถือพอจะตัดสิน) - นี่คือการแก้ไขหลักที่ทำให้กรอบใหญ่ผิดปกติหายไปทั้งหมด
-#   ทั้งใน FRONT และ BACK (ยืนยันจากภาพจริงว่ากรณีที่ถูกต้อง เช่น ED85-02/EC20-02/
-#   EC15-01 ล้วนมีตั้งที่แคบ/ขนาดกล่องเดียวเสมอ ต่างจากกรณีผิดที่ตั้งกว้างผิดปกติ)
-#
-#   ส่วนที่ 2 - RAW-STACK FALLBACK สำหรับ STEP_DOWN_RISK โดยเฉพาะ (ใหม่): ผู้ใช้ระบุว่า
-#   "ภาพ back ต้องการให้หาตั้งสินค้าที่ต่ำกว่าตั้งข้างเคียง เช่นเดียวกับภาพ front" - พบว่า
-#   เมื่อ per-box segmentation ของ view ใด view หนึ่ง (มักเป็น BACK เพราะมี occlusion
-#   มากกว่า FRONT) มี coverage_ratio ต่ำกว่าเกณฑ์ STACK_COVERAGE_MIN_RATIO (60%) ระบบ
-#   จะทิ้งผลการแบ่งกล่องของ view นั้นไปทั้งหมด (stacks=[]) ทำให้ STEP_DOWN_RISK ไม่มี
-#   ทางตรวจพบอะไรเลยใน view นั้น แม้จะมีความเสี่ยงจริงอยู่ก็ตาม - วิธีแก้: เก็บผลการ
-#   แบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์ coverage) ไว้ในคีย์แยกต่างหาก (f"{view}_raw_stacks")
-#   เสมอ ใช้เป็น fallback เฉพาะสำหรับ STEP_DOWN_RISK เท่านั้น (ไม่กระทบ OVERHANG/
-#   TALL_UNSTABLE/REAR_LATERAL_IMBALANCE ซึ่งยังคงต้องใช้ high-confidence data เหมือนเดิม
-#   ทุกประการ) พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น (40% แทน 30%) เพื่อชดเชยความไม่แน่นอน
-#   ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน STACK-WIDTH SANITY GATE (ส่วนที่ 1) เหมือนกันทุก
-#   ประการ ไม่มีข้อยกเว้น
-#
-#   ส่วนที่ 3 - REAR_EMPTY_RISK กรอบใหญ่เกิน (ผู้ใช้: "กรอบควรสั้นเหมือนกรอบสีเหลือง
-#   ด้านหน้ารถ"): ROOT CAUSE - กรอบ REAR_EMPTY_RISK ส่วนใหญ่มาจาก AI zoom analysis
-#   (analyze_rear_zone_with_ai -> box_2d ที่ Gemini เลือกเองจากภาพซูมท้ายตู้) ซึ่งไม่ได้
-#   ผ่านการตรวจสอบ/ตัดขอบเขตด้วยพิกเซลจริงเหมือนที่ LATERAL_GAP_RISK ทำ (v24.13) ทำให้
-#   บางครั้งกรอบกว้าง/สูงเกินกว่าช่องว่างจริงที่วัดได้ วิธีแก้ (_tighten_zoom_box_to_gap):
-#   หลังได้กรอบจาก AI แล้ว ตัด (intersect) ให้ไม่เกินขอบเขตช่องว่างที่วัดได้จริงแบบ
-#   deterministic (จาก compute_empty_gap_pixels ซึ่งมีอยู่แล้ว, +padding เล็กน้อย) ก่อน
-#   นำไปวาด - ใช้หลักการเดียวกับที่ทำให้ LATERAL_GAP_RISK แคบลงใน v24.13 ทำให้กรอบ
-#   REAR_EMPTY_RISK/FRONT_EMPTY_RISK สั้นกระชับสอดคล้องกับขนาดช่องว่างจริงเสมอ ไม่ว่า
-#   AI จะเลือกกรอบมาใหญ่แค่ไหนก็ตาม (ปลอดภัย - ถ้าตัดแล้วพื้นที่เหลือ 0 จะใช้กรอบเดิม
-#   ของ AI แทน กันกรอบหายไปเลย)
+#   1) STACK-WIDTH SANITY GATE: per-box segmentation บางครั้งรวมกล่องหลายใบเป็นตั้ง
+#      เดียวผิดพลาด (under-segmentation) ทำให้กรอบ STEP_DOWN_RISK ใหญ่ผิดปกติ - แก้ไข
+#      ด้วยการปฏิเสธคู่ตั้งใดๆ ที่มีฝั่งใดฝั่งหนึ่งกว้างเกิน 30% ของความกว้างคาร์โก้
+#   2) RAW-STACK FALLBACK: เมื่อ per-box segmentation coverage ต่ำ (มักเป็น BACK view)
+#      ใช้ raw stacks (คุณภาพต่ำกว่า) เป็น fallback เฉพาะ STEP_DOWN_RISK พร้อมเกณฑ์
+#      เข้มงวดขึ้น (40% แทน 30%)
+#   3) กรอบ REAR_EMPTY_RISK/FRONT_EMPTY_RISK จาก AI zoom ถูกตัด (intersect) ให้ไม่เกิน
+#      ขอบเขตช่องว่างที่วัดได้จริงแบบ deterministic (เหมือนหลักการ LATERAL_GAP_RISK)
 #
 # v24.13 - STEP_DOWN_RISK เปลี่ยนวิธีตรวจจับทั้งหมด จาก pixel/height-profile scan +
 #   floor-hole scan + cross-view mirror/veto (v24.1-v24.11) ซึ่งไวต่อสัญญาณรบกวนมาก
@@ -157,8 +144,8 @@ import google.generativeai as genai
 # v24.6 - [REMOVED ใน v24.13] เคยเพิ่ม CROSS-VIEW VERIFICATION (เปรียบเทียบตำแหน่ง
 #   ทางกายภาพระหว่าง FRONT/BACK view ด้วย depth-ratio mapping) สำหรับ veto/mirror
 #   STEP_DOWN_RISK - ทั้ง v24.6/v24.7/v24.8 ถูกแทนที่ด้วยวิธีเปรียบเทียบความสูงตั้งกล่อง
-#   ที่ติดกันโดยตรง (detect_step_down_regions_from_stacks, v24.13) ซึ่งแม่นยำกว่าและ
-#   ใช้โค้ดน้อยกว่ามาก - ดู CHANGELOG v24.13/v24.14 ด้านบนสำหรับรายละเอียดเต็ม
+#   ที่ติดกันโดยตรง (detect_step_down_regions_from_stacks, v24.13-v24.16) ซึ่งแม่นยำ
+#   กว่าและใช้โค้ดน้อยกว่ามาก - ดู CHANGELOG v24.13-v24.16 ด้านบนสำหรับรายละเอียดเต็ม
 #
 # v24.5/v24.4 - [REMOVED ใน v24.13] เคยปรับปรุง _detect_height_profile() (pixel/
 #   color filtering) สำหรับ STEP_DOWN_RISK height-profile scan - แทนที่ทั้งหมดด้วย
@@ -254,7 +241,7 @@ LOCAL_GAP_WALL_ZONE_MARGIN_RATIO = 0.20
 LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO = 0.15
 
 # ---------------------------------------------------------------------------
-# STEP_DOWN_RISK constants (v24.13/v24.14) - เปรียบเทียบความสูงตั้งกล่องที่ติดกัน
+# STEP_DOWN_RISK constants (v24.13-v24.16) - เปรียบเทียบความสูงตั้งกล่องที่ติดกัน
 # ---------------------------------------------------------------------------
 
 STEP_DOWN_STACK_MIN_RATIO = 0.30          # ตั้งข้างเคียงต้องสูงกว่าตั้งที่พิจารณาอยู่
@@ -263,24 +250,35 @@ STEP_DOWN_STACK_MIN_RATIO = 0.30          # ตั้งข้างเคีย
 STEP_DOWN_STACK_MIN_HEIGHT_PX = 15         # ตั้งที่เตี้ยเกินไป (วัดความสูงไม่น่าเชื่อถือ
                                             # พอ) จะไม่ถูกนำมาเปรียบเทียบเลย
 
-# v24.14 NEW: STACK-WIDTH SANITY GATE - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด root
-# cause เต็มรูปแบบ (ยืนยันจากภาพผลลัพธ์จริง 10 ไฟล์) - ป้องกันกรอบใหญ่ผิดปกติที่เกิด
-# จาก per-box segmentation รวมกล่องหลายใบเป็นตั้งเดียวผิดพลาด (under-segmentation)
-STEP_DOWN_STACK_MAX_WIDTH_RATIO = 0.30    # ตั้งทั้ง 2 ฝั่งที่นำมาเปรียบเทียบกัน (ทั้งตั้ง
-                                            # เตี้ยและตั้งข้างเคียงที่สูงกว่า) ต้องกว้างไม่
-                                            # เกิน 30% ของความกว้างคาร์โก้ทั้งหมด มิฉะนั้น
-                                            # ถือว่าน่าจะเป็นการรวมกล่องหลายใบผิดพลาด
-                                            # ไม่ใช่กล่องเดียวจริง - ข้ามคู่นั้นไปทันที
+# v24.14 NEW: STACK-WIDTH SANITY GATE - ป้องกันกรอบใหญ่ผิดปกติที่เกิดจาก per-box
+# segmentation รวมกล่องหลายใบเป็นตั้งเดียวผิดพลาด (under-segmentation)
+STEP_DOWN_STACK_MAX_WIDTH_RATIO = 0.30    # ตั้งทั้ง 2 ฝั่งที่นำมาเปรียบเทียบกันต้องกว้าง
+                                            # ไม่เกิน 30% ของความกว้างคาร์โก้ทั้งหมด
 
 # v24.14 NEW: RAW-STACK FALLBACK เฉพาะสำหรับ STEP_DOWN_RISK - ใช้เมื่อ view ใด view
-# หนึ่ง (มักเป็น BACK) มี per-box segmentation coverage ต่ำกว่าเกณฑ์ปกติ
-# (STACK_COVERAGE_MIN_RATIO) จนถูกทิ้งไปทั้งหมด - ทำให้ STEP_DOWN_RISK ไม่มีทาง
-# ตรวจพบอะไรเลยใน view นั้น (ผู้ใช้ระบุปัญหานี้ตรงๆ: "ภาพ back ต้องการให้หาตั้งสินค้าที่
-# ต่ำกว่าตั้งข้างเคียง เช่นเดียวกับภาพ front") - ใช้เกณฑ์ที่เข้มงวดกว่าปกติ (สูงกว่า)
-# เพื่อชดเชยความไม่น่าเชื่อถือของข้อมูลคุณภาพต่ำ ยังคงผ่าน STACK-WIDTH SANITY GATE
-# เหมือนกันทุกประการ ไม่มีข้อยกเว้น - ไม่กระทบ OVERHANG/TALL_UNSTABLE/
-# REAR_LATERAL_IMBALANCE ซึ่งยังคงต้องใช้ high-confidence data เหมือนเดิมทุกประการ
+# หนึ่ง (มักเป็น BACK) มี per-box segmentation coverage ต่ำกว่าเกณฑ์ปกติจนถูกทิ้งไป
+# ทั้งหมด - ใช้เกณฑ์ที่เข้มงวดกว่าปกติเพื่อชดเชยความไม่น่าเชื่อถือของข้อมูลคุณภาพต่ำ
 STEP_DOWN_STACK_MIN_RATIO_FALLBACK = 0.40
+
+# v24.15 NEW: ISOLATED-PEAK EXCLUSION - ใช้เกณฑ์เดียวกับ TALL_UNSTABLE_RISK
+# (TALL_UNSTABLE_NEIGHBOR_MAX_RATIO, นิยามด้านล่างในหมวด PER-BOX SEGMENTATION) เพื่อ
+# แยกแยะ "ตั้งสูงโดดเดี่ยว" (ควรเป็น TALL_UNSTABLE_RISK เท่านั้น) ออกจาก "ที่ราบ/
+# ขั้นบันไดจริง" (ควรเป็น STEP_DOWN_RISK) - ดู _is_isolated_tall_peak()
+
+# v24.16 NEW: EDGE-ARTIFACT GATE - ป้องกัน "ตั้งปลอม" (fragment) ที่เกิดจากมุม
+# isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้ถูกวัดผิดเป็นหน้าตรง
+# (ยืนยันจาก pixel data จริงไฟล์ EC50-02 - ดู CHANGELOG หัวไฟล์)
+STEP_DOWN_EDGE_ZONE_WIDTH_RATIO = 1.0      # ระยะห่างจากขอบคาร์โก้ (xmin/xmax) ที่ถือว่า
+                                            # เป็น "โซนเสี่ยงเกิด isometric corner
+                                            # artifact" - คิดเป็นสัดส่วนของความกว้างตั้ง
+                                            # มัธยฐานในแถวเดียวกัน (ขนาดของ artifact
+                                            # zone แปรผันตามขนาดกล่อง ไม่ใช่ความยาวตู้)
+STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO = 0.70  # ตั้งที่อยู่ในโซนเสี่ยงข้างต้น จะถูก
+                                            # คัดออกจากการเปรียบเทียบ STEP_DOWN_RISK
+                                            # ก็ต่อเมื่อ "แคบกว่าปกติ" ด้วย (< 70% ของ
+                                            # ความกว้างตั้งมัธยฐาน) - บ่งชี้ว่าเป็นเศษ
+                                            # ของกล่อง (fragment) ไม่ใช่กล่องเต็มใบจริง
+                                            # ตั้งที่กว้างปกติใกล้ขอบยังคงใช้งานได้ตามปกติ
 
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10  # gate สำหรับตรวจสอบว่า Gemini AI claim
                                             # ทับซ้อนกับ deterministic region หรือไม่
@@ -1041,7 +1039,7 @@ def detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h, crop_y
 
 # NOTE (v24.13): FLOOR-HOLE DETECTION and the old pixel/height-profile STEP_DOWN_RISK
 # scan were REMOVED here - replaced by detect_step_down_regions_from_stacks()
-# (per-box stack-height comparison, see CHANGELOG v24.13/v24.14 above).
+# (per-box stack-height comparison, see CHANGELOG v24.13-v24.16 above).
 
 
 def _box_iou_absolute(box_a, box_b):
@@ -1527,17 +1525,15 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
             })
 
         # v24.14 NEW: FALLBACK สำหรับ view ที่ coverage ต่ำ (เช่น BACK view ที่มักมี
-        # occlusion มากกว่า FRONT ทำให้แบ่งกล่องได้ไม่ครอบคลุมพอ) - ROOT CAUSE ที่ผู้ใช้
-        # ระบุตรงๆ: "ภาพ back ต้องการให้หาตั้งสินค้าที่ต่ำกว่าตั้งข้างเคียง เช่นเดียวกับ
-        # ภาพ front" - เดิมเมื่อ coverage_ratio < STACK_COVERAGE_MIN_RATIO จะ "continue"
-        # ทิ้งผลการแบ่งกล่องของ view นั้นไปทั้งหมด (result[view] ค้างเป็น []) ทำให้
-        # STEP_DOWN_RISK ไม่มีทางตรวจพบอะไรเลยใน view นั้น แม้จะมีความเสี่ยงจริงอยู่ก็ตาม
+        # occlusion มากกว่า FRONT ทำให้แบ่งกล่องได้ไม่ครอบคลุมพอ) - เดิมเมื่อ
+        # coverage_ratio < STACK_COVERAGE_MIN_RATIO จะ "continue" ทิ้งผลการแบ่งกล่อง
+        # ของ view นั้นไปทั้งหมด ทำให้ STEP_DOWN_RISK ไม่มีทางตรวจพบอะไรเลยใน view นั้น
         #
         # วิธีแก้: เก็บผลการแบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์ coverage) ไว้ในคีย์แยก
         # ต่างหาก (f"{view}_raw_stacks") เสมอ ใช้เป็น fallback เฉพาะสำหรับ STEP_DOWN_RISK
         # เท่านั้น (detect_step_down_regions_from_stack_model_per_view) พร้อมเกณฑ์ความสูง
-        # ที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK=40%) เพื่อชดเชยความไม่แน่นอน
-        # ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน STACK-WIDTH SANITY GATE เหมือนกันทุกประการ
+        # ที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
+        # ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน STACK-WIDTH/EDGE-ARTIFACT GATE เหมือนกันทุกประการ
         #
         # สำคัญ: result[view] หลัก (ที่ OVERHANG_RISK/TALL_UNSTABLE_RISK/
         # REAR_LATERAL_IMBALANCE ใช้) ยังคงพฤติกรรมเดิมทุกประการ (ว่างเปล่าเมื่อ
@@ -1631,11 +1627,11 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
 
 
 # ---------------------------------------------------------------------------
-# STEP_DOWN_RISK - v24.13/v24.14: DETERMINISTIC STACK-HEIGHT COMPARISON
+# STEP_DOWN_RISK - v24.13-v24.16: DETERMINISTIC STACK-HEIGHT COMPARISON
 # ตามคำขอผู้ใช้ตรงตัว: "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" - ใช้
 # per-box stack model เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK/REAR_LATERAL_IMBALANCE
 # แทนที่วิธีเดิมทั้งหมด (height-profile scan, floor-hole scan, cross-view mirror/veto)
-# v24.14 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK - ดู CHANGELOG หัวไฟล์
+# ดู CHANGELOG หัวไฟล์ v24.13-v24.16 สำหรับรายละเอียด root cause ของแต่ละ gate
 # ---------------------------------------------------------------------------
 
 def _stack_width(s):
@@ -1646,15 +1642,10 @@ def _is_isolated_tall_peak(idx, heights, min_height_px,
                             neighbor_max_ratio=TALL_UNSTABLE_NEIGHBOR_MAX_RATIO):
     """
     v24.15 NEW: ตรวจสอบว่าตั้งที่ตำแหน่ง idx เป็น "ตั้งสูงโดดเดี่ยว" (isolated tall
-    peak) หรือไม่ - คือกรณีที่ตั้งนี้สูงกว่าตั้งข้างเคียง "ทั้ง 2 ฝั่ง" อย่างมีนัยสำคัญ
+    peak) หรือไม่ - คือกรณีที่ตั้งนี้สูงกว่าตั้งข้างเคียงทั้ง 2 ฝั่งอย่างมีนัยสำคัญ
     (เกณฑ์เดียวกับ detect_tall_unstable_regions_for_view ที่ใช้กับ TALL_UNSTABLE_RISK
-    อยู่แล้ว) - ใช้แยกแยะระหว่าง "ตั้งเดียวที่สูงโดดเด่นผิดปกติ" (ซึ่งควรถูกจัดเป็น
-    TALL_UNSTABLE_RISK เท่านั้น) กับ "ที่ราบสูง/ขั้นบันไดจริง" (ตั้งหลายตั้งที่สูง
-    ต่อเนื่องกัน ซึ่งเป็น STEP_DOWN_RISK ที่แท้จริง)
-
-    ดู CHANGELOG v24.15 หัวไฟล์สำหรับรายละเอียด root cause (ยืนยันจากภาพผลลัพธ์จริง:
-    EC12-01/EC15-01/EC20-02 - กรอบแดง STEP_DOWN_RISK เท็จซ้อนทับ/อยู่ติดกับกรอบม่วงแดง
-    TALL_UNSTABLE_RISK ที่ถูกต้องอยู่แล้วเสมอ)
+    อยู่แล้ว) - ใช้แยกแยะระหว่าง "ตั้งเดียวที่สูงโดดเด่นผิดปกติ" (ควรเป็น
+    TALL_UNSTABLE_RISK เท่านั้น) กับ "ที่ราบสูง/ขั้นบันไดจริง" (STEP_DOWN_RISK จริง)
     """
     h = heights[idx]
     if h is None or h < min_height_px:
@@ -1670,31 +1661,65 @@ def _is_isolated_tall_peak(idx, heights, min_height_px,
     return all(nh <= h * neighbor_max_ratio for nh in neighbor_heights)
 
 
+def _step_down_edge_artifact_stack_indices(sorted_stacks,
+                                            zone_width_ratio=STEP_DOWN_EDGE_ZONE_WIDTH_RATIO,
+                                            fragment_max_width_ratio=STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO):
+    """
+    v24.16 NEW: EDGE-ARTIFACT GATE - ระบุตั้งที่น่าจะเป็น "เศษของกล่อง" (fragment) ที่
+    เกิดจากมุม isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้/ประตูท้ายตู้
+    ถูกวัดผิดเป็นหน้าตรง (ยืนยันจาก pixel data จริงไฟล์ EC50-02 - ดู CHANGELOG v24.16)
+
+    เงื่อนไข (ต้องเข้าเงื่อนไขทั้ง 2 ข้อจึงจะถือว่าเป็น artifact):
+      1. ตั้งนั้นอยู่ใกล้ขอบคาร์โก้ (xmin หรือ xmax) ภายในระยะ zone_width_ratio เท่า
+         ของความกว้างตั้งมัธยฐานในแถวนั้น
+      2. ตั้งนั้นแคบกว่าปกติอย่างมีนัยสำคัญ (< fragment_max_width_ratio ของความกว้าง
+         ตั้งมัธยฐาน) - บ่งชี้ว่าเป็นเศษของกล่อง ไม่ใช่กล่องเต็มใบจริง
+
+    ตั้งที่กว้างปกติใกล้ขอบจะไม่ถูกคัดออก (ยังตรวจจับ STEP_DOWN_RISK ใกล้ผนังได้ปกติ)
+    คืนค่า set ของ index (ใน sorted_stacks) ที่ถือว่าเป็น artifact
+    """
+    n = len(sorted_stacks)
+    if n < 2:
+        return set()
+    widths = sorted(_stack_width(s) for s in sorted_stacks)
+    median_w = widths[len(widths) // 2]
+    if median_w <= 0:
+        return set()
+    zone_px = median_w * zone_width_ratio
+    cargo_xmin = sorted_stacks[0]["x0"]
+    cargo_xmax = sorted_stacks[-1]["x1"]
+
+    artifact_idxs = set()
+    for i, s in enumerate(sorted_stacks):
+        w = _stack_width(s)
+        near_left_edge = (s["x0"] - cargo_xmin) < zone_px
+        near_right_edge = (cargo_xmax - s["x1"]) < zone_px
+        is_narrow = w < median_w * fragment_max_width_ratio
+        if (near_left_edge or near_right_edge) and is_narrow:
+            artifact_idxs.add(i)
+    return artifact_idxs
+
+
 def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
                                           min_ratio=STEP_DOWN_STACK_MIN_RATIO,
                                           min_height_px=STEP_DOWN_STACK_MIN_HEIGHT_PX,
                                           max_width_ratio=STEP_DOWN_STACK_MAX_WIDTH_RATIO):
     """
-    v24.13 NEW / v24.14 FIX / v24.15 FIX: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ
-    "ความสูงรวมของตั้งกล่อง" (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรง
-    เท่านั้น (ซ้ายหรือขวา) - ไม่ใช้ pixel/height-profile scan หรือ floor-hole scan อีก
+    v24.13-v24.16: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ "ความสูงรวมของตั้งกล่อง"
+    (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ซ้ายหรือขวา) - ไม่ใช้
+    pixel/height-profile scan หรือ floor-hole scan อีกต่อไป
 
     v24.14 - STACK-WIDTH SANITY GATE: ปฏิเสธคู่ใดๆ ที่มีตั้งฝั่งใดฝั่งหนึ่งกว้างเกิน
-    max_width_ratio ของความกว้างคาร์โก้ทั้งหมด (ป้องกัน per-box segmentation ที่รวม
-    กล่องหลายใบผิดพลาดเป็นตั้งเดียว - ดู CHANGELOG v24.14)
+    max_width_ratio ของความกว้างคาร์โก้ทั้งหมด (ป้องกัน under-segmentation ที่รวมกล่อง
+    หลายใบเป็นตั้งเดียว)
 
-    v24.15 - ISOLATED-PEAK EXCLUSION (ใหม่): ผู้ใช้ทดสอบพบว่ากรอบแดง STEP_DOWN_RISK
-    เท็จปรากฏซ้ำซ้อน/ติดกับกรอบ TALL_UNSTABLE_RISK ที่ถูกต้องอยู่แล้วเสมอ (ยืนยันจาก
-    ภาพจริง EC12-01/EC15-01/EC20-02 - วงกลมส้มชี้ตำแหน่งเดียวกับกรอบม่วงแดง) ROOT
-    CAUSE: เมื่อมีตั้งเดียวสูงโดดเด่นผิดปกติ (isolated tall peak - เพื่อนบ้านทั้ง 2
-    ฝั่งเตี้ยกว่ามาก) การเปรียบเทียบแบบเดิมจะมองว่าเพื่อนบ้านทั้ง 2 ฝั่งนั้น "เตี้ยกว่า
-    ตั้งสูงข้างเคียง" และ flag เป็น STEP_DOWN_RISK ซ้ำซ้อนกับที่ TALL_UNSTABLE_RISK
-    ตรวจพบไปแล้ว (ซึ่งเป็นการอธิบายปรากฏการณ์เดียวกันคนละมุม ไม่ใช่ปัญหาที่แยกจากกัน)
-    วิธีแก้: ก่อนใช้ตั้งข้างเคียง (neighbor) เป็นฐานเปรียบเทียบว่า "สูงกว่า" ตรวจสอบ
-    ก่อนว่าตั้งข้างเคียงนั้นเป็น isolated tall peak หรือไม่ (_is_isolated_tall_peak) -
-    ถ้าใช่ ให้ข้ามเพื่อนบ้านนั้นไปเลย (ถือว่าเป็นกรณีของ TALL_UNSTABLE_RISK ไม่ใช่
-    STEP_DOWN_RISK) ตั้งเตี้ยยังคงถูกตรวจพบได้ปกติหากมีเพื่อนบ้านอีกฝั่งที่สูงกว่าแบบ
-    เป็นที่ราบ/หลายตั้งต่อเนื่องกันจริง (ไม่ใช่ตั้งโดดเดี่ยว)
+    v24.15 - ISOLATED-PEAK EXCLUSION: ก่อนใช้ตั้งข้างเคียงเป็นฐานเปรียบเทียบว่า "สูงกว่า"
+    ตรวจสอบว่าตั้งข้างเคียงนั้นเป็น "ตั้งสูงโดดเดี่ยว" หรือไม่ (_is_isolated_tall_peak) -
+    ถ้าใช่ ข้ามไป (ปล่อยให้ TALL_UNSTABLE_RISK รายงานปรากฏการณ์นี้แต่เพียงผู้เดียว)
+
+    v24.16 - EDGE-ARTIFACT GATE: คัดตั้งที่น่าจะเป็น "เศษของกล่อง" ใกล้ขอบคาร์โก้
+    (isometric corner/top-face artifact) ออกจากการเปรียบเทียบทั้งหมด ก่อนเริ่ม
+    กระบวนการเปรียบเทียบใดๆ (ดู _step_down_edge_artifact_stack_indices)
 
     กรอบผลลัพธ์ (region) ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า" เท่านั้น (x0-x1 ของตั้งนั้น,
     y จาก top_y ถึง floor_y ของตั้งนั้นจริง) - ไม่ยืดไปคลุมตั้งข้างเคียงหรือพื้นตู้เต็ม
@@ -1707,7 +1732,16 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
     heights = [(_stack_total_height(s) if s.get("boxes") else None) for s in sorted_stacks]
     max_width_px = max(1, cargo_width_px) * max_width_ratio
     n = len(sorted_stacks)
+
+    edge_artifact_idxs = _step_down_edge_artifact_stack_indices(sorted_stacks)
+    if edge_artifact_idxs:
+        print(f"STEP_DOWN edge-artifact gate: excluding {len(edge_artifact_idxs)} narrow "
+              f"stack(s) near cargo edge (likely isometric corner/top-face measurement "
+              f"artifact, not genuine cargo) - indices={sorted(edge_artifact_idxs)}")
+
     for i in range(n):
+        if i in edge_artifact_idxs:
+            continue
         h_this = heights[i]
         if h_this is None or h_this < min_height_px:
             continue
@@ -1723,19 +1757,18 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
             neighbor_idxs.append(i + 1)
         best_ratio = 0.0
         for j in neighbor_idxs:
+            if j in edge_artifact_idxs:
+                # เพื่อนบ้านนี้เป็น edge artifact (วัดค่าไม่น่าเชื่อถือ) - ไม่นำมาใช้
+                # เป็นฐานเปรียบเทียบเลย
+                continue
             h_neighbor = heights[j]
             if h_neighbor is None or h_neighbor < min_height_px:
                 continue
             s_neighbor = sorted_stacks[j]
             if _stack_width(s_neighbor) > max_width_px:
-                # เพื่อนบ้านกว้างผิดปกติเช่นกัน - ไม่น่าเชื่อถือพอจะใช้เทียบความสูง
-                # (อาจเป็นค่าเฉลี่ยจากกล่องหลายใบที่ความสูงจริงต่างกัน) ข้ามคู่นี้ไป
                 continue
             if h_neighbor <= h_this:
                 continue  # เพื่อนบ้านไม่ได้สูงกว่า -> ตั้งนี้ไม่ใช่ตั้งเตี้ยเทียบตั้งนั้น
-            # v24.15 NEW: ถ้าเพื่อนบ้านที่ "สูงกว่า" นี้เป็น isolated tall peak (สูงโดด
-            # เด่นผิดปกติจากเพื่อนบ้านทั้ง 2 ฝั่งของมันเอง) แสดงว่านี่คือกรณีเดียวกับที่
-            # TALL_UNSTABLE_RISK ตรวจพบไปแล้ว - ไม่ใช่ step-down/ที่ราบจริง ข้ามไป
             if _is_isolated_tall_peak(j, heights, min_height_px):
                 continue
             ratio = 1 - (h_this / h_neighbor)
@@ -1756,11 +1789,9 @@ def detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_ex
     พิกัดเพิ่มเติม
 
     v24.14 NEW: หาก view ใด view หนึ่งไม่มี high-confidence stacks (coverage ต่ำกว่า
-    เกณฑ์ปกติ, stack_box_model[view] ว่างเปล่า) จะ fallback ไปใช้ "raw stacks"
-    (f"{view}_raw_stacks", เก็บไว้เสมอโดย build_stack_box_model_per_view) แทน พร้อม
-    เกณฑ์ความสูงที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK) เพื่อชดเชยความไม่
-    แน่นอนของข้อมูลคุณภาพต่ำ - ยังคงผ่าน STACK-WIDTH SANITY GATE เหมือนกันทุกประการ
-    (ดู CHANGELOG v24.14 - แก้ปัญหาที่ผู้ใช้ระบุ: "ภาพ back ไม่พบตั้งเตี้ยเหมือน front")
+    เกณฑ์ปกติ) จะ fallback ไปใช้ "raw stacks" (f"{view}_raw_stacks") แทน พร้อมเกณฑ์
+    ความสูงที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
+    ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน gate อื่นๆ ทั้งหมดเหมือนกันทุกประการ
     """
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
@@ -1875,7 +1906,6 @@ def _stack_total_height(s):
         return None
     h = s["floor_y"] - s["top_y"]
     return h if h > 0 else None
-
 
 
 # ---------------------------------------------------------------------------
@@ -1998,7 +2028,7 @@ this image's own size. The box must tightly enclose the actual shorter stack (or
 mismatch boundary) - not the whole image, not empty background.
 
 Return ONLY this exact JSON:
-{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM","box_2d":[ymin,xmin,ymax,xmax]}}
+{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever rear_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, rear_crop, api_keys)
@@ -2024,7 +2054,7 @@ the empty gap is visible in THIS image. Use [ymin, xmin, ymax, xmax] format with
 normalized to this image's own size. The box should cover the actual gap area between cargo and wall.
 
 Return ONLY this exact JSON:
-{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM","box_2d":[ymin,xmin,ymax,xmax]}}
+{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever front_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, front_crop, api_keys)
@@ -2545,14 +2575,14 @@ def process_request(request):
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
 
-        # v24.13/v24.14: STEP_DOWN_RISK ใช้ "การเปรียบเทียบความสูงรวมของตั้งกล่องที่
+        # v24.13-v24.16: STEP_DOWN_RISK ใช้ "การเปรียบเทียบความสูงรวมของตั้งกล่องที่
         # ติดกัน" (per-box stack model เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK/
         # REAR_LATERAL_IMBALANCE) เป็นแหล่งข้อมูลเดียวเท่านั้น ตามคำขอผู้ใช้ตรงตัว:
         # "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" - แทนที่วิธีเดิมทั้งหมด
         # (height-profile pixel scan, floor-hole scan, cross-view mirror/veto + OCR-SKU
         # matching) ซึ่งอ่านค่าจาก pixel โดยตรงและไวต่อสัญญาณรบกวนจนสร้างจุดเสี่ยงเท็จ
-        # จำนวนมาก v24.14 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK (ดู
-        # CHANGELOG หัวไฟล์สำหรับรายละเอียด root cause ครบถ้วน)
+        # จำนวนมาก v24.14-v24.16 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK +
+        # ISOLATED-PEAK EXCLUSION + EDGE-ARTIFACT GATE ตามลำดับ (ดู CHANGELOG หัวไฟล์)
         step_down_regions = detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_extent)
 
         overhang_regions = {}
@@ -2585,10 +2615,10 @@ def process_request(request):
             has_valid_box = view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4
 
             if rt == "STEP_DOWN_RISK":
-                # v24.13/v24.14: gate เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK ด้านล่าง
+                # v24.13-v24.16: gate เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK ด้านล่าง
                 # - ต้อง overlap กับ deterministic region ที่มาจาก per-box stack-height
-                # comparison เท่านั้น (ผ่าน STACK-WIDTH SANITY GATE แล้ว) ไม่มี
-                # cross-view veto/mirror อีกต่อไป เพราะแหล่งข้อมูลนี้เชื่อถือได้ในตัวเอง
+                # comparison เท่านั้น (ผ่านทุก gate แล้ว) ไม่มี cross-view veto/mirror
+                # อีกต่อไป เพราะแหล่งข้อมูลนี้เชื่อถือได้ในตัวเอง
                 if has_valid_box:
                     regions_for_view = step_down_regions.get(view_of_claim, [])
                     if _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
@@ -2981,10 +3011,10 @@ def process_request(request):
 
         for view_label in ("FRONT", "BACK"):
             for region in step_down_regions.get(view_label, []):
-                # v24.13/v24.14: threshold ใช้ STEP_DOWN_STACK_MIN_RATIO (per-box
-                # stack-height comparison) - region ที่มาถึงจุดนี้ผ่านเกณฑ์นี้อยู่แล้ว
-                # จาก detect_step_down_regions_from_stacks() แต่เก็บเช็คซ้ำไว้เป็น
-                # safety net (ใช้เกณฑ์ต่ำสุดระหว่าง 2 ค่า เผื่อมาจาก raw-stack fallback)
+                # v24.13-v24.16: threshold ใช้ค่าต่ำสุดระหว่าง STEP_DOWN_STACK_MIN_RATIO
+                # (ปกติ) และ STEP_DOWN_STACK_MIN_RATIO_FALLBACK (raw-stack fallback) -
+                # region ที่มาถึงจุดนี้ผ่านเกณฑ์ที่ถูกต้องอยู่แล้วจาก
+                # detect_step_down_regions_from_stacks() แต่เก็บเช็คซ้ำไว้เป็น safety net
                 if region["ratio"] < min(STEP_DOWN_STACK_MIN_RATIO, STEP_DOWN_STACK_MIN_RATIO_FALLBACK):
                     continue
                 already_covered = False
