@@ -19,7 +19,16 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.19
+# AI Cargo Safety Checker - High Precision v24.20
+#
+# v24.20 - Fix ตามผลทดสอบ v24.19:
+#   1) TALL_UNSTABLE_RISK (กรอบชมพู): เพิ่ม gate ให้ต้องเป็นตั้งสูงโดดเดี่ยวจริง โดย
+#      จำนวนกล่อง/จำนวนชั้นของตั้งนั้นต้องมากกว่าเพื่อนบ้านทั้งสองฝั่งจริง และต้องไม่ใช่
+#      edge/fragment/merged stack จากมุม isometric หรือ segmentation error
+#   2) GAP ARROW UX: ลูกศร LATERAL/FRONT/REAR GAP จะวาดเฉพาะเมื่อมี local edge evidence
+#      ที่ชัดเจนเท่านั้น หากไม่มีหลักฐานขอบจริง จะ fallback เป็นกรอบบางแทน ไม่วางลูกศรลอย
+#   3) Label บนลูกศรเพิ่มชนิดของ gap: SIDE GAP / FRONT EMPTY / REAR EMPTY เพื่อให้ผู้ใช้
+#      เข้าใจทันทีว่าตัวเลขกำลังวัดช่องว่างประเภทใด
 #
 # v24.19 - Hotfix ตามผลทดสอบ EA03/EA06/EA02:
 #   1) STEP_DOWN_RISK (กรอบแดง): เพิ่ม STACK-COUNT GATE เพื่อป้องกัน false positive จาก
@@ -1109,6 +1118,10 @@ OVERHANG_MIN_RATIO = 0.20
 OVERHANG_MIN_ABS_PX = 20
 TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.35
 TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.65
+
+# v24.20 NEW: TALL_UNSTABLE_RISK ต้องเกิดจากจำนวนกล่อง/จำนวนชั้นมากกว่าเพื่อนบ้านจริง
+# ไม่ใช่แค่ความสูง pixel แตกต่างจากมุมมอง isometric หรือปลายแถว
+TALL_UNSTABLE_REQUIRE_BOX_COUNT_GT_NEIGHBORS = True
 LATERAL_IMBALANCE_MIN_RATIO = 0.40
 
 LATERAL_IMBALANCE_VETO_MAX_RATIO = 0.20
@@ -1577,23 +1590,59 @@ def detect_overhang_regions_for_view(stacks):
 
 
 def detect_tall_unstable_regions_for_view(stacks):
+    """
+    v24.20: ตรวจจับ TALL_UNSTABLE_RISK เฉพาะกรณี "ตั้งสูงโดดเดี่ยวจริง" เท่านั้น
+
+    Gate ใหม่เพื่อแก้ false positive กรอบชมพู:
+      1. ต้องมีเพื่อนบ้านซ้ายและขวา (loop 1..n-2 เหมือนเดิม)
+      2. จำนวนกล่อง/จำนวนชั้นของตั้งกลางต้องมากกว่าเพื่อนบ้านทั้ง 2 ฝั่งจริง
+         (ไม่ใช่แค่ pixel-height สูงจาก perspective)
+      3. ต้องไม่เป็น edge-artifact หรือ merged-stack ตาม gate ของ STEP_DOWN_RISK
+      4. ต้องสูงกว่าเพื่อนบ้านทั้งสองฝั่งตาม ratio เดิม
+    """
     regions = []
     n = len(stacks)
     if n < 3:
         return regions
-    heights = [max(1, s["floor_y"] - s["top_y"]) if s["boxes"] else 0 for s in stacks]
+
+    sorted_stacks = sorted(stacks, key=lambda s: s["x0"])
+    heights = [max(1, s["floor_y"] - s["top_y"]) if s.get("boxes") else 0 for s in sorted_stacks]
+
+    # ใช้ gate เดียวกับ STEP_DOWN เพื่อกัน false positive จากขอบ/เศษกล่อง/การรวมกล่องผิด
+    excluded_idxs = set()
+    try:
+        excluded_idxs |= _step_down_edge_artifact_stack_indices(sorted_stacks)
+        excluded_idxs |= _step_down_merged_stack_indices(sorted_stacks)
+    except Exception:
+        excluded_idxs = set()
+
     for i in range(1, n - 1):
+        if i in excluded_idxs:
+            continue
         h_this = heights[i]
         if h_this <= 0:
             continue
-        neighbor_heights = [heights[i - 1], heights[i + 1]]
+        left_i, right_i = i - 1, i + 1
+        if left_i in excluded_idxs or right_i in excluded_idxs:
+            continue
+        neighbor_heights = [heights[left_i], heights[right_i]]
+        if any(nh <= 0 for nh in neighbor_heights):
+            continue
+
+        if TALL_UNSTABLE_REQUIRE_BOX_COUNT_GT_NEIGHBORS:
+            this_count = len(sorted_stacks[i].get("boxes", []))
+            left_count = len(sorted_stacks[left_i].get("boxes", []))
+            right_count = len(sorted_stacks[right_i].get("boxes", []))
+            # ถ้าจำนวนชั้นไม่ได้มากกว่าเพื่อนบ้านทั้งสองฝั่งจริง ให้ถือว่าเป็น perspective/row pattern
+            if not (this_count > left_count and this_count > right_count):
+                continue
+
         if all(nh <= h_this * TALL_UNSTABLE_NEIGHBOR_MAX_RATIO for nh in neighbor_heights):
             diff_ratio = 1 - (max(neighbor_heights) / h_this)
             if diff_ratio >= TALL_UNSTABLE_MIN_HEIGHT_RATIO:
-                s = stacks[i]
+                s = sorted_stacks[i]
                 regions.append({"x_min": s["x0"], "y_min": s["top_y"], "x_max": s["x1"], "y_max": s["floor_y"], "ratio": diff_ratio})
     return regions
-
 
 def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
@@ -2648,7 +2697,15 @@ def _try_draw_gap_risk_arrow(draw, risk_type, view_label, container_bounds, carg
     else:
         return False
 
-    label_text = _format_gap_label(mm_val, ratio_val)
+    base_label = _format_gap_label(mm_val, ratio_val)
+    if risk_type == "LATERAL_GAP_RISK":
+        label_text = f"SIDE GAP {base_label}"
+    elif risk_type == "FRONT_EMPTY_RISK":
+        label_text = f"FRONT EMPTY {base_label}"
+    elif risk_type == "REAR_EMPTY_RISK":
+        label_text = f"REAR EMPTY {base_label}"
+    else:
+        label_text = base_label
     return _draw_gap_measurement_arrow(draw, p1, p2, orientation, label_text, color)
 
 
