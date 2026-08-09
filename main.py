@@ -19,7 +19,18 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.20
+# AI Cargo Safety Checker - High Precision v24.21
+#
+# v24.21 - Fix ตามผลทดสอบ v24.20 โดยโฟกัส 3 จุดจากผู้ใช้:
+#   1) ตัด fallback กรอบฟ้า/เขียวสำหรับกลุ่ม gap ที่เคยไปครอบสินค้า: ถ้าเป็น
+#      LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK แล้ววาด measurement marker
+#      ที่มีจุดอ้างอิงจริงไม่ได้ จะไม่ fallback ไปวาด rectangle ทับ cargo อีก
+#   2) กรณี LATERAL_GAP_RISK ที่จริงเป็นพื้นที่ว่างบนพื้นท้ายตู้/พื้นด้านหลัง cargo
+#      ให้ย้ายตำแหน่ง marker ไปยัง empty floor zone โดยใช้ localized gap box ที่หาได้จาก
+#      pixel evidence แทนการวางลูกศรลอยนอกตู้
+#   3) เปลี่ยน label จาก SIDE GAP เป็น FLOOR EMPTY เมื่อช่องว่างนั้นเป็นพื้นที่ว่างพื้น
+#      ด้านหลัง/ด้านท้ายตู้จริง เพื่อให้ผู้ใช้งานเข้าใจว่าเป็น empty floor zone ไม่ใช่
+#      lateral side clearance
 #
 # v24.20 - Fix ตามผลทดสอบ v24.19:
 #   1) TALL_UNSTABLE_RISK (กรอบชมพู): เพิ่ม gate ให้ต้องเป็นตั้งสูงโดดเดี่ยวจริง โดย
@@ -306,6 +317,10 @@ GAP_ARROW_HEAD_WIDTH_PX = 8           # ความกว้างหัวล�
 GAP_ARROW_LINE_WIDTH_PX = 3           # ความหนาเส้นหลัก
 GAP_ARROW_LABEL_FONT_SIZE = 20        # ขนาดฟอนต์ตัวเลขระยะห่างกำกับ
 GAP_ARROW_LABEL_PADDING_PX = 4        # padding รอบข้อความใน label background
+
+# v24.21 NEW: floor-empty marker ใช้แทนกรอบฟ้า/เขียว fallback เมื่อ lateral gap จริงๆ
+# เป็นพื้นที่ว่างบนพื้นท้ายตู้/พื้นด้านหลัง cargo
+FLOOR_EMPTY_MARKER_LABEL_OFFSET_PX = 18
 
 
 def get_api_keys_pool():
@@ -2663,6 +2678,59 @@ def _compute_empty_gap_arrow_geometry(view_container, view_cargo, rear_side, ris
     return ("horizontal", (x1, y_mid), (x2, y_mid))
 
 
+
+def _compute_localized_lateral_gap_box(view_container, view_cargo, full_img=None):
+    """
+    v24.21 NEW: คืนค่า box ของพื้นที่ว่างที่มี pixel evidence จริงสำหรับ LATERAL_GAP_RISK
+    โดยใช้ logic เดียวกับ get_precise_lateral_gap_box แต่ expose เป็น deterministic geometry
+    เพื่อใช้วาด floor-empty marker ในตำแหน่งที่ผู้ใช้วงไว้ แทนการวาดลูกศร/label ลอยนอกตู้
+    """
+    if not view_container or not view_cargo:
+        return None
+    top_gap = view_cargo["ymin"] - view_container["ymin"]
+    bottom_gap = view_container["ymax"] - view_cargo["ymax"]
+    if bottom_gap >= top_gap and bottom_gap > 0:
+        y0, y1 = view_cargo["ymax"], view_container["ymax"]
+        gap_kind = "bottom_floor"
+    elif top_gap > 0:
+        y0, y1 = view_container["ymin"], view_cargo["ymin"]
+        gap_kind = "top_space"
+    else:
+        return None
+
+    x0, x1 = view_cargo["xmin"], view_cargo["xmax"]
+    localized = None
+    if full_img is not None:
+        localized = _localize_lateral_gap_x_range(full_img, x0, x1, min(y0, y1), max(y0, y1))
+    if not localized:
+        return None
+    lx0, lx1 = localized
+    # pad เล็กน้อยเฉพาะใน box ของพื้นที่ว่าง ไม่ขยายกลับไปครอบ cargo
+    pad_y = max(3, int(abs(y1 - y0) * 0.10))
+    return (lx0, max(0, min(y0, y1) - pad_y), lx1, max(y0, y1) + pad_y, gap_kind)
+
+
+def _draw_floor_empty_marker(draw, box_with_kind, label_text, color):
+    """
+    v24.21 NEW: วาด marker แบบบางรอบ empty floor zone จริง พร้อม label ใกล้พื้นที่นั้น
+    ไม่วาดเป็นกรอบใหญ่ทับ cargo และไม่วาง label ลอยนอกตู้
+    """
+    if not box_with_kind:
+        return False
+    x0, y0, x1, y1, gap_kind = box_with_kind
+    if x1 <= x0 or y1 <= y0:
+        return False
+    x0, y0, x1, y1 = map(int, (x0, y0, x1, y1))
+    # วาด box บางมากเฉพาะพื้นที่ว่างจริง เพื่อเป็นบริบทให้ label
+    draw.rectangle([x0, y0, x1, y1], outline=color, width=3)
+    font = _get_dimension_font()
+    # label อยู่กลางพื้นที่ marker หรือขยับนิดหน่อยถ้า marker เตี้ย
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if (y1 - y0) < 45:
+        cy = y0 - FLOOR_EMPTY_MARKER_LABEL_OFFSET_PX
+    _draw_text_with_bg(draw, (cx, cy), label_text, font, text_color="black", bg_color="white", outline_color=color)
+    return True
+
 def _try_draw_gap_risk_arrow(draw, risk_type, view_label, container_bounds, cargo_extent,
                               container_length_mm, full_img, color):
     """
@@ -2680,12 +2748,18 @@ def _try_draw_gap_risk_arrow(draw, risk_type, view_label, container_bounds, carg
         return False
 
     if risk_type == "LATERAL_GAP_RISK":
-        geom = _compute_lateral_gap_arrow_geometry(view_container, view_cargo, full_img)
-        if not geom:
-            return False
-        orientation, p1, p2 = geom
+        # v24.21: LATERAL_GAP ที่อยู่ด้านล่าง cargo มักเป็นพื้นที่ว่างบนพื้นท้ายตู้/พื้นด้านหลัง
+        # จึงให้วาดเป็น FLOOR EMPTY marker บน empty floor zone จริงก่อน ไม่วาดลูกศรลอย
+        local_box = _compute_localized_lateral_gap_box(view_container, view_cargo, full_img)
         mm_val = compute_lateral_gap_mm(view_container, view_cargo, container_length_mm)
         ratio_val = compute_lateral_gap_ratio(view_container, view_cargo)
+        if local_box:
+            base_label = _format_gap_label(mm_val, ratio_val)
+            # bottom_floor คือกรณีที่ผู้ใช้วงแดงให้ดู: พื้นว่างหลัง/ท้าย cargo
+            label_text = f"FLOOR EMPTY {base_label}" if local_box[-1] == "bottom_floor" else f"SIDE GAP {base_label}"
+            return _draw_floor_empty_marker(draw, local_box, label_text, color)
+        # ไม่มี local pixel evidence -> ไม่วาด marker/lost arrow เพื่อกันกรอบ/label ลอยนอกตู้
+        return False
     elif risk_type in ("FRONT_EMPTY_RISK", "REAR_EMPTY_RISK"):
         rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
         geom = _compute_empty_gap_arrow_geometry(view_container, view_cargo, rear_side, risk_type)
@@ -3328,6 +3402,11 @@ def process_request(request):
             if risk_type in GAP_ARROW_RISK_TYPES:
                 if _try_draw_gap_risk_arrow(draw, risk_type, resolved_view, container_bounds, cargo_extent,
                                              container_length_mm, img, outline_color):
+                    drawn = True
+                else:
+                    # v24.21: ห้าม fallback ไปวาดกรอบฟ้า/เขียวทับสินค้า/ครอบ cargo อีก
+                    # หากไม่มีขอบจริงให้วัด ให้ยังนับความเสี่ยงในรายงานได้ แต่ไม่วาด marker ผิดตำแหน่ง
+                    print(f"Skipped floating/ambiguous gap marker for {risk_type} ({resolved_view}) - no reliable local edge evidence")
                     drawn = True
 
             if not drawn and is_zone_based and risk_type != "COMBINED_AREA_RISK":
