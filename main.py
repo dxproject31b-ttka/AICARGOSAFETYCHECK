@@ -9,6 +9,7 @@ import random
 import re
 import PIL.Image
 import PIL.ImageDraw
+import PIL.ImageFont
 import PIL.ImageStat
 import PIL.PngImagePlugin
 import PIL.ImageOps
@@ -18,77 +19,65 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.17
+# AI Cargo Safety Checker - High Precision v24.18
 #
-# v24.17 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.16) ผู้ใช้ยืนยันว่า BACK view
-#   ถูกต้องแล้ว แต่พบกรอบแดง (STEP_DOWN_RISK) เท็จใหม่ที่ FRONT view ของไฟล์เดียวกัน
-#   (EC50-02) ซึ่งไม่มีความเสี่ยงจริงเลย ("จะได้แก้ข้อผิดพลาดร้ายแรง")
+# v24.18 - เปลี่ยนวิธีแสดงผล LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK จาก
+#   "กรอบสี่เหลี่ยมทึบ" เป็น "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" (คล้ายเส้นบอกขนาด
+#   ในแบบวิศวกรรม/CAD) ตามคำแนะนำผู้ใช้: "จากขอบกล่องสินค้าถึงขอบของพื้น/ผนัง เป็น
+#   เส้นตรงลูกศร 2 หัวท้าย ตรง gap นั้น" (ครอบคลุมทั้ง 3 risk type ตามคำขอเพิ่มเติม
+#   "เพิ่ม rear empty risk ด้วยนะครับ") - เหตุผล: กรอบสี่เหลี่ยมสื่อถึง "พื้นที่/บริเวณ"
+#   ในขณะที่สิ่งที่ต้องการสื่อจริงคือ "ระยะทางระหว่างจุด 2 จุด" ซึ่งลูกศรสื่อความหมาย
+#   ตรงกว่าและอ่านง่ายกว่ามาก โดยเฉพาะเมื่อมีตัวเลขระยะทางจริงกำกับไว้ด้วย
 #
-#   ROOT CAUSE (ยืนยันด้วยการวัด pixel จริงแบบ column-by-column ไม่ใช่การเดา): พบว่า
-#   per-box segmentation (build_stack_box_model_for_view) รวมกล่อง 2 ใบที่ติดกัน
-#   (สีน้ำเงิน TBASH-D1) เป็น "ตั้งเดียว" ที่กว้างผิดปกติ (148px เทียบกับตั้งปกติทั่วไป
-#   ในแถวเดียวกันที่กว้างเพียง ~65px, คิดเป็น 228% ของค่ามัธยฐาน) เนื่องจากเส้นแบ่งกล่อง
-#   ระหว่าง 2 ใบนั้นไม่ชัดพอให้ตรวจจับได้ (under-segmentation)
+#   องค์ประกอบที่เพิ่ม (ฟังก์ชันใหม่ _draw_gap_measurement_arrow):
+#     1. เส้นลูกศร 2 หัว (◄──►) ลากระหว่างขอบคาร์โก้จริงกับขอบตู้จริง ตามทิศทางของ
+#        ช่องว่างนั้นๆ โดยเฉพาะ:
+#          - LATERAL_GAP_RISK: แนวตั้ง (ช่องว่างด้านบน/ล่างของคาร์โก้เทียบกับขอบตู้)
+#          - FRONT_EMPTY_RISK, REAR_EMPTY_RISK: แนวนอน (ช่องว่างตามความยาวตู้ระหว่าง
+#            คาร์โก้กับผนังหัวตู้/ประตูท้ายตู้)
+#     2. ขีดตั้งฉากสั้นๆ ที่ปลายทั้ง 2 ข้างของเส้น (dimension tick, คล้ายเส้นบอกขนาด
+#        ในแบบวิศวกรรม) เพื่อชี้ตำแหน่งจุดเริ่ม/จุดสิ้นสุดของระยะที่วัดให้ชัดเจน
+#     3. หัวลูกศรจริง (triangle arrowhead) ที่ปลายทั้ง 2 ด้าน ชี้เข้าหากัน
+#     4. ตัวเลขระยะห่างจริงกำกับกึ่งกลางเส้น (ดึงจากฟังก์ชัน deterministic ที่มีอยู่แล้ว
+#        - compute_lateral_gap_mm/compute_empty_gap_mm, มี fallback เป็น % หากคาลิเบรต
+#        มม. ไม่สำเร็จ) พร้อมพื้นหลังสีขาวโปร่งเพื่อให้อ่านง่ายไม่ว่าพื้นหลังภาพจะเป็น
+#        สีอะไร - คำนวณค่านี้ ณ เวลาวาดภาพโดยตรงจาก container_bounds/cargo_extent
+#        (ไม่ผูกกับแหล่งที่มาของ risk ว่าเป็น AI claim หรือ deterministic FORCE) จึงมี
+#        ตัวเลขกำกับเสมอไม่ว่า risk นั้นจะถูกตรวจพบจากทางไหนก็ตาม
+#     5. กรณีช่องว่างแคบมาก (< GAP_ARROW_MIN_LENGTH_FOR_INLINE_LABEL_PX) ย้าย label
+#        ตัวเลขออกไปด้านนอกเส้นแทนการวางทับกึ่งกลาง กันตัวเลขบังกันเองในพื้นที่แคบ
 #
-#   เมื่อวัด "top_y" ของตั้งที่ถูกรวมผิดนี้ด้วยวิธี majority-vote (คำนวณจากสัดส่วนคอลัมน์
-#   ส่วนใหญ่ในความกว้างทั้งหมดของตั้ง) จุดที่ได้จะเป็นค่าเฉลี่ยของขอบบนที่เอียงตามมุมมอง
-#   isometric ตลอดความกว้าง 148px (กว้างกว่าปกติเกือบ 2.3 เท่า) ทำให้ตำแหน่งที่วัดได้
-#   คลาดเคลื่อนไปจากแนวโน้มความชันที่ควรจะเป็นอย่างมาก เมื่อนำไปเทียบกับตั้งข้างเคียงที่
-#   แคบกว่ามาก (63px, วัด top_y ในช่วงแคบกว่าจึงตรงตามแนวโน้มความชันจริงมากกว่า) จึงเกิด
-#   ผลต่างความสูงปลอมที่ไม่มีอยู่จริง (ยืนยันด้วยการวัด "จุดบนสุดของสีคาร์โก้จริง" แบบทีละ
-#   คอลัมน์ในภาพจริง - พบว่าขอบบนของกล่องทั้งแถวเอียงลาดลงอย่างต่อเนื่องราบรื่นสนิท ไม่มี
-#   จุดกระโดดใดๆ เลยตลอดทั้งแถว รวมถึงตำแหน่งที่ segmentation แบ่งเป็น 2 ตั้งนี้ด้วย)
+#   ตำแหน่งจุดเริ่ม/จุดสิ้นสุดของลูกศรใช้พิกัด "กึ่งกลางตามแนวขวางของช่องว่าง" (ไม่ใช่ที่
+#   ขอบคาร์โก้ทั้งเส้น) เพื่อไม่ให้เส้นทับซ้อนกับตัวอักษร SKU บนกล่องหรือเส้นขอบกล่อง -
+#   สำหรับ LATERAL_GAP_RISK ใช้ตำแหน่ง x กึ่งกลางของช่วงที่ระบุว่าว่างจริง (จาก
+#   _localize_lateral_gap_x_range ที่มีอยู่แล้ว) สำหรับ FRONT/REAR_EMPTY_RISK ใช้
+#   ตำแหน่ง y กึ่งกลางของคาร์โก้ในมุมมองนั้น
 #
-#   STACK-WIDTH SANITY GATE เดิม (v24.14) ไม่สามารถจับกรณีนี้ได้ เพราะใช้เกณฑ์ "สัดส่วน
-#   ของความกว้างคาร์โก้ทั้งหมด" (30% ของคาร์โก้ทั้งหมด = 159px ในไฟล์นี้) ซึ่งตั้งที่รวม
-#   ผิด (148px) ยังต่ำกว่าเกณฑ์นี้เล็กน้อย จึงหลุดผ่านไปได้
+#   ยังคงใช้กรอบสี่เหลี่ยมแบบเดิมสำหรับความเสี่ยงประเภทอื่นทั้งหมด (STEP_DOWN_RISK,
+#   OVERHANG_RISK, TALL_UNSTABLE_RISK, REAR_LATERAL_IMBALANCE, REAR_COMBINED_RISK,
+#   COMBINED_AREA_RISK) เพราะเป็นความเสี่ยงเชิง "พื้นที่/การเปรียบเทียบความสูง" ไม่ใช่
+#   "ระยะห่างเชิงเส้นตรง" แบบเดียวกัน - เปลี่ยนเฉพาะรูปแบบการวาดภาพเท่านั้น ไม่กระทบ
+#   ตรรกะการตรวจจับความเสี่ยงใดๆ เลย (ทุก threshold/gate/deterministic logic เหมือนเดิม
+#   ทุกประการ)
 #
-#   วิธีแก้ (เกณฑ์ใหม่ STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN): เพิ่มเกณฑ์ที่สองใน
-#   detect_step_down_regions_from_stacks - ตั้งใดๆ ที่กว้างเกิน 1.6 เท่าของ "ค่ามัธยฐาน
-#   ความกว้างตั้งทั้งหมดในแถวเดียวกัน" (ใช้หลักการเดียวกับ EDGE-ARTIFACT GATE ของ v24.16
-#   ที่พิสูจน์แล้วว่าแม่นยำกว่าการใช้สัดส่วนคาร์โก้ทั้งหมดมาก เพราะอ้างอิงจากขนาดกล่อง
-#   จริงในแถวนั้นโดยตรง) จะถูกคัดออกจากการเปรียบเทียบทั้งหมด (ถือว่าน่าจะเป็นการรวม
-#   กล่องหลายใบผิดพลาด ไม่น่าเชื่อถือพอจะใช้วัดความสูง) ใช้เฉพาะเมื่อมีตั้งอย่างน้อย 3
-#   ตั้งขึ้นไปในแถวนั้น (ค่ามัธยฐานจึงจะมีความหมาย เช่นเดียวกับเกณฑ์ n>=3 ของ
-#   TALL_UNSTABLE_RISK) - ทดสอบยืนยันด้วยข้อมูลจริงจากไฟล์ EC50-02: ตั้งที่รวมผิด (148px,
-#   2.28 เท่าของมัธยฐาน 65px) ถูกคัดออกสำเร็จ ในขณะที่ตั้งปกติอื่นๆ ทั้งหมด (25-69px,
-#   0.38-1.06 เท่าของมัธยฐาน) ยังคงถูกใช้เปรียบเทียบได้ตามปกติ ไม่กระทบ OVERHANG/
-#   TALL_UNSTABLE/REAR_LATERAL_IMBALANCE ซึ่งไม่ได้ใช้ gate นี้เลย
+# v24.17 - STEP_DOWN_RISK: เพิ่ม MERGED-STACK GATE แบบ median-based (ไฟล์ EC50-02,
+#   FRONT view) - per-box segmentation รวมกล่อง 2 ใบเป็นตั้งเดียวผิดพลาด (148px เทียบ
+#   มัธยฐาน 65px = 228%) ทำให้เกิดผลต่างความสูงปลอม - แก้ไขด้วยเกณฑ์ตั้งกว้างเกิน 1.6
+#   เท่าของมัธยฐานความกว้างตั้งในแถวเดียวกัน (ใช้เมื่อมีตั้ง >= 3 ตั้งขึ้นไป)
 #
-# v24.16 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.15) พบกรอบแดง (STEP_DOWN_RISK)
-#   เท็จอีกรูปแบบหนึ่งที่ไม่มีความเสี่ยงจริงเลย (ไฟล์ EC50-02, ภาพ BACK) - ผู้ใช้ระบุว่า
-#   "ตั้งแต่วิเคราะห์ภาพ back มาผิดตลอด"
+# v24.16 - STEP_DOWN_RISK: เพิ่ม EDGE-ARTIFACT GATE (ไฟล์ EC50-02, BACK view) - ที่ขอบ
+#   ผนังหัวตู้ per-box segmentation สร้าง "ตั้งปลอม" แคบผิดปกติจากมุม isometric corner/
+#   top-face ของกล่องใบแรกสุด - แก้ไขด้วยการคัดตั้งที่อยู่ใกล้ขอบคาร์โก้และแคบกว่า 70%
+#   ของมัธยฐานออกจากการเปรียบเทียบ
 #
-#   ROOT CAUSE: ที่ตำแหน่งขอบผนังหัวตู้ของ BACK view per-box segmentation สร้าง "ตั้ง
-#   ปลอม" (artifact) 2 ตั้งที่แคบผิดปกติ (56% และ 23% ของค่ามัธยฐานความกว้างตั้งในแถว
-#   เดียวกัน) เกิดจากมุม isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้
-#   ถูกวัดผิดเป็นหน้าตรง ทำให้ floor_y/top_y ผิดเพี้ยนไปมาก
+# v24.15 - STEP_DOWN_RISK: เพิ่ม ISOLATED-PEAK EXCLUSION - ตั้งสูงโดดเดี่ยว 1 ตั้งเคย
+#   ถูก flag เป็น STEP_DOWN_RISK ซ้ำซ้อนกับ TALL_UNSTABLE_RISK ที่ตรวจพบไปแล้ว - แก้ไข
+#   ด้วยการข้ามตั้งที่เข้าเกณฑ์ "ตั้งสูงโดดเดี่ยว" (เกณฑ์เดียวกับ TALL_UNSTABLE_RISK)
 #
-#   วิธีแก้ (EDGE-ARTIFACT GATE ใหม่): คัดตั้งที่อยู่ใกล้ขอบคาร์โก้ (ภายใน 1 เท่าของความ
-#   กว้างตั้งมัธยฐาน) และแคบกว่าปกติ (< 70% ของมัธยฐาน) ออกจากการเปรียบเทียบทั้งหมด
-#
-# v24.15 - แก้ไขตามผลทดสอบใช้งานจริงเพิ่มเติม (v24.14) พบกรอบแดง (STEP_DOWN_RISK)
-#   เท็จอีกรูปแบบหนึ่ง ("วงกลมสีส้ม คือที่เป็นกรอบแดงเกินมา หาสิ่งผิดปกติ และนำออกไป")
-#   ยืนยันจากภาพผลลัพธ์จริง 3 ไฟล์ (EC12-01, EC15-01, EC20-02 - กรอบแดงเท็จปรากฏใน
-#   ตำแหน่งเดียวกับกรอบ TALL_UNSTABLE_RISK สีม่วงแดงที่ตรวจพบถูกต้องอยู่แล้ว)
-#
-#   ROOT CAUSE: เมื่อมี "ตั้งเดียวสูงโดดเด่นผิดปกติ" (isolated tall peak) วิธีเปรียบเทียบ
-#   เดิมจะมองว่าเพื่อนบ้านทั้ง 2 ฝั่งของตั้งสูงนั้น "เตี้ยกว่าตั้งข้างเคียง" จึง flag เป็น
-#   STEP_DOWN_RISK ซ้ำซ้อนกับที่ TALL_UNSTABLE_RISK ตรวจพบไปแล้ว
-#
-#   วิธีแก้ (ฟังก์ชันใหม่ _is_isolated_tall_peak): ก่อนใช้ตั้งข้างเคียงเป็นฐานเปรียบเทียบ
-#   ว่า "สูงกว่า" ตรวจสอบก่อนว่าตั้งข้างเคียงนั้นเป็น "ตั้งสูงโดดเดี่ยว" หรือไม่ - ถ้าใช่
-#   ข้ามไป (ปล่อยให้ TALL_UNSTABLE_RISK รายงานปรากฏการณ์นี้แต่เพียงผู้เดียว)
-#
-# v24.14 - แก้ไขตามผลทดสอบใช้งานจริงกับไฟล์หลากหลาย (v24.13) พบ 3 ปัญหา:
-#   1) STACK-WIDTH SANITY GATE: per-box segmentation บางครั้งรวมกล่องหลายใบเป็นตั้ง
-#      เดียวผิดพลาด (under-segmentation) ทำให้กรอบ STEP_DOWN_RISK ใหญ่ผิดปกติ - แก้ไข
-#      ด้วยการปฏิเสธคู่ตั้งใดๆ ที่มีฝั่งใดฝั่งหนึ่งกว้างเกิน 30% ของความกว้างคาร์โก้
-#   2) RAW-STACK FALLBACK: เมื่อ per-box segmentation coverage ต่ำ (มักเป็น BACK view)
-#      ใช้ raw stacks (คุณภาพต่ำกว่า) เป็น fallback เฉพาะ STEP_DOWN_RISK พร้อมเกณฑ์
-#      เข้มงวดขึ้น (40% แทน 30%)
-#   3) กรอบ REAR_EMPTY_RISK/FRONT_EMPTY_RISK จาก AI zoom ถูกตัด (intersect) ให้ไม่เกิน
-#      ขอบเขตช่องว่างที่วัดได้จริงแบบ deterministic (เหมือนหลักการ LATERAL_GAP_RISK)
+# v24.14 - STEP_DOWN_RISK: เพิ่ม STACK-WIDTH SANITY GATE (ป้องกันกรอบใหญ่ผิดปกติจาก
+#   under-segmentation ที่รวมกล่องหลายใบ) + RAW-STACK FALLBACK (สำหรับ view ที่
+#   coverage ต่ำ เช่น BACK) + กรอบ REAR_EMPTY_RISK/FRONT_EMPTY_RISK จาก AI zoom ถูกตัด
+#   (intersect) ให้ไม่เกินขอบเขตช่องว่างที่วัดได้จริงแบบ deterministic
 #
 # v24.13 - STEP_DOWN_RISK เปลี่ยนวิธีตรวจจับทั้งหมด จาก pixel/height-profile scan +
 #   floor-hole scan + cross-view mirror/veto (v24.1-v24.11) ซึ่งไวต่อสัญญาณรบกวนมาก
@@ -97,11 +86,8 @@ import google.generativeai as genai
 #   "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง" - ลบฟังก์ชันเดิมที่ไม่ใช้แล้ว
 #   ทั้งหมด (floor-hole, height-profile, cross-view, OCR-SKU matching) ออกจากโค้ด
 #
-#   นอกจากนี้ยังแก้ไข LATERAL_GAP_RISK (กรอบฟ้า) และ FRONT/REAR_EMPTY_RISK (กรอบเหลือง)
-#   ที่ตีกรอบใหญ่เกินจริง: LATERAL_GAP_RISK เดิมใช้ x0,x1=คาร์โก้เต็มความยาวเสมอ แก้ไข
-#   ด้วยการสแกน pixel หาช่วงที่ว่างจริงก่อน (_localize_lateral_gap_x_range) FRONT/
-#   REAR_EMPTY_RISK (fallback box) เดิมคำนวณความสูงจาก container+cargo รวมกันทำให้ยืด
-#   เต็มความสูงเสมอ แก้ไขให้ใช้เฉพาะความสูงคาร์โก้จริงเท่านั้น
+#   นอกจากนี้ยังแก้ไข LATERAL_GAP_RISK (กรอบฟ้า) ที่ตีกรอบใหญ่เกินจริง - เดิมใช้
+#   x0,x1=คาร์โก้เต็มความยาวเสมอ แก้ไขด้วยการสแกน pixel หาช่วงที่ว่างจริงก่อน
 #
 # v24.12 - 3 การแก้ไขตามคำขอผู้ใช้หลังทดสอบ v24.11:
 #
@@ -148,7 +134,7 @@ import google.generativeai as genai
 #   ทางกายภาพระหว่าง FRONT/BACK view ด้วย depth-ratio mapping) สำหรับ veto/mirror
 #   STEP_DOWN_RISK - ทั้ง v24.6/v24.7/v24.8 ถูกแทนที่ด้วยวิธีเปรียบเทียบความสูงตั้งกล่อง
 #   ที่ติดกันโดยตรง (detect_step_down_regions_from_stacks, v24.13-v24.17) ซึ่งแม่นยำ
-#   กว่าและใช้โค้ดน้อยกว่ามาก - ดู CHANGELOG v24.13-v24.17 ด้านบนสำหรับรายละเอียดเต็ม
+#   กว่าและใช้โค้ดน้อยกว่ามาก - ดู CHANGELOG v24.13-v24.18 ด้านบนสำหรับรายละเอียดเต็ม
 #
 # v24.5/v24.4 - [REMOVED ใน v24.13] เคยปรับปรุง _detect_height_profile() (pixel/
 #   color filtering) สำหรับ STEP_DOWN_RISK height-profile scan - แทนที่ทั้งหมดด้วย
@@ -220,6 +206,15 @@ BOX_BASED_RISK_TYPES = {
     "OVERHANG_RISK",
 }
 
+# v24.18 NEW: ความเสี่ยงที่วาดเป็น "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" แทนกรอบ
+# สี่เหลี่ยม - ทั้ง 3 ประเภทนี้เป็นความเสี่ยงเชิง "ระยะห่างเชิงเส้นตรงระหว่างขอบคาร์โก้
+# กับขอบตู้" ตามคำแนะนำผู้ใช้ (รวม REAR_EMPTY_RISK ตามคำขอเพิ่มเติม)
+GAP_ARROW_RISK_TYPES = {
+    "LATERAL_GAP_RISK",
+    "FRONT_EMPTY_RISK",
+    "REAR_EMPTY_RISK",
+}
+
 HARDCODED_REAR_SIDE = {
     "FRONT": "LEFT",
     "BACK": "RIGHT",
@@ -249,9 +244,7 @@ LOCAL_GAP_DOOR_ZONE_MARGIN_RATIO = 0.15
 
 STEP_DOWN_STACK_MIN_RATIO = 0.30          # ตั้งข้างเคียงต้องสูงกว่าตั้งที่พิจารณาอยู่
                                             # อย่างน้อย 30% ของความสูงตั้งที่สูงกว่า
-                                            # จึงจะถือว่าเป็น step-down จริง
-STEP_DOWN_STACK_MIN_HEIGHT_PX = 15         # ตั้งที่เตี้ยเกินไป (วัดความสูงไม่น่าเชื่อถือ
-                                            # พอ) จะไม่ถูกนำมาเปรียบเทียบเลย
+STEP_DOWN_STACK_MIN_HEIGHT_PX = 15         # ตั้งที่เตี้ยเกินไปจะไม่ถูกนำมาเปรียบเทียบ
 
 # v24.14 NEW: STACK-WIDTH SANITY GATE - ป้องกันกรอบใหญ่ผิดปกติที่เกิดจาก per-box
 # segmentation รวมกล่องหลายใบเป็นตั้งเดียวผิดพลาด (under-segmentation)
@@ -259,38 +252,38 @@ STEP_DOWN_STACK_MAX_WIDTH_RATIO = 0.30    # ตั้งทั้ง 2 ฝั่
                                             # ไม่เกิน 30% ของความกว้างคาร์โก้ทั้งหมด
 
 # v24.17 NEW: MERGED-STACK GATE (median-based) - เกณฑ์ v24.14 ข้างต้น (สัดส่วนของ
-# ความกว้างคาร์โก้ทั้งหมด) ไม่สามารถจับกรณีที่คาร์โก้มีหลายตั้งขนาดเล็ก แต่มีตั้งหนึ่ง
-# ถูกรวมผิดเป็น ~2 เท่าของขนาดปกติได้ (ยืนยันจาก pixel data จริงไฟล์ EC50-02 FRONT view
-# - ตั้งกว้าง 148px จากคาร์โก้กว้าง 531px ยังผ่านเกณฑ์ 30% ได้) - เพิ่มเกณฑ์ที่สอง
-# อ้างอิงจาก "ค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน" โดยตรง (แม่นยำกว่ามาก เพราะสะท้อน
-# ขนาดกล่องจริงในแถวนั้น ไม่ใช่สัดส่วนของความยาวคาร์โก้ทั้งหมด)
+# ความกว้างคาร์โก้ทั้งหมด) ไม่สามารถจับกรณีที่มีตั้งหนึ่งถูกรวมผิดเป็น ~2 เท่าของขนาด
+# ปกติได้เสมอไป - เพิ่มเกณฑ์ที่สองอ้างอิงจาก "ค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน"
 STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = 1.6  # ตั้งที่กว้างเกิน 1.6 เท่าของค่ามัธยฐาน
-                                                   # ความกว้างตั้งทั้งหมดในแถวเดียวกัน
                                                    # ถือว่าน่าจะเป็นการรวมกล่องผิดพลาด
                                                    # (ใช้เฉพาะเมื่อมีตั้ง >= 3 ตั้งขึ้นไป)
 
-# v24.14 NEW: RAW-STACK FALLBACK เฉพาะสำหรับ STEP_DOWN_RISK - ใช้เมื่อ view ใด view
-# หนึ่ง (มักเป็น BACK) มี per-box segmentation coverage ต่ำกว่าเกณฑ์ปกติจนถูกทิ้งไป
-# ทั้งหมด - ใช้เกณฑ์ที่เข้มงวดกว่าปกติเพื่อชดเชยความไม่น่าเชื่อถือของข้อมูลคุณภาพต่ำ
+# v24.14 NEW: RAW-STACK FALLBACK เฉพาะสำหรับ STEP_DOWN_RISK
 STEP_DOWN_STACK_MIN_RATIO_FALLBACK = 0.40
 
 # v24.15 NEW: ISOLATED-PEAK EXCLUSION - ใช้เกณฑ์เดียวกับ TALL_UNSTABLE_RISK
-# (TALL_UNSTABLE_NEIGHBOR_MAX_RATIO, นิยามในหมวด PER-BOX SEGMENTATION ด้านล่าง) เพื่อ
-# แยกแยะ "ตั้งสูงโดดเดี่ยว" (ควรเป็น TALL_UNSTABLE_RISK เท่านั้น) ออกจาก "ที่ราบ/
-# ขั้นบันไดจริง" (ควรเป็น STEP_DOWN_RISK) - ดู _is_isolated_tall_peak()
+# (TALL_UNSTABLE_NEIGHBOR_MAX_RATIO, นิยามในหมวด PER-BOX SEGMENTATION ด้านล่าง)
 
 # v24.16 NEW: EDGE-ARTIFACT GATE - ป้องกัน "ตั้งปลอม" (fragment) ที่เกิดจากมุม
 # isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้ถูกวัดผิดเป็นหน้าตรง
-STEP_DOWN_EDGE_ZONE_WIDTH_RATIO = 1.0      # ระยะห่างจากขอบคาร์โก้ (xmin/xmax) ที่ถือว่า
-                                            # เป็น "โซนเสี่ยงเกิด isometric corner
-                                            # artifact" - คิดเป็นสัดส่วนของความกว้างตั้ง
-                                            # มัธยฐานในแถวเดียวกัน
-STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO = 0.70  # ตั้งที่อยู่ในโซนเสี่ยงข้างต้น จะถูก
-                                            # คัดออกก็ต่อเมื่อ "แคบกว่าปกติ" ด้วย (< 70%
-                                            # ของความกว้างตั้งมัธยฐาน)
+STEP_DOWN_EDGE_ZONE_WIDTH_RATIO = 1.0
+STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO = 0.70
 
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10  # gate สำหรับตรวจสอบว่า Gemini AI claim
                                             # ทับซ้อนกับ deterministic region หรือไม่
+
+# ---------------------------------------------------------------------------
+# GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
+# ---------------------------------------------------------------------------
+
+GAP_ARROW_MIN_LENGTH_FOR_INLINE_LABEL_PX = 55  # ถ้าเส้นลูกศรสั้นกว่านี้ ย้าย label
+                                                 # ตัวเลขไปไว้นอกเส้นแทนวางทับกึ่งกลาง
+GAP_ARROW_TICK_LENGTH_PX = 10        # ความยาวขีดตั้งฉาก (dimension tick) ที่ปลายเส้น
+GAP_ARROW_HEAD_LENGTH_PX = 12         # ความยาวหัวลูกศรสามเหลี่ยม
+GAP_ARROW_HEAD_WIDTH_PX = 8           # ความกว้างหัวลูกศรสามเหลี่ยม
+GAP_ARROW_LINE_WIDTH_PX = 3           # ความหนาเส้นหลัก
+GAP_ARROW_LABEL_FONT_SIZE = 20        # ขนาดฟอนต์ตัวเลขระยะห่างกำกับ
+GAP_ARROW_LABEL_PADDING_PX = 4        # padding รอบข้อความใน label background
 
 
 def get_api_keys_pool():
@@ -821,8 +814,7 @@ LATERAL_GAP_BOX_MIN_WIDTH_PX = 40   # ความกว้างขั้นต
 def _localize_lateral_gap_x_range(full_img, cargo_xmin, cargo_xmax, gap_y0, gap_y1):
     """
     v24.13 NEW: หาช่วง x (พิกัดสัมบูรณ์บนภาพเต็ม) ที่ "ว่างจริง" ภายในแถบความสูง
-    gap_y0-gap_y1 แทนที่จะสมมติว่าช่องว่างนี้กว้างเท่ากับคาร์โก้ทั้งหมดเสมอ (แก้บั๊กที่
-    กรอบ LATERAL_GAP_RISK ยืดเต็มความยาวคาร์โก้เสมอ - ตามคำขอผู้ใช้ "กรอบฟ้าใหญ่เกิน")
+    gap_y0-gap_y1 แทนที่จะสมมติว่าช่องว่างนี้กว้างเท่ากับคาร์โก้ทั้งหมดเสมอ
 
     สแกนทีละคอลัมน์ x ภายในช่วงคาร์โก้ ตรวจสอบว่ามี pixel สีคาร์โก้ปรากฏอยู่ภายในแถบ
     gap_y0-gap_y1 หรือไม่ - คอลัมน์ที่ "ไม่มีคาร์โก้อยู่ในแถบนั้นเลย" ถือเป็นส่วนหนึ่งของ
@@ -861,7 +853,8 @@ def _localize_lateral_gap_x_range(full_img, cargo_xmin, cargo_xmax, gap_y0, gap_
 
 def get_precise_lateral_gap_box(view_container, view_cargo, full_img=None):
     """v24.2: คำนวณตำแหน่งกรอบแม่นยำสำหรับ LATERAL_GAP_RISK โดยเปรียบเทียบช่องว่าง
-    บน-ล่างแยกกัน แล้ววาดกรอบเฉพาะฝั่งที่มีช่องว่างจริงมากกว่า"""
+    บน-ล่างแยกกัน แล้ววาดกรอบเฉพาะฝั่งที่มีช่องว่างจริงมากกว่า (ยังคงเก็บไว้เป็น fallback
+    สำหรับกรณีที่ v24.18 arrow drawing ไม่สามารถวาดได้)"""
     if not view_container or not view_cargo:
         return None
     top_gap = view_cargo["ymin"] - view_container["ymin"]
@@ -877,8 +870,6 @@ def get_precise_lateral_gap_box(view_container, view_cargo, full_img=None):
     if full_img is not None:
         localized = _localize_lateral_gap_x_range(full_img, x0, x1, y0, y1)
         if localized:
-            print(f"LATERAL_GAP_RISK box localized (pixel-verified): x=[{localized[0]}-{localized[1]}] "
-                  f"(was full cargo width x=[{x0}-{x1}])")
             x0, x1 = localized
     return (x0, max(0, y0 - pad), x1, y1 + pad)
 
@@ -1531,16 +1522,9 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
             })
 
         # v24.14 NEW: FALLBACK สำหรับ view ที่ coverage ต่ำ (เช่น BACK view ที่มักมี
-        # occlusion มากกว่า FRONT ทำให้แบ่งกล่องได้ไม่ครอบคลุมพอ) - เดิมเมื่อ
-        # coverage_ratio < STACK_COVERAGE_MIN_RATIO จะ "continue" ทิ้งผลการแบ่งกล่อง
-        # ของ view นั้นไปทั้งหมด ทำให้ STEP_DOWN_RISK ไม่มีทางตรวจพบอะไรเลยใน view นั้น
-        #
-        # วิธีแก้: เก็บผลการแบ่งกล่อง "แบบ raw" (ไม่ผ่านเกณฑ์ coverage) ไว้ในคีย์แยก
-        # ต่างหาก (f"{view}_raw_stacks") เสมอ ใช้เป็น fallback เฉพาะสำหรับ STEP_DOWN_RISK
-        # เท่านั้น (detect_step_down_regions_from_stack_model_per_view) พร้อมเกณฑ์ความสูง
-        # ที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
-        # ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน STACK-WIDTH/EDGE-ARTIFACT/MERGED-STACK GATE
-        # เหมือนกันทุกประการ
+        # occlusion มากกว่า FRONT) - เก็บผลการแบ่งกล่อง "แบบ raw" ไว้ในคีย์แยกต่างหาก
+        # (f"{view}_raw_stacks") เสมอ ใช้เป็น fallback เฉพาะสำหรับ STEP_DOWN_RISK
+        # เท่านั้น พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK)
         #
         # สำคัญ: result[view] หลัก (ที่ OVERHANG_RISK/TALL_UNSTABLE_RISK/
         # REAR_LATERAL_IMBALANCE ใช้) ยังคงพฤติกรรมเดิมทุกประการ (ว่างเปล่าเมื่อ
@@ -1675,14 +1659,6 @@ def _step_down_edge_artifact_stack_indices(sorted_stacks,
     v24.16 NEW: EDGE-ARTIFACT GATE - ระบุตั้งที่น่าจะเป็น "เศษของกล่อง" (fragment) ที่
     เกิดจากมุม isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้/ประตูท้ายตู้
     ถูกวัดผิดเป็นหน้าตรง (ยืนยันจาก pixel data จริงไฟล์ EC50-02 BACK view)
-
-    เงื่อนไข (ต้องเข้าเงื่อนไขทั้ง 2 ข้อจึงจะถือว่าเป็น artifact):
-      1. ตั้งนั้นอยู่ใกล้ขอบคาร์โก้ (xmin หรือ xmax) ภายในระยะ zone_width_ratio เท่า
-         ของความกว้างตั้งมัธยฐานในแถวนั้น
-      2. ตั้งนั้นแคบกว่าปกติอย่างมีนัยสำคัญ (< fragment_max_width_ratio ของความกว้าง
-         ตั้งมัธยฐาน) - บ่งชี้ว่าเป็นเศษของกล่อง ไม่ใช่กล่องเต็มใบจริง
-
-    คืนค่า set ของ index (ใน sorted_stacks) ที่ถือว่าเป็น artifact
     """
     n = len(sorted_stacks)
     if n < 2:
@@ -1710,19 +1686,7 @@ def _step_down_merged_stack_indices(sorted_stacks, max_width_ratio_of_median=STE
     """
     v24.17 NEW: MERGED-STACK GATE (median-based) - ระบุตั้งที่น่าจะเป็นการ "รวมกล่อง
     หลายใบผิดพลาด" (under-segmentation) โดยใช้ค่ามัธยฐานความกว้างตั้งในแถวเดียวกันเป็น
-    ตัวอ้างอิง (แม่นยำกว่าเกณฑ์ v24.14 ที่ใช้สัดส่วนของความกว้างคาร์โก้ทั้งหมด เพราะ
-    ค่ามัธยฐานสะท้อนขนาดกล่องจริงในแถวนั้นโดยตรง)
-
-    ROOT CAUSE ที่พบจากไฟล์จริง EC50-02 FRONT view: ตั้งหนึ่งกว้าง 148px (2.28 เท่าของ
-    มัธยฐาน 65px) เกิดจากกล่อง 2 ใบที่ติดกันถูกรวมเป็นตั้งเดียว (เส้นแบ่งไม่ชัดพอ) ทำให้
-    ค่า top_y ที่วัดด้วย majority-vote ข้ามความกว้างที่ผิดปกตินี้คลาดเคลื่อนจากแนวโน้ม
-    ความชันของมุมมอง isometric จริงอย่างมาก เมื่อเทียบกับตั้งข้างเคียงที่แคบกว่าปกติ จึง
-    เกิดผลต่างความสูงปลอมที่ไม่มีอยู่จริง (ยืนยันด้วยการวัดจุดบนสุดของคาร์โก้จริงทีละ
-    คอลัมน์ - พบว่าขอบบนของกล่องทั้งแถวเอียงราบรื่นต่อเนื่องไม่มีจุดกระโดดใดๆ เลย)
-
-    ใช้เฉพาะเมื่อมีตั้งอย่างน้อย 3 ตั้งขึ้นไปในแถวนั้น (ค่ามัธยฐานจึงจะมีความหมาย
-    เช่นเดียวกับเกณฑ์ n>=3 ของ TALL_UNSTABLE_RISK) คืนค่า set ของ index ที่ถือว่าเป็น
-    merged stack
+    ตัวอ้างอิง (ยืนยันจาก pixel data จริงไฟล์ EC50-02 FRONT view)
     """
     n = len(sorted_stacks)
     if n < 3:
@@ -1744,18 +1708,10 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
                                           max_width_ratio=STEP_DOWN_STACK_MAX_WIDTH_RATIO):
     """
     v24.13-v24.17: ตรวจจับ STEP_DOWN_RISK จากการเปรียบเทียบ "ความสูงรวมของตั้งกล่อง"
-    (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ซ้ายหรือขวา) - ไม่ใช้
-    pixel/height-profile scan หรือ floor-hole scan อีกต่อไป
+    (จาก per-box stack model) ระหว่างตั้งที่ติดกันโดยตรงเท่านั้น (ซ้ายหรือขวา)
 
-    v24.14 - STACK-WIDTH SANITY GATE (สัดส่วนของคาร์โก้ทั้งหมด)
-    v24.15 - ISOLATED-PEAK EXCLUSION (_is_isolated_tall_peak)
-    v24.16 - EDGE-ARTIFACT GATE (_step_down_edge_artifact_stack_indices)
-    v24.17 - MERGED-STACK GATE แบบ median-based (_step_down_merged_stack_indices) -
-    ทั้งหมดใช้ร่วมกันเพื่อคัดตั้งที่ไม่น่าเชื่อถือออกก่อนเริ่มเปรียบเทียบใดๆ
-
-    กรอบผลลัพธ์ (region) ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า" เท่านั้น (x0-x1 ของตั้งนั้น,
-    y จาก top_y ถึง floor_y ของตั้งนั้นจริง) - ไม่ยืดไปคลุมตั้งข้างเคียงหรือพื้นตู้เต็ม
-    ความสูงเหมือนวิธีเดิม ทำให้กรอบที่วาดออกมาแม่นยำและไม่ใหญ่เกินจริง
+    กรอบผลลัพธ์ (region) ใช้ขอบเขตของ "ตั้งที่เตี้ยกว่า" เท่านั้น ทำให้กรอบที่วาดออกมา
+    แม่นยำและไม่ใหญ่เกินจริง
     """
     regions = []
     if not stacks or len(stacks) < 2:
@@ -1788,8 +1744,6 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
             continue
         s_this = sorted_stacks[i]
         if _stack_width(s_this) > max_width_px:
-            # ตั้งนี้กว้างผิดปกติ (น่าจะเป็นการรวมกล่องหลายใบผิดพลาด) - ไม่นำมาพิจารณา
-            # เป็น "ตั้งเตี้ย" เลย ไม่ว่าจะเทียบกับเพื่อนบ้านฝั่งใดก็ตาม
             continue
         neighbor_idxs = []
         if i > 0:
@@ -1799,8 +1753,6 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
         best_ratio = 0.0
         for j in neighbor_idxs:
             if j in excluded_idxs:
-                # เพื่อนบ้านนี้ถูกคัดออก (วัดค่าไม่น่าเชื่อถือ) - ไม่นำมาใช้เป็นฐาน
-                # เปรียบเทียบเลย
                 continue
             h_neighbor = heights[j]
             if h_neighbor is None or h_neighbor < min_height_px:
@@ -1809,7 +1761,7 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
             if _stack_width(s_neighbor) > max_width_px:
                 continue
             if h_neighbor <= h_this:
-                continue  # เพื่อนบ้านไม่ได้สูงกว่า -> ตั้งนี้ไม่ใช่ตั้งเตี้ยเทียบตั้งนั้น
+                continue
             if _is_isolated_tall_peak(j, heights, min_height_px):
                 continue
             ratio = 1 - (h_this / h_neighbor)
@@ -1826,14 +1778,8 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
 
 def detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_extent):
     """เรียก detect_step_down_regions_from_stacks() สำหรับทั้ง FRONT และ BACK view -
-    stacks ใน stack_box_model เก็บพิกัดแบบ "สัมบูรณ์บนภาพเต็ม" อยู่แล้ว จึงไม่ต้องแปลง
-    พิกัดเพิ่มเติม
-
-    v24.14 NEW: หาก view ใด view หนึ่งไม่มี high-confidence stacks (coverage ต่ำกว่า
-    เกณฑ์ปกติ) จะ fallback ไปใช้ "raw stacks" (f"{view}_raw_stacks") แทน พร้อมเกณฑ์
-    ความสูงที่เข้มงวดขึ้น (STEP_DOWN_STACK_MIN_RATIO_FALLBACK) เพื่อชดเชยความไม่แน่นอน
-    ของข้อมูลคุณภาพต่ำ - ยังคงผ่าน gate อื่นๆ ทั้งหมดเหมือนกันทุกประการ
-    """
+    v24.14 NEW: หาก view ใด view หนึ่งไม่มี high-confidence stacks จะ fallback ไปใช้
+    "raw stacks" แทน พร้อมเกณฑ์ความสูงที่เข้มงวดขึ้น"""
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
         ce = cargo_extent.get(view)
@@ -1857,7 +1803,7 @@ def detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_ex
                   f"(threshold={min_ratio*100:.0f}%)")
         if not regions:
             print(f"Deterministic STEP_DOWN_RISK: no adjacent-stack height difference found for {view} "
-                  f"(fallback_stacks={using_fallback}) (container appears uniform based on per-box stack comparison)")
+                  f"(fallback_stacks={using_fallback})")
     return results
 
 
@@ -2206,9 +2152,9 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
     if risk_type in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "REAR_COMBINED_RISK") and view_container and view_cargo:
         c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
         g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
-        # v24.13 FIX: เดิมใช้ min/max ระหว่างขอบเขตตู้ (container) กับขอบเขตคาร์โก้
-        # (cargo) รวมกัน ทำให้กรอบยืดเต็มความสูงของภาพเสมอ - เปลี่ยนไปใช้เฉพาะขอบเขต
-        # ความสูงของคาร์โก้จริง (view_cargo) เท่านั้น + padding เล็กน้อย
+        # v24.13 FIX: ใช้เฉพาะขอบเขตความสูงของคาร์โก้จริง (view_cargo) เท่านั้น + padding
+        # เล็กน้อย แทนที่จะใช้ min/max ระหว่าง container+cargo รวมกัน (ซึ่งทำให้กรอบ
+        # ยืดเต็มความสูงของภาพเสมอ)
         y0 = view_cargo["ymin"]
         y1 = view_cargo["ymax"]
         y_pad = max(4, (y1 - y0) * 0.06)
@@ -2463,6 +2409,226 @@ def _draw_single_or_dual_rectangle(draw, coords, outline_color, draw_colors=None
     else:
         draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
+# ---------------------------------------------------------------------------
+# v24.18 NEW: GAP MEASUREMENT ARROW - แสดง LATERAL_GAP_RISK/FRONT_EMPTY_RISK/
+# REAR_EMPTY_RISK เป็น "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" (คล้ายเส้นบอกขนาดใน
+# แบบวิศวกรรม/CAD) แทนกรอบสี่เหลี่ยมทึบ - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียดเต็ม
+# ---------------------------------------------------------------------------
+
+_DIMENSION_FONT_CACHE = {}
+
+
+def _get_dimension_font(size=GAP_ARROW_LABEL_FONT_SIZE):
+    """โหลดฟอนต์สำหรับ label ตัวเลขระยะห่าง (cached) - มี fallback เป็น default font
+    ของ PIL หากไม่พบไฟล์ฟอนต์ TrueType ในระบบ (กันโค้ดพังในสภาพแวดล้อมที่ไม่มีฟอนต์นี้)"""
+    if size in _DIMENSION_FONT_CACHE:
+        return _DIMENSION_FONT_CACHE[size]
+    font = None
+    for font_name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf", "arial.ttf"):
+        try:
+            font = PIL.ImageFont.truetype(font_name, size)
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = PIL.ImageFont.load_default(size=size)
+        except Exception:
+            font = PIL.ImageFont.load_default()
+    _DIMENSION_FONT_CACHE[size] = font
+    return font
+
+
+def _draw_arrowhead(draw, apex, direction_from, color,
+                     length=GAP_ARROW_HEAD_LENGTH_PX, width=GAP_ARROW_HEAD_WIDTH_PX):
+    """วาดหัวลูกศรรูปสามเหลี่ยมทึบที่ตำแหน่ง apex ชี้ออกจากทิศทาง direction_from
+    (คือปลายลูกศรอยู่ที่ apex ฐานสามเหลี่ยมอยู่ทางฝั่ง direction_from)"""
+    ax, ay = apex
+    dx, dy = direction_from
+    vx, vy = ax - dx, ay - dy
+    dist = (vx ** 2 + vy ** 2) ** 0.5
+    if dist < 1e-6:
+        return
+    ux, uy = vx / dist, vy / dist
+    px_, py_ = -uy, ux  # perpendicular unit vector
+    base_x, base_y = ax - ux * length, ay - uy * length
+    p1 = (base_x + px_ * width / 2, base_y + py_ * width / 2)
+    p2 = (base_x - px_ * width / 2, base_y - py_ * width / 2)
+    draw.polygon([apex, p1, p2], fill=color)
+
+
+def _draw_text_with_bg(draw, center_pos, text, font, text_color="black", bg_color="white", outline_color=None):
+    """วาดข้อความพร้อมกล่องพื้นหลังทึบสีขาว (อ่านง่ายไม่ว่าพื้นหลังภาพจะเป็นสีอะไร)
+    center_pos คือจุดกึ่งกลางของกล่องข้อความ"""
+    x, y = center_pos
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        tw, th = len(text) * (GAP_ARROW_LABEL_FONT_SIZE * 0.6), GAP_ARROW_LABEL_FONT_SIZE * 1.2
+    pad = GAP_ARROW_LABEL_PADDING_PX
+    rect = [x - tw / 2 - pad, y - th / 2 - pad, x + tw / 2 + pad, y + th / 2 + pad]
+    draw.rectangle(rect, fill=bg_color, outline=(outline_color or text_color), width=1)
+    draw.text((x - tw / 2, y - th / 2), text, fill=text_color, font=font)
+
+
+def _draw_gap_measurement_arrow(draw, p1, p2, orientation, label_text, color):
+    """
+    v24.18 NEW: วาดเส้นลูกศร 2 หัว (dimension arrow) ระหว่างจุด p1 กับ p2 พร้อมขีดตั้งฉาก
+    (dimension tick) ที่ปลายทั้ง 2 ข้าง และตัวเลข label_text กำกับกึ่งกลางเส้น (หรือ
+    นอกเส้นถ้าเส้นสั้นเกินไป) - ใช้แทนกรอบสี่เหลี่ยมสำหรับ LATERAL_GAP_RISK/
+    FRONT_EMPTY_RISK/REAR_EMPTY_RISK ตามคำแนะนำผู้ใช้
+
+    orientation: "vertical" (LATERAL_GAP_RISK) หรือ "horizontal" (FRONT/REAR_EMPTY_RISK)
+    - กำหนดทิศทางของขีดตั้งฉากที่ปลายเส้น (ให้ตั้งฉากกับเส้นหลักเสมอ)
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length < 2:
+        return False
+
+    draw.line([x1, y1, x2, y2], fill=color, width=GAP_ARROW_LINE_WIDTH_PX)
+
+    tick = GAP_ARROW_TICK_LENGTH_PX
+    if orientation == "vertical":
+        draw.line([x1 - tick, y1, x1 + tick, y1], fill=color, width=GAP_ARROW_LINE_WIDTH_PX)
+        draw.line([x2 - tick, y2, x2 + tick, y2], fill=color, width=GAP_ARROW_LINE_WIDTH_PX)
+    else:
+        draw.line([x1, y1 - tick, x1, y1 + tick], fill=color, width=GAP_ARROW_LINE_WIDTH_PX)
+        draw.line([x2, y2 - tick, x2, y2 + tick], fill=color, width=GAP_ARROW_LINE_WIDTH_PX)
+
+    _draw_arrowhead(draw, (x1, y1), (x2, y2), color)
+    _draw_arrowhead(draw, (x2, y2), (x1, y1), color)
+
+    mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+    font = _get_dimension_font()
+    if length < GAP_ARROW_MIN_LENGTH_FOR_INLINE_LABEL_PX:
+        # v24.18: เส้นสั้นเกินไป (ช่องว่างแคบ) - ย้าย label ออกไปด้านนอกเส้นแทนวางทับ
+        # กึ่งกลาง กันตัวเลขบังกันเองในพื้นที่แคบ
+        if orientation == "vertical":
+            label_pos = (mid_x + tick + 34, mid_y)
+        else:
+            label_pos = (mid_x, mid_y - tick - 18)
+    else:
+        label_pos = (mid_x, mid_y)
+
+    _draw_text_with_bg(draw, label_pos, label_text, font, text_color="black", bg_color="white", outline_color=color)
+    return True
+
+
+def _format_gap_label(mm_val, ratio_val):
+    """แปลงค่าระยะห่าง (มม. หรือสัดส่วน) เป็นข้อความ label สำหรับกำกับเส้นลูกศร
+
+    v24.18 NOTE: ใช้หน่วยภาษาอังกฤษ ("cm") แทน "ซม." เพราะฟอนต์ TrueType ที่มีอยู่ใน
+    สภาพแวดล้อม deploy (DejaVu Sans) ไม่มี glyph ภาษาไทย - ถ้าใช้ข้อความไทยตรงนี้จะ
+    เรนเดอร์เป็นกล่องสี่เหลี่ยมว่างแทนตัวอักษร (ยืนยันจากการทดสอบเรนเดอร์จริง) คำอธิบาย
+    ความเสี่ยง (action_text/description) ในส่วนอื่นยังคงเป็นภาษาไทยตามปกติ เพราะเป็น
+    ข้อความ JSON ธรรมดา ไม่ใช่ข้อความที่วาดลงบนรูปภาพ"""
+    if mm_val is not None:
+        return f"{mm_val / 10:.0f} cm"
+    elif ratio_val is not None:
+        return f"{ratio_val * 100:.0f}%"
+    else:
+        return "?"
+
+
+def _compute_lateral_gap_arrow_geometry(view_container, view_cargo, full_img=None):
+    """
+    v24.18 NEW: คำนวณจุดเริ่ม/จุดสิ้นสุดของเส้นลูกศรสำหรับ LATERAL_GAP_RISK (แนวตั้ง -
+    ช่องว่างระหว่างขอบบน/ล่างของคาร์โก้กับขอบบน/ล่างของตู้) ใช้หลักการเดียวกับ
+    get_precise_lateral_gap_box (v24.2/v24.13) ในการเลือกฝั่งที่มีช่องว่างจริงมากกว่า
+    และหาตำแหน่ง x ที่ว่างจริงด้วย pixel scan (_localize_lateral_gap_x_range)
+
+    คืนค่า ("vertical", (x, y_cargo_edge), (x, y_container_edge)) หรือ None
+    """
+    if not view_container or not view_cargo:
+        return None
+    top_gap = view_cargo["ymin"] - view_container["ymin"]
+    bottom_gap = view_container["ymax"] - view_cargo["ymax"]
+    if bottom_gap >= top_gap and bottom_gap > 0:
+        y1, y2 = view_cargo["ymax"], view_container["ymax"]
+    elif top_gap > 0:
+        y1, y2 = view_container["ymin"], view_cargo["ymin"]
+    else:
+        return None
+
+    x0, x1_ = view_cargo["xmin"], view_cargo["xmax"]
+    x_mid = (x0 + x1_) / 2
+    if full_img is not None:
+        localized = _localize_lateral_gap_x_range(full_img, x0, x1_, min(y1, y2), max(y1, y2))
+        if localized:
+            x_mid = (localized[0] + localized[1]) / 2
+    return ("vertical", (x_mid, y1), (x_mid, y2))
+
+
+def _compute_empty_gap_arrow_geometry(view_container, view_cargo, rear_side, risk_type):
+    """
+    v24.18 NEW: คำนวณจุดเริ่ม/จุดสิ้นสุดของเส้นลูกศรสำหรับ FRONT_EMPTY_RISK/
+    REAR_EMPTY_RISK (แนวนอน - ช่องว่างตามความยาวตู้ระหว่างคาร์โก้กับผนังหัวตู้/ประตู
+    ท้ายตู้) - ตำแหน่ง y ใช้กึ่งกลางความสูงคาร์โก้ เพื่อไม่ให้เส้นทับซ้อนกับตัวอักษร
+    SKU บนกล่องหรือเส้นขอบกล่องส่วนบน/ล่าง
+
+    คืนค่า ("horizontal", (x1, y_mid), (x2, y_mid)) หรือ None
+    """
+    if not view_container or not view_cargo:
+        return None
+    c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
+    g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
+    if risk_type == "FRONT_EMPTY_RISK":
+        if rear_side == "LEFT":
+            x1, x2 = g_xmax, c_xmax
+        else:
+            x1, x2 = c_xmin, g_xmin
+    else:  # REAR_EMPTY_RISK / REAR_COMBINED_RISK
+        if rear_side == "LEFT":
+            x1, x2 = c_xmin, g_xmin
+        else:
+            x1, x2 = g_xmax, c_xmax
+    if x2 < x1:
+        x1, x2 = x2, x1
+    y_mid = (view_cargo["ymin"] + view_cargo["ymax"]) / 2
+    return ("horizontal", (x1, y_mid), (x2, y_mid))
+
+
+def _try_draw_gap_risk_arrow(draw, risk_type, view_label, container_bounds, cargo_extent,
+                              container_length_mm, full_img, color):
+    """
+    v24.18 NEW: ฟังก์ชันกลางสำหรับพยายามวาดเส้นลูกศรวัดระยะสำหรับ LATERAL_GAP_RISK/
+    FRONT_EMPTY_RISK/REAR_EMPTY_RISK - คำนวณทั้งเรขาคณิต (จุดเริ่ม/สิ้นสุด) และตัวเลข
+    label โดยตรงจาก container_bounds/cargo_extent เสมอ (deterministic, ไม่ผูกกับ
+    แหล่งที่มาของ risk ว่าเป็น AI claim หรือ FORCED deterministic)
+
+    คืนค่า True หากวาดสำเร็จ, False หากไม่มีข้อมูลพอ (ผู้เรียกควร fallback ไปใช้กรอบ
+    สี่เหลี่ยมแบบเดิมเพื่อไม่ให้ risk นั้นไม่ถูกวาดอะไรเลย)
+    """
+    view_container = container_bounds.get(view_label)
+    view_cargo = cargo_extent.get(view_label)
+    if not view_container or not view_cargo:
+        return False
+
+    if risk_type == "LATERAL_GAP_RISK":
+        geom = _compute_lateral_gap_arrow_geometry(view_container, view_cargo, full_img)
+        if not geom:
+            return False
+        orientation, p1, p2 = geom
+        mm_val = compute_lateral_gap_mm(view_container, view_cargo, container_length_mm)
+        ratio_val = compute_lateral_gap_ratio(view_container, view_cargo)
+    elif risk_type in ("FRONT_EMPTY_RISK", "REAR_EMPTY_RISK"):
+        rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
+        geom = _compute_empty_gap_arrow_geometry(view_container, view_cargo, rear_side, risk_type)
+        if not geom:
+            return False
+        orientation, p1, p2 = geom
+        mm_val = compute_empty_gap_mm(view_container, view_cargo, rear_side, risk_type, container_length_mm)
+        ratio_val = compute_empty_gap_ratio(view_container, view_cargo, rear_side, risk_type)
+    else:
+        return False
+
+    label_text = _format_gap_label(mm_val, ratio_val)
+    return _draw_gap_measurement_arrow(draw, p1, p2, orientation, label_text, color)
+
+
 def _convert_zoom_box_to_absolute(zoom_box_2d, crop_x0, crop_y0, crop_x1, crop_y1):
     try:
         ymin, xmin, ymax, xmax = map(float, zoom_box_2d)
@@ -2497,56 +2663,6 @@ def _get_zoom_precise_box(zone_result, box_key, crop_rect, full_img, min_cargo_r
         return None
     print(f"Zoom box_2d ACCEPTED (cargo_ratio={cargo_ratio:.2f}): {abs_box}")
     return abs_box
-
-
-def _get_deterministic_gap_x_range(view_container, view_cargo, rear_side, risk_type):
-    """v24.14 NEW: คำนวณช่วง x ของ "ช่องว่างจริง" (ระหว่างขอบเขตคาร์โก้กับขอบเขตตู้)
-    แบบ deterministic เดียวกับที่ _get_fallback_box ใช้ - แยกออกมาเป็นฟังก์ชันกลาง
-    เพื่อนำไปใช้ "ตัดขอบเขต" กรอบที่ได้จาก AI zoom analysis ด้วย"""
-    if not view_container or not view_cargo:
-        return None
-    c_xmin, c_xmax = view_container["xmin"], view_container["xmax"]
-    g_xmin, g_xmax = view_cargo["xmin"], view_cargo["xmax"]
-    if risk_type == "FRONT_EMPTY_RISK":
-        if rear_side == "LEFT":
-            return (g_xmax, c_xmax)
-        else:
-            return (c_xmin, g_xmin)
-    else:  # REAR_EMPTY_RISK / REAR_COMBINED_RISK
-        if rear_side == "LEFT":
-            return (c_xmin, g_xmin)
-        else:
-            return (g_xmax, c_xmax)
-
-
-def _tighten_zoom_box_to_gap(abs_box, view_container, view_cargo, rear_side, risk_type, pad_ratio=0.25):
-    """
-    v24.14 NEW: ตัด (intersect) กรอบที่ได้จาก AI zoom analysis ให้ไม่เกินขอบเขตช่องว่าง
-    ที่วัดได้จริงแบบ deterministic (จาก _get_deterministic_gap_x_range) - ป้องกันกรอบ
-    REAR_EMPTY_RISK/FRONT_EMPTY_RISK กว้าง/สูงเกินกว่าช่องว่างจริงที่วัดได้
-    """
-    if not abs_box:
-        return abs_box
-    gap_range = _get_deterministic_gap_x_range(view_container, view_cargo, rear_side, risk_type)
-    if not gap_range:
-        return abs_box
-    gap_x0, gap_x1 = gap_range
-    if gap_x1 <= gap_x0:
-        return abs_box
-    pad = max(10, (gap_x1 - gap_x0) * pad_ratio)
-    allowed_x0, allowed_x1 = gap_x0 - pad, gap_x1 + pad
-
-    x0, y0, x1, y1 = abs_box
-    new_x0 = max(x0, allowed_x0)
-    new_x1 = min(x1, allowed_x1)
-    if new_x1 - new_x0 < 10:
-        print(f"WARNING: Zoom box for {risk_type} does not overlap deterministic gap range "
-              f"x=[{allowed_x0:.0f}-{allowed_x1:.0f}] - keeping original AI box x=[{x0:.0f}-{x1:.0f}] unchanged")
-        return abs_box
-    if (new_x0, new_x1) != (x0, x1):
-        print(f"Tightened {risk_type} zoom box to deterministic gap range: "
-              f"x=[{x0:.0f}-{x1:.0f}] -> x=[{new_x0:.0f}-{new_x1:.0f}]")
-    return (new_x0, y0, new_x1, y1)
 
 
 # ---------------------------------------------------------------------------
@@ -2611,7 +2727,6 @@ def process_request(request):
         # (height-profile pixel scan, floor-hole scan, cross-view mirror/veto + OCR-SKU
         # matching) v24.14-v24.17 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK +
         # ISOLATED-PEAK EXCLUSION + EDGE-ARTIFACT GATE + MERGED-STACK GATE (median-based)
-        # ตามลำดับ (ดู CHANGELOG หัวไฟล์)
         step_down_regions = detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_extent)
 
         overhang_regions = {}
@@ -2795,23 +2910,14 @@ def process_request(request):
                 if pb:
                     rear_zone_risk_val = str(rear_result.get("rear_zone_risk", "")).upper()
                     if rear_zone_risk_val in ("REAR_EMPTY_RISK", "BOTH"):
-                        # v24.14 NEW: ตัดกรอบ AI zoom ให้ไม่เกินช่องว่างที่วัดได้จริงแบบ
-                        # deterministic - ไม่ใช้กับ REAR_LATERAL_IMBALANCE เพราะเป็นโซน
-                        # เปรียบเทียบความสูงจริง ไม่ใช่แค่ช่องว่างเปล่าๆ
-                        pb_tight = _tighten_zoom_box_to_gap(
-                            pb, container_bounds.get(view_label), cargo_extent.get(view_label),
-                            HARDCODED_REAR_SIDE[view_label], "REAR_EMPTY_RISK")
-                        precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb_tight
+                        precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb
                     if rear_zone_risk_val in ("REAR_LATERAL_IMBALANCE", "BOTH"):
                         precise_boxes[(view_label, "REAR_LATERAL_IMBALANCE")] = pb
 
         if isinstance(front_result_from_front_view, dict) and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
             pb = _get_zoom_precise_box(front_result_from_front_view, "box_2d", zoom_crop_rects["front_FRONT"], img)
             if pb:
-                pb_tight = _tighten_zoom_box_to_gap(
-                    pb, container_bounds.get("FRONT"), cargo_extent.get("FRONT"),
-                    HARDCODED_REAR_SIDE["FRONT"], "FRONT_EMPTY_RISK")
-                precise_boxes[("FRONT", "FRONT_EMPTY_RISK")] = pb_tight
+                precise_boxes[("FRONT", "FRONT_EMPTY_RISK")] = pb
 
         def _normalize_view(v):
             v = str(v).upper().strip()
@@ -3134,7 +3240,17 @@ def process_request(request):
             drawn = False
             is_zone_based = fallback_risk_type in ZONE_BASED_RISK_TYPES or risk_type == "COMBINED_AREA_RISK"
 
-            if is_zone_based and risk_type != "COMBINED_AREA_RISK":
+            # v24.18 NEW: LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK วาดเป็น
+            # "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" แทนกรอบสี่เหลี่ยม ตามคำแนะนำผู้ใช้
+            # - คำนวณเรขาคณิต/ตัวเลขโดยตรงจาก container_bounds/cargo_extent เสมอ (ไม่
+            # ผูกกับแหล่งที่มาของ risk) หากไม่มีข้อมูลพอ (กรณีหายาก) จะ fallback ไปใช้
+            # กรอบสี่เหลี่ยมแบบเดิมด้านล่างโดยอัตโนมัติ (ปลอดภัย ไม่ทำให้ risk หายไป)
+            if risk_type in GAP_ARROW_RISK_TYPES:
+                if _try_draw_gap_risk_arrow(draw, risk_type, resolved_view, container_bounds, cargo_extent,
+                                             container_length_mm, img, outline_color):
+                    drawn = True
+
+            if not drawn and is_zone_based and risk_type != "COMBINED_AREA_RISK":
                 precise = precise_boxes.get((resolved_view, risk_type))
                 if precise:
                     _draw_single_or_dual_rectangle(draw, precise, outline_color, draw_colors)
