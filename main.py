@@ -1998,7 +1998,7 @@ this image's own size. The box must tightly enclose the actual shorter stack (or
 mismatch boundary) - not the whole image, not empty background.
 
 Return ONLY this exact JSON:
-{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
+{{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever rear_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, rear_crop, api_keys)
@@ -2024,7 +2024,7 @@ the empty gap is visible in THIS image. Use [ymin, xmin, ymax, xmax] format with
 normalized to this image's own size. The box should cover the actual gap area between cargo and wall.
 
 Return ONLY this exact JSON:
-{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
+{{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever front_zone_risk is not SAFE; omit or use null if SAFE)
 """
     return _call_gemini_json(prompt, front_crop, api_keys)
