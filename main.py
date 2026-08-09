@@ -19,7 +19,16 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.18
+# AI Cargo Safety Checker - High Precision v24.19
+#
+# v24.19 - Hotfix ตามผลทดสอบ EA03/EA06/EA02:
+#   1) STEP_DOWN_RISK (กรอบแดง): เพิ่ม STACK-COUNT GATE เพื่อป้องกัน false positive จาก
+#      perspective/isometric slope และความสูง pixel ที่ต่างกัน แม้จำนวนชั้น/จำนวนกล่องในตั้ง
+#      เท่ากันจริง - จากนี้จะ flag STEP_DOWN เฉพาะกรณีที่ตั้งข้างเคียงมีจำนวนกล่อง/ชั้นมากกว่า
+#      ตั้งที่เตี้ยกว่าอย่างชัดเจน (neighbor box-count > current box-count) เท่านั้น
+#   2) LATERAL_GAP_RISK arrow: ถ้าหา local gap x-range ที่มีหลักฐาน pixel จริงไม่ได้ จะไม่วาด
+#      ลูกศรลอยกลางพื้นที่ว่างอีก แต่ fallback ไปกรอบ/box เดิม เพื่อหลีกเลี่ยงเส้นวัดระยะที่
+#      ไม่แตะขอบสินค้า/ขอบพื้นจริง
 #
 # v24.18 - เปลี่ยนวิธีแสดงผล LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK จาก
 #   "กรอบสี่เหลี่ยมทึบ" เป็น "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" (คล้ายเส้นบอกขนาด
@@ -260,6 +269,10 @@ STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = 1.6  # ตั้งที่กว�
 
 # v24.14 NEW: RAW-STACK FALLBACK เฉพาะสำหรับ STEP_DOWN_RISK
 STEP_DOWN_STACK_MIN_RATIO_FALLBACK = 0.40
+
+# v24.19 NEW: STEP_DOWN ต้องเกิดจากจำนวนชั้น/จำนวนกล่องในตั้งข้างเคียงมากกว่าจริง
+# ไม่ใช่แค่ความสูง pixel แตกต่างจากมุมมอง isometric หรือ perspective
+STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT = True
 
 # v24.15 NEW: ISOLATED-PEAK EXCLUSION - ใช้เกณฑ์เดียวกับ TALL_UNSTABLE_RISK
 # (TALL_UNSTABLE_NEIGHBOR_MAX_RATIO, นิยามในหมวด PER-BOX SEGMENTATION ด้านล่าง)
@@ -1758,6 +1771,12 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
             if h_neighbor is None or h_neighbor < min_height_px:
                 continue
             s_neighbor = sorted_stacks[j]
+            if STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT:
+                # v24.19: ป้องกัน false positive จากมุมมอง isometric: ถ้าจำนวนกล่อง/ชั้น
+                # ของตั้งข้างเคียงไม่ได้มากกว่าตั้งนี้จริง จะไม่ถือว่าเป็น step-down
+                # (กรณี EA03/EA06 ที่เห็นความสูง pixel ต่างกันแต่จริงๆ จำนวนชั้นเท่ากัน)
+                if len(s_neighbor.get("boxes", [])) <= len(s_this.get("boxes", [])):
+                    continue
             if _stack_width(s_neighbor) > max_width_px:
                 continue
             if h_neighbor <= h_this:
@@ -2559,6 +2578,10 @@ def _compute_lateral_gap_arrow_geometry(view_container, view_cargo, full_img=Non
         localized = _localize_lateral_gap_x_range(full_img, x0, x1_, min(y1, y2), max(y1, y2))
         if localized:
             x_mid = (localized[0] + localized[1]) / 2
+        else:
+            # v24.19: ไม่มีหลักฐาน pixel ว่ามี x-range ว่างจริง ณ แถบ y นี้
+            # จึงไม่วาดลูกศรลอยในพื้นที่ว่าง ให้ caller fallback เป็นกรอบ/box เดิมแทน
+            return None
     return ("vertical", (x_mid, y1), (x_mid, y2))
 
 
