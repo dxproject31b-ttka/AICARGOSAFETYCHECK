@@ -19,15 +19,131 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.23
+# AI Cargo Safety Checker - High Precision v24.27
 #
-# v24.23 - Complete fix ตาม acceptance criteria ล่าสุด:
-#   1) EA07 ต้องไม่ขึ้น LOW_EXPOSED/STEP_DOWN false positive เมื่อโหลดเป็น block เต็มตู้
-#      และไม่มี empty floor zone จริงรองรับการตก
-#   2) EA06 ช่องว่างท้ายรถ/พื้นท้ายตู้ประมาณ 5-10% ต้องถูกระบุเป็น FLOOR/REAR EMPTY
-#      marker ได้ แม้ mm calibration ไม่พร้อม โดยใช้ ratio threshold เฉพาะ floor-empty ที่ 5%
-#   3) ปิด TALL_UNSTABLE_RISK/กรอบชมพู false positive ให้เด็ดขาด โดยวาดได้เฉพาะกรณี
-#      ที่มี deterministic tall-unstable region ที่ผ่าน gate และ box ของ claim overlap จริงเท่านั้น
+# v24.27 - แก้ 2 ปัญหาที่ผู้ใช้ยืนยันจากภาพจริง (EA07 BACK="OK", AA04-03 BACK="NG":
+#   ตัวกล่องชมพูเองเสี่ยงหล่น/ไม่มั่นคงเพราะฐานรองรับแคบกว่า):
+#
+#   1) FLOOR-COVERAGE GATE สำหรับ LOW_EXPOSED FLOODFILL (สำเร็จ ทดสอบยืนยันแล้ว):
+#   ROOT CAUSE ที่พบ - v24.26 เคยขึ้น false positive ที่ EA07 BACK (53%) และ AA04-03
+#   BACK (62-78%, 3 จุด) เพราะเปรียบเทียบ "กล่องที่ชิดพื้นบางส่วน" กับเพื่อนบ้านโดยไม่
+#   ตรวจสอบว่ากล่องนั้นกว้างพอจะเป็น "กล่องเดียววางเต็มฐาน" แบบ EA10 หรือไม่ - วัด pixel
+#   จริงพบว่า EA07/AA04-03 ที่เป็น false positive ล้วนเป็นภูมิภาคที่กว้างแค่ 13-33% ของ
+#   ตั้งทั้งหมด (คือแค่ 1 ใน "หลายกล่องที่วางเรียงกันปกติ") ในขณะที่ EA10 (ความเสี่ยงจริง)
+#   กล่องเขียวกว้างถึง 98% ของตั้ง (คือ "กล่องเดียววางเต็มฐานจริง")
+#
+#   วิธีแก้: เพิ่ม LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO=70% เป็นเงื่อนไขบังคับ
+#   เพิ่มเติม - ภูมิภาคที่ชิดพื้นต้องกว้างอย่างน้อย 70% ของตั้งทั้งหมดที่ถูกรวม จึงจะ
+#   ยอมรับเป็น candidate ผลทดสอบจริง (รันโค้ดจริงกับ PDF ทั้ง 5 ไฟล์):
+#     - EA07: LOW_EXPOSED = 0 candidates (แก้ false positive สำเร็จ - ผู้ใช้ยืนยัน "OK")
+#     - AA04-03: LOW_EXPOSED = 0 candidates (ไม่มี false positive อีกต่อไป)
+#     - EA10: LOW_EXPOSED ยังคงพบกล่องเขียวที่ถูกต้อง (39%, ไม่กระทบ)
+#     - AA02-01, AA04-06: LOW_EXPOSED = 0 candidates เช่นกัน (ทุก candidate ที่เคยพบมี
+#       floor coverage ต่ำกว่า 70% ทั้งหมด)
+#
+#   2) OVERHANG-VIA-FLOODFILL สำหรับ AA04-03 (ไม่สำเร็จ - ปิดไว้ก่อน ต้องแจ้งตรงไปตรงมา):
+#   ผู้ใช้ยืนยันว่า AA04-03 มีความเสี่ยงจริงคนละประเภทจาก LOW_EXPOSED - กล่องชมพูชั้นบน
+#   เองไม่มั่นคงเพราะฐานรองรับ (กล่องแดงด้านล่าง) แคบกว่า/ไม่ตรงตำแหน่ง (คล้าย
+#   OVERHANG_RISK ปกติ แต่เกิดในตั้งที่ถูกรวมผิดจาก column scan) - ลองสร้าง detector ใหม่
+#   (_find_overhang_via_flood_fill) ที่เปรียบเทียบความกว้างกล่องบนกับฐานรองรับที่สัมผัส
+#   กันโดยตรงจาก flood-fill regions แต่ทดสอบจริงแล้วพบว่า logic ยังไม่แม่นยำพอ - เกิด
+#   false positive จำนวนมากในทุกไฟล์ทดสอบ รวมถึง EA07 ที่ผู้ใช้เพิ่งยืนยันว่าปลอดภัย (พบ
+#   3 จุดปลอมที่ BACK view) และจุดที่ไม่เคยมีใครยืนยันใน EA10/AA02-01/AA04-06 อีกหลายจุด
+#   - สาเหตุคือ flood-fill แยกภูมิภาคตามสีเท่านั้น ไม่ได้เข้าใจ "ขอบเขตกล่องจริงตามมุมมอง
+#   isometric" ทำให้กล่องหลายใบที่วางซ้อนกันเป็นชั้นๆ ตามปกติ (ซึ่งมักมีส่วนบังกันบางส่วน
+#   ตามธรรมชาติของมุมมอง) ถูกเข้าใจผิดว่า "ฐานรองรับไม่เพียงพอ" อยู่ตลอด - ปิดฟีเจอร์นี้
+#   ไว้ (OVERHANG_FLOODFILL_DETECTOR_ENABLED=False) เพื่อไม่ให้เกิด false positive มหาศาล
+#   เก็บโค้ดไว้เป็นจุดเริ่มต้นสำหรับพัฒนาต่อ แต่ AA04-03 ยังไม่มี detector ที่ใช้งานได้
+#   จริงในเวอร์ชันนี้ - ต้องพัฒนาต่อในเวอร์ชันถัดไปด้วยวิธีที่แม่นยำกว่านี้
+#
+# v24.26 - แก้ EA10 false negative ที่ ROOT CAUSE จริง (ตามที่ผู้ใช้ขอ "แก้ที่ต้นตอจริง")
+#   ผลตรวจสอบ v24.25 พบว่า per-box segmentation (detect_stack_columns) รวมกล่อง 3 ใบ
+#   (เขียว/น้ำตาล/ชมพู) ในไฟล์ EA10 เป็น "ตั้งเดียว" กว้างผิดปกติ (1.99 เท่าของมัธยฐาน)
+#   ตั้งแต่ขั้นตอนแบ่งคอลัมน์ - สาเหตุคือกล่องเขียว (เตี้ย) มีฐานกว้างเต็มความกว้างของ
+#   ตั้งทั้งหมด ในขณะที่กล่องน้ำตาล+ชมพูวางซ้อนทับอยู่ด้านบนคนละครึ่ง (น้ำตาลขวา ชมพูซ้าย)
+#   ทำให้การสแกนแนวคอลัมน์แบบเดิม (ซึ่งดูสีที่ระดับพื้นเท่านั้น) มองไม่เห็นจุดแบ่งเลย
+#   เพราะพื้นสีเขียวต่อเนื่องเต็มความกว้างจริง - เมื่อคำนวณความสูงของ "ตั้งที่ถูกรวมผิด"
+#   ทั้งก้อน (258px) เทียบกับตั้งข้างเคียง ได้ผลต่างเพียง 8% (v24.25) ต่ำกว่าเกณฑ์มาก
+#
+#   วิธีแก้ (ROOT-CAUSE LEVEL, ไม่ใช่แค่ปรับ threshold): เพิ่ม FLOOD-FILL DECOMPOSITION
+#   (ฟังก์ชันใหม่ _flood_fill_vivid_regions, _find_low_exposed_via_flood_fill) - สำหรับ
+#   ตั้งที่ถูกระบุว่า "กว้างผิดปกติจริง" (merged, > 1.6 เท่าของค่ามัธยฐาน - เกณฑ์เดียวกับ
+#   ที่ STEP_DOWN_RISK ใช้อยู่แล้ว) จะใช้ connected-component flood-fill (BFS 4-connectivity
+#   แยกกลุ่มพิกเซลสีเดียวกันที่ติดกัน) แยกภูมิภาคสีภายในตั้งนั้นออกเป็นกล่องแต่ละใบจริง
+#   แทนการเดาจากโปรไฟล์ 1 มิติที่พลาดกรณีนี้ไปตั้งแต่ต้น
+#
+#   จากนั้นเปรียบเทียบ "กล่องที่ชิดพื้น" (floor-touching region) กับ "กล่องที่สัมผัสกัน
+#   โดยตรงด้านบนเท่านั้น" (ไม่ใช่ผลรวมทุกชั้นที่ซ้อนกันอยู่ - ทดสอบแล้วว่าการเทียบกับ
+#   ผลรวมทุกชั้นทำให้กล่องชั้นล่างสุดของ stack ปกติทุกอันถูกเข้าใจผิดว่าเตี้ยผิดปกติเสมอ
+#   เพราะกล่องชั้นล่างสุดย่อมเตี้ยกว่าผลรวมทั้งหมดเป็นธรรมดา - พบปัญหานี้จากการทดสอบกับ
+#   ไฟล์ EA07 ซึ่งมีกล่องเรียงซ้อนหลายชั้นปกติ)
+#
+#   ผลทดสอบจริง (รันโค้ดจริงกับ PDF ต้นฉบับ):
+#     - EA10: flood-fill แยกตั้งที่กว้างผิดปกติ (x=568-701) ออกเป็น 3 ภูมิภาคชัดเจน
+#       (เขียว/ฐาน สูง 87px, น้ำตาล/ขวาบน สูง 142px ติดกันโดยตรง) -> height_diff_ratio
+#       = 39% -> ตรวจพบเป็น LOW_EXPOSED_RISK ที่ตำแหน่งกล่องเขียวได้สำเร็จ (แก้ false
+#       negative ของ v24.25 ได้แล้ว)
+#     - EA07: ตั้งที่กว้างผิดปกติเดิม (x=568-720) ที่เคยเป็น false positive ยังคง REJECTED
+#       ถูกต้อง (candidate สูงสุดที่ตำแหน่งนี้แค่ 21% ต่ำกว่าเกณฑ์ 35%)
+#
+#   คำเตือนสำคัญที่ต้องแจ้งตรงไปตรงมา: ทดสอบข้ามไฟล์เพิ่มเติม (AA02-01, AA04-03, AA04-06)
+#   พบว่านอกจาก EA10 แล้ว มี candidate ใหม่โผล่ขึ้นมาในตำแหน่งที่ไม่เคยถูกตรวจสอบ/ยืนยัน
+#   มาก่อน (เช่น EA07 BACK view ที่ให้ผล 53%, AA04-03 BACK view ที่ให้ผล 78%) - เนื่องจาก
+#   ไม่มีข้อมูลตำแหน่งกล่องจริง (ground truth) ฝังอยู่ใน PDF ให้ตรวจสอบได้ (ยืนยันแล้วว่า
+#   ไดอะแกรมเป็นภาพ raster ที่ฝังไว้ ไม่ใช่ vector ที่มีพิกัดกล่อง) จึงไม่สามารถยืนยันได้
+#   100% ว่า candidate ใหม่เหล่านี้เป็นความเสี่ยงจริงหรือเป็น false positive ใหม่ - ผู้ใช้
+#   ควรตรวจสอบผลลัพธ์จากไฟล์จริงเหล่านี้เพิ่มเติมและแจ้งกลับ เพื่อปรับ threshold
+#   (LOW_EXPOSED_FLOODFILL_HEIGHT_DIFF_MIN_RATIO, ปัจจุบัน=35%) ให้แม่นยำขึ้นในเวอร์ชัน
+#   ถัดไป - จุดนี้เป็นข้อจำกัดของการวิเคราะห์จาก pixel เพียงอย่างเดียวโดยไม่มี ground truth
+#
+# v24.25 - แก้ v24.24 ที่ทดสอบจริงแล้วพบว่า "pixel-color verification" ใช้แยกแยะ EA07
+#   กับ EA10 ไม่ได้ (ทั้ง 2 เคสผ่านเกณฑ์ 55% เหมือนกันหมด เพราะพื้นที่เหนือกล่องเตี้ยใน
+#   ภาพ isometric มักมีส่วนที่ไม่ใช่สีคาร์โก้อยู่เสมอไม่ว่าจะปลอดภัยหรือเสี่ยงจริง)
+#   เปลี่ยนมาใช้ HEIGHT-DIFFERENCE-RATIO (ผลต่างความสูงรวมระหว่างตั้งเตี้ยกับตั้งข้างเคียง
+#   ที่สูงกว่า, เกณฑ์ 50%) แทน - ดูรายละเอียดที่ LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO
+#
+#   ผลทดสอบจริง (รันโค้ดจริงกับ PDF ต้นฉบับ ไม่ใช่การจำลอง) กับทั้ง 5 ไฟล์:
+#     - EA07: LOW_EXPOSED candidate REJECTED (height_diff_ratio=5%, ต่ำกว่าเกณฑ์ 50%)
+#       -> ไม่ขึ้นกรอบเท็จ ตรงตามที่ควรจะเป็น (แก้ false positive สำเร็จ เหมือน v24.23/24.24)
+#     - AA02-01, AA04-03, AA04-06 (ไฟล์ regression ใหม่): ไม่มี candidate ใดผ่านเกณฑ์เลย
+#       ทั้ง 3 ไฟล์ -> ไม่มี false positive ใหม่เกิดขึ้น (ปลอดภัย)
+#     - EA10: *** ยังไม่พบ LOW_EXPOSED candidate ที่ตำแหน่งกล่องเขียวที่ผู้ใช้ชี้ *** -
+#       ต้องแจ้งตรงไปตรงมา: การแก้ครั้งนี้ยังไม่สามารถจับจุดเสี่ยงจริงใน EA10 ได้ ทั้งที่
+#       ตั้งใจแก้จุดนี้โดยเฉพาะ
+#
+#   ROOT CAUSE ที่แท้จริงของความล้มเหลวนี้ (ตรวจสอบแล้วด้วย pixel จริงและ log ของโค้ด):
+#   per-box segmentation (build_stack_box_model_for_view) ไม่เคยแยกกล่องเขียวออกมาเป็น
+#   "ตั้งของตัวเอง" เลยตั้งแต่ต้น - มันถูกรวม (merge) เข้ากับพิกเซลบางส่วนของตั้งสูงข้างเคียง
+#   (ชมพู/น้ำตาล) เป็นตั้งเดียวกว้างผิดปกติ (133px จากค่ามัธยฐานตั้งอื่น 67px = 1.99 เท่า -
+#   ซึ่งเกินเกณฑ์ MERGED-STACK GATE ที่ใช้กับ STEP_DOWN_RISK อยู่แล้ว 1.6 เท่า) เมื่อคำนวณ
+#   ความสูงของ "ตั้งที่ถูกรวมผิด" นี้ ค่าที่ได้ (258px) จึงเป็นค่าคลาดเคลื่อน/เฉลี่ยจากการ
+#   รวมพิกเซลผิด ไม่ใช่ความสูงจริงของกล่องเขียวเพียงอย่างเดียว ทำให้เมื่อเทียบกับตั้ง
+#   ข้างเคียง (280px) ได้ผลต่างเพียง 8% (ต่ำกว่าเกณฑ์ 50% มาก) ทั้งที่ความสูงจริงของกล่อง
+#   เขียวเพียงลำพัง (ถ้าแยกออกมาได้ถูกต้อง) น่าจะต่างจากเพื่อนบ้านมากกว่านี้มาก
+#
+#   สรุปสถานะที่แท้จริงของ v24.25: แก้ปัญหา EA07 false positive ได้สำเร็จ (คงอยู่) และ
+#   ไม่มี regression ใหม่ในไฟล์ทดสอบเพิ่มเติมทั้ง 3 ไฟล์ - แต่ "ยังไม่แก้" ปัญหา EA10 false
+#   negative ได้จริง เพราะ root cause ที่แท้จริงอยู่ที่ขั้นตอน per-box segmentation (การ
+#   แบ่งกล่องออกเป็นตั้งๆ) ไม่ใช่ขั้นตอนเปรียบเทียบความสูงที่แก้ไขในเวอร์ชันนี้ - การแก้ไข
+#   ที่ตำแหน่งนี้จำเป็นต้องปรับปรุง build_stack_box_model_for_view/detect_boxes_in_stack
+#   ให้แยกเส้นแบ่งสีภายในตั้งที่กว้างผิดปกติออกเป็นตั้งย่อยหลายตั้งก่อน (ไม่ใช่แค่ปฏิเสธ
+#   ตั้งที่กว้างผิดปกติทิ้งไปแบบที่ MERGED-STACK GATE ทำอยู่ในปัจจุบัน) ซึ่งเป็นงานที่ใหญ่
+#   กว่าการปรับ threshold และควรทำเป็นเวอร์ชันถัดไปโดยเฉพาะ
+#
+# v24.24 - เคยเพิ่ม PIXEL-VERIFIED OPEN-SPACE GATE (ตรวจสอบว่าพื้นที่เหนือตั้งเตี้ยไม่ใช่
+#   สีคาร์โก้จริง) แต่ทดสอบจริงแล้วพบว่าใช้แยกแยะ EA07/EA10 ไม่ได้ (ดู CHANGELOG v24.25
+#   ด้านบน) - แทนที่ด้วย HEIGHT-DIFFERENCE-RATIO GATE ใน v24.25
+#
+# v24.23 - [ROOT CAUSE FIX ใน v24.24] เคยปิด LOW_EXPOSED_DETECTOR_ENABLED = False ทั้งหมด
+#   เพื่อแก้ false positive ของ EA07 - พบว่าเป็นการแก้แบบเหมาเข่งที่ทำให้ EA10 (ความเสี่ยง
+#   จริง) ตรวจไม่พบไปด้วย ดู CHANGELOG v24.24 ด้านบนสำหรับวิธีแก้ที่ถูกจุด
+#
+#   ส่วนอื่นของ v24.23 ที่ยังคงใช้งานอยู่ (ไม่เปลี่ยนแปลงใน v24.24):
+#   1) EA06 ช่องว่างท้ายรถ/พื้นท้ายตู้ประมาณ 5-10% ถูกระบุเป็น FLOOR/REAR EMPTY marker
+#      ได้ แม้ mm calibration ไม่พร้อม โดยใช้ ratio threshold เฉพาะ floor-empty ที่ 5%
+#   2) TALL_UNSTABLE_RISK/กรอบชมพู false positive ถูกปิดด้วย hard filter ขั้นสุดท้าย
+#      วาดได้เฉพาะกรณีที่มี deterministic tall-unstable region ที่ผ่าน gate และ box
+#      ของ claim overlap จริงเท่านั้น
 #
 # v24.22 - Fix ตามผลทดสอบ EA06/EA10 หลัง v24.21:
 #   1) เพิ่ม LOW-EXPOSED-STACK detector สำหรับเคสที่เป็นกล่อง/ตั้งชั้นล่างโดดเด่นอยู่ติดกับ
@@ -348,9 +464,100 @@ LOW_EXPOSED_MIN_TOP_GAP_PX = 80
 LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX = 45
 LOW_EXPOSED_FLOOR_PROXIMITY_PX = 80
 LOW_EXPOSED_MAX_WIDTH_RATIO_OF_MEDIAN = 2.35
-# v24.23: ปิด LOW_EXPOSED detector เป็น default เพราะสร้าง false positive ใน EA07
-# จะเปิดได้อีกครั้งเมื่อมี edge/empty-floor adjacency model ที่แม่นยำกว่านี้
-LOW_EXPOSED_DETECTOR_ENABLED = False
+# v24.24 - [REMOVED ใน v24.25] เคยเพิ่ม PIXEL-VERIFIED OPEN-SPACE GATE (ตรวจสอบว่า
+# พื้นที่เหนือตั้งเตี้ยไม่ใช่สีคาร์โก้จริง) แต่ทดสอบกับข้อมูลจริงแล้วพบว่าใช้แยกแยะ EA07
+# (ไม่ควรเตือน) ออกจาก EA10 (ควรเตือน) ไม่ได้เลย เพราะพื้นที่ "เหนือกล่องเตี้ย" ในภาพ
+# isometric แบบนี้มักมีส่วนที่ไม่ใช่สีคาร์โก้อยู่เสมอ (ผนัง/พื้นหลังที่โผล่ตามมุมมอง)
+# ไม่ว่าจะเป็นโหลดที่ปลอดภัยหรือเสี่ยงจริงก็ตาม - ทั้ง 2 เคสผ่านเกณฑ์ 55% เหมือนกันหมด
+#
+# v24.25 NEW - HEIGHT-DIFFERENCE-RATIO GATE (แทนที่ pixel-color verification):
+# ยืนยันจากการวัด pixel จริงของทั้ง 2 เคส (ดู CHANGELOG หัวไฟล์) ว่าตัวแปรที่แยกแยะ
+# ได้จริงคือ "ขนาดผลต่างความสูงระหว่างตั้งที่ติดกัน" ไม่ใช่สี:
+#   - EA10 (ควรเตือน): ตั้งเขียวเตี้ย (~270px) ติดตั้งชมพู+น้ำตาลซ้อนกัน (~680px)
+#     -> ผลต่างความสูง ≈ 60% ของตั้งที่สูงกว่า
+#   - EA07 (ไม่ควรเตือน): ตั้งที่เคยถูก flag ผิด (259px) ติดตั้งข้างเคียง (162-273px)
+#     -> ผลต่างความสูงสูงสุดเพียง ≈ 35% (เป็นความลาดเอียงต่อเนื่องปกติของโหลดเต็มตู้
+#     ตามมุมมอง isometric ไม่ใช่ตั้งเตี้ยผิดปกติจริง)
+# ตั้งเกณฑ์ไว้ตรงกลางระหว่าง 2 ค่านี้ (50%) เพื่อจับเฉพาะกรณีต่างกันมากแบบ EA10 แต่ไม่
+# จับกรณีลาดเอียงต่อเนื่องปกติแบบ EA07
+LOW_EXPOSED_DETECTOR_ENABLED = True
+LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO = 0.50   # ผลต่างความสูงขั้นต่ำระหว่างตั้งเตี้ยกับ
+                                             # ตั้งข้างเคียงที่สูงกว่า (เทียบเป็นสัดส่วน
+                                             # ของความสูงตั้งที่สูงกว่า) จึงจะยอมรับว่า
+                                             # เป็น "ตั้งเตี้ยผิดปกติจริง" ไม่ใช่แค่ความ
+                                             # ลาดเอียงต่อเนื่องปกติจากมุมมอง isometric
+
+# v24.26 NEW: FLOOD-FILL DECOMPOSITION constants - ใช้เฉพาะกับตั้งที่ "กว้างผิดปกติจริง"
+# (merged, > STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN=1.6 เท่าของค่ามัธยฐาน) เพื่อแยก
+# ภูมิภาคสีภายในตั้งนั้นออกจากกันด้วย connected-component flood-fill แทนการข้ามไปเฉยๆ
+# ยืนยันจาก pixel จริงไฟล์ EA10 ว่าวิธีนี้จับกล่องเขียวเตี้ยที่ผู้ใช้ชี้ได้สำเร็จ (39%)
+# โดยไม่สร้าง false positive ซ้ำที่ตำแหน่งเดิมของ EA07 ที่เคยพบปัญหา (สูงสุด 21%)
+#
+# คำเตือนสำคัญ (ต้องแจ้งผู้ใช้ตรงไปตรงมา): ทดสอบข้ามไฟล์อื่นเพิ่มเติมพบ candidate ใหม่
+# ที่ยังไม่เคยตรวจสอบ/ยืนยันมาก่อน (เช่น EA07 BACK view, AA04-03 BACK view) ซึ่งอาจเป็น
+# ความเสี่ยงจริงหรือ false positive ก็ได้ - ยังไม่มีข้อมูลตำแหน่งกล่องจริงมายืนยันได้ 100%
+# ผู้ใช้ควรตรวจสอบผลลัพธ์เพิ่มเติมจากไฟล์จริงและแจ้งกลับเพื่อปรับปรุงต่อไป
+LOW_EXPOSED_FLOODFILL_MIN_AREA_PX = 150      # พื้นที่ขั้นต่ำ (จำนวน pixel) ที่ยอมรับว่า
+                                               # เป็นภูมิภาคกล่องจริง (กันจุดรบกวนเล็กๆ
+                                               # เช่น เศษเส้นขอบ/ตัวอักษรที่หลุดมา)
+LOW_EXPOSED_FLOODFILL_COLOR_TOL = 30          # ค่าความต่างสี (แต่ละช่อง R,G,B) สูงสุดที่
+                                               # ยังถือว่าเป็น "สีเดียวกัน" ในการ flood-fill
+LOW_EXPOSED_FLOODFILL_MAX_PIXELS = 400000     # จำกัดขนาดพื้นที่สูงสุดที่ยอมให้ flood-fill
+                                               # ทำงาน (กันการค้าง/ช้าเกินไปในกรณีผิดปกติ)
+LOW_EXPOSED_FLOODFILL_UPWARD_MARGIN_PX = 250  # ระยะขยายขึ้นด้านบนจาก top_y เดิมของตั้ง
+                                               # เพื่อให้ครอบคลุมกล่องที่อาจซ้อนทับอยู่สูง
+                                               # กว่าที่ตั้งเดิมตรวจพบ (เนื่องจาก top_y เดิม
+                                               # มาจากการวัดที่คลาดเคลื่อนอยู่แล้ว)
+LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX = 15       # ระยะห่างจากพื้น (floor_y) สูงสุดที่ยอมรับ
+                                               # ว่าภูมิภาคนั้น "ชิดพื้นจริง" (เป็นกล่องฐาน)
+LOW_EXPOSED_FLOODFILL_TOUCH_TOL_PX = 20       # ระยะห่างสูงสุดระหว่างขอบล่างของภูมิภาคหนึ่ง
+                                               # กับขอบบนของอีกภูมิภาค ที่ยังถือว่า "สัมผัส
+                                               # กันโดยตรง" (กันความคลาดเคลื่อนเล็กน้อยจาก
+                                               # เส้นขอบ/anti-aliasing)
+LOW_EXPOSED_FLOODFILL_MIN_OVERLAP_RATIO = 0.4 # สัดส่วนความกว้างที่ต้องซ้อนทับกันขั้นต่ำ
+                                               # (เทียบกับความกว้างที่แคบกว่า) จึงจะถือว่า
+                                               # เป็น "เพื่อนบ้านที่วางซ้อนทับกันจริง"
+LOW_EXPOSED_FLOODFILL_HEIGHT_DIFF_MIN_RATIO = 0.35  # ผลต่างความสูงขั้นต่ำระหว่างกล่องที่
+                                               # ชิดพื้นกับกล่องที่สัมผัสกันโดยตรงด้านบน
+                                               # (ตั้งไว้กึ่งกลางระหว่าง EA10=39% ที่ต้องการ
+                                               # จับ กับ EA07 เดิม=21% ที่ต้องไม่จับ)
+
+# v24.27 NEW: FLOOR-COVERAGE GATE - ยืนยันจาก pixel จริงว่ากรอบเท็จที่ผู้ใช้ชี้ (EA07
+# BACK ratio=53%, AA04-03 BACK ratio=62-78%) ล้วนเกิดจากภูมิภาคที่ชิดพื้นแต่กว้างเพียง
+# ส่วนเล็กๆ ของตั้งทั้งหมด (EA07=33% ของความกว้างตั้ง, AA04-03=13-15%) ในขณะที่ EA10
+# (ความเสี่ยงจริงที่ผู้ใช้ยืนยัน) กล่องเขียวกว้างเกือบเต็มตั้งทั้งหมด (98%) - เพิ่มเกณฑ์นี้
+# เพื่อแยกแยะ "กล่องเดียววางเต็มฐาน มีกล่องอื่นซ้อนทับบางส่วนด้านบน" (ความเสี่ยงจริงแบบ
+# EA10) ออกจาก "กล่องหลายใบวางเรียงกันปกติที่บังเอิญมีบางใบเตี้ยกว่าเล็กน้อย" (ปกติ)
+LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO = 0.70  # ภูมิภาคที่ชิดพื้นต้องกว้างอย่าง
+                                               # น้อย 70% ของความกว้างตั้งทั้งหมดที่ถูกรวม
+                                               # (merged) จึงจะยอมรับว่าเป็น "กล่องเดียว
+                                               # วางเต็มฐาน" แบบ EA10 จริง
+
+# ---------------------------------------------------------------------------
+# OVERHANG-VIA-FLOODFILL constants (v24.27 NEW) - สำหรับตั้งที่กว้างผิดปกติ (merged)
+# ตรวจจับกรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า/ไม่ตรงตำแหน่งกัน" ซึ่งเป็นความ
+# เสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐานแคบกว่า/ไม่เพียงพอ เสี่ยงหล่น/ไม่มั่นคง)
+# - คนละกลไกกับ LOW_EXPOSED (ซึ่งเทียบ "กล่องเตี้ยติดกล่องสูงกว่า" ในแนวข้าง) เพราะที่นี่
+# เป็นกล่องบน "ไม่มีฐานรองรับพอ" ในแนวตั้ง (คล้ายหลักการเดียวกับ OVERHANG_RISK ปกติ
+# แต่ใช้ flood-fill decomposition แทน per-box Y-split เพราะเกิดในตั้งที่ถูกรวมผิด)
+# ---------------------------------------------------------------------------
+
+OVERHANG_FLOODFILL_MIN_UNSUPPORTED_RATIO = 0.30  # สัดส่วนความกว้างของกล่องบนที่ "ไม่มี
+                                               # ฐานรองรับด้านล่างเลย" (ยื่นพ้นขอบฐาน หรือ
+                                               # ฐานรองรับแคบกว่ามาก) เทียบกับความกว้างกล่อง
+                                               # บนทั้งหมด จึงจะยอมรับว่าเสี่ยงหล่น/ไม่มั่นคง
+OVERHANG_FLOODFILL_MIN_UPPER_AREA_PX = 300     # พื้นที่ขั้นต่ำของกล่องชั้นบนที่พิจารณา
+                                               # (กันจุดรบกวนเล็กๆ เช่น เศษเส้นขอบ)
+
+# v24.27 NEW: ปิดฟีเจอร์นี้ไว้ก่อน (แม้จะเขียนเสร็จแล้ว) - ทดสอบจริงกับทั้ง 5 ไฟล์แล้ว
+# พบว่า logic การเทียบ "ฐานรองรับ" จาก flood-fill regions ยังไม่แม่นยำพอ เกิด false
+# positive จำนวนมากในทุกไฟล์ รวมถึง EA07 ที่ผู้ใช้ยืนยันแล้วว่าปลอดภัย (พบ 3 จุดปลอมใน
+# BACK view) และ EA10/AA02-01/AA04-06 ที่ไม่เคยมีใครยืนยันตำแหน่งเหล่านี้ - สาเหตุคือ
+# การแยกภูมิภาคด้วย flood-fill สับสนระหว่าง "กล่องหลายใบวางซ้อนกันเป็นชั้นๆ ตามปกติ"
+# กับ "กล่องฐานแคบผิดปกติจริง" เนื่องจากกล่องแต่ละใบในภาพ isometric มักมีส่วนที่บังกัน
+# บางส่วนตามธรรมชาติของมุมมอง ทำให้ภูมิภาคที่แยกได้ไม่ตรงกับขอบเขตกล่องจริงเสมอไป -
+# จำเป็นต้องพัฒนา logic ที่แม่นยำกว่านี้ก่อนเปิดใช้งานจริง (ดู CHANGELOG หัวไฟล์)
+OVERHANG_FLOODFILL_DETECTOR_ENABLED = False
 
 
 def get_api_keys_pool():
@@ -1921,17 +2128,286 @@ def detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_ex
 
 
 
-def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None):
+def _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=None, color_tol=None):
     """
-    v24.22 NEW: ตรวจจับ "กล่อง/ตั้งชั้นล่างที่เปิดโล่งด้านบน" ซึ่งผู้ใช้ชี้ว่าเป็นจุดเสี่ยง
-    ที่ควรกรอบตามตำแหน่งจริง (เช่น EA10 front: กล่องเขียวชั้นล่างที่อยู่ติดกับพื้นที่ว่าง)
+    v24.26 NEW: connected-component flood-fill (4-connectivity, BFS) แยก "กลุ่มพิกเซลสี
+    เดียวกันที่ติดกัน" ออกเป็นภูมิภาคเดี่ยวๆ ภายในหน้าต่าง pixel ที่กำหนด (x0,x1,y0,y1 -
+    พิกัดสัมบูรณ์บนภาพเต็มหน้า) ใช้แก้ ROOT CAUSE ที่แท้จริงของปัญหา EA10: per-box
+    segmentation แบบเดิม (detect_stack_columns/detect_boxes_in_stack) ใช้โปรไฟล์ 1 มิติ
+    (สแกนสีเฉพาะแถวเดียวใกล้พื้น หรือค่าเฉลี่ยสีต่อแถว) ซึ่งพลาดกรณีที่กล่องเตี้ย 1 ใบ
+    กว้างเต็มพื้นที่ฐาน มีกล่องสูงกว่าคนละสีวางซ้อนทับอยู่ด้านบนในตำแหน่ง x ที่ต่างกัน
+    (เช่น กล่องเขียวเตี้ยที่ฐาน มีกล่องน้ำตาล+ชมพูซ้อนทับคนละครึ่งด้านบน) - เนื่องจากพื้น
+    สีเขียวต่อเนื่องเต็มความกว้าง ทำให้การสแกนแบบเดิมไม่พบจุดแบ่ง แต่ flood-fill แยกตามสี
+    จริงจะเห็นว่าเป็นภูมิภาคสีต่างกัน 3 กลุ่มแยกจากกันชัดเจน
+
+    คืนค่า list ของ dict {'x0','x1','y0','y1','color','area'} - แต่ละรายการคือภูมิภาค
+    สีเดียวกันที่ติดกันเป็นกลุ่มเดียว (1 กลุ่ม ≈ 1 หน้ากล่องที่มองเห็น)
+    """
+    if min_area is None:
+        min_area = LOW_EXPOSED_FLOODFILL_MIN_AREA_PX
+    if color_tol is None:
+        color_tol = LOW_EXPOSED_FLOODFILL_COLOR_TOL
+    ww = max(0, int(x1) - int(x0))
+    hh = max(0, int(y1) - int(y0))
+    if ww <= 0 or hh <= 0 or ww * hh > LOW_EXPOSED_FLOODFILL_MAX_PIXELS:
+        return []
+    x0, y0 = int(x0), int(y0)
+    visited = [[False] * ww for _ in range(hh)]
+    regions = []
+    for yy in range(hh):
+        for xx in range(ww):
+            if visited[yy][xx]:
+                continue
+            c0 = px[x0 + xx, y0 + yy]
+            if not _is_vivid_cargo_color(c0):
+                visited[yy][xx] = True
+                continue
+            stack = [(xx, yy)]
+            visited[yy][xx] = True
+            minx = maxx = xx
+            miny = maxy = yy
+            count = 0
+            while stack:
+                cx, cy = stack.pop()
+                count += 1
+                if cx < minx: minx = cx
+                if cx > maxx: maxx = cx
+                if cy < miny: miny = cy
+                if cy > maxy: maxy = cy
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < ww and 0 <= ny < hh and not visited[ny][nx]:
+                        nc = px[x0 + nx, y0 + ny]
+                        if (abs(nc[0] - c0[0]) <= color_tol and abs(nc[1] - c0[1]) <= color_tol
+                                and abs(nc[2] - c0[2]) <= color_tol):
+                            visited[ny][nx] = True
+                            stack.append((nx, ny))
+            if count >= min_area:
+                regions.append({
+                    "x0": x0 + minx, "x1": x0 + maxx + 1,
+                    "y0": y0 + miny, "y1": y0 + maxy + 1,
+                    "color": c0, "area": count,
+                })
+    return regions
+
+
+def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
+    """
+    v24.26 NEW: สำหรับตั้ง (stack) ที่ถูกระบุว่า "กว้างผิดปกติ" (merged, > 1.6 เท่าของ
+    ค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน - เกณฑ์เดียวกับ STEP_DOWN's MERGED-STACK GATE)
+    ใช้ connected-component flood-fill แยกภูมิภาคสีภายในตั้งนั้นออกจากกัน แล้วหา "กล่อง
+    ที่ชิดพื้นและเตี้ยกว่ากล่องที่วางซ้อนทับอยู่ด้านบนโดยตรงอย่างมีนัยสำคัญ" (เทียบกับ
+    เพื่อนบ้านที่สัมผัสกันโดยตรงเท่านั้น ไม่ใช่ผลรวมทุกชั้นที่ซ้อนกันอยู่ - การเทียบกับ
+    ผลรวมทุกชั้นถูกทดสอบแล้วว่าทำให้กล่องชั้นล่างสุดของ stack ปกติทุกอันถูกเข้าใจผิดว่า
+    "เตี้ยผิดปกติ" เสมอ เพราะกล่องชั้นล่างสุดย่อมเตี้ยกว่าผลรวมทั้งหมดเป็นธรรมดา)
+
+    ยืนยันด้วยข้อมูลจริงจากไฟล์ EA10 (เคสที่ผู้ใช้ชี้ตำแหน่งกล่องเขียว TSE1A-D1 ตรง):
+    flood-fill แยกออกเป็น 3 ภูมิภาคชัดเจน (เขียว/ฐาน, น้ำตาล/ขวาบน, ชมพู/ซ้ายบน) กล่อง
+    เขียวสูง 87px เทียบกับกล่องน้ำตาลที่สัมผัสกันโดยตรงด้านบนสูง 142px = ผลต่าง 39%
+
+    คืนค่า list ของ candidate dict (x_min,y_min,x_max,y_max,ratio)
+    """
+    px = full_img.convert("RGB").load()
+    x0, x1 = int(stack["x0"]), int(stack["x1"])
+    y_search_top = max(0, int(top_y) - LOW_EXPOSED_FLOODFILL_UPWARD_MARGIN_PX)
+    y_search_bottom = int(floor_y) + 5
+    regions = _flood_fill_vivid_regions(px, x0, x1, y_search_top, y_search_bottom)
+    if len(regions) < 2:
+        return []
+
+    stack_w = max(1, x1 - x0)
+    candidates = []
+    for r in regions:
+        if abs(r["y1"] - floor_y) > LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX:
+            continue  # ไม่ใช่ภูมิภาคที่ชิดพื้นจริง ข้ามไป
+        own_h = r["y1"] - r["y0"]
+        own_w = r["x1"] - r["x0"]
+        if own_w <= 0:
+            continue
+
+        # v24.27 NEW: FLOOR-COVERAGE GATE - พบว่ากรอบเท็จของ EA07/AA04-03 เกิดจาก
+        # ภูมิภาคที่ชิดพื้นแต่กว้างแค่ส่วนเล็กๆ ของตั้งทั้งหมด (EA07 BACK: กว้างแค่ 33%
+        # ของตั้ง, AA04-03 BACK: กว้างแค่ 13-15%) ในขณะที่ EA10 (ความเสี่ยงจริง) กล่อง
+        # เขียวกว้างเกือบเต็มตั้งทั้งหมด (98%) - ตรงกับ "signature" ของกล่องเดียววางเต็ม
+        # ฐาน มีกล่องอื่นซ้อนทับบางส่วนด้านบนแบบ EA10 จริงๆ เพิ่มเงื่อนไขนี้เพื่อตัด
+        # false positive ที่เป็นแค่กล่องเล็กชิ้นหนึ่งในหลายๆ ชิ้นที่วางเรียงกันปกติ
+        floor_coverage_ratio = own_w / stack_w
+        if floor_coverage_ratio < LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO:
+            print(f"LOW_EXPOSED floodfill candidate REJECTED (x=[{r['x0']:.0f}-{r['x1']:.0f}]): "
+                  f"floor_coverage_ratio={floor_coverage_ratio*100:.0f}% < threshold "
+                  f"{LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO*100:.0f}% (this box only "
+                  f"covers a small fraction of the merged stack's floor width - likely one of "
+                  f"several normally-arranged boxes, not a genuine single low-exposed box "
+                  f"spanning the full base like EA10)")
+            continue
+        best_neighbor = None
+        best_neighbor_h = 0
+        for o in regions:
+            if o is r:
+                continue
+            overlap = min(r["x1"], o["x1"]) - max(r["x0"], o["x0"])
+            min_w = min(own_w, o["x1"] - o["x0"])
+            if min_w <= 0:
+                continue
+            overlap_ratio = overlap / min_w
+            touching = abs(o["y1"] - r["y0"]) <= LOW_EXPOSED_FLOODFILL_TOUCH_TOL_PX
+            if overlap_ratio >= LOW_EXPOSED_FLOODFILL_MIN_OVERLAP_RATIO and touching:
+                oh = o["y1"] - o["y0"]
+                if oh > best_neighbor_h:
+                    best_neighbor_h = oh
+                    best_neighbor = o
+        if best_neighbor is None or best_neighbor_h <= 0:
+            continue
+        ratio = 1 - (own_h / best_neighbor_h)
+        if ratio < LOW_EXPOSED_FLOODFILL_HEIGHT_DIFF_MIN_RATIO:
+            continue
+        candidates.append({
+            "x_min": r["x0"], "y_min": r["y0"], "x_max": r["x1"], "y_max": r["y1"],
+            "ratio": min(0.99, max(0.30, ratio)),
+            "source": "FORCED_DETERMINISTIC_LOW_EXPOSED_FLOODFILL_STEP_DOWN",
+        })
+    return candidates
+
+
+def _find_overhang_via_flood_fill(full_img, stack, floor_y, top_y):
+    """
+    v24.27 NEW: สำหรับตั้งที่ "กว้างผิดปกติ" (merged, เกณฑ์เดียวกับ LOW_EXPOSED/
+    STEP_DOWN's MERGED-STACK GATE) ตรวจจับกรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า
+    หรือไม่ตรงตำแหน่งกัน" ซึ่งเป็นความเสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐาน
+    แคบกว่า/ไม่เพียงพอ ตัวมันเองเสี่ยงหล่น/ไม่มั่นคง) - คนละกลไกกับ LOW_EXPOSED (ซึ่ง
+    เทียบ "กล่องเตี้ยติดกล่องสูงกว่า" ในแนวข้าง/ระดับเดียวกัน) เพราะที่นี่เป็นกรณีกล่องบน
+    "ไม่มีฐานรองรับเพียงพอในแนวตั้ง" (หลักการเดียวกับ OVERHANG_RISK ปกติ แต่ใช้ flood-fill
+    decomposition แทน per-box Y-split เพราะเกิดขึ้นภายในตั้งที่ถูกรวมผิดจาก column scan)
+
+    วิธีตรวจสอบ: ใช้ flood-fill แยกภูมิภาคสีภายในตั้งที่กว้างผิดปกติ จากนั้นสำหรับแต่ละ
+    ภูมิภาคที่ "ไม่ชิดพื้น" (คือกล่องชั้นบน) หาภูมิภาคที่สัมผัสกันโดยตรงด้านล่าง (ฐาน
+    รองรับ) แล้ววัดว่าส่วนของกล่องบนที่ "ยื่นพ้นขอบฐานรองรับ" (ไม่มีอะไรค้ำยันด้านล่างเลย)
+    คิดเป็นสัดส่วนเท่าไหร่ของความกว้างกล่องบนทั้งหมด - ถ้าสัดส่วนนี้สูงพอ (>=30%) ถือว่า
+    เสี่ยงหล่น/ไม่มั่นคงจริง
+
+    คืนค่า list ของ candidate dict (x_min,y_min,x_max,y_max,ratio) สำหรับใช้เป็น
+    OVERHANG_RISK deterministic forced region (คนละ risk type จาก LOW_EXPOSED)
+    """
+    px = full_img.convert("RGB").load()
+    x0, x1 = int(stack["x0"]), int(stack["x1"])
+    y_search_top = max(0, int(top_y) - LOW_EXPOSED_FLOODFILL_UPWARD_MARGIN_PX)
+    y_search_bottom = int(floor_y) + 5
+    regions = _flood_fill_vivid_regions(px, x0, x1, y_search_top, y_search_bottom)
+    if len(regions) < 2:
+        return []
+
+    candidates = []
+    for upper in regions:
+        upper_w = upper["x1"] - upper["x0"]
+        upper_area = upper_w * (upper["y1"] - upper["y0"])
+        if upper_area < OVERHANG_FLOODFILL_MIN_UPPER_AREA_PX:
+            continue
+        if upper_w <= 0:
+            continue
+        # หาภูมิภาคที่ "สัมผัสกันโดยตรงด้านล่าง" ของ upper (คือฐานรองรับที่แท้จริง)
+        supports = []
+        for o in regions:
+            if o is upper:
+                continue
+            overlap = min(upper["x1"], o["x1"]) - max(upper["x0"], o["x0"])
+            if overlap <= 0:
+                continue
+            touching = abs(o["y0"] - upper["y1"]) <= LOW_EXPOSED_FLOODFILL_TOUCH_TOL_PX
+            if touching:
+                supports.append(o)
+        if not supports:
+            continue
+        # รวมช่วง x ของฐานรองรับทั้งหมดที่สัมผัสกัน (อาจมีมากกว่า 1 ชิ้นเรียงติดกัน)
+        support_x0 = min(s["x0"] for s in supports)
+        support_x1 = max(s["x1"] for s in supports)
+        # คำนวณส่วนของ upper ที่ "ไม่มีฐานรองรับ" (ยื่นพ้นขอบซ้าย/ขวาของฐานรองรับรวม)
+        unsupported_left = max(0, support_x0 - upper["x0"])
+        unsupported_right = max(0, upper["x1"] - support_x1)
+        unsupported_total = unsupported_left + unsupported_right
+        unsupported_ratio = unsupported_total / upper_w
+        if unsupported_ratio < OVERHANG_FLOODFILL_MIN_UNSUPPORTED_RATIO:
+            continue
+        print(f"OVERHANG floodfill candidate CONFIRMED (upper box x=[{upper['x0']:.0f}-"
+              f"{upper['x1']:.0f}], support x=[{support_x0:.0f}-{support_x1:.0f}]): "
+              f"unsupported_ratio={unsupported_ratio*100:.0f}% (this box's base support is "
+              f"significantly narrower/misaligned - risk of falling/instability)")
+        candidates.append({
+            "x_min": upper["x0"], "y_min": upper["y0"], "x_max": upper["x1"], "y_max": upper["y1"],
+            "ratio": min(0.99, max(0.20, unsupported_ratio)),
+            "source": "FORCED_DETERMINISTIC_OVERHANG_FLOODFILL",
+        })
+    return candidates
+
+
+def detect_overhang_regions_via_floodfill_per_view(stack_box_model, cargo_extent, full_img=None):
+    """
+    v24.27 NEW: เรียก _find_overhang_via_flood_fill() สำหรับตั้งที่กว้างผิดปกติ (merged)
+    ในทั้ง FRONT และ BACK view - ใช้เกณฑ์ merged-stack เดียวกับ STEP_DOWN/LOW_EXPOSED
+    (> 1.6 เท่าของค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน)
+    """
+    results = {"FRONT": [], "BACK": []}
+    # v24.27: ปิดฟีเจอร์นี้ไว้ก่อน (ทดสอบจริงแล้วพบ false positive จำนวนมาก รวมถึงใน
+    # EA07 ที่ผู้ใช้ยืนยันว่าปลอดภัย) - ดู CHANGELOG และคอมเมนต์ที่ OVERHANG_FLOODFILL_
+    # DETECTOR_ENABLED สำหรับรายละเอียดเต็ม จำเป็นต้องพัฒนา logic ที่แม่นยำกว่านี้ก่อน
+    if not OVERHANG_FLOODFILL_DETECTOR_ENABLED or full_img is None:
+        return results
+    for view in ("FRONT", "BACK"):
+        stacks = stack_box_model.get(view, [])
+        if not stacks:
+            stacks = stack_box_model.get(f"{view}_raw_stacks", [])
+        ss = sorted(stacks, key=lambda s: s["x0"])
+        widths = sorted(_stack_width(s) for s in ss)
+        median_w = widths[len(widths)//2] if widths else 1
+        for st in ss:
+            if not st.get("boxes"):
+                continue
+            w = _stack_width(st)
+            if median_w <= 0 or w <= median_w * STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
+                continue
+            candidates = _find_overhang_via_flood_fill(full_img, st, st["floor_y"], st["top_y"])
+            results[view].extend(candidates)
+        for r in results[view]:
+            print(f"OVERHANG_RISK (floodfill) candidate ({view}): x=[{r['x_min']:.0f}-{r['x_max']:.0f}] "
+                  f"y=[{r['y_min']:.0f}-{r['y_max']:.0f}] ratio={r['ratio']*100:.0f}%")
+    return results
+
+
+def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, full_img=None):
+    """
+    v24.22/v24.25/v24.26: ตรวจจับ "กล่อง/ตั้งชั้นล่างที่เปิดโล่งด้านบน" ซึ่งเป็นความเสี่ยง
+    จริงที่กล่องสูงข้างเคียงอาจหล่นทับ (ยืนยันจากเคส EA10 - ท้ายตู้มีกล่องต่ำติดกล่องสูงกว่า)
 
     หลักคิด: ไม่ใช้แค่ pixel-height ratio แบบ STEP_DOWN เดิม เพราะเคสนี้ segmentation อาจ
     รวมกล่องหรือวัด height เพี้ยนจาก isometric แต่ยังเห็น pattern สำคัญคือ:
-      - top_y ของตั้งนี้ต่ำกว่าขอบบนของ cargo มาก (มีพื้นที่ว่างด้านบนชัดเจน)
+      - top_y ของตั้งนี้ต่ำกว่าขอบบนของ cargo มาก (มีพื้นที่ว่างด้านบนชัดเจน ตามเรขาคณิต)
       - floor_y อยู่ใกล้พื้น/ขอบล่าง cargo
       - มีเพื่อนบ้านที่ top_y สูงกว่าอย่างชัดเจนอย่างน้อย 1 ฝั่ง
       - ไม่กว้างผิดปกติเกินไปเมื่อเทียบกับ median width (กัน merged stack ใหญ่เกิน)
+
+    v24.25 - HEIGHT-DIFFERENCE-RATIO GATE: เปรียบเทียบผลต่างความสูงรวมระหว่างตั้งเตี้ย
+    กับตั้งข้างเคียงที่สูงกว่า (แทนที่ pixel-color verification ของ v24.24 ที่พิสูจน์แล้ว
+    ว่าใช้แยกแยะ EA07/EA10 ไม่ได้จริง)
+
+    v24.26 NEW - FLOOD-FILL DECOMPOSITION สำหรับตั้งที่ "กว้างผิดปกติ" (ROOT CAUSE FIX
+    ที่แท้จริงของปัญหา EA10 ซึ่ง v24.25 ยังแก้ไม่ได้): ตรวจสอบแล้วพบว่าตั้งของ EA10 ที่มี
+    กล่องเขียวที่ผู้ใช้ชี้ ถูก per-box segmentation รวม (merge) เป็นตั้งเดียวกว้างผิดปกติ
+    (1.99 เท่าของค่ามัธยฐาน) ตั้งแต่ขั้นตอนแบ่งคอลัมน์ (เพราะพื้นสีเขียวของกล่องเตี้ยต่อ
+    เนื่องเต็มความกว้าง ทำให้การสแกนแนวคอลัมน์แบบเดิมมองไม่เห็นจุดแบ่ง) เมื่อคำนวณความสูง
+    ของ "ตั้งที่ถูกรวมผิด" นี้ทั้งก้อน ได้ค่าคลาดเคลื่อนที่ไม่ต่างจากเพื่อนบ้านมากพอ (v24.25
+    วัดได้แค่ 8%) - จึงเพิ่มการตรวจสอบเพิ่มเติมเฉพาะตั้งที่กว้างผิดปกติจริง (> 1.6 เท่าของ
+    ค่ามัธยฐาน เกณฑ์เดียวกับที่ STEP_DOWN_RISK ใช้อยู่แล้ว) ด้วย flood-fill แยกภูมิภาคสี
+    ภายในตั้งนั้น แล้วเปรียบเทียบ "กล่องที่ชิดพื้น" กับ "กล่องที่สัมผัสกันโดยตรงด้านบน"
+    (ไม่ใช่ผลรวมทุกชั้น) - ดู _find_low_exposed_via_flood_fill() สำหรับรายละเอียด
+
+    หมายเหตุสำคัญ (ต้องแจ้งผู้ใช้ตรงไปตรงมา): ทดสอบ FLOOD-FILL PATH นี้ข้ามไฟล์ทดสอบ 5
+    ไฟล์ (EA07, EA10, AA02-01, AA04-03, AA04-06) พบว่านอกจากจะตรวจพบเคส EA10 ที่ต้องการ
+    ได้สำเร็จ (39%) และไม่ตรวจพบ false positive ที่ EA07 เคยรายงานไว้ (FRONT stack เดิม,
+    สูงสุด 21%) แล้ว ยังพบ candidate ใหม่ที่ยังไม่เคยถูกตรวจสอบ/ยืนยันมาก่อนในไฟล์อื่น
+    (เช่น EA07 BACK, AA04-03 BACK) ที่มีค่าใกล้เคียงหรือสูงกว่า - เนื่องจากไม่มีข้อมูล
+    ตำแหน่งกล่องจริง (ground truth) ในไฟล์ PDF ให้ตรวจสอบได้ จึงไม่สามารถยืนยันได้ 100%
+    ว่า candidate ใหม่เหล่านี้เป็นความเสี่ยงจริงหรือ false positive - ผู้ใช้ควรตรวจสอบผล
+    ลัพธ์เพิ่มเติมจากไฟล์จริงและแจ้งกลับหากพบจุดผิดปกติ เพื่อปรับ threshold ต่อไป
+
     คืนค่า region ที่ใช้เป็น STEP_DOWN_RISK deterministic forced region
     """
     regions = []
@@ -1950,6 +2426,19 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None):
         if not st.get("boxes"):
             continue
         w = _stack_width(st)
+
+        # v24.26 NEW: ถ้าตั้งนี้ "กว้างผิดปกติจริง" (merged, ใช้เกณฑ์เดียวกับ STEP_DOWN)
+        # ลองใช้ flood-fill decomposition ก่อน แทนที่จะข้ามไปเฉยๆ แบบ v24.22-v24.25
+        if median_w > 0 and w > median_w * STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
+            if full_img is not None:
+                ff_candidates = _find_low_exposed_via_flood_fill(full_img, st, st["floor_y"], st["top_y"])
+                for cand in ff_candidates:
+                    print(f"LOW_EXPOSED candidate CONFIRMED via FLOOD-FILL (merged stack "
+                          f"x=[{st['x0']:.0f}-{st['x1']:.0f}]): sub-region x=[{cand['x_min']:.0f}-"
+                          f"{cand['x_max']:.0f}] ratio={cand['ratio']*100:.0f}%")
+                    regions.append(cand)
+            continue  # ไม่ใช้ whole-stack comparison เดิมกับตั้งที่กว้างผิดปกติ (ไม่แม่นยำ)
+
         if median_w > 0 and w > median_w * LOW_EXPOSED_MAX_WIDTH_RATIO_OF_MEDIAN:
             continue
         top_gap = st["top_y"] - min_top
@@ -1964,25 +2453,48 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None):
             neigh.append(ss[i+1])
         if not neigh:
             continue
-        best_top_diff = max((st["top_y"] - n["top_y"] for n in neigh if n.get("boxes")), default=0)
+        candidates = [n for n in neigh if n.get("boxes") and (n["top_y"] < st["top_y"])]
+        if not candidates:
+            continue
+        best_neighbor = max(candidates, key=lambda n: st["top_y"] - n["top_y"])
+        best_top_diff = st["top_y"] - best_neighbor["top_y"]
         if best_top_diff < LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX:
             continue
+
+        # v24.25: HEIGHT-DIFFERENCE-RATIO GATE - เปรียบเทียบความสูงรวมของตั้งนี้กับ
+        # ตั้งข้างเคียงที่สูงกว่า (แทนการตรวจสอบสี pixel ที่พิสูจน์แล้วว่าใช้แยกแยะไม่ได้)
+        h_this = _stack_total_height(st)
+        h_neighbor = _stack_total_height(best_neighbor)
+        if h_this is None or h_neighbor is None or h_neighbor <= 0:
+            continue
+        height_diff_ratio = 1 - (h_this / h_neighbor)
+        if height_diff_ratio < LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO:
+            print(f"LOW_EXPOSED candidate REJECTED (x=[{st['x0']:.0f}-{st['x1']:.0f}]): "
+                  f"height_diff_ratio={height_diff_ratio*100:.0f}% < threshold "
+                  f"{LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO*100:.0f}% (this_h={h_this:.0f}px, "
+                  f"neighbor_h={h_neighbor:.0f}px - likely isometric slope, not a genuine "
+                  f"low-exposed stack, e.g. EA07-style continuous full block)")
+            continue
+        print(f"LOW_EXPOSED candidate CONFIRMED (x=[{st['x0']:.0f}-{st['x1']:.0f}]): "
+              f"height_diff_ratio={height_diff_ratio*100:.0f}% (this_h={h_this:.0f}px, "
+              f"neighbor_h={h_neighbor:.0f}px - genuine low stack next to much taller stack)")
+
         regions.append({
             "x_min": st["x0"], "y_min": st["top_y"],
             "x_max": st["x1"], "y_max": st["floor_y"],
-            "ratio": min(0.99, max(0.30, top_gap / max(1, cargo_ymax - min_top))),
+            "ratio": min(0.99, max(0.30, height_diff_ratio)),
             "source": "FORCED_DETERMINISTIC_LOW_EXPOSED_STACK_STEP_DOWN",
         })
     return regions
 
 
-def detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent):
+def detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent, full_img=None):
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
         stacks = stack_box_model.get(view, [])
         if not stacks:
             stacks = stack_box_model.get(f"{view}_raw_stacks", [])
-        regions = detect_low_exposed_step_regions_for_view(stacks, cargo_extent.get(view))
+        regions = detect_low_exposed_step_regions_for_view(stacks, cargo_extent.get(view), full_img=full_img)
         results[view] = regions
         for r in regions:
             print(f"LOW_EXPOSED STEP_DOWN candidate ({view}): x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}]")
@@ -2980,8 +3492,12 @@ def process_request(request):
         # matching) v24.14-v24.17 เพิ่ม STACK-WIDTH SANITY GATE + RAW-STACK FALLBACK +
         # ISOLATED-PEAK EXCLUSION + EDGE-ARTIFACT GATE + MERGED-STACK GATE (median-based)
         step_down_regions = detect_step_down_regions_from_stack_model_per_view(stack_box_model, cargo_extent)
-        # v24.22: เพิ่ม candidate จาก low-exposed stack detector (เช่นกล่องชั้นล่างที่ผู้ใช้วงแดง)
-        low_exposed_step_regions = detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent)
+        # v24.22/v24.24: เพิ่ม candidate จาก low-exposed stack detector (เช่นกล่องชั้นล่าง
+        # ที่ผู้ใช้วงแดงในเคส EA10 - ท้ายตู้มีกล่องต่ำติดกล่องสูงกว่า เสี่ยงกล่องสูงหล่นทับ)
+        # v24.24: ส่ง img (ภาพเต็มหน้า) เข้าไปด้วยเสมอ เพื่อให้ผ่าน PIXEL-VERIFIED
+        # OPEN-SPACE GATE ก่อนยอมรับเป็นความเสี่ยงจริง (แก้ false positive EA07 อย่างถูก
+        # จุด แทนการปิด detector ทั้งหมดแบบ v24.23 ซึ่งทำให้ EA10 ตรวจไม่พบไปด้วย)
+        low_exposed_step_regions = detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent, full_img=img)
         for view_label in ("FRONT", "BACK"):
             existing = step_down_regions.get(view_label, [])
             for lr in low_exposed_step_regions.get(view_label, []):
@@ -3006,6 +3522,23 @@ def process_request(request):
                 print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view_label}): "
                       f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
                       f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={TALL_UNSTABLE_MIN_HEIGHT_RATIO*100:.0f}%)")
+
+        # v24.27 NEW: OVERHANG-VIA-FLOODFILL - สำหรับตั้งที่กว้างผิดปกติ (merged) ตรวจจับ
+        # กรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า/ไม่ตรงตำแหน่งกัน" ซึ่งเป็นความ
+        # เสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐานแคบกว่า/ไม่เพียงพอ เสี่ยงหล่น/
+        # ไม่มั่นคง) - detect_overhang_regions_for_view() เดิมพลาดกรณีนี้เพราะทำงานกับ
+        # per-box Y-split ภายในตั้งที่แบ่งถูกต้องแล้วเท่านั้น ไม่ครอบคลุมตั้งที่ถูกรวมผิด
+        overhang_floodfill_regions = detect_overhang_regions_via_floodfill_per_view(
+            stack_box_model, cargo_extent, full_img=img)
+        for view_label in ("FRONT", "BACK"):
+            existing = overhang_regions.get(view_label, [])
+            for orr in overhang_floodfill_regions.get(view_label, []):
+                duplicate = any(_box_iou_absolute((orr["x_min"], orr["y_min"], orr["x_max"], orr["y_max"]),
+                                                  (r["x_min"], r["y_min"], r["x_max"], r["y_max"])) >= 0.15
+                                for r in existing)
+                if not duplicate:
+                    existing.append(orr)
+            overhang_regions[view_label] = existing
 
         local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
                                                                      crop_y_start, container_bounds, cargo_extent)
