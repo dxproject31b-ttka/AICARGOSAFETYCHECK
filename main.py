@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.30
+# AI Cargo Safety Checker - High Precision v24.31
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -668,6 +668,23 @@ LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO = 0.70  # ภูมิภาค�
                                                # น้อย 70% ของความกว้างตั้งทั้งหมดที่ถูกรวม
                                                # (merged) จึงจะยอมรับว่าเป็น "กล่องเดียว
                                                # วางเต็มฐาน" แบบ EA10 จริง
+
+# v24.31 HOTFIX: EC10 rear low-exposed cases can be suppressed when the rear low box is
+# visible at the door/rear side but the flood-fill floor coverage is lower than the EA10
+# original full-base signature. Apply the relaxed coverage/height thresholds ONLY in the
+# physical rear zone of the view, never globally.
+LOW_EXPOSED_REAR_ZONE_WIDTH_RATIO = 0.45
+LOW_EXPOSED_REAR_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO = 0.55
+LOW_EXPOSED_REAR_HEIGHT_DIFF_MIN_RATIO = 0.35
+LOW_EXPOSED_REAR_MIN_NEIGHBOR_TOP_DIFF_PX = 35
+
+# v24.31 HOTFIX: suppress tiny red artifact boxes on the head-wall/front side top face.
+# These are not cargo risks: they are usually SKU/font/top-face contour fragments.
+TINY_HEAD_TOP_ARTIFACT_MAX_WIDTH_NORM = 140
+TINY_HEAD_TOP_ARTIFACT_MAX_HEIGHT_NORM = 140
+TINY_HEAD_TOP_ARTIFACT_MAX_AREA_NORM = 12000
+TINY_HEAD_TOP_ARTIFACT_TOP_BAND_RATIO = 0.48
+TINY_HEAD_TOP_ARTIFACT_SIDE_BAND_RATIO = 0.45
 
 # ---------------------------------------------------------------------------
 # OVERHANG-VIA-FLOODFILL constants (v24.27 NEW) - สำหรับตั้งที่กว้างผิดปกติ (merged)
@@ -2474,7 +2491,8 @@ def _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=None, color_tol=None)
     return regions
 
 
-def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
+def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y,
+                                     min_floor_coverage_ratio=None, min_height_diff_ratio=None):
     """
     v24.26 NEW: สำหรับตั้ง (stack) ที่ถูกระบุว่า "กว้างผิดปกติ" (merged, > 1.6 เท่าของ
     ค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน - เกณฑ์เดียวกับ STEP_DOWN's MERGED-STACK GATE)
@@ -2491,6 +2509,10 @@ def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
     คืนค่า list ของ candidate dict (x_min,y_min,x_max,y_max,ratio)
     """
     px = full_img.convert("RGB").load()
+    effective_floor_coverage_ratio = (LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO
+                                      if min_floor_coverage_ratio is None else min_floor_coverage_ratio)
+    effective_height_diff_ratio = (LOW_EXPOSED_FLOODFILL_HEIGHT_DIFF_MIN_RATIO
+                                   if min_height_diff_ratio is None else min_height_diff_ratio)
     x0, x1 = int(stack["x0"]), int(stack["x1"])
     y_search_top = max(0, int(top_y) - LOW_EXPOSED_FLOODFILL_UPWARD_MARGIN_PX)
     y_search_bottom = int(floor_y) + 5
@@ -2515,10 +2537,10 @@ def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
         # ฐาน มีกล่องอื่นซ้อนทับบางส่วนด้านบนแบบ EA10 จริงๆ เพิ่มเงื่อนไขนี้เพื่อตัด
         # false positive ที่เป็นแค่กล่องเล็กชิ้นหนึ่งในหลายๆ ชิ้นที่วางเรียงกันปกติ
         floor_coverage_ratio = own_w / stack_w
-        if floor_coverage_ratio < LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO:
+        if floor_coverage_ratio < effective_floor_coverage_ratio:
             print(f"LOW_EXPOSED floodfill candidate REJECTED (x=[{r['x0']:.0f}-{r['x1']:.0f}]): "
                   f"floor_coverage_ratio={floor_coverage_ratio*100:.0f}% < threshold "
-                  f"{LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO*100:.0f}% (this box only "
+                  f"{effective_floor_coverage_ratio*100:.0f}% (this box only "
                   f"covers a small fraction of the merged stack's floor width - likely one of "
                   f"several normally-arranged boxes, not a genuine single low-exposed box "
                   f"spanning the full base like EA10)")
@@ -2542,7 +2564,7 @@ def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
         if best_neighbor is None or best_neighbor_h <= 0:
             continue
         ratio = 1 - (own_h / best_neighbor_h)
-        if ratio < LOW_EXPOSED_FLOODFILL_HEIGHT_DIFF_MIN_RATIO:
+        if ratio < effective_height_diff_ratio:
             continue
         candidates.append({
             "x_min": r["x0"], "y_min": r["y0"], "x_max": r["x1"], "y_max": r["y1"],
@@ -2655,7 +2677,27 @@ def detect_overhang_regions_via_floodfill_per_view(stack_box_model, cargo_extent
     return results
 
 
-def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, full_img=None):
+def _is_stack_in_physical_rear_zone(stack, cargo_extent_view=None, view_label=None):
+    """v24.31: True when stack center is near the physical rear/door side for this view."""
+    if not stack or not cargo_extent_view or not view_label:
+        return False
+    view_label = str(view_label).upper().strip()
+    if view_label not in ("FRONT", "BACK"):
+        return False
+    xmin = cargo_extent_view.get("xmin")
+    xmax = cargo_extent_view.get("xmax")
+    if xmin is None or xmax is None or xmax <= xmin:
+        return False
+    cx = (stack.get("x0", 0) + stack.get("x1", 0)) / 2.0
+    width = xmax - xmin
+    rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
+    rear_band = width * LOW_EXPOSED_REAR_ZONE_WIDTH_RATIO
+    if rear_side == "LEFT":
+        return cx <= xmin + rear_band
+    return cx >= xmax - rear_band
+
+
+def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, full_img=None, view_label=None):
     """
     v24.22/v24.25/v24.26: ตรวจจับ "กล่อง/ตั้งชั้นล่างที่เปิดโล่งด้านบน" ซึ่งเป็นความเสี่ยง
     จริงที่กล่องสูงข้างเคียงอาจหล่นทับ (ยืนยันจากเคส EA10 - ท้ายตู้มีกล่องต่ำติดกล่องสูงกว่า)
@@ -2709,12 +2751,17 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, ful
         if not st.get("boxes"):
             continue
         w = _stack_width(st)
+        in_rear_zone = _is_stack_in_physical_rear_zone(st, cargo_extent_view, view_label)
 
         # v24.26 NEW: ถ้าตั้งนี้ "กว้างผิดปกติจริง" (merged, ใช้เกณฑ์เดียวกับ STEP_DOWN)
         # ลองใช้ flood-fill decomposition ก่อน แทนที่จะข้ามไปเฉยๆ แบบ v24.22-v24.25
         if median_w > 0 and w > median_w * STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
             if full_img is not None:
-                ff_candidates = _find_low_exposed_via_flood_fill(full_img, st, st["floor_y"], st["top_y"])
+                ff_candidates = _find_low_exposed_via_flood_fill(
+                    full_img, st, st["floor_y"], st["top_y"],
+                    min_floor_coverage_ratio=(LOW_EXPOSED_REAR_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO if in_rear_zone else None),
+                    min_height_diff_ratio=(LOW_EXPOSED_REAR_HEIGHT_DIFF_MIN_RATIO if in_rear_zone else None),
+                )
                 for cand in ff_candidates:
                     print(f"LOW_EXPOSED candidate CONFIRMED via FLOOD-FILL (merged stack "
                           f"x=[{st['x0']:.0f}-{st['x1']:.0f}]): sub-region x=[{cand['x_min']:.0f}-"
@@ -2741,7 +2788,8 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, ful
             continue
         best_neighbor = max(candidates, key=lambda n: st["top_y"] - n["top_y"])
         best_top_diff = st["top_y"] - best_neighbor["top_y"]
-        if best_top_diff < LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX:
+        top_diff_threshold = (LOW_EXPOSED_REAR_MIN_NEIGHBOR_TOP_DIFF_PX if in_rear_zone else LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX)
+        if best_top_diff < top_diff_threshold:
             continue
 
         # v24.25: HEIGHT-DIFFERENCE-RATIO GATE - เปรียบเทียบความสูงรวมของตั้งนี้กับ
@@ -2751,10 +2799,11 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, ful
         if h_this is None or h_neighbor is None or h_neighbor <= 0:
             continue
         height_diff_ratio = 1 - (h_this / h_neighbor)
-        if height_diff_ratio < LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO:
+        height_diff_threshold = (LOW_EXPOSED_REAR_HEIGHT_DIFF_MIN_RATIO if in_rear_zone else LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO)
+        if height_diff_ratio < height_diff_threshold:
             print(f"LOW_EXPOSED candidate REJECTED (x=[{st['x0']:.0f}-{st['x1']:.0f}]): "
                   f"height_diff_ratio={height_diff_ratio*100:.0f}% < threshold "
-                  f"{LOW_EXPOSED_HEIGHT_DIFF_MIN_RATIO*100:.0f}% (this_h={h_this:.0f}px, "
+                  f"{height_diff_threshold*100:.0f}% (this_h={h_this:.0f}px, "
                   f"neighbor_h={h_neighbor:.0f}px - likely isometric slope, not a genuine "
                   f"low-exposed stack, e.g. EA07-style continuous full block)")
             continue
@@ -2777,7 +2826,7 @@ def detect_low_exposed_step_regions_per_view(stack_box_model, cargo_extent, full
         stacks = stack_box_model.get(view, [])
         if not stacks:
             stacks = stack_box_model.get(f"{view}_raw_stacks", [])
-        regions = detect_low_exposed_step_regions_for_view(stacks, cargo_extent.get(view), full_img=full_img)
+        regions = detect_low_exposed_step_regions_for_view(stacks, cargo_extent.get(view), full_img=full_img, view_label=view)
         results[view] = regions
         for r in regions:
             print(f"LOW_EXPOSED STEP_DOWN candidate ({view}): x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}]")
@@ -4268,11 +4317,52 @@ def process_request(request):
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis / cross-view verification)",
                 })
 
+        def _is_tiny_head_top_artifact_risk(_risk):
+            """v24.31: remove tiny isolated red boxes on the physical head-wall/top-face zone."""
+            _rt = str(_risk.get("risk_type", "")).upper().strip()
+            if _rt not in ("STEP_DOWN_RISK", "OVERHANG_RISK", "TALL_UNSTABLE_RISK"):
+                return False
+            _view = _normalize_view(_risk.get("view", ""))
+            if _view not in ("FRONT", "BACK"):
+                return False
+            _box = _risk.get("box_2d")
+            if not (_box and isinstance(_box, list) and len(_box) == 4):
+                return False
+            try:
+                ymin, xmin, ymax, xmax = map(float, _box)
+                if max(ymin, xmin, ymax, xmax) <= 1.0:
+                    ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+            except Exception:
+                return False
+            bw = max(0.0, xmax - xmin)
+            bh = max(0.0, ymax - ymin)
+            if not (bw <= TINY_HEAD_TOP_ARTIFACT_MAX_WIDTH_NORM
+                    and bh <= TINY_HEAD_TOP_ARTIFACT_MAX_HEIGHT_NORM
+                    and (bw * bh) <= TINY_HEAD_TOP_ARTIFACT_MAX_AREA_NORM):
+                return False
+            rear_side = HARDCODED_REAR_SIDE.get(_view, "LEFT")
+            cx = (xmin + xmax) / 2.0
+            cy = (ymin + ymax) / 2.0
+            in_top_band = cy <= TINY_HEAD_TOP_ARTIFACT_TOP_BAND_RATIO * 1000.0
+            if rear_side == "LEFT":
+                in_head_side = cx >= (1.0 - TINY_HEAD_TOP_ARTIFACT_SIDE_BAND_RATIO) * 1000.0
+            else:
+                in_head_side = cx <= TINY_HEAD_TOP_ARTIFACT_SIDE_BAND_RATIO * 1000.0
+            if not (in_top_band and in_head_side):
+                return False
+            reason = str(_risk.get("reasoning", "")).upper()
+            if "LOW_EXPOSED" in reason:
+                return False
+            return True
+
         # v24.23: final hard filter for TALL_UNSTABLE_RISK to stop persistent pink false positives
         # Only keep a TALL claim if its box overlaps a deterministic tall_unstable region in the same view.
         filtered_risks = []
         for _risk in all_risks:
             _rt = str(_risk.get("risk_type", "")).upper().strip()
+            if _is_tiny_head_top_artifact_risk(_risk):
+                print(f"v24.31 HARD FILTER: removed tiny head-wall/top-face artifact {_rt} ({_risk.get('view')}) box={_risk.get('box_2d')}")
+                continue
             if _rt != "TALL_UNSTABLE_RISK":
                 filtered_risks.append(_risk)
                 continue
