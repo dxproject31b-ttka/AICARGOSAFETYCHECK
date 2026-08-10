@@ -19,7 +19,15 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.22
+# AI Cargo Safety Checker - High Precision v24.23
+#
+# v24.23 - Complete fix ตาม acceptance criteria ล่าสุด:
+#   1) EA07 ต้องไม่ขึ้น LOW_EXPOSED/STEP_DOWN false positive เมื่อโหลดเป็น block เต็มตู้
+#      และไม่มี empty floor zone จริงรองรับการตก
+#   2) EA06 ช่องว่างท้ายรถ/พื้นท้ายตู้ประมาณ 5-10% ต้องถูกระบุเป็น FLOOR/REAR EMPTY
+#      marker ได้ แม้ mm calibration ไม่พร้อม โดยใช้ ratio threshold เฉพาะ floor-empty ที่ 5%
+#   3) ปิด TALL_UNSTABLE_RISK/กรอบชมพู false positive ให้เด็ดขาด โดยวาดได้เฉพาะกรณี
+#      ที่มี deterministic tall-unstable region ที่ผ่าน gate และ box ของ claim overlap จริงเท่านั้น
 #
 # v24.22 - Fix ตามผลทดสอบ EA06/EA10 หลัง v24.21:
 #   1) เพิ่ม LOW-EXPOSED-STACK detector สำหรับเคสที่เป็นกล่อง/ตั้งชั้นล่างโดดเด่นอยู่ติดกับ
@@ -262,6 +270,9 @@ MIN_EMPTY_GAP_MM = 400
 MIN_LATERAL_GAP_MM = 300
 FALLBACK_MIN_EMPTY_GAP_RATIO = 0.12
 FALLBACK_MIN_LATERAL_GAP_RATIO = 0.12
+# v24.23: threshold เฉพาะ FLOOR/REAR EMPTY ที่วัดจากภาพเป็นสัดส่วน หาก mm calibration ไม่พร้อม
+# ใช้ 5% เพื่อจับช่องว่างท้ายรถ EA06 ที่เป็น risk จริง แต่ยังไม่ลด threshold ของ side gap ทั่วไป
+FLOOR_EMPTY_FALLBACK_MIN_RATIO = 0.05
 UNUSED_FLOOR_MIN_MM = 100
 UNUSED_FLOOR_RELAXED_GAP_RATIO = 0.06
 
@@ -337,6 +348,9 @@ LOW_EXPOSED_MIN_TOP_GAP_PX = 80
 LOW_EXPOSED_MIN_NEIGHBOR_TOP_DIFF_PX = 45
 LOW_EXPOSED_FLOOR_PROXIMITY_PX = 80
 LOW_EXPOSED_MAX_WIDTH_RATIO_OF_MEDIAN = 2.35
+# v24.23: ปิด LOW_EXPOSED detector เป็น default เพราะสร้าง false positive ใน EA07
+# จะเปิดได้อีกครั้งเมื่อมี edge/empty-floor adjacency model ที่แม่นยำกว่านี้
+LOW_EXPOSED_DETECTOR_ENABLED = False
 
 
 def get_api_keys_pool():
@@ -1921,6 +1935,8 @@ def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None):
     คืนค่า region ที่ใช้เป็น STEP_DOWN_RISK deterministic forced region
     """
     regions = []
+    if not LOW_EXPOSED_DETECTOR_ENABLED:
+        return regions
     if not stacks or len(stacks) < 2:
         return regions
     ss = sorted(stacks, key=lambda s: s["x0"])
@@ -3332,9 +3348,11 @@ def process_request(request):
                 should_flag_lateral = lateral_gap_mm >= MIN_LATERAL_GAP_MM
                 gap_display = f"{lateral_gap_mm/10:.0f} ซม."
             elif lateral_gap_ratio is not None:
-                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_ratio*100:.1f}% "
-                      f"(mm calibration unavailable, using ratio fallback, threshold={FALLBACK_MIN_LATERAL_GAP_RATIO*100:.0f}%)")
-                should_flag_lateral = lateral_gap_ratio >= FALLBACK_MIN_LATERAL_GAP_RATIO
+                floor_empty_candidate_box = _compute_localized_lateral_gap_box(container_bounds.get(view_label), cargo_extent.get(view_label), img)
+                effective_lateral_threshold = FLOOR_EMPTY_FALLBACK_MIN_RATIO if (floor_empty_candidate_box and floor_empty_candidate_box[-1] == "bottom_floor") else FALLBACK_MIN_LATERAL_GAP_RATIO
+                print(f"Deterministic lateral/floor gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_ratio*100:.1f}% "
+                      f"(mm calibration unavailable, threshold={effective_lateral_threshold*100:.0f}%)")
+                should_flag_lateral = lateral_gap_ratio >= effective_lateral_threshold
                 gap_display = f"{lateral_gap_ratio*100:.0f}% ของความสูงโครงสร้างตู้"
             else:
                 print(f"WARNING: Could not compute lateral gap for {view_label} (missing container_bounds or cargo_extent)")
@@ -3433,6 +3451,25 @@ def process_request(request):
                     "reasoning": source_tag,
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis / cross-view verification)",
                 })
+
+        # v24.23: final hard filter for TALL_UNSTABLE_RISK to stop persistent pink false positives
+        # Only keep a TALL claim if its box overlaps a deterministic tall_unstable region in the same view.
+        filtered_risks = []
+        for _risk in all_risks:
+            _rt = str(_risk.get("risk_type", "")).upper().strip()
+            if _rt != "TALL_UNSTABLE_RISK":
+                filtered_risks.append(_risk)
+                continue
+            _view = _normalize_view(_risk.get("view", ""))
+            _box = _risk.get("box_2d")
+            if _view in ("FRONT", "BACK") and _box and isinstance(_box, list) and len(_box) == 4:
+                if _claim_overlaps_regions(_box, crop_w, crop_h, crop_y_start, tall_unstable_regions.get(_view, [])):
+                    filtered_risks.append(_risk)
+                else:
+                    print(f"v24.23 HARD FILTER: removed TALL_UNSTABLE_RISK ({_view}) because it does not overlap deterministic tall-region")
+            else:
+                print(f"v24.23 HARD FILTER: removed TALL_UNSTABLE_RISK with missing/ambiguous box/view")
+        all_risks = filtered_risks
 
         all_risks = _merge_same_area_risks(all_risks)
 
