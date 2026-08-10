@@ -19,7 +19,21 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.27
+# AI Cargo Safety Checker - High Precision v24.28
+#
+# v24.28 - CODE CLEANUP: ลบ OVERHANG-VIA-FLOODFILL ออกทั้งหมด (เคยเพิ่มใน v24.27 แต่
+#   ปิดใช้งานถาวรด้วย OVERHANG_FLOODFILL_DETECTOR_ENABLED=False เพราะทดสอบจริงแล้วพบ
+#   false positive กระจายในทุกไฟล์ รวมถึง EA07 ที่ผู้ใช้ยืนยันว่าปลอดภัย - ดู CHANGELOG
+#   v24.27 ด้านล่างสำหรับรายละเอียด root cause เดิม) - ผู้ใช้ขอให้ลบโค้ดที่ปิดใช้งานถาวร
+#   ออกไปเลยแทนที่จะเก็บไว้เฉยๆ เพื่อความสะอาดของโค้ด สิ่งที่ถูกลบออก:
+#     - constants: OVERHANG_FLOODFILL_MIN_UNSUPPORTED_RATIO,
+#       OVERHANG_FLOODFILL_MIN_UPPER_AREA_PX, OVERHANG_FLOODFILL_DETECTOR_ENABLED
+#     - ฟังก์ชัน: _find_overhang_via_flood_fill(), detect_overhang_regions_via_floodfill_per_view()
+#     - จุดเรียกใช้ใน process_request() ที่ merge ผลลัพธ์เข้ากับ overhang_regions
+#   ไม่กระทบฟีเจอร์อื่นใดๆ เลย - LOW_EXPOSED FLOODFILL (สำหรับ STEP_DOWN_RISK, ที่ใช้
+#   ฟังก์ชันกลาง _flood_fill_vivid_regions ร่วมกัน) ยังคงทำงานปกติทุกประการเหมือนเดิม
+#   เพราะเป็นฟังก์ชัน/detector คนละตัวกันโดยสิ้นเชิง (ดู CHANGELOG v24.25/v24.26 ด้านล่าง)
+#   AA04-03 (กล่องฐานแคบ) ยังคงไม่มี detector อัตโนมัติที่ใช้งานได้จริงในเวอร์ชันนี้
 #
 # v24.27 - แก้ 2 ปัญหาที่ผู้ใช้ยืนยันจากภาพจริง (EA07 BACK="OK", AA04-03 BACK="NG":
 #   ตัวกล่องชมพูเองเสี่ยงหล่น/ไม่มั่นคงเพราะฐานรองรับแคบกว่า):
@@ -533,31 +547,9 @@ LOW_EXPOSED_FLOODFILL_MIN_FLOOR_COVERAGE_RATIO = 0.70  # ภูมิภาค�
                                                # (merged) จึงจะยอมรับว่าเป็น "กล่องเดียว
                                                # วางเต็มฐาน" แบบ EA10 จริง
 
-# ---------------------------------------------------------------------------
-# OVERHANG-VIA-FLOODFILL constants (v24.27 NEW) - สำหรับตั้งที่กว้างผิดปกติ (merged)
-# ตรวจจับกรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า/ไม่ตรงตำแหน่งกัน" ซึ่งเป็นความ
-# เสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐานแคบกว่า/ไม่เพียงพอ เสี่ยงหล่น/ไม่มั่นคง)
-# - คนละกลไกกับ LOW_EXPOSED (ซึ่งเทียบ "กล่องเตี้ยติดกล่องสูงกว่า" ในแนวข้าง) เพราะที่นี่
-# เป็นกล่องบน "ไม่มีฐานรองรับพอ" ในแนวตั้ง (คล้ายหลักการเดียวกับ OVERHANG_RISK ปกติ
-# แต่ใช้ flood-fill decomposition แทน per-box Y-split เพราะเกิดในตั้งที่ถูกรวมผิด)
-# ---------------------------------------------------------------------------
-
-OVERHANG_FLOODFILL_MIN_UNSUPPORTED_RATIO = 0.30  # สัดส่วนความกว้างของกล่องบนที่ "ไม่มี
-                                               # ฐานรองรับด้านล่างเลย" (ยื่นพ้นขอบฐาน หรือ
-                                               # ฐานรองรับแคบกว่ามาก) เทียบกับความกว้างกล่อง
-                                               # บนทั้งหมด จึงจะยอมรับว่าเสี่ยงหล่น/ไม่มั่นคง
-OVERHANG_FLOODFILL_MIN_UPPER_AREA_PX = 300     # พื้นที่ขั้นต่ำของกล่องชั้นบนที่พิจารณา
-                                               # (กันจุดรบกวนเล็กๆ เช่น เศษเส้นขอบ)
-
-# v24.27 NEW: ปิดฟีเจอร์นี้ไว้ก่อน (แม้จะเขียนเสร็จแล้ว) - ทดสอบจริงกับทั้ง 5 ไฟล์แล้ว
-# พบว่า logic การเทียบ "ฐานรองรับ" จาก flood-fill regions ยังไม่แม่นยำพอ เกิด false
-# positive จำนวนมากในทุกไฟล์ รวมถึง EA07 ที่ผู้ใช้ยืนยันแล้วว่าปลอดภัย (พบ 3 จุดปลอมใน
-# BACK view) และ EA10/AA02-01/AA04-06 ที่ไม่เคยมีใครยืนยันตำแหน่งเหล่านี้ - สาเหตุคือ
-# การแยกภูมิภาคด้วย flood-fill สับสนระหว่าง "กล่องหลายใบวางซ้อนกันเป็นชั้นๆ ตามปกติ"
-# กับ "กล่องฐานแคบผิดปกติจริง" เนื่องจากกล่องแต่ละใบในภาพ isometric มักมีส่วนที่บังกัน
-# บางส่วนตามธรรมชาติของมุมมอง ทำให้ภูมิภาคที่แยกได้ไม่ตรงกับขอบเขตกล่องจริงเสมอไป -
-# จำเป็นต้องพัฒนา logic ที่แม่นยำกว่านี้ก่อนเปิดใช้งานจริง (ดู CHANGELOG หัวไฟล์)
-OVERHANG_FLOODFILL_DETECTOR_ENABLED = False
+# v24.28: OVERHANG-VIA-FLOODFILL (เคยเพิ่มใน v24.27) ถูกลบออกทั้งหมดแล้ว - ทดสอบจริง
+# พบ false positive กระจายในทุกไฟล์รวมถึง EA07 ที่ยืนยันว่าปลอดภัย จึงตัดสินใจลบโค้ด
+# ที่ปิดใช้งานถาวรนี้ออกไปแทนที่จะเก็บไว้เฉยๆ (ดู CHANGELOG หัวไฟล์ v24.28)
 
 
 def get_api_keys_pool():
@@ -2269,109 +2261,6 @@ def _find_low_exposed_via_flood_fill(full_img, stack, floor_y, top_y):
     return candidates
 
 
-def _find_overhang_via_flood_fill(full_img, stack, floor_y, top_y):
-    """
-    v24.27 NEW: สำหรับตั้งที่ "กว้างผิดปกติ" (merged, เกณฑ์เดียวกับ LOW_EXPOSED/
-    STEP_DOWN's MERGED-STACK GATE) ตรวจจับกรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า
-    หรือไม่ตรงตำแหน่งกัน" ซึ่งเป็นความเสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐาน
-    แคบกว่า/ไม่เพียงพอ ตัวมันเองเสี่ยงหล่น/ไม่มั่นคง) - คนละกลไกกับ LOW_EXPOSED (ซึ่ง
-    เทียบ "กล่องเตี้ยติดกล่องสูงกว่า" ในแนวข้าง/ระดับเดียวกัน) เพราะที่นี่เป็นกรณีกล่องบน
-    "ไม่มีฐานรองรับเพียงพอในแนวตั้ง" (หลักการเดียวกับ OVERHANG_RISK ปกติ แต่ใช้ flood-fill
-    decomposition แทน per-box Y-split เพราะเกิดขึ้นภายในตั้งที่ถูกรวมผิดจาก column scan)
-
-    วิธีตรวจสอบ: ใช้ flood-fill แยกภูมิภาคสีภายในตั้งที่กว้างผิดปกติ จากนั้นสำหรับแต่ละ
-    ภูมิภาคที่ "ไม่ชิดพื้น" (คือกล่องชั้นบน) หาภูมิภาคที่สัมผัสกันโดยตรงด้านล่าง (ฐาน
-    รองรับ) แล้ววัดว่าส่วนของกล่องบนที่ "ยื่นพ้นขอบฐานรองรับ" (ไม่มีอะไรค้ำยันด้านล่างเลย)
-    คิดเป็นสัดส่วนเท่าไหร่ของความกว้างกล่องบนทั้งหมด - ถ้าสัดส่วนนี้สูงพอ (>=30%) ถือว่า
-    เสี่ยงหล่น/ไม่มั่นคงจริง
-
-    คืนค่า list ของ candidate dict (x_min,y_min,x_max,y_max,ratio) สำหรับใช้เป็น
-    OVERHANG_RISK deterministic forced region (คนละ risk type จาก LOW_EXPOSED)
-    """
-    px = full_img.convert("RGB").load()
-    x0, x1 = int(stack["x0"]), int(stack["x1"])
-    y_search_top = max(0, int(top_y) - LOW_EXPOSED_FLOODFILL_UPWARD_MARGIN_PX)
-    y_search_bottom = int(floor_y) + 5
-    regions = _flood_fill_vivid_regions(px, x0, x1, y_search_top, y_search_bottom)
-    if len(regions) < 2:
-        return []
-
-    candidates = []
-    for upper in regions:
-        upper_w = upper["x1"] - upper["x0"]
-        upper_area = upper_w * (upper["y1"] - upper["y0"])
-        if upper_area < OVERHANG_FLOODFILL_MIN_UPPER_AREA_PX:
-            continue
-        if upper_w <= 0:
-            continue
-        # หาภูมิภาคที่ "สัมผัสกันโดยตรงด้านล่าง" ของ upper (คือฐานรองรับที่แท้จริง)
-        supports = []
-        for o in regions:
-            if o is upper:
-                continue
-            overlap = min(upper["x1"], o["x1"]) - max(upper["x0"], o["x0"])
-            if overlap <= 0:
-                continue
-            touching = abs(o["y0"] - upper["y1"]) <= LOW_EXPOSED_FLOODFILL_TOUCH_TOL_PX
-            if touching:
-                supports.append(o)
-        if not supports:
-            continue
-        # รวมช่วง x ของฐานรองรับทั้งหมดที่สัมผัสกัน (อาจมีมากกว่า 1 ชิ้นเรียงติดกัน)
-        support_x0 = min(s["x0"] for s in supports)
-        support_x1 = max(s["x1"] for s in supports)
-        # คำนวณส่วนของ upper ที่ "ไม่มีฐานรองรับ" (ยื่นพ้นขอบซ้าย/ขวาของฐานรองรับรวม)
-        unsupported_left = max(0, support_x0 - upper["x0"])
-        unsupported_right = max(0, upper["x1"] - support_x1)
-        unsupported_total = unsupported_left + unsupported_right
-        unsupported_ratio = unsupported_total / upper_w
-        if unsupported_ratio < OVERHANG_FLOODFILL_MIN_UNSUPPORTED_RATIO:
-            continue
-        print(f"OVERHANG floodfill candidate CONFIRMED (upper box x=[{upper['x0']:.0f}-"
-              f"{upper['x1']:.0f}], support x=[{support_x0:.0f}-{support_x1:.0f}]): "
-              f"unsupported_ratio={unsupported_ratio*100:.0f}% (this box's base support is "
-              f"significantly narrower/misaligned - risk of falling/instability)")
-        candidates.append({
-            "x_min": upper["x0"], "y_min": upper["y0"], "x_max": upper["x1"], "y_max": upper["y1"],
-            "ratio": min(0.99, max(0.20, unsupported_ratio)),
-            "source": "FORCED_DETERMINISTIC_OVERHANG_FLOODFILL",
-        })
-    return candidates
-
-
-def detect_overhang_regions_via_floodfill_per_view(stack_box_model, cargo_extent, full_img=None):
-    """
-    v24.27 NEW: เรียก _find_overhang_via_flood_fill() สำหรับตั้งที่กว้างผิดปกติ (merged)
-    ในทั้ง FRONT และ BACK view - ใช้เกณฑ์ merged-stack เดียวกับ STEP_DOWN/LOW_EXPOSED
-    (> 1.6 เท่าของค่ามัธยฐานความกว้างตั้งในแถวเดียวกัน)
-    """
-    results = {"FRONT": [], "BACK": []}
-    # v24.27: ปิดฟีเจอร์นี้ไว้ก่อน (ทดสอบจริงแล้วพบ false positive จำนวนมาก รวมถึงใน
-    # EA07 ที่ผู้ใช้ยืนยันว่าปลอดภัย) - ดู CHANGELOG และคอมเมนต์ที่ OVERHANG_FLOODFILL_
-    # DETECTOR_ENABLED สำหรับรายละเอียดเต็ม จำเป็นต้องพัฒนา logic ที่แม่นยำกว่านี้ก่อน
-    if not OVERHANG_FLOODFILL_DETECTOR_ENABLED or full_img is None:
-        return results
-    for view in ("FRONT", "BACK"):
-        stacks = stack_box_model.get(view, [])
-        if not stacks:
-            stacks = stack_box_model.get(f"{view}_raw_stacks", [])
-        ss = sorted(stacks, key=lambda s: s["x0"])
-        widths = sorted(_stack_width(s) for s in ss)
-        median_w = widths[len(widths)//2] if widths else 1
-        for st in ss:
-            if not st.get("boxes"):
-                continue
-            w = _stack_width(st)
-            if median_w <= 0 or w <= median_w * STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
-                continue
-            candidates = _find_overhang_via_flood_fill(full_img, st, st["floor_y"], st["top_y"])
-            results[view].extend(candidates)
-        for r in results[view]:
-            print(f"OVERHANG_RISK (floodfill) candidate ({view}): x=[{r['x_min']:.0f}-{r['x_max']:.0f}] "
-                  f"y=[{r['y_min']:.0f}-{r['y_max']:.0f}] ratio={r['ratio']*100:.0f}%")
-    return results
-
-
 def detect_low_exposed_step_regions_for_view(stacks, cargo_extent_view=None, full_img=None):
     """
     v24.22/v24.25/v24.26: ตรวจจับ "กล่อง/ตั้งชั้นล่างที่เปิดโล่งด้านบน" ซึ่งเป็นความเสี่ยง
@@ -3522,23 +3411,6 @@ def process_request(request):
                 print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view_label}): "
                       f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
                       f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={TALL_UNSTABLE_MIN_HEIGHT_RATIO*100:.0f}%)")
-
-        # v24.27 NEW: OVERHANG-VIA-FLOODFILL - สำหรับตั้งที่กว้างผิดปกติ (merged) ตรวจจับ
-        # กรณี "กล่องชั้นบนวางอยู่บนฐานรองรับที่แคบกว่า/ไม่ตรงตำแหน่งกัน" ซึ่งเป็นความ
-        # เสี่ยงจริงที่ผู้ใช้ยืนยัน (AA04-03: กล่องชมพูฐานแคบกว่า/ไม่เพียงพอ เสี่ยงหล่น/
-        # ไม่มั่นคง) - detect_overhang_regions_for_view() เดิมพลาดกรณีนี้เพราะทำงานกับ
-        # per-box Y-split ภายในตั้งที่แบ่งถูกต้องแล้วเท่านั้น ไม่ครอบคลุมตั้งที่ถูกรวมผิด
-        overhang_floodfill_regions = detect_overhang_regions_via_floodfill_per_view(
-            stack_box_model, cargo_extent, full_img=img)
-        for view_label in ("FRONT", "BACK"):
-            existing = overhang_regions.get(view_label, [])
-            for orr in overhang_floodfill_regions.get(view_label, []):
-                duplicate = any(_box_iou_absolute((orr["x_min"], orr["y_min"], orr["x_max"], orr["y_max"]),
-                                                  (r["x_min"], r["y_min"], r["x_max"], r["y_max"])) >= 0.15
-                                for r in existing)
-                if not duplicate:
-                    existing.append(orr)
-            overhang_regions[view_label] = existing
 
         local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
                                                                      crop_y_start, container_bounds, cargo_extent)
