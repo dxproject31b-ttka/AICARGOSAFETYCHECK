@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.33
+# AI Cargo Safety Checker - High Precision v24.34
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -587,6 +587,15 @@ STEP_DOWN_TINY_TOPFACE_MAX_CENTER_Y_NORM = 820
 
 # v24.33: suppress Gemini-drawn STEP_DOWN rectangles. Deterministic regions remain authoritative.
 STEP_DOWN_USE_DETERMINISTIC_BOX_ONLY = True
+
+# v24.34: AI-assisted deterministic localization fallback.
+# The AI box is only a search hint. A risk is drawn only if adjacent physical stacks from the
+# stack model show a real height difference. This recovers EC10-style misses without returning
+# to arbitrary AI boxes.
+STEP_DOWN_AI_ASSIST_LOCALIZATION_ENABLED = True
+STEP_DOWN_AI_ASSIST_MIN_PAIR_OVERLAP = 0.03
+STEP_DOWN_AI_ASSIST_MIN_HEIGHT_RATIO = STEP_DOWN_STACK_MIN_RATIO
+STEP_DOWN_AI_ASSIST_MIN_LOW_STACK_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -3842,6 +3851,7 @@ def process_request(request):
             raw_ai_risks = []
 
         all_risks = []
+        ai_step_down_claims_for_localization = []
         for r in raw_ai_risks:
             rt = str(r.get("risk_type", "")).upper().strip()
             view_of_claim = str(r.get("view", "")).upper().strip()
@@ -3849,6 +3859,8 @@ def process_request(request):
             has_valid_box = view_of_claim in ("FRONT", "BACK") and box_2d and isinstance(box_2d, list) and len(box_2d) == 4
 
             if rt == "STEP_DOWN_RISK":
+                if has_valid_box:
+                    ai_step_down_claims_for_localization.append(r)
                 # v24.13-v24.17: gate เดียวกับ OVERHANG_RISK/TALL_UNSTABLE_RISK ด้านล่าง
                 # - ต้อง overlap กับ deterministic region ที่มาจาก per-box stack-height
                 # comparison เท่านั้น (ผ่านทุก gate แล้ว) ไม่มี cross-view veto/mirror
@@ -4238,6 +4250,76 @@ def process_request(request):
                                            "description": f"พบพื้นที่ว่างบริเวณ{desc_zone}ประมาณ {ratio_val*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
                                            "box_2d": None})
 
+        def _v2434_abs_box_from_claim(_box_2d):
+            try:
+                ymin, xmin, ymax, xmax = map(float, _box_2d)
+                if max(ymin, xmin, ymax, xmax) <= 1.0:
+                    ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+                abs_xmin = (xmin / 1000.0) * crop_w
+                abs_xmax = (xmax / 1000.0) * crop_w
+                abs_ymin = crop_y_start + (ymin / 1000.0) * crop_h
+                abs_ymax = crop_y_start + (ymax / 1000.0) * crop_h
+                if abs_xmax <= abs_xmin or abs_ymax <= abs_ymin:
+                    return None
+                return (abs_xmin, abs_ymin, abs_xmax, abs_ymax)
+            except Exception:
+                return None
+
+        def _v2434_localize_step_down_from_ai_claim(view_label, claim_box_2d):
+            """Use AI STEP_DOWN claim only as a search hint; draw nearest shorter physical stack."""
+            if not STEP_DOWN_AI_ASSIST_LOCALIZATION_ENABLED:
+                return None
+            claim_abs = _v2434_abs_box_from_claim(claim_box_2d)
+            if not claim_abs:
+                return None
+            stacks = stack_box_model.get(view_label, [])
+            if not stacks:
+                stacks = stack_box_model.get(f"{view_label}_raw_stacks", [])
+            stacks = sorted([s for s in stacks if s.get("boxes")], key=lambda s: s["x0"])
+            if len(stacks) < 2:
+                print(f"v24.34 AI-ASSIST STEP_DOWN ({view_label}) skipped - not enough physical stacks")
+                return None
+            best = None
+            for i in range(len(stacks) - 1):
+                a, b = stacks[i], stacks[i + 1]
+                ha = _stack_total_height(a)
+                hb = _stack_total_height(b)
+                if ha is None or hb is None or ha <= 0 or hb <= 0:
+                    continue
+                taller_h = max(ha, hb)
+                shorter_h = min(ha, hb)
+                if shorter_h < STEP_DOWN_AI_ASSIST_MIN_LOW_STACK_HEIGHT_PX:
+                    continue
+                ratio = 1 - (shorter_h / taller_h)
+                if ratio < STEP_DOWN_AI_ASSIST_MIN_HEIGHT_RATIO:
+                    continue
+                low = a if ha < hb else b
+                pair_box = (min(a["x0"], b["x0"]), min(a["top_y"], b["top_y"]),
+                            max(a["x1"], b["x1"]), max(a["floor_y"], b["floor_y"]))
+                low_box = (low["x0"], low["top_y"], low["x1"], low["floor_y"])
+                pair_overlap = _box_iou_absolute(pair_box, claim_abs)
+                low_overlap = _box_iou_absolute(low_box, claim_abs)
+                overlap = max(pair_overlap, low_overlap)
+                if overlap < STEP_DOWN_AI_ASSIST_MIN_PAIR_OVERLAP:
+                    continue
+                # Prefer a tight low-stack box near the AI claim with a strong height difference.
+                score = overlap * 2.0 + ratio
+                if best is None or score > best[0]:
+                    best = (score, low, ratio, overlap, pair_box)
+            if best is None:
+                print(f"v24.34 AI-ASSIST STEP_DOWN ({view_label}) skipped - no adjacent physical stack pair overlaps AI claim")
+                return None
+            _, low, ratio, overlap, pair_box = best
+            region = {
+                "x_min": low["x0"], "y_min": low["top_y"],
+                "x_max": low["x1"], "y_max": low["floor_y"],
+                "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                "source": "AI_ASSISTED_DETERMINISTIC_STACK_LOCALIZATION",
+                "ai_overlap": overlap,
+            }
+            print(f"v24.34 AI-ASSIST STEP_DOWN ({view_label}) accepted: low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], ratio={ratio*100:.1f}%, overlap={overlap:.3f}, pair_box={pair_box}")
+            return region
+
         for view_label in ("FRONT", "BACK"):
             for region in step_down_regions.get(view_label, []):
                 # v24.13-v24.17: threshold ใช้ค่าต่ำสุดระหว่าง STEP_DOWN_STACK_MIN_RATIO
@@ -4311,6 +4393,39 @@ def process_request(request):
             _rt_dbg = str(_risk.get("risk_type", "")).upper().strip()
             if _rt_dbg == "STEP_DOWN_RISK":
                 print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
+
+        # v24.34: If the deterministic forced loop above did not create a box for an AI STEP_DOWN
+        # observation, use the AI box only as a hint to choose a real adjacent stack-height pair.
+        for _claim in ai_step_down_claims_for_localization:
+            _view = str(_claim.get("view", "")).upper().strip()
+            _box = _claim.get("box_2d")
+            if _view not in ("FRONT", "BACK") or not (_box and isinstance(_box, list) and len(_box) == 4):
+                continue
+            localized_region = _v2434_localize_step_down_from_ai_claim(_view, _box)
+            if not localized_region:
+                continue
+            already_covered = False
+            localized_abs = (localized_region["x_min"], localized_region["y_min"], localized_region["x_max"], localized_region["y_max"])
+            for _risk in all_risks:
+                if str(_risk.get("risk_type", "")).upper().strip() != "STEP_DOWN_RISK":
+                    continue
+                if str(_risk.get("view", "")).upper().strip() != _view:
+                    continue
+                _risk_abs = _ai_box_2d_to_absolute(_risk.get("box_2d"), crop_w, crop_h, crop_y_start) if _risk.get("box_2d") else None
+                if _risk_abs and _box_iou_absolute(localized_abs, _risk_abs) >= 0.15:
+                    already_covered = True
+                    break
+            if already_covered:
+                continue
+            localized_box_2d = _region_to_padded_normalized_box(localized_region["x_min"], localized_region["y_min"], localized_region["x_max"], localized_region["y_max"],
+                                                                 crop_w, crop_h, crop_y_start, _view, layout)
+            all_risks.append({
+                "view": _view,
+                "risk_type": "STEP_DOWN_RISK",
+                "box_2d": localized_box_2d,
+                "reasoning": localized_region.get("source", "AI_ASSISTED_DETERMINISTIC_STACK_LOCALIZATION"),
+                "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {localized_region['ratio']*100:.0f}% โดยใช้ AI เป็นตัวชี้ตำแหน่งและยืนยันกล่องจริงจาก stack model",
+            })
 
         # v24.23: final hard filter for TALL_UNSTABLE_RISK to stop persistent pink false positives
         # Only keep a TALL claim if its box overlaps a deterministic tall_unstable region in the same view.
