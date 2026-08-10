@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.32
+# AI Cargo Safety Checker - High Precision v24.33
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -577,14 +577,16 @@ STEP_DOWN_EDGE_FRAGMENT_MAX_HEIGHT_RATIO = 0.50
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10  # gate สำหรับตรวจสอบว่า Gemini AI claim
                                             # ทับซ้อนกับ deterministic region หรือไม่
 
-# v24.32: source-specific final guard for the recurring tiny red box artifact.
-# Keep this narrow: only STEP_DOWN_RISK from the normal deterministic stack-step source,
-# never LOW_EXPOSED/FLOODFILL and never gap/rear-zone logic.
-STEP_DOWN_TINY_ARTIFACT_GUARD_ENABLED = True
-STEP_DOWN_TINY_ARTIFACT_MAX_WIDTH_NORM = 115
-STEP_DOWN_TINY_ARTIFACT_MAX_HEIGHT_NORM = 170
-STEP_DOWN_TINY_ARTIFACT_MAX_AREA_NORM = 14000
-STEP_DOWN_TINY_ARTIFACT_TOP_BAND_NORM = 620
+# v24.33 final guard: suppress small top-face STEP_DOWN artifacts that are not meaningful
+# physical risk zones. This does not affect gap arrows or rear/front empty logic.
+STEP_DOWN_TINY_TOPFACE_GUARD_ENABLED = True
+STEP_DOWN_TINY_TOPFACE_MAX_WIDTH_NORM = 170
+STEP_DOWN_TINY_TOPFACE_MAX_HEIGHT_NORM = 230
+STEP_DOWN_TINY_TOPFACE_MAX_AREA_NORM = 26000
+STEP_DOWN_TINY_TOPFACE_MAX_CENTER_Y_NORM = 820
+
+# v24.33: suppress Gemini-drawn STEP_DOWN rectangles. Deterministic regions remain authoritative.
+STEP_DOWN_USE_DETERMINISTIC_BOX_ONLY = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -3854,7 +3856,10 @@ def process_request(request):
                 if has_valid_box:
                     regions_for_view = step_down_regions.get(view_of_claim, [])
                     if _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
-                        all_risks.append(r)
+                        if STEP_DOWN_USE_DETERMINISTIC_BOX_ONLY:
+                            print(f"v24.33: Gemini STEP_DOWN_RISK claim for {view_of_claim} validated but NOT drawn; deterministic region box will be used instead (AI box={box_2d})")
+                        else:
+                            all_risks.append(r)
                     else:
                         print(f"Gemini STEP_DOWN_RISK claim for {view_of_claim} view REJECTED by deterministic gate "
                               f"(description: {r.get('description', '')[:100]})")
@@ -4279,26 +4284,11 @@ def process_request(request):
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis / cross-view verification)",
                 })
 
-        def _v2432_log_risk_source(_risk, stage):
-            _rt = str(_risk.get("risk_type", "")).upper().strip()
-            if _rt not in ("STEP_DOWN_RISK", "OVERHANG_RISK", "TALL_UNSTABLE_RISK"):
-                return
-            _view = _normalize_view(_risk.get("view", ""))
-            _box = _risk.get("box_2d")
-            _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "UNKNOWN")
-            print(f"v24.32 TRACE {stage}: risk={_rt} view={_view} source={_source} box_2d={_box}")
-
-        def _v2432_is_tiny_step_down_artifact(_risk):
-            """Reject only the known tiny top-face artifact from deterministic stack-step source."""
-            if not STEP_DOWN_TINY_ARTIFACT_GUARD_ENABLED:
+        def _v2433_is_tiny_topface_step_down_artifact(_risk):
+            if not STEP_DOWN_TINY_TOPFACE_GUARD_ENABLED:
                 return False
             _rt = str(_risk.get("risk_type", "")).upper().strip()
             if _rt != "STEP_DOWN_RISK":
-                return False
-            _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
-            if "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
-                return False
-            if not ("FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP" in _source or "FORCED_DETERMINISTIC_STACK_STEP" in _source):
                 return False
             _box = _risk.get("box_2d")
             if not (_box and isinstance(_box, list) and len(_box) == 4):
@@ -4313,26 +4303,22 @@ def process_request(request):
             bh = max(0.0, ymax - ymin)
             area = bw * bh
             cy = (ymin + ymax) / 2.0
-            if bw > STEP_DOWN_TINY_ARTIFACT_MAX_WIDTH_NORM:
-                return False
-            if bh > STEP_DOWN_TINY_ARTIFACT_MAX_HEIGHT_NORM:
-                return False
-            if area > STEP_DOWN_TINY_ARTIFACT_MAX_AREA_NORM:
-                return False
-            if cy > STEP_DOWN_TINY_ARTIFACT_TOP_BAND_NORM:
-                return False
-            return True
+            if bw <= STEP_DOWN_TINY_TOPFACE_MAX_WIDTH_NORM and bh <= STEP_DOWN_TINY_TOPFACE_MAX_HEIGHT_NORM and area <= STEP_DOWN_TINY_TOPFACE_MAX_AREA_NORM and cy <= STEP_DOWN_TINY_TOPFACE_MAX_CENTER_Y_NORM:
+                return True
+            return False
 
         for _risk in all_risks:
-            _v2432_log_risk_source(_risk, "before_final_filter")
+            _rt_dbg = str(_risk.get("risk_type", "")).upper().strip()
+            if _rt_dbg == "STEP_DOWN_RISK":
+                print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
 
         # v24.23: final hard filter for TALL_UNSTABLE_RISK to stop persistent pink false positives
         # Only keep a TALL claim if its box overlaps a deterministic tall_unstable region in the same view.
         filtered_risks = []
         for _risk in all_risks:
             _rt = str(_risk.get("risk_type", "")).upper().strip()
-            if _v2432_is_tiny_step_down_artifact(_risk):
-                print(f"v24.32 HARD FILTER: removed tiny STEP_DOWN artifact source={_risk.get('reasoning')} view={_risk.get('view')} box={_risk.get('box_2d')}")
+            if _v2433_is_tiny_topface_step_down_artifact(_risk):
+                print(f"v24.33 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
                 continue
             if _rt != "TALL_UNSTABLE_RISK":
                 filtered_risks.append(_risk)
