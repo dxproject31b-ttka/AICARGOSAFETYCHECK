@@ -19,7 +19,81 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.29
+# AI Cargo Safety Checker - High Precision v24.30
+#
+# v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
+#   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
+#   กล่องน้ำเงินอย่างชัดเจน) และ EC10 segmentation ล้มเหลวสมบูรณ์ (มองทั้งภาพเป็น "1
+#   stack เดียว" ทั้งที่มีกล่องหลายสีจริง) - ทั้งสองปัญหามี ROOT CAUSE คนละจุดกัน ดังนี้:
+#
+#   ปัญหาที่ 1: STEP_DOWN_RISK/TALL_UNSTABLE_RISK พลาดความเสี่ยงจริงที่ผลต่างความสูง
+#   สูงถึง 32-46% (ยืนยันจากภาพจริง EC07/EC09) เพราะ 3 gate ที่เพิ่มมาป้องกัน false
+#   positive ในเวอร์ชันก่อนหน้า (v24.19/v24.20) กลับบล็อกความเสี่ยงจริงไปด้วย เนื่องจาก
+#   per-box segmentation คืนค่า box_count=1 เกือบทุกตั้งเสมอ (ไม่เคยพบ >1 เลยในไฟล์
+#   ทดสอบทั้งหมดก่อนหน้านี้) ทำให้เกทที่อ้างอิง "จำนวนกล่อง/ชั้น" กลายเป็น "บล็อกเกือบ
+#   ทุกอย่างโดยพฤตินัย" ไม่ใช่แค่กรองเฉพาะ false positive ตามเจตนาเดิม:
+#
+#     1a) STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT (v24.19): เดิมต้อง "เพื่อนบ้าน
+#     มีจำนวนกล่องมากกว่าจริง" (neighbor_count <= current_count -> reject) - แก้เป็น
+#     ตรวจสอบเฉพาะกรณีที่มีข้อมูลจำนวนกล่องที่มีความหมายจริง (มีตั้งใดตั้งหนึ่ง >1 กล่อง)
+#     จึงบังคับใช้กฎเดิม ถ้าทุกตั้งมี box_count=1 เท่ากันหมด (ไม่มีข้อมูลที่มีความหมาย)
+#     จะไม่บล็อกจาก box count แต่ใช้ _is_part_of_gradual_multi_stack_trend() แยกแยะ
+#     "ขั้นบันไดเดี่ยว 2 ตั้งจริง" ออกจาก "ความลาดเอียงต่อเนื่องหลายตั้งจากมุมมอง
+#     isometric" (เจตนาดั้งเดิมของ v24.19) แทน
+#
+#     1b) TALL_UNSTABLE_REQUIRE_BOX_COUNT_GT_NEIGHBORS (v24.20): เดิมต้อง "จำนวนกล่อง
+#     ของตั้งกลางมากกว่าเพื่อนบ้านทั้ง 2 ฝั่งจริง" - แก้ด้วยหลักการเดียวกับ 1a (ไม่บล็อก
+#     เมื่อ box_count เท่ากันหมด เพราะไม่มีข้อมูลที่มีความหมาย) ยังคงต้องผ่านเกณฑ์ความสูง
+#     เข้มงวดเดิม (เพื่อนบ้านทั้ง 2 ฝั่ง <=65% ของตั้งกลาง AND diff_ratio>=35%) ซึ่งเข้มงวด
+#     พออยู่แล้ว (ยืนยันจาก EA06-01: ทุกคู่ตั้งที่ไม่ถูก exclude มี ratio สูงสุดแค่ 21%)
+#
+#     1c) _is_isolated_tall_peak() ใน STEP_DOWN: เดิมไม่ตรวจสอบ excluded_idxs เลย ทำให้
+#     ใช้ค่าความสูงของตั้งที่ถูก exclude (เช่น merged-stack ที่ไม่น่าเชื่อถือ) มาตัดสินว่า
+#     เป็น "isolated tall peak" (จึงถอยให้ TALL_UNSTABLE_RISK จัดการแทน) แต่ TALL_UNSTABLE
+#     เองกลับปฏิเสธเพราะต้องการเพื่อนบ้านที่ไม่ถูก exclude ครบทั้ง 2 ฝั่งเช่นกัน - ผลคือ
+#     ไม่มี detector ตัวไหนรายงานเลย (ตกหล่นระหว่างกลาง 2 detector) - แก้ด้วยการส่ง
+#     excluded_idxs เข้าไปด้วย และคืนค่า False ทันทีถ้าเพื่อนบ้านฝั่งใดฝั่งหนึ่งถูก exclude
+#     (สอดคล้องกับเงื่อนไขของ TALL_UNSTABLE เป๊ะ) เพื่อให้ STEP_DOWN ดำเนินการตรวจสอบ
+#     ต่อไปเอง แทนที่จะรอ detector อื่นที่จะไม่มีวันยืนยันได้
+#
+#     1d) _step_down_edge_artifact_stack_indices() (v24.16): เดิมตัดสินจาก "ความกว้าง"
+#     อย่างเดียว (แคบกว่า 70% ของมัธยฐาน = edge artifact) ทำให้ตัดตั้งขอบคาร์โก้ที่แคบแต่
+#     สูงปกติทิ้งไปด้วย (EC09: ตั้งขอบทั้ง 2 ฝั่งถูกตัดทิ้งจนเหลือตั้งเดียวเปรียบเทียบไม่ได้
+#     เลย) - แก้ด้วยการเพิ่มเงื่อนไข "ต้องเตี้ยผิดปกติด้วย" (ไม่ใช่แค่แคบ) เพราะเศษเสี้ยว
+#     จากมุม isometric corner/top-face จริงจะมีทั้งความกว้างและความสูงเล็กผิดปกติพร้อมกัน
+#
+#   ปัญหาที่ 2: _find_color_step_boundaries() (per-box segmentation) - EC10 FRONT ทั้ง
+#   ภาพถูกมองเป็น "1 stack เดียว" ทั้งที่มีกล่องสีเขียว/แดง/น้ำเงินแยกกันชัดเจน ตรวจสอบ
+#   pixel จริงพบว่ามีการเปลี่ยนสีชัดเจนมาก (เขียว->แดง, color_distance≈360 สูงกว่าเกณฑ์
+#   min_distance=60 มาก) แต่ฟังก์ชันเดิมยังหาไม่เจอ เพราะการเปลี่ยนสีในภาพจริงมักเกิดเป็น
+#   "ช่วงไล่เฉด" (gradient/transition zone กว้าง 4-5px จาก anti-aliasing/มุม isometric)
+#   ไม่ใช่เปลี่ยนทันทีทันใดเสมอไป - ฟังก์ชันเดิมเช็คความเสถียรโดยเทียบกับ cur_color (สีที่
+#   จุดเริ่มเปลี่ยน ซึ่งตัวมันเองยังอยู่ระหว่างไล่เฉด ไม่ใช่สีปลายทางจริง) ทำให้ไม่มีจุดไหน
+#   ผ่านเกณฑ์ "เสถียรทันที" เลย - แก้ด้วยการข้าม transition_zone_px (5px) แรกไปก่อน แล้ว
+#   ใช้สีที่ "ตกตะกอนแล้ว" (anchor) เป็นตัวเทียบความเสถียรแทน cur_color เดิม
+#
+#   ผลทดสอบจริง (รันโค้ดจริงกับ PDF ทั้ง 5 ไฟล์ที่มีอยู่: EA06-01, EC07, EC09, EC10,
+#   EC18 - ครอบคลุมทั้งเคสที่ต้องคง SAFE และเคสที่ต้องตรวจพบความเสี่ยงจริง):
+#     - EA06-01: STEP_DOWN=0, TALL_UNSTABLE=0 ทั้ง FRONT/BACK เหมือนเดิมทุกประการ
+#       (ไม่มี regression แม้ค่าตั้งใน BACK จะเปลี่ยนจาก [1,1,1] เป็น [1,1,3,1] กล่อง
+#       จากการแก้ปัญหาที่ 2 - segmentation แม่นยำขึ้นแต่ผลลัพธ์ยังปลอดภัยเหมือนเดิม)
+#     - EC07 FRONT: STEP_DOWN พบ 1 จุด ratio=46% ตรงตำแหน่งกล่องเขียว(TGT1C-BU)/น้ำเงิน
+#       (HOW1A-BU) ที่ผู้ใช้วาดเส้นแดงชี้ไว้พอดี (แก้ false negative สำเร็จ)
+#     - EC09 FRONT: STEP_DOWN พบ 1 จุด ratio=33% ตรงตำแหน่งกล่องเขียว(STEMA-B5)/น้ำเงิน
+#       (KAP1A-B5) ที่ผู้ใช้วาดเส้นแดงชี้ไว้พอดี (แก้ false negative สำเร็จ)
+#     - EC10 BACK: STEP_DOWN พบ 1 จุดใหม่ ratio=64% - ตรวจสอบภาพจริงยืนยันว่าเป็นความ
+#       เสี่ยงจริง (ตั้งน้ำเงิน+แดง 1 ชั้น อยู่ติดตั้งแดง+เขียว 2 ชั้นที่สูงกว่ามาก)
+#     - EC18 BACK: STEP_DOWN พบ 1 จุดใหม่ ratio=64% - ตรวจสอบภาพจริงยืนยันว่าเป็นความ
+#       เสี่ยงจริงเช่นกัน (ตั้งน้ำเงิน+เขียว 2 ชั้น อยู่ติดตั้งเขียวล้วน 3 ชั้น)
+#     - REAR_LATERAL_IMBALANCE (v24.29 fix): ยังทำงานถูกต้องเหมือนเดิมทุกไฟล์ ไม่ถูก
+#       กระทบจากการแก้ไขในเวอร์ชันนี้เลย (คนละฟังก์ชัน คนละ code path)
+#     - LOW_EXPOSED/OVERHANG: ยังคงเป็น 0 ในทุกไฟล์เหมือนเดิม ไม่มี false positive ใหม่
+#
+#   สรุป: v24.30 แก้ทั้ง 2 ปัญหาสำเร็จ พร้อมยืนยันด้วยข้อมูลจริงและตรวจสอบภาพจริงประกอบ
+#   ทุกจุด ไม่มี regression ในไฟล์ทดสอบทั้งหมดที่มีอยู่ (5 ไฟล์ครอบคลุมทั้งเคส SAFE และ
+#   เคสความเสี่ยงจริงหลายรูปแบบ)
+#
+# AI Cargo Safety Checker - High Precision v24.29 [ประวัติเดิม]
 #
 # v24.29 - แก้ REAR_LATERAL_IMBALANCE false positive (กรอบสีชมพูเข้ม/deeppink) ที่
 #   EA06-01 BACK view ยืนยันจาก log จริงของ production run v24.28: ผู้ใช้ระบุว่ากล่อง
@@ -482,6 +556,10 @@ STEP_DOWN_STACK_MIN_RATIO_FALLBACK = 0.40
 # v24.19 NEW: STEP_DOWN ต้องเกิดจากจำนวนชั้น/จำนวนกล่องในตั้งข้างเคียงมากกว่าจริง
 # ไม่ใช่แค่ความสูง pixel แตกต่างจากมุมมอง isometric หรือ perspective
 STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT = True
+# v24.30 NEW: ใช้เป็นเกณฑ์ "isolated cliff" bypass เมื่อ box-count ทั้ง 2 ฝั่งเท่ากัน (ไม่มี
+# ข้อมูลที่มีความหมายให้ใช้ตัดสิน) - ตั้งถัดไปในทิศทางเดียวกันต้องสูง >= (1-tolerance) เท่า
+# ของตั้งที่สูงกว่า จึงจะถือว่าเป็น "แนวโน้มต่อเนื่อง" (ต้องเข้มงวดขึ้น ไม่ให้ผ่าน bypass)
+STEP_DOWN_GRADUAL_TREND_TOLERANCE_RATIO = 0.10
 
 # v24.15 NEW: ISOLATED-PEAK EXCLUSION - ใช้เกณฑ์เดียวกับ TALL_UNSTABLE_RISK
 # (TALL_UNSTABLE_NEIGHBOR_MAX_RATIO, นิยามในหมวด PER-BOX SEGMENTATION ด้านล่าง)
@@ -490,6 +568,11 @@ STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT = True
 # isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้ถูกวัดผิดเป็นหน้าตรง
 STEP_DOWN_EDGE_ZONE_WIDTH_RATIO = 1.0
 STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO = 0.70
+# v24.30 NEW: ต้อง "เตี้ยผิดปกติ" ด้วย (ไม่ใช่แค่แคบ) จึงจะถือว่าเป็นเศษเสี้ยวจากมุม
+# isometric corner/top-face จริง - ยืนยันจาก pixel จริงไฟล์ EC09 ว่ากล่องขอบคาร์โก้ที่แคบ
+# แต่ความสูงปกติ (เช่น STEMA-B5 h=80 เทียบมัธยฐาน 139.5 = 57%, ไม่ใช่เศษเล็กผิดปกติ) ไม่ควร
+# ถูกตัดทิ้ง - ตั้งเกณฑ์ 50% ของมัธยฐานความสูง (เศษเสี้ยวจริงมักเตี้ยกว่านี้มาก)
+STEP_DOWN_EDGE_FRAGMENT_MAX_HEIGHT_RATIO = 0.50
 
 STEP_DOWN_CLAIM_OVERLAP_THRESHOLD = 0.10  # gate สำหรับตรวจสอบว่า Gemini AI claim
                                             # ทับซ้อนกับ deterministic region หรือไม่
@@ -1460,6 +1543,10 @@ def _find_dark_boundary_lines_1d(profile, min_drop=BOX_BOUNDARY_MIN_DROP, max_th
 COLOR_STEP_MIN_DISTANCE = 60
 COLOR_STEP_MIN_RUN_AFTER = 6
 COLOR_STEP_MIN_GAP = 15
+# v24.30 NEW: จำนวน pixel ที่ข้ามไปก่อนเริ่มเช็คความเสถียรของสี (ให้ "ช่วงไล่เฉด" ระหว่าง
+# 2 สี จาก anti-aliasing/มุม isometric ตกตะกอนเสร็จสิ้นก่อน) - ยืนยันจาก pixel จริงไฟล์
+# EC10 ว่าช่วงไล่เฉดกว้างประมาณ 4-5px จึงตั้งไว้ที่ 5 เผื่อระยะปลอดภัย
+COLOR_STEP_TRANSITION_ZONE_PX = 5
 JUMP_MIN_PX = 40
 JUMP_MIN_GAP = 15
 BOUNDARY_SMOOTH_WINDOW = 5
@@ -1499,7 +1586,22 @@ def _median_smooth_scalar(profile, window=BOUNDARY_SMOOTH_WINDOW):
 
 
 def _find_color_step_boundaries(color_profile, min_distance=COLOR_STEP_MIN_DISTANCE,
-                                  min_run_after=COLOR_STEP_MIN_RUN_AFTER, min_gap_between=COLOR_STEP_MIN_GAP):
+                                  min_run_after=COLOR_STEP_MIN_RUN_AFTER, min_gap_between=COLOR_STEP_MIN_GAP,
+                                  transition_zone_px=COLOR_STEP_TRANSITION_ZONE_PX):
+    """
+    v24.30 FIX: ROOT CAUSE ของ EC10 FRONT segmentation ล้มเหลวสมบูรณ์ (ทั้งภาพถูกมองเป็น
+    "1 stack เดียว" ทั้งที่มีกล่องหลายสีจริง) - ตรวจสอบ pixel จริงพบว่ามีการเปลี่ยนสีชัดเจน
+    มาก (เขียว->แดง, color_distance≈360 ซึ่งสูงกว่าเกณฑ์ min_distance=60 มาก) แต่ฟังก์ชัน
+    เดิมยังหาไม่เจอ เพราะการเปลี่ยนสีในภาพจริงมักเกิดเป็น "ช่วงไล่เฉด" (gradient/transition
+    zone) กว้างหลาย pixel จาก anti-aliasing หรือมุม isometric ไม่ใช่เปลี่ยนทันทีทันใดเสมอไป
+    - ฟังก์ชันเดิมเช็ค "ความเสถียร" โดยเทียบกับ cur_color (สีที่จุดเริ่มเปลี่ยน ซึ่งตัวมันเอง
+    ยังอยู่ระหว่างไล่เฉด ไม่ใช่สีปลายทางที่แท้จริง) ทำให้ไม่มีจุดไหนผ่านเกณฑ์ "เสถียรทันที"
+    เลยแม้จะมีการเปลี่ยนสีจริงชัดเจนมากก็ตาม
+
+    วิธีแก้: ข้าม transition_zone_px แรกไปก่อน (ให้สีไล่เฉดตกตะกอนเสร็จสิ้น) แล้วใช้สีที่จุด
+    "ตกตะกอนแล้ว" (anchor) เป็นตัวเทียบความเสถียรแทน cur_color เดิม - ยังคงต้องยืนยันว่า
+    anchor color ต่างจาก prev_color จริง (ไม่ใช่แค่สัญญาณรบกวนชั่วขณะที่กลับมาเหมือนเดิม)
+    """
     n = len(color_profile)
     boundaries = []
     last_boundary = -999
@@ -1509,10 +1611,21 @@ def _find_color_step_boundaries(color_profile, min_distance=COLOR_STEP_MIN_DISTA
         cur_color = color_profile[i]
         dist = _color_distance(prev_color, cur_color)
         if dist >= min_distance:
+            settle_start = i + transition_zone_px
+            if settle_start >= n:
+                i += 1
+                continue
+            anchor_color = color_profile[settle_start]
+            if _color_distance(anchor_color, prev_color) < min_distance:
+                i += 1
+                continue
+            check_len = min(min_run_after, n - settle_start)
             run_ok = True
-            check_len = min(min_run_after, n - i - 1)
-            for k in range(1, check_len + 1):
-                if _color_distance(color_profile[i + k], cur_color) > min_distance * 0.5:
+            for k in range(check_len):
+                idx = settle_start + k
+                if idx >= n:
+                    break
+                if _color_distance(color_profile[idx], anchor_color) > min_distance * 0.5:
                     run_ok = False
                     break
             if run_ok and (i - last_boundary) > min_gap_between:
@@ -1938,9 +2051,21 @@ def detect_tall_unstable_regions_for_view(stacks):
             this_count = len(sorted_stacks[i].get("boxes", []))
             left_count = len(sorted_stacks[left_i].get("boxes", []))
             right_count = len(sorted_stacks[right_i].get("boxes", []))
-            # ถ้าจำนวนชั้นไม่ได้มากกว่าเพื่อนบ้านทั้งสองฝั่งจริง ให้ถือว่าเป็น perspective/row pattern
-            if not (this_count > left_count and this_count > right_count):
-                continue
+            # v24.30 FIX: ยืนยันจาก pixel จริงไฟล์ EC07 ว่า per-box segmentation ให้
+            # box_count=1 เกือบทุกตั้งเสมอ (ไม่เคยพบ >1 เลยในไฟล์ทดสอบทั้งหมด) ทำให้เกท
+            # เดิม (ต้องมากกว่าเพื่อนบ้านทั้ง 2 ฝั่งจริง) บล็อกเกือบทุกกรณีโดยพฤตินัย รวมถึง
+            # ตั้งสูงโดดเดี่ยวจริง (EC07 stack กลาง h=247 vs เพื่อนบ้าน 158/133 = diff 36%)
+            # ซึ่งควรถูกตรวจพบเป็น TALL_UNSTABLE_RISK - ใช้หลักการเดียวกับ STEP_DOWN's
+            # box-count gate fix: ถ้าจำนวนกล่องเท่ากันหมด (ไม่มีข้อมูลที่มีความหมายให้ใช้
+            # ตัดสิน) ไม่บล็อกจาก box count แต่ยังต้องผ่านเกณฑ์ความสูงที่เข้มงวดของ
+            # TALL_UNSTABLE อยู่ดี (เพื่อนบ้านทั้ง 2 ฝั่ง <=65% ของความสูงตั้งกลาง AND
+            # diff_ratio>=35%) ซึ่งเข้มงวดพออยู่แล้วที่จะกันมุมมองลาดเอียงแบบ isometric
+            # (ยืนยันจาก EA06-01: ทุกคู่ตั้งที่ไม่ถูก exclude มี ratio สูงสุดแค่ 21%
+            # ต่ำกว่าเกณฑ์ 35% อยู่แล้วโดยธรรมชาติ ไม่ต้องพึ่ง box-count gate ช่วยกรอง)
+            # - ถ้าจำนวนกล่องต่างกันจริง (มีข้อมูลที่มีความหมาย) ยังคงใช้กฎเดิมทุกประการ
+            if max(this_count, left_count, right_count) > 1:
+                if not (this_count > left_count and this_count > right_count):
+                    continue
 
         if all(nh <= h_this * TALL_UNSTABLE_NEIGHBOR_MAX_RATIO for nh in neighbor_heights):
             diff_ratio = 1 - (max(neighbor_heights) / h_this)
@@ -2024,7 +2149,7 @@ def _stack_width(s):
     return max(1, s["x1"] - s["x0"])
 
 
-def _is_isolated_tall_peak(idx, heights, min_height_px,
+def _is_isolated_tall_peak(idx, heights, min_height_px, excluded_idxs=None,
                             neighbor_max_ratio=TALL_UNSTABLE_NEIGHBOR_MAX_RATIO):
     """
     v24.15 NEW: ตรวจสอบว่าตั้งที่ตำแหน่ง idx เป็น "ตั้งสูงโดดเดี่ยว" (isolated tall
@@ -2032,28 +2157,54 @@ def _is_isolated_tall_peak(idx, heights, min_height_px,
     (เกณฑ์เดียวกับ detect_tall_unstable_regions_for_view ที่ใช้กับ TALL_UNSTABLE_RISK
     อยู่แล้ว) - ใช้แยกแยะระหว่าง "ตั้งเดียวที่สูงโดดเด่นผิดปกติ" (ควรเป็น
     TALL_UNSTABLE_RISK เท่านั้น) กับ "ที่ราบสูง/ขั้นบันไดจริง" (STEP_DOWN_RISK จริง)
+
+    v24.30 FIX: ROOT CAUSE ของ EC07 FRONT - เดิมฟังก์ชันนี้ใช้ heights ของเพื่อนบ้านแม้จะ
+    เป็นตั้งที่ถูก exclude ไปแล้ว (เช่น merged-stack ที่ top_y/floor_y ไม่น่าเชื่อถือ) มา
+    ยืนยันว่าเป็น "isolated peak" ทำให้ STEP_DOWN ยอมถอยให้ TALL_UNSTABLE_RISK จัดการแทน
+    แต่ TALL_UNSTABLE_RISK เองกลับปฏิเสธที่จะยืนยัน (เพราะต้องการเพื่อนบ้านที่ไม่ถูก exclude
+    ทั้ง 2 ฝั่งเช่นกัน) ทำให้ความเสี่ยงจริงหลุดจากทั้ง 2 detector พร้อมกัน (EC07: ตั้งเขียว
+    h=246 อยู่ติดตั้งที่ถูก merged-exclude ฝั่งซ้าย และตั้งฟ้า h=133 ฝั่งขวา) - แก้ไขด้วยการ
+    ถือว่า "ไม่สามารถยืนยันได้อย่างน่าเชื่อถือว่าเป็น isolated peak จริง" ทันทีที่เพื่อนบ้าน
+    ฝั่งใดฝั่งหนึ่งถูก exclude ไปแล้ว (แทนที่จะข้ามไปเฉยๆ แล้วใช้แค่ฝั่งที่เหลือตัดสิน) เพื่อ
+    ให้ STEP_DOWN ดำเนินการตรวจสอบต่อไปเอง แทนที่จะรอ TALL_UNSTABLE ที่จะไม่มีวันยืนยันได้
     """
     h = heights[idx]
     if h is None or h < min_height_px:
         return False
-    neighbor_heights = []
+    excluded_idxs = excluded_idxs or set()
+    neighbor_positions = []
     if idx > 0:
-        neighbor_heights.append(heights[idx - 1])
+        neighbor_positions.append(idx - 1)
     if idx < len(heights) - 1:
-        neighbor_heights.append(heights[idx + 1])
-    neighbor_heights = [nh for nh in neighbor_heights if nh is not None]
-    if not neighbor_heights:
+        neighbor_positions.append(idx + 1)
+    if not neighbor_positions:
         return False
-    return all(nh <= h * neighbor_max_ratio for nh in neighbor_heights)
+    for pos in neighbor_positions:
+        if pos in excluded_idxs:
+            return False
+        nh = heights[pos]
+        if nh is None or nh > h * neighbor_max_ratio:
+            return False
+    return True
 
 
 def _step_down_edge_artifact_stack_indices(sorted_stacks,
                                             zone_width_ratio=STEP_DOWN_EDGE_ZONE_WIDTH_RATIO,
-                                            fragment_max_width_ratio=STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO):
+                                            fragment_max_width_ratio=STEP_DOWN_EDGE_FRAGMENT_MAX_WIDTH_RATIO,
+                                            fragment_max_height_ratio=STEP_DOWN_EDGE_FRAGMENT_MAX_HEIGHT_RATIO):
     """
     v24.16 NEW: EDGE-ARTIFACT GATE - ระบุตั้งที่น่าจะเป็น "เศษของกล่อง" (fragment) ที่
     เกิดจากมุม isometric corner/top-face ของกล่องใบแรกสุดที่ติดผนังหัวตู้/ประตูท้ายตู้
     ถูกวัดผิดเป็นหน้าตรง (ยืนยันจาก pixel data จริงไฟล์ EC50-02 BACK view)
+
+    v24.30 FIX: ROOT CAUSE ของ EC09 FRONT - เกทเดิมตัดสินจาก "ความกว้าง" อย่างเดียว ทำให้
+    ตัดตั้งขอบคาร์โก้ (STEMA-B5 เขียว h=80, KAP1A ปลายอีกด้าน h=177) ทิ้งทั้งคู่เพียงเพราะ
+    แคบกว่า 70% ของมัธยฐานความกว้าง ทั้งที่ความสูงทั้ง 2 ตั้งนี้ปกติดี (ไม่ใช่เศษเสี้ยว
+    เตี้ยผิดปกติแบบที่เกทนี้ตั้งใจจะจับ) ผลคือเหลือตั้งเดียวในทั้งแถว ทำให้เปรียบเทียบ
+    STEP_DOWN ไม่ได้เลยแม้แต่คู่เดียว - เพิ่มเงื่อนไข "ต้องเตี้ยผิดปกติด้วย" (ไม่ใช่แค่แคบ)
+    เพราะเศษเสี้ยวจากมุม isometric corner/top-face จริงๆ จะมีทั้งความกว้างและความสูงที่
+    เล็กผิดปกติพร้อมกัน (เป็นแค่มุมเล็กๆ ของกล่อง ไม่ใช่หน้าตรงเต็มใบ) ต่างจากกล่องจริงที่
+    แคบแต่สูงปกติ (เป็นกล่อง SKU ที่แคบกว่าเพื่อนบ้านจริงตามขนาดสินค้า)
     """
     n = len(sorted_stacks)
     if n < 2:
@@ -2062,6 +2213,9 @@ def _step_down_edge_artifact_stack_indices(sorted_stacks,
     median_w = widths[len(widths) // 2]
     if median_w <= 0:
         return set()
+    heights = [_stack_total_height(s) for s in sorted_stacks]
+    valid_heights = sorted(h for h in heights if h is not None and h > 0)
+    median_h = valid_heights[len(valid_heights) // 2] if valid_heights else None
     zone_px = median_w * zone_width_ratio
     cargo_xmin = sorted_stacks[0]["x0"]
     cargo_xmax = sorted_stacks[-1]["x1"]
@@ -2069,10 +2223,17 @@ def _step_down_edge_artifact_stack_indices(sorted_stacks,
     artifact_idxs = set()
     for i, s in enumerate(sorted_stacks):
         w = _stack_width(s)
+        h = heights[i]
         near_left_edge = (s["x0"] - cargo_xmin) < zone_px
         near_right_edge = (cargo_xmax - s["x1"]) < zone_px
         is_narrow = w < median_w * fragment_max_width_ratio
-        if (near_left_edge or near_right_edge) and is_narrow:
+        # v24.30: ถ้าไม่มีข้อมูลความสูงที่เชื่อถือได้ (median_h) ให้ fallback ไปใช้เกณฑ์
+        # ความกว้างอย่างเดียวแบบเดิม (ปลอดภัยกว่า ไม่เปลี่ยนพฤติกรรมเมื่อข้อมูลไม่พอ)
+        if median_h is None or h is None:
+            is_short = True
+        else:
+            is_short = h < median_h * fragment_max_height_ratio
+        if (near_left_edge or near_right_edge) and is_narrow and is_short:
             artifact_idxs.add(i)
     return artifact_idxs
 
@@ -2095,6 +2256,31 @@ def _step_down_merged_stack_indices(sorted_stacks, max_width_ratio_of_median=STE
         if _stack_width(s) > median_w * max_width_ratio_of_median:
             merged_idxs.add(i)
     return merged_idxs
+
+
+def _is_part_of_gradual_multi_stack_trend(idx_shorter, idx_taller, heights, excluded_idxs,
+                                           tolerance_ratio=STEP_DOWN_GRADUAL_TREND_TOLERANCE_RATIO):
+    """
+    v24.30 NEW: ใช้แยกแยะ "ขั้นบันไดเดี่ยว 2 ตั้งจริง" (genuine isolated 2-stack step,
+    ตามเจตนาเดิมของ v24.13: "ค้นหาแค่ตั้งของกล่องที่ต่ำกว่า ตั้งของกล่องด้านข้าง") ออกจาก
+    "ความลาดเอียงต่อเนื่องหลายตั้งจากมุมมอง isometric/perspective" (ซึ่งเป็นกรณีที่
+    STEP_DOWN_REQUIRE_NEIGHBOR_BOX_COUNT_GT_CURRENT ถูกสร้างขึ้นมาป้องกันใน v24.19)
+
+    ตรวจสอบว่าถัดจากตั้งที่สูงกว่า (idx_taller) ไปอีก 1 ตั้งในทิศทางเดียวกัน (ออกห่างจาก
+    idx_shorter) ความสูงยังคงมีแนวโน้มเดียวกัน (สูงขึ้นต่อเนื่อง หรือใกล้เคียงกัน) หรือไม่
+    - ถ้าใช่ แสดงว่าน่าจะเป็นความลาดเอียงต่อเนื่องหลายตั้ง (ควรเข้มงวด ต้องมี box-count
+    ยืนยันเพิ่ม) - ถ้าไม่มีข้อมูลถัดไป (สุดแถว หรือตั้งถัดไปถูก exclude ไปแล้ว) หรือแนวโน้ม
+    กลับทิศทาง ถือว่าเป็น "ขั้นบันไดเดี่ยว" ที่แยกออกมาชัดเจน (isolated cliff)
+    """
+    direction = 1 if idx_taller > idx_shorter else -1
+    next_idx = idx_taller + direction
+    if next_idx < 0 or next_idx >= len(heights) or next_idx in excluded_idxs:
+        return False
+    h_next = heights[next_idx]
+    h_taller = heights[idx_taller]
+    if h_next is None or h_taller is None:
+        return False
+    return h_next >= h_taller * (1 - tolerance_ratio)
 
 
 def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
@@ -2157,13 +2343,29 @@ def detect_step_down_regions_from_stacks(stacks, cargo_width_px,
                 # v24.19: ป้องกัน false positive จากมุมมอง isometric: ถ้าจำนวนกล่อง/ชั้น
                 # ของตั้งข้างเคียงไม่ได้มากกว่าตั้งนี้จริง จะไม่ถือว่าเป็น step-down
                 # (กรณี EA03/EA06 ที่เห็นความสูง pixel ต่างกันแต่จริงๆ จำนวนชั้นเท่ากัน)
-                if len(s_neighbor.get("boxes", [])) <= len(s_this.get("boxes", [])):
-                    continue
+                #
+                # v24.30 FIX: ยืนยันจาก pixel จริงว่า per-box segmentation ให้ box_count=1
+                # เกือบทุกตั้งในทุกไฟล์ที่ทดสอบมา (ไม่เคยพบ >1 เลย) ทำให้เกทนี้กลายเป็น
+                # "บล็อกเกือบทุกอย่างเสมอ" โดยพฤตินัย รวมถึงกรณีที่เป็นความเสี่ยงจริง (EC07
+                # ผลต่าง 46.2%, EC09 ผลต่าง 32.2% - ยืนยันจากภาพจริงว่าเป็นกล่องเตี้ยกว่า
+                # เพื่อนบ้านจริง) - เพิ่มเงื่อนไข OR bypass: ถ้าจำนวนกล่องเท่ากัน (ไม่มี
+                # ข้อมูล box-count ที่มีความหมายให้ใช้ตัดสิน) จะยอมให้ผ่านได้เฉพาะกรณีที่
+                # เป็น "ขั้นบันไดเดี่ยวที่แยกออกมาชัดเจน" (ไม่ใช่ส่วนหนึ่งของความลาดเอียง
+                # ต่อเนื่องหลายตั้งแบบ EA03/EA06) เท่านั้น - ถ้าจำนวนกล่องต่างกันจริง (มี
+                # ข้อมูลที่มีความหมาย) ยังคงใช้กฎเดิมทุกประการ (ต้องมากกว่าเท่านั้น)
+                neighbor_box_count = len(s_neighbor.get("boxes", []))
+                current_box_count = len(s_this.get("boxes", []))
+                if max(neighbor_box_count, current_box_count) > 1:
+                    if neighbor_box_count <= current_box_count:
+                        continue
+                else:
+                    if _is_part_of_gradual_multi_stack_trend(i, j, heights, excluded_idxs):
+                        continue
             if _stack_width(s_neighbor) > max_width_px:
                 continue
             if h_neighbor <= h_this:
                 continue
-            if _is_isolated_tall_peak(j, heights, min_height_px):
+            if _is_isolated_tall_peak(j, heights, min_height_px, excluded_idxs=excluded_idxs):
                 continue
             ratio = 1 - (h_this / h_neighbor)
             best_ratio = max(best_ratio, ratio)
