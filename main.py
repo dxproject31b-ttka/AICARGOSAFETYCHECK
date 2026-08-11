@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.34
+# AI Cargo Safety Checker - High Precision v24.35
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -596,6 +596,15 @@ STEP_DOWN_AI_ASSIST_LOCALIZATION_ENABLED = True
 STEP_DOWN_AI_ASSIST_MIN_PAIR_OVERLAP = 0.03
 STEP_DOWN_AI_ASSIST_MIN_HEIGHT_RATIO = STEP_DOWN_STACK_MIN_RATIO
 STEP_DOWN_AI_ASSIST_MIN_LOW_STACK_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
+
+# v24.35: narrow deterministic rear-tail low-stack detector.
+# This is intentionally restricted to rear/door-side adjacent pairs only.
+REAR_TAIL_LOW_STACK_DETECTOR_ENABLED = True
+REAR_TAIL_LOW_STACK_ZONE_RATIO = 0.42
+REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO = STEP_DOWN_STACK_MIN_RATIO
+REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN = 0.45
+REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN
+REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4250,6 +4259,70 @@ def process_request(request):
                                            "description": f"พบพื้นที่ว่างบริเวณ{desc_zone}ประมาณ {ratio_val*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
                                            "box_2d": None})
 
+        def _v2435_detect_rear_tail_low_stack_regions(view_label):
+            """Detect only the physical rear/end low stack adjacent to a taller stack."""
+            if not REAR_TAIL_LOW_STACK_DETECTOR_ENABLED:
+                return []
+            ce = cargo_extent.get(view_label)
+            if not ce:
+                return []
+            stacks = stack_box_model.get(view_label, [])
+            if not stacks:
+                stacks = stack_box_model.get(f"{view_label}_raw_stacks", [])
+            stacks = sorted([s for s in stacks if s.get("boxes")], key=lambda s: s["x0"])
+            if len(stacks) < 2:
+                return []
+            widths = sorted(_stack_width(s) for s in stacks)
+            median_w = widths[len(widths) // 2] if widths else 1
+            if median_w <= 0:
+                return []
+            cargo_xmin, cargo_xmax = ce["xmin"], ce["xmax"]
+            cargo_w = max(1, cargo_xmax - cargo_xmin)
+            rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
+            if rear_side == "LEFT":
+                rear_limit = cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO
+                pair_iter = range(0, len(stacks) - 1)
+                def pair_in_rear_zone(a, b):
+                    return min(a["x0"], b["x0"]) <= rear_limit and ((a["x0"] + a["x1"]) / 2.0 <= rear_limit or (b["x0"] + b["x1"]) / 2.0 <= rear_limit)
+            else:
+                rear_limit = cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO
+                pair_iter = range(len(stacks) - 2, -1, -1)
+                def pair_in_rear_zone(a, b):
+                    return max(a["x1"], b["x1"]) >= rear_limit and ((a["x0"] + a["x1"]) / 2.0 >= rear_limit or (b["x0"] + b["x1"]) / 2.0 >= rear_limit)
+            regions = []
+            for i in pair_iter:
+                a, b = stacks[i], stacks[i + 1]
+                if not pair_in_rear_zone(a, b):
+                    continue
+                ha, hb = _stack_total_height(a), _stack_total_height(b)
+                if ha is None or hb is None or ha <= 0 or hb <= 0:
+                    continue
+                low, high = (a, b) if ha < hb else (b, a)
+                low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
+                if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
+                    continue
+                low_w = _stack_width(low)
+                if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
+                    print(f"v24.35 REAR-TAIL skipped tiny/fragment low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                    continue
+                if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
+                    print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                    continue
+                ratio = 1 - (low_h / high_h)
+                if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
+                    continue
+                region = {
+                    "x_min": low["x0"], "y_min": low["top_y"],
+                    "x_max": low["x1"], "y_max": low["floor_y"],
+                    "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                    "source": "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK",
+                }
+                print(f"v24.35 REAR-TAIL STEP_DOWN accepted ({view_label}): low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], low_h={low_h:.0f}, high_h={high_h:.0f}, ratio={ratio*100:.1f}%")
+                regions.append(region)
+                # Only take the closest physical rear pair to avoid broad/multiple rear-zone boxes.
+                break
+            return regions
+
         def _v2434_abs_box_from_claim(_box_2d):
             try:
                 ymin, xmin, ymax, xmax = map(float, _box_2d)
@@ -4393,6 +4466,33 @@ def process_request(request):
             _rt_dbg = str(_risk.get("risk_type", "")).upper().strip()
             if _rt_dbg == "STEP_DOWN_RISK":
                 print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
+
+        # v24.35: deterministic rear-tail low-stack pass. This covers EC10 cases where the
+        # rear low box is not emitted by the generic STEP_DOWN/LOW_EXPOSED gates.
+        for view_label in ("FRONT", "BACK"):
+            for region in _v2435_detect_rear_tail_low_stack_regions(view_label):
+                region_abs = (region["x_min"], region["y_min"], region["x_max"], region["y_max"])
+                already_covered = False
+                for r in all_risks:
+                    if str(r.get("risk_type", "")).upper().strip() != "STEP_DOWN_RISK":
+                        continue
+                    if str(r.get("view", "")).upper().strip() != view_label:
+                        continue
+                    r_abs = _ai_box_2d_to_absolute(r.get("box_2d"), crop_w, crop_h, crop_y_start) if r.get("box_2d") else None
+                    if r_abs and _box_iou_absolute(region_abs, r_abs) >= 0.15:
+                        already_covered = True
+                        break
+                if already_covered:
+                    continue
+                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, view_label, layout)
+                all_risks.append({
+                    "view": view_label,
+                    "risk_type": "STEP_DOWN_RISK",
+                    "box_2d": box_2d,
+                    "reasoning": region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"),
+                    "description": f"พบกล่องเตี้ยบริเวณท้ายตู้ติดกับกองสินค้าสูงกว่า ประมาณ {region['ratio']*100:.0f}% (ตรวจจับเฉพาะคู่ติดกันด้านท้ายตู้)",
+                })
 
         # v24.34: If the deterministic forced loop above did not create a box for an AI STEP_DOWN
         # observation, use the AI box only as a hint to choose a real adjacent stack-height pair.
