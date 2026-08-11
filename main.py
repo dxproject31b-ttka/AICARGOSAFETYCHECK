@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.38
+# AI Cargo Safety Checker - High Precision v24.39
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -605,7 +605,8 @@ REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN = 0.45
 REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN
 REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
-REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = True
+REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = False
+REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR = True
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
 
 # ---------------------------------------------------------------------------
@@ -4302,6 +4303,8 @@ def process_request(request):
                     side_specs.append(("HARDCODED_LEFT", cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(0, len(stacks) - 1)))
                 else:
                     side_specs.append(("HARDCODED_RIGHT", cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(len(stacks) - 2, -1, -1)))
+                if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                    print(f"v24.39 REAR-TAIL TRACE ({view_label}): scan_both_ends=False, physical_rear_side={rear_side}, side_specs={[x[0] for x in side_specs]}")
             regions = []
             for side_name, rear_limit, pair_iter in side_specs:
                 for i in pair_iter:
@@ -4332,8 +4335,11 @@ def process_request(request):
                     print(f"v24.35 REAR-TAIL skipped tiny/fragment low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
                     continue
                 if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
-                    print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
-                    continue
+                    if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
+                        print(f"v24.39 REAR-TAIL allowing merged-width low stack on physical rear ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                    else:
+                        print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        continue
                 ratio = 1 - (low_h / high_h)
                 if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
                     if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
@@ -4568,7 +4574,7 @@ def process_request(request):
         for _risk in all_risks:
             _rt = str(_risk.get("risk_type", "")).upper().strip()
             if _v2433_is_tiny_topface_step_down_artifact(_risk):
-                print(f"v24.38 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
+                print(f"v24.39 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
                 continue
             if _rt != "TALL_UNSTABLE_RISK":
                 filtered_risks.append(_risk)
