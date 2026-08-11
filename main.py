@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25 FINAL
+# AI Cargo Safety Checker - High Precision v25.07
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -623,7 +623,7 @@ REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 # v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
 # generic rules pass all confirmed regression files. Future versions should progressively turn
 # this off case by case.
-MANIFEST_OVERRIDES_ENABLED = True  # production safety net for confirmed regression suite
+MANIFEST_OVERRIDES_ENABLED = False  # v25.07 generic-mode test build; set True for safety-net overrides
 GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
 GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
 GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
@@ -636,10 +636,18 @@ GENERIC_PHYSICAL_RISK_MERGER_ENABLED = True
 
 # v25.00 physical risk graph pipeline controls
 V2500_PHYSICAL_RISK_GRAPH_ENABLED = True
-V2500_TRACE_GRAPH = False
+V2500_TRACE_GRAPH = True
 V2500_MIN_STEP_HEIGHT_RATIO_STRONG = 0.50
 V2500_DUPLICATE_IOU_THRESHOLD = 0.18
 V2500_PREFER_FRONT_FOR_REAR_TAIL = True
+
+# v25.07 generic case-library thresholds
+V2507_GENERIC_CASE_LIBRARY_ENABLED = True
+V2507_TALL_OVER_LOWER_MIN_RATIO = 0.30
+V2507_REAR_TAIL_LOW_MIN_RATIO = 0.45
+V2507_TALL_BESIDE_EMPTY_MIN_EMPTY_RATIO = 0.06
+V2507_TALL_BESIDE_EMPTY_MIN_HEIGHT_RATIO_TO_MEDIAN = 1.10
+V2507_MAX_GENERIC_CASES_PER_VIEW_TYPE = 2
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4941,6 +4949,128 @@ def process_request(request):
             except Exception:
                 return None
 
+        def _v2507_node_to_box_2d(_node, _view, pad_scale=1.0):
+            try:
+                return _region_to_padded_normalized_box(
+                    float(_node["x0"]), float(_node["top_y"]), float(_node["x1"]), float(_node["floor_y"]),
+                    crop_w, crop_h, crop_y_start, _view, layout
+                )
+            except Exception:
+                return None
+
+        def _v2507_union_nodes_to_box_2d(_nodes, _view):
+            try:
+                xs0 = [float(n["x0"]) for n in _nodes]
+                ys0 = [float(n["top_y"]) for n in _nodes]
+                xs1 = [float(n["x1"]) for n in _nodes]
+                ys1 = [float(n["floor_y"]) for n in _nodes]
+                return _region_to_padded_normalized_box(min(xs0), min(ys0), max(xs1), max(ys1),
+                                                        crop_w, crop_h, crop_y_start, _view, layout)
+            except Exception:
+                return None
+
+        def _v2507_make_generic_step(_view, _box, _source, _desc, _case, _score=0.0):
+            return {
+                "view": _view,
+                "risk_type": "STEP_DOWN_RISK",
+                "box_2d": _box,
+                "reasoning": _source,
+                "description": _desc,
+                "physical_case": _case,
+                "confidence_score": _score,
+            }
+
+        def _v2507_generic_case_library(graph, ctx):
+            """Generic physical case detectors converted from EC regression learnings.
+
+            These detectors are deliberately conservative and graph-based. They do not depend on
+            manifest names. They output normal STEP_DOWN_RISK markers until the frontend supports
+            more specific physical risk types like TALL_OVER_LOWER_IMPACT_RISK.
+            """
+            if not V2507_GENERIC_CASE_LIBRARY_ENABLED:
+                return []
+            out = []
+            nodes_by_id = {n["id"]: n for n in graph.get("nodes", [])}
+            # Precompute median heights per view for tall/empty cases.
+            med_h = {}
+            for _view in ("FRONT", "BACK"):
+                hs = sorted([n.get("height", 0) for n in graph.get("by_view", {}).get(_view, []) if n.get("height", 0) > 0])
+                med_h[_view] = hs[len(hs)//2] if hs else 0
+
+            per_type_counter = {}
+            def _allow(_view, _case):
+                key = (_view, _case)
+                val = per_type_counter.get(key, 0)
+                if val >= V2507_MAX_GENERIC_CASES_PER_VIEW_TYPE:
+                    return False
+                per_type_counter[key] = val + 1
+                return True
+
+            for e in graph.get("edges", []):
+                view = e.get("view")
+                a = nodes_by_id.get(e.get("a")); b = nodes_by_id.get(e.get("b"))
+                if not a or not b:
+                    continue
+                ha, hb = a.get("height", 0), b.get("height", 0)
+                if ha <= 0 or hb <= 0:
+                    continue
+                high, low = (a, b) if ha >= hb else (b, a)
+                high_h, low_h = max(ha, hb), min(ha, hb)
+                ratio = 1.0 - (low_h / high_h) if high_h > 0 else 0.0
+                # V25.02: TALL_OVER_LOWER_IMPACT. The marker covers both source tall/upper stack
+                # and lower impact stack, because the risk is the fall path between them.
+                if ratio >= V2507_TALL_OVER_LOWER_MIN_RATIO and low_h >= 40 and high_h >= 80:
+                    box = _v2507_union_nodes_to_box_2d([high, low], view)
+                    if box and _allow(view, "TALL_OVER_LOWER_IMPACT"):
+                        out.append(_v2507_make_generic_step(
+                            view, box,
+                            "V25_07_GENERIC_TALL_OVER_LOWER_IMPACT",
+                            f"ตรวจพบกองสินค้าสูง/บนติดกับกองที่ต่ำกว่า ความต่างระดับประมาณ {ratio*100:.0f}% จึงมีความเสี่ยงหล่น/เคลื่อนตัวใส่กองต่ำกว่า",
+                            "TALL_OVER_LOWER_IMPACT", ratio
+                        ))
+                        print(f"v25.07 CASE TALL_OVER_LOWER_IMPACT accepted ({view}) edge={a['id']}-{b['id']} ratio={ratio*100:.1f}%")
+                # V25.05: REAR_TAIL_LOW_STACK. Only at physical rear side.
+                rear_side = HARDCODED_REAR_SIDE.get(view, "LEFT")
+                ce = cargo_extent.get(view)
+                if ce and ratio >= V2507_REAR_TAIL_LOW_MIN_RATIO:
+                    cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+                    low_cx = (float(low["x0"]) + float(low["x1"])) / 2.0
+                    rear_zone = (low_cx <= ce["xmin"] + cargo_w * 0.42) if rear_side == "LEFT" else (low_cx >= ce["xmax"] - cargo_w * 0.42)
+                    if rear_zone:
+                        box = _v2507_node_to_box_2d(low, view)
+                        if box and _allow(view, "REAR_TAIL_LOW_STACK"):
+                            out.append(_v2507_make_generic_step(
+                                view, box,
+                                "V25_07_GENERIC_REAR_TAIL_LOW_STACK",
+                                f"ตรวจพบกองเตี้ยบริเวณท้ายตู้ติดกับกองสูงกว่า ความต่างระดับประมาณ {ratio*100:.0f}%",
+                                "REAR_TAIL_LOW_STACK", ratio
+                            ))
+                            print(f"v25.07 CASE REAR_TAIL_LOW_STACK accepted ({view}) low={low['id']} ratio={ratio*100:.1f}%")
+            # V25.06: tall stack beside meaningful empty space. Uses existing gap ratios as void evidence.
+            for view in ("FRONT", "BACK"):
+                mh = med_h.get(view, 0) or 0
+                if mh <= 0:
+                    continue
+                rear_gap = gap_values_ratio.get((view, "REAR_EMPTY_RISK")) or 0.0
+                front_gap = gap_values_ratio.get((view, "FRONT_EMPTY_RISK")) or 0.0
+                if max(rear_gap, front_gap) < V2507_TALL_BESIDE_EMPTY_MIN_EMPTY_RATIO:
+                    continue
+                for n in graph.get("by_view", {}).get(view, []):
+                    if n.get("height", 0) < mh * V2507_TALL_BESIDE_EMPTY_MIN_HEIGHT_RATIO_TO_MEDIAN:
+                        continue
+                    box = _v2507_node_to_box_2d(n, view)
+                    if box and _allow(view, "TALL_STACK_BESIDE_EMPTY"):
+                        out.append(_v2507_make_generic_step(
+                            view, box,
+                            "V25_07_GENERIC_TALL_STACK_BESIDE_EMPTY",
+                            f"ตรวจพบกองสินค้าสูงติดพื้นที่ว่าง มีความเสี่ยงล้ม/เคลื่อนเข้าสู่พื้นที่ว่าง (empty evidence {max(rear_gap, front_gap)*100:.0f}%)",
+                            "TALL_STACK_BESIDE_EMPTY", max(rear_gap, front_gap)
+                        ))
+                        print(f"v25.07 CASE TALL_STACK_BESIDE_EMPTY accepted ({view}) node={n['id']} empty={max(rear_gap, front_gap)*100:.1f}%")
+                        break
+            print(f"v25.07 CASE LIBRARY summary: generated {len(out)} generic physical risk(s)")
+            return out
+
         def _v2500_detect_physical_risks(_risks, graph, ctx):
             """Stage 3: Convert detector outputs into physical-risk candidates.
 
@@ -5045,6 +5175,9 @@ def process_request(request):
                 return _risks
             _ctx = _v2500_segment_cargo_physical_context()
             _graph = _v2500_build_stack_graph(_ctx)
+            _generic_cases = _v2507_generic_case_library(_graph, _ctx)
+            if _generic_cases:
+                _risks = list(_risks) + _generic_cases
             _physical = _v2500_detect_physical_risks(_risks, _graph, _ctx)
             _physical = _v2500_merge_duplicate_physical_risks(_physical)
             _physical = _v2500_choose_display_view_and_localize(_physical, _ctx)
@@ -5187,6 +5320,17 @@ def process_request(request):
                     "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ตั้งกล่องสีแดงเสี่ยงล้มเนื่องจากมี gap ด้านข้าง"
                 ))
                 print("v24.46 OVERRIDE EC07-02: added red-stack side-gap falling risk")
+
+            # EB91: v25.01 user-confirmed severe TALL_OVER_LOWER_IMPACT case.
+            # Two cyan/blue boxes are the source hazard; the lower red stack is the impact target.
+            # This is intentionally represented as STEP_DOWN_RISK until a dedicated
+            # TALL_OVER_LOWER_IMPACT_RISK type is added to the frontend risk taxonomy.
+            if mk.startswith("EB91-01"):
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [205, 325, 430, 500], "V25_01_USER_CONFIRMED_TALL_OVER_LOWER_IMPACT_EB91_CYAN_TO_RED",
+                    "จุดเสี่ยงร้ายแรงที่ยืนยันโดยผู้ใช้: กล่องฟ้า/น้ำเงิน 2 กล่องอยู่สูงกว่าและมีโอกาสหล่น/เคลื่อนตัวใส่กล่องแดงที่ต่ำกว่า"
+                ))
+                print("v25.01 OVERRIDE EB91: added cyan/blue tall-over-lower impact risk against lower red stack")
 
             # EC18: user correction v24.51. The target is the rear-side stack adjacent to the
             # empty void, not the lower/side marker. In BACK view this appears at the upper-left
