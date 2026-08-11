@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.44
+# AI Cargo Safety Checker - High Precision v24.45
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -614,6 +614,11 @@ REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO = 0.25
 REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
 REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW = True
+REAR_TAIL_FRONT_DIRECT_LOCALIZATION_ENABLED = True
+REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO = 0.20
+REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO = 0.80
+REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
+REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4610,6 +4615,93 @@ def process_request(request):
             if _rt_dbg == "STEP_DOWN_RISK":
                 print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
 
+        def _v2445_localize_rear_tail_display_in_front(back_region=None):
+            """Use BACK as evidence, then build the display box from FRONT rear-side pixels.
+
+            This avoids coarse BACK->FRONT rectangle mapping for same-color/merged sub-boxes.
+            """
+            if not REAR_TAIL_FRONT_DIRECT_LOCALIZATION_ENABLED:
+                return None
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return None
+            stacks = stack_box_model.get("FRONT", [])
+            if not stacks:
+                stacks = stack_box_model.get("FRONT_raw_stacks", [])
+            stacks = sorted([st for st in stacks if st.get("boxes")], key=lambda st: st["x0"])
+            if not stacks:
+                print("v24.45 FRONT-LOCALIZE skipped: no FRONT stacks")
+                return None
+            rear_side = HARDCODED_REAR_SIDE.get("FRONT", "LEFT")
+            cargo_w = max(1, ce["xmax"] - ce["xmin"])
+            if rear_side == "LEFT":
+                rear_limit = ce["xmin"] + cargo_w * REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO
+                rear_stacks = [st for st in stacks if ((st["x0"] + st["x1"]) / 2.0) <= rear_limit]
+            else:
+                rear_limit = ce["xmax"] - cargo_w * REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO
+                rear_stacks = [st for st in stacks if ((st["x0"] + st["x1"]) / 2.0) >= rear_limit]
+            if not rear_stacks:
+                print(f"v24.45 FRONT-LOCALIZE skipped: no stack in FRONT physical rear side={rear_side}")
+                return None
+            # Use the widest/nearest rear stack as the merged host; if same-color boxes are merged,
+            # this is where floor-touching low subregions live.
+            host = max(rear_stacks, key=lambda st: _stack_width(st))
+            ref_h = max((_stack_total_height(st) or 0) for st in stacks)
+            if ref_h <= 0:
+                print("v24.45 FRONT-LOCALIZE skipped: invalid reference height")
+                return None
+            try:
+                px = img.convert("RGB").load()
+            except Exception:
+                return None
+            x0, x1 = int(host["x0"]), int(host["x1"])
+            y0 = max(0, int(host["top_y"]) - 25)
+            y1 = min(img.height, int(host["floor_y"]) + 8)
+            host_w = max(1, x1 - x0)
+            regions_ff = _flood_fill_vivid_regions(px, x0, x1, y0, y1)
+            candidates = []
+            for rr in regions_ff:
+                own_w = rr["x1"] - rr["x0"]
+                own_h = rr["y1"] - rr["y0"]
+                if own_w <= 0 or own_h <= 0:
+                    continue
+                floor_touch = abs(rr["y1"] - host["floor_y"]) <= LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX
+                if not floor_touch:
+                    continue
+                floor_cov = own_w / host_w
+                if floor_cov < REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: floor_cov={floor_cov*100:.0f}% < {REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO*100:.0f}%")
+                    continue
+                if floor_cov > REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: floor_cov={floor_cov*100:.0f}% > {REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO*100:.0f}% (likely whole merged stack)")
+                    continue
+                ratio = 1 - (own_h / ref_h)
+                if ratio < REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: ratio={ratio*100:.1f}% < {REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO*100:.0f}%")
+                    continue
+                # Prefer candidates closest to the physical rear side, then strongest height gap.
+                center_x = (rr["x0"] + rr["x1"]) / 2.0
+                if rear_side == "LEFT":
+                    rear_score = 1.0 - max(0.0, center_x - ce["xmin"]) / cargo_w
+                else:
+                    rear_score = max(0.0, center_x - ce["xmin"]) / cargo_w
+                score = rear_score + ratio
+                candidates.append((score, rr, ratio, floor_cov))
+            if not candidates:
+                print(f"v24.45 FRONT-LOCALIZE: no accepted floor-touching FRONT rear subregion in host x=[{x0}-{x1}], rear_side={rear_side}")
+                return None
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            # Use best candidate only to avoid drawing a broad union over non-risk cargo.
+            _, rr, ratio, floor_cov = candidates[0]
+            region = {
+                "x_min": rr["x0"], "y_min": rr["y0"],
+                "x_max": rr["x1"], "y_max": rr["y1"],
+                "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                "source": "FORCED_DETERMINISTIC_REAR_TAIL_FRONT_PIXEL_LOCALIZED",
+            }
+            print(f"v24.45 FRONT-LOCALIZE accepted: box=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], ratio={ratio*100:.1f}%, floor_cov={floor_cov*100:.0f}%, host=[{x0},{y0},{x1},{y1}], rear_side={rear_side}")
+            return region
+
         def _v2443_map_region_between_views(region, source_view, target_view):
             """Map a detected rear-tail region from one view to another using relative cargo extent."""
             src = cargo_extent.get(source_view)
@@ -4664,11 +4756,17 @@ def process_request(request):
                 display_region = region
                 source_text = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"))
                 if (REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW and view_label == "BACK" and "REAR_TAIL" in source_text.upper()):
-                    mapped_region = _v2443_map_region_between_views(region, "BACK", "FRONT")
-                    if mapped_region:
+                    front_region = _v2445_localize_rear_tail_display_in_front(region)
+                    if front_region:
                         display_view = "FRONT"
-                        display_region = mapped_region
-                        source_text = mapped_region.get("source", source_text)
+                        display_region = front_region
+                        source_text = front_region.get("source", source_text)
+                    else:
+                        mapped_region = _v2443_map_region_between_views(region, "BACK", "FRONT")
+                        if mapped_region:
+                            display_view = "FRONT"
+                            display_region = mapped_region
+                            source_text = mapped_region.get("source", source_text)
                 box_2d = _region_to_padded_normalized_box(display_region["x_min"], display_region["y_min"], display_region["x_max"], display_region["y_max"],
                                                             crop_w, crop_h, crop_y_start, display_view, layout)
                 all_risks.append({
