@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.40
+# AI Cargo Safety Checker - High Precision v24.41
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -609,6 +609,9 @@ REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = False
 REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR = True
 GENERIC_STEP_DOWN_HEAD_SIDE_VETO_ENABLED = True
 GENERIC_STEP_DOWN_HEAD_SIDE_ZONE_RATIO = 0.45
+REAR_TAIL_MERGED_SUBREGION_ENABLED = True
+REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO = 0.25
+REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
 
 # ---------------------------------------------------------------------------
@@ -4264,6 +4267,59 @@ def process_request(request):
                                            "description": f"พบพื้นที่ว่างบริเวณ{desc_zone}ประมาณ {ratio_val*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
                                            "box_2d": None})
 
+        def _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name):
+            """Localize real low boxes inside a merged/same-color rear-tail stack only."""
+            if not REAR_TAIL_MERGED_SUBREGION_ENABLED:
+                return []
+            high_h = _stack_total_height(high)
+            if high_h is None or high_h <= 0:
+                return []
+            try:
+                px = img.convert("RGB").load()
+            except Exception:
+                return []
+            x0, x1 = int(low["x0"]), int(low["x1"])
+            y0 = max(0, int(low["top_y"]) - 20)
+            y1 = min(img.height, int(low["floor_y"]) + 8)
+            stack_w = max(1, x1 - x0)
+            regions_ff = _flood_fill_vivid_regions(px, x0, x1, y0, y1)
+            candidates = []
+            for rr in regions_ff:
+                own_w = rr["x1"] - rr["x0"]
+                own_h = rr["y1"] - rr["y0"]
+                if own_w <= 0 or own_h <= 0:
+                    continue
+                floor_touch = abs(rr["y1"] - low["floor_y"]) <= LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX
+                if not floor_touch:
+                    continue
+                floor_cov = own_w / stack_w
+                if floor_cov < REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.41 REAR-TAIL subregion rejected ({view_label}/{side_name}): x=[{rr['x0']:.0f}-{rr['x1']:.0f}] floor_coverage={floor_cov*100:.0f}% < {REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO*100:.0f}%")
+                    continue
+                ratio = 1 - (own_h / high_h)
+                if ratio < REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO:
+                    print(f"v24.41 REAR-TAIL subregion rejected ({view_label}/{side_name}): x=[{rr['x0']:.0f}-{rr['x1']:.0f}] ratio={ratio*100:.1f}% < {REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO*100:.0f}%")
+                    continue
+                candidates.append((rr, ratio, floor_cov))
+            if not candidates:
+                print(f"v24.41 REAR-TAIL merged-stack subregion: no accepted floor-touching low subregion in x=[{x0}-{x1}] ({view_label}/{side_name})")
+                return []
+            # Combine adjacent accepted low-box regions in the same merged rear-tail stack. This keeps
+            # the marker at the physical tail low boxes while avoiding a broad whole-stack rectangle.
+            minx = min(c[0]["x0"] for c in candidates)
+            maxx = max(c[0]["x1"] for c in candidates)
+            miny = min(c[0]["y0"] for c in candidates)
+            maxy = max(c[0]["y1"] for c in candidates)
+            best_ratio = max(c[1] for c in candidates)
+            covs = [c[2] for c in candidates]
+            print(f"v24.41 REAR-TAIL merged-stack subregion accepted ({view_label}/{side_name}): sub_box=[{minx:.0f},{miny:.0f},{maxx:.0f},{maxy:.0f}], candidates={len(candidates)}, max_ratio={best_ratio*100:.1f}%, coverages={[round(v*100) for v in covs]}")
+            return [{
+                "x_min": minx, "y_min": miny,
+                "x_max": maxx, "y_max": maxy,
+                "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, best_ratio)),
+                "source": "FORCED_DETERMINISTIC_REAR_TAIL_MERGED_SUBREGION",
+            }]
+
         def _v2435_detect_rear_tail_low_stack_regions(view_label):
             """Detect only the physical rear/end low stack adjacent to a taller stack."""
             if not REAR_TAIL_LOW_STACK_DETECTOR_ENABLED:
@@ -4338,7 +4394,13 @@ def process_request(request):
                     continue
                 if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
                     if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
-                        print(f"v24.39 REAR-TAIL allowing merged-width low stack on physical rear ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        print(f"v24.41 REAR-TAIL merged-width low stack detected on physical rear ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}; trying subregion localization")
+                        subregions = _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name)
+                        if subregions:
+                            regions.extend(subregions)
+                            break
+                        print(f"v24.41 REAR-TAIL skipped merged low stack after subregion localization failed ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}]")
+                        continue
                     else:
                         print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
                         continue
@@ -4489,7 +4551,7 @@ def process_request(request):
                 return False
             _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
             # Preserve the real target sources. These may be small and may live at the rear edge.
-            if "REAR_TAIL_LOW_STACK" in _source or "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
+            if "REAR_TAIL" in _source or "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
                 return False
             # Apply only to generic stack-height/AI-assisted STEP_DOWN sources, not other risk types.
             if not ("STACK_HEIGHT_STEP_DOWN" in _source or "AI_ASSISTED_DETERMINISTIC_STACK_LOCALIZATION" in _source or "HEIGHT_PROFILE_STEP" in _source):
@@ -4521,7 +4583,7 @@ def process_request(request):
             _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
             # v24.38: log evidence showed FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK is a real
             # short rear-tail box. Do not classify it as the old tiny top-face artifact.
-            if "REAR_TAIL_LOW_STACK" in _source:
+            if "REAR_TAIL" in _source:
                 return False
             _box = _risk.get("box_2d")
             if not (_box and isinstance(_box, list) and len(_box) == 4):
