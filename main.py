@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25.11
+# AI Cargo Safety Checker - High Precision v25.12
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -670,6 +670,14 @@ V2511_VISUAL_DEDUP_IOU_THRESHOLD = 0.20
 V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD = 0.55
 V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM = 155.0
 V2511_KEEP_ONLY_ONE_FALL_PATH_PER_VIEW = True
+
+# v25.12 support-validation / physical cluster controls
+V2512_SUPPORT_VALIDATION_ENABLED = True
+V2512_UNSUPPORTED_EMPTY_EVIDENCE_RATIO = 0.055
+V2512_SUPPORTED_LOAD_DROP_GENERIC_STEP_WITHOUT_GAP = True
+V2512_CLUSTER_ANY_FAMILY_IOU_THRESHOLD = 0.28
+V2512_CLUSTER_ANY_FAMILY_CONTAINMENT_THRESHOLD = 0.70
+V2512_CLUSTER_ANY_FAMILY_CENTER_DISTANCE_NORM = 120.0
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -5731,6 +5739,32 @@ def process_request(request):
                         continue
                     filtered.append(d)
                 decorated = filtered
+            # v25.12 support-validation cleanup: generic step/fall markers require some
+            # empty-space/support-weakness evidence unless they are rear-tail or user-confirmed.
+            if V2512_SUPPORT_VALIDATION_ENABLED:
+                max_empty_ratio = 0.0
+                try:
+                    for _v in ("FRONT", "BACK"):
+                        for _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                            _rv = gap_values_ratio.get((_v, _rt))
+                            if _rv is not None:
+                                max_empty_ratio = max(max_empty_ratio, float(_rv))
+                except Exception:
+                    pass
+                filtered = []
+                for d in decorated:
+                    src = str(d["risk"].get("reasoning", "") or d["risk"].get("source", "")).upper()
+                    rt = str(d["risk"].get("risk_type", "")).upper().strip()
+                    fam = d["family"]
+                    protected = ("USER_CONFIRMED" in src or "REAR_TAIL" in src or fam in ("LONGITUDINAL_EMPTY", "LATERAL_GAP"))
+                    generic_step_like = (rt == "STEP_DOWN_RISK" and fam in ("FALL_PATH", "STEP"))
+                    if (V2512_SUPPORTED_LOAD_DROP_GENERIC_STEP_WITHOUT_GAP and generic_step_like and not protected
+                            and max_empty_ratio < V2512_UNSUPPORTED_EMPTY_EVIDENCE_RATIO
+                            and not (unused_floor_mm is not None and unused_floor_mm > 50)):
+                        print(f"v25.12 SUPPORT VALIDATION: dropped generic {fam} marker without empty/support evidence view={d['view']} source={d['risk'].get('reasoning')} max_empty_ratio={max_empty_ratio:.3f}")
+                        continue
+                    filtered.append(d)
+                decorated = filtered
             # General overlap de-duplication, priority first.
             decorated.sort(key=lambda d: (d["priority"], -((d["box"][2]-d["box"][0])*(d["box"][3]-d["box"][1]))), reverse=True)
             kept = []
@@ -5745,8 +5779,10 @@ def process_request(request):
                     one_is_measurement = d["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP") or k["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP")
                     overlap_same = (iou >= V2511_VISUAL_DEDUP_IOU_THRESHOLD or containment >= V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD or center_dist <= V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM)
                     overlap_measurement = (iou >= 0.32 or containment >= 0.68)
-                    if (same_family and overlap_same) or (one_is_measurement and overlap_measurement):
-                        print(f"v25.11 VISUAL DEDUP: dropped overlapping marker view={d['view']} family={d['family']} kept_family={k['family']} iou={iou:.2f} contain={containment:.2f} dist={center_dist:.0f} source={d['risk'].get('reasoning')}")
+                    overlap_any_physical_cluster = (iou >= V2512_CLUSTER_ANY_FAMILY_IOU_THRESHOLD or containment >= V2512_CLUSTER_ANY_FAMILY_CONTAINMENT_THRESHOLD or center_dist <= V2512_CLUSTER_ANY_FAMILY_CENTER_DISTANCE_NORM)
+                    protected_user = "USER_CONFIRMED" in str(d['risk'].get('reasoning','')).upper() or "USER_CONFIRMED" in str(k['risk'].get('reasoning','')).upper()
+                    if ((same_family and overlap_same) or (one_is_measurement and overlap_measurement) or (overlap_any_physical_cluster and not protected_user)):
+                        print(f"v25.12 PHYSICAL CLUSTER: dropped overlapping marker view={d['view']} family={d['family']} kept_family={k['family']} iou={iou:.2f} contain={containment:.2f} dist={center_dist:.0f} source={d['risk'].get('reasoning')}")
                         drop = True
                         break
                 if drop:
@@ -5761,7 +5797,7 @@ def process_request(request):
                 if idx in kept_idx or _v2511_norm_box(r) is None:
                     out.append(r)
             if len(out) != len(_risks):
-                print(f"v25.11 VISUAL DEDUP summary: {len(_risks)} -> {len(out)} visible risks")
+                print(f"v25.12 VISUAL DEDUP/CLUSTER summary: {len(_risks)} -> {len(out)} visible risks")
             return out
 
         all_risks = _merge_same_area_risks(all_risks)
