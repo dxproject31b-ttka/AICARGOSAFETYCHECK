@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.36
+# AI Cargo Safety Checker - High Precision v24.37
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -606,6 +606,7 @@ REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN = 0.45
 REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN
 REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
 REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = True
+REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4271,7 +4272,14 @@ def process_request(request):
             if not stacks:
                 stacks = stack_box_model.get(f"{view_label}_raw_stacks", [])
             stacks = sorted([s for s in stacks if s.get("boxes")], key=lambda s: s["x0"])
+            if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                print(f"v24.37 REAR-TAIL TRACE ({view_label}): stack_count={len(stacks)}")
+                for _idx, _s in enumerate(stacks):
+                    _h = _stack_total_height(_s)
+                    _w = _stack_width(_s)
+                    print(f"v24.37 REAR-TAIL STACK ({view_label}) idx={_idx} x=[{_s['x0']:.0f}-{_s['x1']:.0f}] w={_w:.0f} top={_s['top_y']:.0f} floor={_s['floor_y']:.0f} h={(_h if _h is not None else -1):.0f} boxes={len(_s.get('boxes', []))}")
             if len(stacks) < 2:
+                print(f"v24.37 REAR-TAIL TRACE ({view_label}): rejected early - less than 2 detected physical stacks")
                 return []
             widths = sorted(_stack_width(s) for s in stacks)
             median_w = widths[len(widths) // 2] if widths else 1
@@ -4279,6 +4287,8 @@ def process_request(request):
                 return []
             cargo_xmin, cargo_xmax = ce["xmin"], ce["xmax"]
             cargo_w = max(1, cargo_xmax - cargo_xmin)
+            if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                print(f"v24.37 REAR-TAIL TRACE ({view_label}): cargo_x=[{cargo_xmin:.0f}-{cargo_xmax:.0f}] cargo_w={cargo_w:.0f} median_w={median_w:.0f} zone_ratio={REAR_TAIL_LOW_STACK_ZONE_RATIO:.2f}")
             # v24.36: EC10 showed the fixed FRONT/BACK rear-side mapping can be wrong for the
             # physical low-box-at-tail pattern. Inspect both silhouette ends, but keep all
             # existing height/width gates so this does not become a broad rear-zone detector.
@@ -4301,13 +4311,21 @@ def process_request(request):
                     else:
                         in_zone = max(a["x1"], b["x1"]) >= rear_limit and (((a["x0"] + a["x1"]) / 2.0 >= rear_limit) or ((b["x0"] + b["x1"]) / 2.0 >= rear_limit))
                     if not in_zone:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: outside end zone")
                         continue
+                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                        print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} in_zone=True")
                 ha, hb = _stack_total_height(a), _stack_total_height(b)
                 if ha is None or hb is None or ha <= 0 or hb <= 0:
+                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: invalid heights ha={ha} hb={hb}")
                     continue
                 low, high = (a, b) if ha < hb else (b, a)
                 low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
                 if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
+                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: low_h={low_h:.0f} < min={REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX}")
                     continue
                 low_w = _stack_width(low)
                 if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
@@ -4318,6 +4336,8 @@ def process_request(request):
                     continue
                 ratio = 1 - (low_h / high_h)
                 if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
+                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: ratio={ratio*100:.1f}% < threshold={REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO*100:.0f}% (ha={ha:.0f}, hb={hb:.0f})")
                     continue
                 region = {
                     "x_min": low["x0"], "y_min": low["top_y"],
@@ -4329,6 +4349,8 @@ def process_request(request):
                 regions.append(region)
                 # Only take the closest physical rear pair to avoid broad/multiple rear-zone boxes.
                 break
+            if not regions and REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                print(f"v24.37 REAR-TAIL TRACE ({view_label}): no accepted rear-tail low-stack region after all gates")
             return regions
 
         def _v2434_abs_box_from_claim(_box_2d):
