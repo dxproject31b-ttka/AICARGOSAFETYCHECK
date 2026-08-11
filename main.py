@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.43
+# AI Cargo Safety Checker - High Precision v24.44
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -4629,13 +4629,18 @@ def process_request(request):
             ry0, ry1 = max(0.0, min(1.0, ry0)), max(0.0, min(1.0, ry1))
             if rx1 <= rx0 or ry1 <= ry0:
                 return None
+            mirror_x = HARDCODED_REAR_SIDE.get(source_view) != HARDCODED_REAR_SIDE.get(target_view)
+            if mirror_x:
+                # BACK and FRONT are opposite projections: BACK rear=RIGHT, FRONT rear=LEFT.
+                # Preserve the physical tail position by mirroring horizontal relative coordinates.
+                rx0, rx1 = 1.0 - rx1, 1.0 - rx0
             mapped = dict(region)
             mapped["x_min"] = dst["xmin"] + rx0 * dst_w
             mapped["x_max"] = dst["xmin"] + rx1 * dst_w
             mapped["y_min"] = dst["ymin"] + ry0 * dst_h
             mapped["y_max"] = dst["ymin"] + ry1 * dst_h
             mapped["source"] = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK")) + "_DISPLAY_FRONT_MAPPED"
-            print(f"v24.43 REAR-TAIL DISPLAY MAP: {source_view}-> {target_view} src=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}] mapped=[{mapped['x_min']:.0f},{mapped['y_min']:.0f},{mapped['x_max']:.0f},{mapped['y_max']:.0f}]")
+            print(f"v24.44 REAR-TAIL DISPLAY MAP: {source_view}-> {target_view} mirror_x={mirror_x} src=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}] mapped=[{mapped['x_min']:.0f},{mapped['y_min']:.0f},{mapped['x_max']:.0f},{mapped['y_max']:.0f}]")
             return mapped
 
         # v24.35: deterministic rear-tail low-stack pass. This covers EC10 cases where the
