@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25.10
+# AI Cargo Safety Checker - High Precision v25.11
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -663,6 +663,13 @@ V2510_GENERIC_REGION_MAX_X_GAP_RATIO = 0.24
 V2510_GENERIC_REGION_MAX_DROP_GAP_PX = 130
 V2510_GENERIC_REGION_MIN_VERTICAL_LINK_RATIO = 0.08
 V2510_GENERIC_REGION_MAX_CASES = 3
+
+# v25.11 visual de-duplication controls
+V2511_VISUAL_DEDUP_ENABLED = True
+V2511_VISUAL_DEDUP_IOU_THRESHOLD = 0.20
+V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD = 0.55
+V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM = 155.0
+V2511_KEEP_ONLY_ONE_FALL_PATH_PER_VIEW = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -5617,11 +5624,152 @@ def process_request(request):
                 print(f"v24.50 MERGER summary: {len(_risks)} -> {len(out)} risks")
             return out
 
+        def _v2511_norm_box(_risk):
+            box = _risk.get("box_2d")
+            if not (box and isinstance(box, list) and len(box) == 4):
+                return None
+            try:
+                y0, x0, y1, x1 = map(float, box)
+                if max(y0, x0, y1, x1) <= 1.0:
+                    y0, x0, y1, x1 = y0 * 1000, x0 * 1000, y1 * 1000, x1 * 1000
+                if x1 <= x0 or y1 <= y0:
+                    return None
+                return (x0, y0, x1, y1)
+            except Exception:
+                return None
+
+        def _v2511_box_metrics(a, b):
+            ax0, ay0, ax1, ay1 = a
+            bx0, by0, bx1, by1 = b
+            iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+            ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+            inter = iw * ih
+            aa = max(1.0, (ax1 - ax0) * (ay1 - ay0))
+            ba = max(1.0, (bx1 - bx0) * (by1 - by0))
+            union = aa + ba - inter
+            iou = inter / union if union > 0 else 0.0
+            containment = inter / min(aa, ba)
+            acx, acy = (ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0
+            bcx, bcy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+            center_dist = ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
+            return iou, containment, center_dist, aa, ba
+
+        def _v2511_family(_risk):
+            rt = str(_risk.get("risk_type", "")).upper().strip()
+            src = str(_risk.get("reasoning", "") or _risk.get("source", "")).upper()
+            case = str(_risk.get("physical_case", "")).upper()
+            if "FALL_PATH" in src or "OVER_LOWER" in src or "OVER_LOWER" in case:
+                return "FALL_PATH"
+            if "REAR_TAIL" in src or "REAR_TAIL" in case:
+                return "REAR_TAIL"
+            if rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                return "LONGITUDINAL_EMPTY"
+            if rt == "LATERAL_GAP_RISK":
+                return "LATERAL_GAP"
+            if rt == "STEP_DOWN_RISK":
+                return "STEP"
+            return rt or "UNKNOWN"
+
+        def _v2511_priority(_risk):
+            src = str(_risk.get("reasoning", "") or _risk.get("source", "")).upper()
+            rt = str(_risk.get("risk_type", "")).upper().strip()
+            score = float(_risk.get("confidence_score", 0.0) or 0.0)
+            # Higher number is kept first. Fall-path/source risk should beat generic empty/gap
+            # marker when they collide visually, because it communicates the actionable object.
+            base = 10
+            if "USER_CONFIRMED" in src:
+                base = 100
+            elif "V25_10_GENERIC_UPPER_REGION_OVER_LOWER_IMPACT" in src:
+                base = 86
+            elif "GENERIC_REGION_FALL_PATH" in src or "FALL_PATH" in src:
+                base = 84
+            elif "REAR_TAIL" in src:
+                base = 78
+            elif rt == "STEP_DOWN_RISK":
+                base = 70
+            elif rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                base = 55
+            elif rt == "LATERAL_GAP_RISK":
+                base = 45
+            return base + min(9.0, score * 10.0)
+
+        def _v2511_visual_deduplicate_risks(_risks):
+            """Final clean-up: one visible marker per physical risk area.
+
+            This prevents stacked/overlapping red rectangles when several detectors describe the
+            same physical hazard. It runs immediately before render.
+            """
+            if not V2511_VISUAL_DEDUP_ENABLED:
+                return _risks
+            decorated = []
+            passthrough = []
+            for idx, r in enumerate(_risks):
+                nb = _v2511_norm_box(r)
+                if nb is None:
+                    passthrough.append(r)
+                    continue
+                decorated.append({
+                    "idx": idx,
+                    "risk": r,
+                    "box": nb,
+                    "view": _normalize_view(r.get("view", "GENERAL")),
+                    "family": _v2511_family(r),
+                    "priority": _v2511_priority(r),
+                })
+            # Optional strict rule: for generic fall-path, keep one best marker per view.
+            if V2511_KEEP_ONLY_ONE_FALL_PATH_PER_VIEW:
+                best_fall = {}
+                for d in decorated:
+                    if d["family"] == "FALL_PATH":
+                        k = d["view"]
+                        if k not in best_fall or d["priority"] > best_fall[k]["priority"]:
+                            best_fall[k] = d
+                filtered = []
+                for d in decorated:
+                    if d["family"] == "FALL_PATH" and best_fall.get(d["view"]) is not d:
+                        print(f"v25.11 VISUAL DEDUP: dropped extra fall-path marker view={d['view']} source={d['risk'].get('reasoning')} box={d['risk'].get('box_2d')}")
+                        continue
+                    filtered.append(d)
+                decorated = filtered
+            # General overlap de-duplication, priority first.
+            decorated.sort(key=lambda d: (d["priority"], -((d["box"][2]-d["box"][0])*(d["box"][3]-d["box"][1]))), reverse=True)
+            kept = []
+            dropped_idx = set()
+            for d in decorated:
+                drop = False
+                for k in kept:
+                    if d["view"] != k["view"]:
+                        continue
+                    iou, containment, center_dist, area_d, area_k = _v2511_box_metrics(d["box"], k["box"])
+                    same_family = d["family"] == k["family"]
+                    one_is_measurement = d["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP") or k["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP")
+                    overlap_same = (iou >= V2511_VISUAL_DEDUP_IOU_THRESHOLD or containment >= V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD or center_dist <= V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM)
+                    overlap_measurement = (iou >= 0.32 or containment >= 0.68)
+                    if (same_family and overlap_same) or (one_is_measurement and overlap_measurement):
+                        print(f"v25.11 VISUAL DEDUP: dropped overlapping marker view={d['view']} family={d['family']} kept_family={k['family']} iou={iou:.2f} contain={containment:.2f} dist={center_dist:.0f} source={d['risk'].get('reasoning')}")
+                        drop = True
+                        break
+                if drop:
+                    dropped_idx.add(d["idx"])
+                    continue
+                kept.append(d)
+            kept_idx = {d["idx"] for d in kept}
+            out = []
+            for idx, r in enumerate(_risks):
+                if idx in dropped_idx:
+                    continue
+                if idx in kept_idx or _v2511_norm_box(r) is None:
+                    out.append(r)
+            if len(out) != len(_risks):
+                print(f"v25.11 VISUAL DEDUP summary: {len(_risks)} -> {len(out)} visible risks")
+            return out
+
         all_risks = _merge_same_area_risks(all_risks)
         all_risks = _v2447_apply_generic_physical_normalization(all_risks)
         all_risks = _v2446_apply_ground_truth_overrides(all_risks)
         all_risks = _v2450_physical_risk_merger(all_risks)
         all_risks = _v2500_physical_risk_pipeline(all_risks)
+        all_risks = _v2511_visual_deduplicate_risks(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
