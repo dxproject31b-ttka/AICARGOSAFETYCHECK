@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.42
+# AI Cargo Safety Checker - High Precision v24.43
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -613,6 +613,7 @@ REAR_TAIL_MERGED_SUBREGION_ENABLED = True
 REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO = 0.25
 REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
+REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4609,6 +4610,34 @@ def process_request(request):
             if _rt_dbg == "STEP_DOWN_RISK":
                 print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
 
+        def _v2443_map_region_between_views(region, source_view, target_view):
+            """Map a detected rear-tail region from one view to another using relative cargo extent."""
+            src = cargo_extent.get(source_view)
+            dst = cargo_extent.get(target_view)
+            if not src or not dst:
+                return None
+            src_w = max(1.0, float(src["xmax"] - src["xmin"]))
+            src_h = max(1.0, float(src["ymax"] - src["ymin"]))
+            dst_w = max(1.0, float(dst["xmax"] - dst["xmin"]))
+            dst_h = max(1.0, float(dst["ymax"] - dst["ymin"]))
+            rx0 = (region["x_min"] - src["xmin"]) / src_w
+            rx1 = (region["x_max"] - src["xmin"]) / src_w
+            ry0 = (region["y_min"] - src["ymin"]) / src_h
+            ry1 = (region["y_max"] - src["ymin"]) / src_h
+            # Clip to cargo-relative coordinates to avoid spillover from perspective/label noise.
+            rx0, rx1 = max(0.0, min(1.0, rx0)), max(0.0, min(1.0, rx1))
+            ry0, ry1 = max(0.0, min(1.0, ry0)), max(0.0, min(1.0, ry1))
+            if rx1 <= rx0 or ry1 <= ry0:
+                return None
+            mapped = dict(region)
+            mapped["x_min"] = dst["xmin"] + rx0 * dst_w
+            mapped["x_max"] = dst["xmin"] + rx1 * dst_w
+            mapped["y_min"] = dst["ymin"] + ry0 * dst_h
+            mapped["y_max"] = dst["ymin"] + ry1 * dst_h
+            mapped["source"] = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK")) + "_DISPLAY_FRONT_MAPPED"
+            print(f"v24.43 REAR-TAIL DISPLAY MAP: {source_view}-> {target_view} src=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}] mapped=[{mapped['x_min']:.0f},{mapped['y_min']:.0f},{mapped['x_max']:.0f},{mapped['y_max']:.0f}]")
+            return mapped
+
         # v24.35: deterministic rear-tail low-stack pass. This covers EC10 cases where the
         # rear low box is not emitted by the generic STEP_DOWN/LOW_EXPOSED gates.
         for view_label in ("FRONT", "BACK"):
@@ -4626,14 +4655,23 @@ def process_request(request):
                         break
                 if already_covered:
                     continue
-                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
-                                                            crop_w, crop_h, crop_y_start, view_label, layout)
+                display_view = view_label
+                display_region = region
+                source_text = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"))
+                if (REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW and view_label == "BACK" and "REAR_TAIL" in source_text.upper()):
+                    mapped_region = _v2443_map_region_between_views(region, "BACK", "FRONT")
+                    if mapped_region:
+                        display_view = "FRONT"
+                        display_region = mapped_region
+                        source_text = mapped_region.get("source", source_text)
+                box_2d = _region_to_padded_normalized_box(display_region["x_min"], display_region["y_min"], display_region["x_max"], display_region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, display_view, layout)
                 all_risks.append({
-                    "view": view_label,
+                    "view": display_view,
                     "risk_type": "STEP_DOWN_RISK",
                     "box_2d": box_2d,
-                    "reasoning": region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"),
-                    "description": f"พบกล่องเตี้ยบริเวณท้ายตู้ติดกับกองสินค้าสูงกว่า ประมาณ {region['ratio']*100:.0f}% (ตรวจจับเฉพาะคู่ติดกันด้านท้ายตู้)",
+                    "reasoning": source_text,
+                    "description": f"พบกล่องเตี้ยบริเวณท้ายตู้ติดกับกองสินค้าสูงกว่า ประมาณ {region['ratio']*100:.0f}% (ตรวจจับจากหลักฐานท้ายตู้และแสดงผลในมุมมองที่เห็นตำแหน่งชัดกว่า)",
                 })
 
         # v24.34: If the deterministic forced loop above did not create a box for an AI STEP_DOWN
