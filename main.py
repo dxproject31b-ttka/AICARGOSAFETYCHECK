@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.37
+# AI Cargo Safety Checker - High Precision v24.38
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -4475,6 +4475,11 @@ def process_request(request):
             _rt = str(_risk.get("risk_type", "")).upper().strip()
             if _rt != "STEP_DOWN_RISK":
                 return False
+            _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
+            # v24.38: log evidence showed FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK is a real
+            # short rear-tail box. Do not classify it as the old tiny top-face artifact.
+            if "REAR_TAIL_LOW_STACK" in _source:
+                return False
             _box = _risk.get("box_2d")
             if not (_box and isinstance(_box, list) and len(_box) == 4):
                 return False
@@ -4563,7 +4568,7 @@ def process_request(request):
         for _risk in all_risks:
             _rt = str(_risk.get("risk_type", "")).upper().strip()
             if _v2433_is_tiny_topface_step_down_artifact(_risk):
-                print(f"v24.33 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
+                print(f"v24.38 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
                 continue
             if _rt != "TALL_UNSTABLE_RISK":
                 filtered_risks.append(_risk)
