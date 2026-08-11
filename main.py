@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.41
+# AI Cargo Safety Checker - High Precision v24.42
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -4321,7 +4321,11 @@ def process_request(request):
             }]
 
         def _v2435_detect_rear_tail_low_stack_regions(view_label):
-            """Detect only the physical rear/end low stack adjacent to a taller stack."""
+            """Detect only the physical rear/end low stack adjacent to a taller stack.
+
+            v24.42: rewritten to avoid evaluating a stale (a,b) pair after the pair loop.
+            Every height/width/merged-subregion test now happens inside the in-zone pair branch.
+            """
             if not REAR_TAIL_LOW_STACK_DETECTOR_ENABLED:
                 return []
             ce = cargo_extent.get(view_label)
@@ -4332,13 +4336,13 @@ def process_request(request):
                 stacks = stack_box_model.get(f"{view_label}_raw_stacks", [])
             stacks = sorted([s for s in stacks if s.get("boxes")], key=lambda s: s["x0"])
             if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): stack_count={len(stacks)}")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): stack_count={len(stacks)}")
                 for _idx, _s in enumerate(stacks):
                     _h = _stack_total_height(_s)
                     _w = _stack_width(_s)
-                    print(f"v24.37 REAR-TAIL STACK ({view_label}) idx={_idx} x=[{_s['x0']:.0f}-{_s['x1']:.0f}] w={_w:.0f} top={_s['top_y']:.0f} floor={_s['floor_y']:.0f} h={(_h if _h is not None else -1):.0f} boxes={len(_s.get('boxes', []))}")
+                    print(f"v24.42 REAR-TAIL STACK ({view_label}) idx={_idx} x=[{_s['x0']:.0f}-{_s['x1']:.0f}] w={_w:.0f} top={_s['top_y']:.0f} floor={_s['floor_y']:.0f} h={(_h if _h is not None else -1):.0f} boxes={len(_s.get('boxes', []))}")
             if len(stacks) < 2:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): rejected early - less than 2 detected physical stacks")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): rejected early - less than 2 detected physical stacks")
                 return []
             widths = sorted(_stack_width(s) for s in stacks)
             median_w = widths[len(widths) // 2] if widths else 1
@@ -4347,10 +4351,8 @@ def process_request(request):
             cargo_xmin, cargo_xmax = ce["xmin"], ce["xmax"]
             cargo_w = max(1, cargo_xmax - cargo_xmin)
             if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): cargo_x=[{cargo_xmin:.0f}-{cargo_xmax:.0f}] cargo_w={cargo_w:.0f} median_w={median_w:.0f} zone_ratio={REAR_TAIL_LOW_STACK_ZONE_RATIO:.2f}")
-            # v24.36: EC10 showed the fixed FRONT/BACK rear-side mapping can be wrong for the
-            # physical low-box-at-tail pattern. Inspect both silhouette ends, but keep all
-            # existing height/width gates so this does not become a broad rear-zone detector.
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): cargo_x=[{cargo_xmin:.0f}-{cargo_xmax:.0f}] cargo_w={cargo_w:.0f} median_w={median_w:.0f} zone_ratio={REAR_TAIL_LOW_STACK_ZONE_RATIO:.2f}")
+
             side_specs = []
             if REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS:
                 side_specs.append(("LEFT_END", cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(0, len(stacks) - 1)))
@@ -4362,7 +4364,8 @@ def process_request(request):
                 else:
                     side_specs.append(("HARDCODED_RIGHT", cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(len(stacks) - 2, -1, -1)))
                 if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                    print(f"v24.39 REAR-TAIL TRACE ({view_label}): scan_both_ends=False, physical_rear_side={rear_side}, side_specs={[x[0] for x in side_specs]}")
+                    print(f"v24.42 REAR-TAIL TRACE ({view_label}): scan_both_ends=False, physical_rear_side={rear_side}, side_specs={[x[0] for x in side_specs]}")
+
             regions = []
             for side_name, rear_limit, pair_iter in side_specs:
                 for i in pair_iter:
@@ -4373,54 +4376,53 @@ def process_request(request):
                         in_zone = max(a["x1"], b["x1"]) >= rear_limit and (((a["x0"] + a["x1"]) / 2.0 >= rear_limit) or ((b["x0"] + b["x1"]) / 2.0 >= rear_limit))
                     if not in_zone:
                         if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                            print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: outside end zone")
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: outside end zone")
                         continue
                     if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} in_zone=True")
-                ha, hb = _stack_total_height(a), _stack_total_height(b)
-                if ha is None or hb is None or ha <= 0 or hb <= 0:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: invalid heights ha={ha} hb={hb}")
-                    continue
-                low, high = (a, b) if ha < hb else (b, a)
-                low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
-                if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: low_h={low_h:.0f} < min={REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX}")
-                    continue
-                low_w = _stack_width(low)
-                if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
-                    print(f"v24.35 REAR-TAIL skipped tiny/fragment low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
-                    continue
-                if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
-                    if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
-                        print(f"v24.41 REAR-TAIL merged-width low stack detected on physical rear ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}; trying subregion localization")
-                        subregions = _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name)
-                        if subregions:
-                            regions.extend(subregions)
-                            break
-                        print(f"v24.41 REAR-TAIL skipped merged low stack after subregion localization failed ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}]")
+                        print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} in_zone=True")
+
+                    ha, hb = _stack_total_height(a), _stack_total_height(b)
+                    if ha is None or hb is None or ha <= 0 or hb <= 0:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: invalid heights ha={ha} hb={hb}")
                         continue
-                    else:
-                        print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                    low, high = (a, b) if ha < hb else (b, a)
+                    low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
+                    if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: low_h={low_h:.0f} < min={REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX}")
                         continue
-                ratio = 1 - (low_h / high_h)
-                if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: ratio={ratio*100:.1f}% < threshold={REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO*100:.0f}% (ha={ha:.0f}, hb={hb:.0f})")
-                    continue
-                region = {
-                    "x_min": low["x0"], "y_min": low["top_y"],
-                    "x_max": low["x1"], "y_max": low["floor_y"],
-                    "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
-                    "source": "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK",
-                }
-                print(f"v24.35 REAR-TAIL STEP_DOWN accepted ({view_label}): low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], low_h={low_h:.0f}, high_h={high_h:.0f}, ratio={ratio*100:.1f}%")
-                regions.append(region)
-                # Only take the closest physical rear pair to avoid broad/multiple rear-zone boxes.
-                break
+                    low_w = _stack_width(low)
+                    if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
+                        print(f"v24.42 REAR-TAIL skipped tiny/fragment low stack ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        continue
+                    if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
+                        if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
+                            print(f"v24.42 REAR-TAIL merged-width low stack detected on physical rear ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}; trying subregion localization")
+                            subregions = _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name)
+                            if subregions:
+                                regions.extend(subregions)
+                                return regions
+                            print(f"v24.42 REAR-TAIL skipped merged low stack after subregion localization failed ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}]")
+                            continue
+                        print(f"v24.42 REAR-TAIL skipped merged low stack ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        continue
+                    ratio = 1 - (low_h / high_h)
+                    if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: ratio={ratio*100:.1f}% < threshold={REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO*100:.0f}% (ha={ha:.0f}, hb={hb:.0f})")
+                        continue
+                    region = {
+                        "x_min": low["x0"], "y_min": low["top_y"],
+                        "x_max": low["x1"], "y_max": low["floor_y"],
+                        "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                        "source": "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK",
+                    }
+                    print(f"v24.42 REAR-TAIL STEP_DOWN accepted ({view_label}/{side_name}): idx={i}-{i+1} low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], low_h={low_h:.0f}, high_h={high_h:.0f}, ratio={ratio*100:.1f}%")
+                    regions.append(region)
+                    return regions
             if not regions and REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): no accepted rear-tail low-stack region after all gates")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): no accepted rear-tail low-stack region after all gates")
             return regions
 
         def _v2434_abs_box_from_claim(_box_2d):
