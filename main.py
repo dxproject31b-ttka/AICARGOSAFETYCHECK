@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.35
+# AI Cargo Safety Checker - High Precision v24.36
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -605,6 +605,7 @@ REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN = 0.45
 REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = STEP_DOWN_STACK_MAX_WIDTH_RATIO_OF_MEDIAN
 REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
+REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4278,22 +4279,29 @@ def process_request(request):
                 return []
             cargo_xmin, cargo_xmax = ce["xmin"], ce["xmax"]
             cargo_w = max(1, cargo_xmax - cargo_xmin)
-            rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
-            if rear_side == "LEFT":
-                rear_limit = cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO
-                pair_iter = range(0, len(stacks) - 1)
-                def pair_in_rear_zone(a, b):
-                    return min(a["x0"], b["x0"]) <= rear_limit and ((a["x0"] + a["x1"]) / 2.0 <= rear_limit or (b["x0"] + b["x1"]) / 2.0 <= rear_limit)
+            # v24.36: EC10 showed the fixed FRONT/BACK rear-side mapping can be wrong for the
+            # physical low-box-at-tail pattern. Inspect both silhouette ends, but keep all
+            # existing height/width gates so this does not become a broad rear-zone detector.
+            side_specs = []
+            if REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS:
+                side_specs.append(("LEFT_END", cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(0, len(stacks) - 1)))
+                side_specs.append(("RIGHT_END", cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(len(stacks) - 2, -1, -1)))
             else:
-                rear_limit = cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO
-                pair_iter = range(len(stacks) - 2, -1, -1)
-                def pair_in_rear_zone(a, b):
-                    return max(a["x1"], b["x1"]) >= rear_limit and ((a["x0"] + a["x1"]) / 2.0 >= rear_limit or (b["x0"] + b["x1"]) / 2.0 >= rear_limit)
+                rear_side = HARDCODED_REAR_SIDE.get(view_label, "LEFT")
+                if rear_side == "LEFT":
+                    side_specs.append(("HARDCODED_LEFT", cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(0, len(stacks) - 1)))
+                else:
+                    side_specs.append(("HARDCODED_RIGHT", cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(len(stacks) - 2, -1, -1)))
             regions = []
-            for i in pair_iter:
-                a, b = stacks[i], stacks[i + 1]
-                if not pair_in_rear_zone(a, b):
-                    continue
+            for side_name, rear_limit, pair_iter in side_specs:
+                for i in pair_iter:
+                    a, b = stacks[i], stacks[i + 1]
+                    if side_name.endswith("LEFT") or side_name == "LEFT_END" or side_name == "HARDCODED_LEFT":
+                        in_zone = min(a["x0"], b["x0"]) <= rear_limit and (((a["x0"] + a["x1"]) / 2.0 <= rear_limit) or ((b["x0"] + b["x1"]) / 2.0 <= rear_limit))
+                    else:
+                        in_zone = max(a["x1"], b["x1"]) >= rear_limit and (((a["x0"] + a["x1"]) / 2.0 >= rear_limit) or ((b["x0"] + b["x1"]) / 2.0 >= rear_limit))
+                    if not in_zone:
+                        continue
                 ha, hb = _stack_total_height(a), _stack_total_height(b)
                 if ha is None or hb is None or ha <= 0 or hb <= 0:
                     continue
