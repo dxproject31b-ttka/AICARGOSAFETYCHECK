@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25.08
+# AI Cargo Safety Checker - High Precision v25.10
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -648,6 +648,21 @@ V2507_REAR_TAIL_LOW_MIN_RATIO = 0.45
 V2507_TALL_BESIDE_EMPTY_MIN_EMPTY_RATIO = 0.06
 V2507_TALL_BESIDE_EMPTY_MIN_HEIGHT_RATIO_TO_MEDIAN = 1.10
 V2507_MAX_GENERIC_CASES_PER_VIEW_TYPE = 2
+
+V2509_COLOR_FALL_PATH_ENABLED = False
+V2509_COLOR_FALL_PATH_MIN_COLD_REGIONS = 2
+V2509_COLOR_FALL_PATH_MIN_RED_AREA = 2500
+V2509_COLOR_FALL_PATH_MAX_X_GAP_RATIO = 0.22
+V2509_COLOR_FALL_PATH_MIN_VERTICAL_OVERLAP_RATIO = 0.10
+
+V2510_GENERIC_REGION_FALL_PATH_ENABLED = True
+V2510_GENERIC_REGION_MIN_AREA = 700
+V2510_GENERIC_REGION_MIN_DIM_PX = 18
+V2510_GENERIC_REGION_MIN_COLOR_DISTANCE = 45
+V2510_GENERIC_REGION_MAX_X_GAP_RATIO = 0.24
+V2510_GENERIC_REGION_MAX_DROP_GAP_PX = 130
+V2510_GENERIC_REGION_MIN_VERTICAL_LINK_RATIO = 0.08
+V2510_GENERIC_REGION_MAX_CASES = 3
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -4980,6 +4995,216 @@ def process_request(request):
                 "confidence_score": _score,
             }
 
+        def _v2509_is_cold_blue_cyan(_color):
+            try:
+                r, g, b = _color[:3]
+                return (b >= 140 and g >= 90 and r <= 90) or (b >= 150 and r <= 80 and g <= 130)
+            except Exception:
+                return False
+
+        def _v2509_is_red_warm(_color):
+            try:
+                r, g, b = _color[:3]
+                return r >= 150 and g <= 95 and b <= 95
+            except Exception:
+                return False
+
+        def _v2509_overlap_len(a0, a1, b0, b1):
+            return max(0.0, min(float(a1), float(b1)) - max(float(a0), float(b0)))
+
+        def _v2509_detect_color_fall_path(ctx):
+            """Detect cyan/blue upper/rear boxes falling/sliding into lower red stack.
+
+            This complements graph adjacency. EB91 showed that the hazardous cyan boxes and red
+            lower impact region may not be connected as adjacent stack edges, but the visual color
+            regions clearly show a fall-impact relationship.
+            """
+            if not V2509_COLOR_FALL_PATH_ENABLED:
+                return []
+            # Do not run this special pattern on very full/solid loads.
+            try:
+                if cargo_cube_pct is not None and cargo_cube_pct >= 90 and (unused_floor_mm is None or unused_floor_mm <= 80):
+                    return []
+            except Exception:
+                pass
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return []
+            try:
+                px = img.convert("RGB").load()
+                x0 = int(max(0, ce["xmin"] - 25)); x1 = int(min(img.width, ce["xmax"] + 25))
+                y0 = int(max(0, ce["ymin"] - 35)); y1 = int(min(img.height, ce["ymax"] + 15))
+                regions = _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=350, color_tol=45)
+            except Exception as e:
+                print(f"v25.09 COLOR FALL-PATH skipped: floodfill error={e}")
+                return []
+            cold = []
+            red = []
+            for rr in regions:
+                w = rr["x1"] - rr["x0"]; h = rr["y1"] - rr["y0"]
+                if w < 18 or h < 18:
+                    continue
+                if _v2509_is_cold_blue_cyan(rr.get("color", (0,0,0))):
+                    cold.append(rr)
+                elif _v2509_is_red_warm(rr.get("color", (0,0,0))):
+                    red.append(rr)
+            if len(cold) < V2509_COLOR_FALL_PATH_MIN_COLD_REGIONS or not red:
+                print(f"v25.09 COLOR FALL-PATH no trigger: cold={len(cold)}, red={len(red)}")
+                return []
+            cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+            accepted = []
+            for c in cold:
+                c_area = (c["x1"] - c["x0"]) * (c["y1"] - c["y0"])
+                if c_area < 700:
+                    continue
+                for r in red:
+                    r_area = (r["x1"] - r["x0"]) * (r["y1"] - r["y0"])
+                    if r_area < V2509_COLOR_FALL_PATH_MIN_RED_AREA:
+                        continue
+                    # Side/diagonal adjacency is accepted if x distance is small or x ranges overlap.
+                    x_overlap = _v2509_overlap_len(c["x0"], c["x1"], r["x0"], r["x1"])
+                    y_overlap = _v2509_overlap_len(c["y0"], c["y1"], r["y0"], r["y1"])
+                    x_gap = max(0.0, max(float(c["x0"]), float(r["x0"])) - min(float(c["x1"]), float(r["x1"])))
+                    min_h = max(1.0, min(float(c["y1"]-c["y0"]), float(r["y1"]-r["y0"])))
+                    vertical_overlap_ratio = y_overlap / min_h
+                    if (x_overlap > 0 or x_gap <= cargo_w * V2509_COLOR_FALL_PATH_MAX_X_GAP_RATIO) and vertical_overlap_ratio >= V2509_COLOR_FALL_PATH_MIN_VERTICAL_OVERLAP_RATIO:
+                        accepted.append((c, r, x_gap, vertical_overlap_ratio))
+                        break
+            if not accepted:
+                print(f"v25.09 COLOR FALL-PATH no accepted linkage: cold={len(cold)}, red={len(red)}")
+                return []
+            # Union all accepted cold regions and their closest red impact regions. Clamp to a compact
+            # physical fall-path box so it marks the cyan/blue source and red impact edge, not the whole cargo.
+            xs0=[]; ys0=[]; xs1=[]; ys1=[]
+            for c, r, _, _ in accepted:
+                xs0 += [c["x0"], r["x0"]]; ys0 += [c["y0"], r["y0"]]
+                xs1 += [c["x1"], r["x1"]]; ys1 += [c["y1"], r["y1"]]
+            ux0, uy0, ux1, uy1 = min(xs0), min(ys0), max(xs1), max(ys1)
+            # Limit oversized box: if red area is huge, bias x/y toward cyan source and impact edge.
+            cold_x0=min(c["x0"] for c,_,_,_ in accepted); cold_x1=max(c["x1"] for c,_,_,_ in accepted)
+            cold_y0=min(c["y0"] for c,_,_,_ in accepted); cold_y1=max(c["y1"] for c,_,_,_ in accepted)
+            ux0 = max(ce["xmin"], min(ux0, cold_x0 - 20)); ux1 = min(ce["xmax"], max(cold_x1 + 25, min(ux1, cold_x1 + cargo_w*0.30)))
+            uy0 = max(ce["ymin"], min(uy0, cold_y0 - 20)); uy1 = min(ce["ymax"], max(cold_y1 + 25, min(uy1, cold_y1 + 180)))
+            box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+            print(f"v25.09 CASE COLOR_FALL_PATH_CYAN_TO_RED accepted (FRONT): cold_regions={len(cold)}, red_regions={len(red)}, accepted_links={len(accepted)}, box_abs=[{ux0:.0f},{uy0:.0f},{ux1:.0f},{uy1:.0f}]")
+            return [_v2507_make_generic_step(
+                "FRONT", box,
+                "V25_09_GENERIC_COLOR_FALL_PATH_CYAN_TO_RED",
+                "ตรวจพบกล่องฟ้า/น้ำเงินหลายกล่องอยู่ในแนวเสี่ยงหล่นหรือเคลื่อนตัวใส่กล่องแดงที่ต่ำกว่า",
+                "COLOR_FALL_PATH_CYAN_TO_RED", 0.75
+            )]
+
+        def _v2510_color_distance(c1, c2):
+            try:
+                return ((int(c1[0])-int(c2[0]))**2 + (int(c1[1])-int(c2[1]))**2 + (int(c1[2])-int(c2[2]))**2) ** 0.5
+            except Exception:
+                return 0.0
+
+        def _v2510_detect_generic_region_fall_path(ctx):
+            """Generic upper-region to lower-impact fall/slide path detector.
+
+            This is the central logic version of EB91-type reasoning. It does not require cyan/red
+            colors and does not check manifest names.
+            """
+            if not V2510_GENERIC_REGION_FALL_PATH_ENABLED:
+                return []
+            try:
+                if cargo_cube_pct is not None and cargo_cube_pct >= 90 and (unused_floor_mm is None or unused_floor_mm <= 80):
+                    print("v25.10 GENERIC FALL-PATH skipped: full-cargo context")
+                    return []
+            except Exception:
+                pass
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return []
+            try:
+                px = img.convert("RGB").load()
+                x0 = int(max(0, ce["xmin"] - 25)); x1 = int(min(img.width, ce["xmax"] + 25))
+                y0 = int(max(0, ce["ymin"] - 35)); y1 = int(min(img.height, ce["ymax"] + 15))
+                regions_raw = _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=V2510_GENERIC_REGION_MIN_AREA, color_tol=45)
+            except Exception as e:
+                print(f"v25.10 GENERIC FALL-PATH skipped: floodfill error={e}")
+                return []
+            regions = []
+            for rr in regions_raw:
+                w = rr["x1"] - rr["x0"]; h = rr["y1"] - rr["y0"]
+                if w < V2510_GENERIC_REGION_MIN_DIM_PX or h < V2510_GENERIC_REGION_MIN_DIM_PX:
+                    continue
+                rr = dict(rr)
+                rr["w"] = w; rr["h"] = h; rr["area_box"] = w*h
+                rr["cx"] = (rr["x0"] + rr["x1"]) / 2.0
+                rr["cy"] = (rr["y0"] + rr["y1"]) / 2.0
+                regions.append(rr)
+            if len(regions) < 2:
+                print(f"v25.10 GENERIC FALL-PATH no trigger: regions={len(regions)}")
+                return []
+            cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+            candidates = []
+            for src in regions:
+                for impact in regions:
+                    if src is impact:
+                        continue
+                    # Source should be higher/upper than the impact region. It may still overlap in
+                    # perspective, so use center and top constraints rather than strict non-overlap.
+                    if not (src["cy"] <= impact["cy"] - 8 or src["y0"] <= impact["y0"] - 20):
+                        continue
+                    if _v2510_color_distance(src.get("color", (0,0,0)), impact.get("color", (0,0,0))) < V2510_GENERIC_REGION_MIN_COLOR_DISTANCE:
+                        continue
+                    x_overlap = _v2509_overlap_len(src["x0"], src["x1"], impact["x0"], impact["x1"])
+                    x_gap = max(0.0, max(float(src["x0"]), float(impact["x0"])) - min(float(src["x1"]), float(impact["x1"])))
+                    y_overlap = _v2509_overlap_len(src["y0"], src["y1"], impact["y0"], impact["y1"])
+                    min_h = max(1.0, min(float(src["h"]), float(impact["h"])))
+                    vertical_link_ratio = y_overlap / min_h
+                    drop_gap = max(0.0, float(impact["y0"]) - float(src["y1"]))
+                    x_link_ok = x_overlap > 0 or x_gap <= cargo_w * V2510_GENERIC_REGION_MAX_X_GAP_RATIO
+                    y_link_ok = vertical_link_ratio >= V2510_GENERIC_REGION_MIN_VERTICAL_LINK_RATIO or drop_gap <= V2510_GENERIC_REGION_MAX_DROP_GAP_PX
+                    if not (x_link_ok and y_link_ok):
+                        continue
+                    # Prefer compact source regions and meaningful impact faces. Avoid text/noise.
+                    score = (1.0 if x_overlap > 0 else 0.65) + min(1.0, vertical_link_ratio) + max(0.0, 1.0 - x_gap/(cargo_w*V2510_GENERIC_REGION_MAX_X_GAP_RATIO + 1))
+                    score += min(0.8, src["area_box"] / 20000.0) + min(0.6, impact["area_box"] / 25000.0)
+                    candidates.append((score, src, impact, x_gap, vertical_link_ratio, drop_gap))
+            if not candidates:
+                print(f"v25.10 GENERIC FALL-PATH no accepted linkage: regions={len(regions)}")
+                return []
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            selected = []
+            used_pairs = []
+            for cand in candidates:
+                _, src, impact, _, _, _ = cand
+                # Avoid repeated boxes with high overlap with already selected source/impact pairs.
+                current_abs = (min(src["x0"], impact["x0"]), min(src["y0"], impact["y0"]), max(src["x1"], impact["x1"]), max(src["y1"], impact["y1"]))
+                duplicate = False
+                for prev in used_pairs:
+                    if _box_iou_absolute(current_abs, prev) >= 0.35:
+                        duplicate = True
+                        break
+                if duplicate:
+                    continue
+                selected.append(cand); used_pairs.append(current_abs)
+                if len(selected) >= V2510_GENERIC_REGION_MAX_CASES:
+                    break
+            out = []
+            for idx, (score, src, impact, x_gap, vlink, drop_gap) in enumerate(selected, 1):
+                # Draw the source region plus nearest impact edge. Keep marker compact, not whole cargo.
+                ux0 = max(ce["xmin"], min(src["x0"], impact["x0"]) - 12)
+                uy0 = max(ce["ymin"], min(src["y0"], impact["y0"]) - 12)
+                ux1 = min(ce["xmax"], max(src["x1"], impact["x1"]) + 12)
+                uy1 = min(ce["ymax"], max(src["y1"], impact["y1"]) + 12)
+                # Bias to source hazard if impact region is very large.
+                if (ux1 - ux0) > cargo_w * 0.42:
+                    ux0 = max(ce["xmin"], src["x0"] - 20)
+                    ux1 = min(ce["xmax"], src["x1"] + cargo_w * 0.22)
+                box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+                print(f"v25.10 CASE GENERIC_REGION_FALL_PATH accepted (FRONT#{idx}): score={score:.2f}, src=[{src['x0']:.0f},{src['y0']:.0f},{src['x1']:.0f},{src['y1']:.0f}], impact=[{impact['x0']:.0f},{impact['y0']:.0f},{impact['x1']:.0f},{impact['y1']:.0f}], x_gap={x_gap:.0f}, vlink={vlink:.2f}, drop_gap={drop_gap:.0f}")
+                out.append(_v2507_make_generic_step(
+                    "FRONT", box,
+                    "V25_10_GENERIC_UPPER_REGION_OVER_LOWER_IMPACT",
+                    "ตรวจพบกล่อง/ผิวสินค้าด้านบนอยู่ในแนวเสี่ยงหล่นหรือเคลื่อนตัวใส่กล่องที่ต่ำกว่า",
+                    "UPPER_REGION_OVER_LOWER_IMPACT", min(0.99, max(0.55, score/3.0))
+                ))
+            return out
+
         def _v2507_generic_case_library(graph, ctx):
             """Generic physical case detectors converted from EC regression learnings.
 
@@ -4990,6 +5215,10 @@ def process_request(request):
             if not V2507_GENERIC_CASE_LIBRARY_ENABLED:
                 return []
             out = []
+            out.extend(_v2510_detect_generic_region_fall_path(ctx))
+            # Keep v25.09 color-specific detector disabled by default; it can be enabled for
+            # debugging but no longer drives the central logic.
+            out.extend(_v2509_detect_color_fall_path(ctx))
             nodes_by_id = {n["id"]: n for n in graph.get("nodes", [])}
             # Precompute median heights per view for tall/empty cases.
             med_h = {}
