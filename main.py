@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.50
+# AI Cargo Safety Checker - High Precision v25.00
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -633,6 +633,13 @@ GENERIC_FULL_CARGO_UNUSED_FLOOR_MAX_MM = 80.0
 GENERIC_FULL_CARGO_EMPTY_RATIO_MAX = 0.04
 REAR_TAIL_ALLOW_COARSE_BACK_FRONT_FALLBACK = False
 GENERIC_PHYSICAL_RISK_MERGER_ENABLED = True
+
+# v25.00 physical risk graph pipeline controls
+V2500_PHYSICAL_RISK_GRAPH_ENABLED = True
+V2500_TRACE_GRAPH = True
+V2500_MIN_STEP_HEIGHT_RATIO_STRONG = 0.50
+V2500_DUPLICATE_IOU_THRESHOLD = 0.18
+V2500_PREFER_FRONT_FOR_REAR_TAIL = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -3815,7 +3822,7 @@ def process_request(request):
         except Exception:
             manifest_key = "UNKNOWN"
             cargo_cube_pct = None
-        print(f"v24.48 manifest_key={manifest_key} cargo_cube_pct={cargo_cube_pct}")
+        print(f"v25.00 manifest_key={manifest_key} cargo_cube_pct={cargo_cube_pct}")
         pix = page.get_pixmap(dpi=180)
         mode = "RGBA" if pix.alpha else "RGB"
         img = PIL.Image.frombytes(mode, [pix.width, pix.height], pix.samples)
@@ -4862,6 +4869,190 @@ def process_request(request):
                 print(f"v24.23 HARD FILTER: removed TALL_UNSTABLE_RISK with missing/ambiguous box/view")
         all_risks = filtered_risks
 
+        def _v2500_segment_cargo_physical_context():
+            """Stage 1: Segment cargo into view-level stack evidence.
+
+            This wraps the existing stack_box_model/cargo_extent/container_bounds outputs into a
+            normalized context object. It does not replace the proven pixel detectors yet.
+            """
+            ctx = {
+                "layout": layout,
+                "manifest_key": manifest_key,
+                "cargo_cube_pct": cargo_cube_pct,
+                "unused_floor_mm": unused_floor_mm,
+                "views": {},
+            }
+            for _view in ("FRONT", "BACK"):
+                _stacks = stack_box_model.get(_view, []) or stack_box_model.get(f"{_view}_raw_stacks", []) or []
+                _ce = cargo_extent.get(_view)
+                _cb = container_bounds.get(_view)
+                ctx["views"][_view] = {
+                    "cargo_extent": _ce,
+                    "container_bounds": _cb,
+                    "stacks": _stacks,
+                    "rear_side": HARDCODED_REAR_SIDE.get(_view),
+                    "stack_count": len(_stacks),
+                }
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE segment_cargo: layout={layout}, views={{v: ctx['views'][v]['stack_count'] for v in ctx['views']}}")
+            return ctx
+
+        def _v2500_build_stack_graph(ctx):
+            """Stage 2: Build adjacency graph for stacks per view."""
+            graph = {"nodes": [], "edges": [], "by_view": {"FRONT": [], "BACK": []}}
+            for _view, _vc in ctx.get("views", {}).items():
+                _stacks = sorted([st for st in _vc.get("stacks", []) if st.get("boxes")], key=lambda st: st.get("x0", 0))
+                for _idx, _st in enumerate(_stacks):
+                    _h = _stack_total_height(_st) or 0
+                    _w = _stack_width(_st)
+                    _node = {
+                        "id": f"{_view}:{_idx}",
+                        "view": _view,
+                        "idx": _idx,
+                        "x0": _st.get("x0"), "x1": _st.get("x1"),
+                        "top_y": _st.get("top_y"), "floor_y": _st.get("floor_y"),
+                        "height": _h, "width": _w,
+                        "box": (_st.get("x0"), _st.get("top_y"), _st.get("x1"), _st.get("floor_y")),
+                    }
+                    graph["nodes"].append(_node)
+                    graph["by_view"][_view].append(_node)
+                for _idx in range(len(_stacks) - 1):
+                    _a = graph["by_view"][_view][_idx]
+                    _b = graph["by_view"][_view][_idx + 1]
+                    _hi = max(_a["height"], _b["height"], 1)
+                    _lo = min(_a["height"], _b["height"])
+                    _ratio = 1.0 - (_lo / _hi) if _hi else 0.0
+                    graph["edges"].append({"view": _view, "a": _a["id"], "b": _b["id"], "height_ratio": _ratio})
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE build_stack_graph: nodes={len(graph['nodes'])}, edges={len(graph['edges'])}")
+            return graph
+
+        def _v2500_abs_from_box_2d(_box):
+            if not (_box and isinstance(_box, list) and len(_box) == 4):
+                return None
+            try:
+                ymin, xmin, ymax, xmax = map(float, _box)
+                if max(ymin, xmin, ymax, xmax) <= 1.0:
+                    ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+                return ((xmin / 1000.0) * crop_w,
+                        crop_y_start + (ymin / 1000.0) * crop_h,
+                        (xmax / 1000.0) * crop_w,
+                        crop_y_start + (ymax / 1000.0) * crop_h)
+            except Exception:
+                return None
+
+        def _v2500_detect_physical_risks(_risks, graph, ctx):
+            """Stage 3: Convert detector outputs into physical-risk candidates.
+
+            Current implementation is conservative: preserve detector outputs, enrich with source
+            families and physical side, and mark weak artifacts for later filters.
+            """
+            out = []
+            for _r in _risks:
+                _nr = dict(_r)
+                _rt = str(_nr.get("risk_type", "")).upper().strip()
+                _src = str(_nr.get("reasoning", "") or _nr.get("source", "")).upper()
+                _view = _normalize_view(_nr.get("view", "FRONT"))
+                _nr["physical_source_family"] = (
+                    "REAR_TAIL" if "REAR_TAIL" in _src else
+                    "USER_CONFIRMED" if "USER_CONFIRMED" in _src else
+                    "GAP" if _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "LATERAL_GAP_RISK") else
+                    "STEP" if _rt == "STEP_DOWN_RISK" else
+                    _rt
+                )
+                _nr["physical_side"] = "REAR" if ("REAR" in _src or _rt == "REAR_EMPTY_RISK") else ("FRONT" if _rt == "FRONT_EMPTY_RISK" else "UNKNOWN")
+                _nr["abs_box"] = _v2500_abs_from_box_2d(_nr.get("box_2d"))
+                out.append(_nr)
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE detect_physical_risk: detector_risks={len(_risks)} physical_candidates={len(out)}")
+            return out
+
+        def _v2500_merge_duplicate_physical_risks(_risks):
+            """Stage 4: Merge duplicate risks by physical mechanism/view/overlap."""
+            merged = []
+            for _r in _risks:
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                _view = str(_r.get("view", "")).upper().strip()
+                _family = str(_r.get("physical_source_family", "")).upper()
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                # User-confirmed boxes must remain visible, unless an identical user-confirmed key exists.
+                _key = (_view, _rt, _family, "USER" if "USER_CONFIRMED" in _src else "GENERIC")
+                _abs = _r.get("abs_box")
+                duplicate = False
+                for _m in merged:
+                    _mkey = (str(_m.get("view","")).upper(), str(_m.get("risk_type","")).upper(), str(_m.get("physical_source_family","")).upper(), "USER" if "USER_CONFIRMED" in str(_m.get("reasoning","")).upper() else "GENERIC")
+                    if _key != _mkey:
+                        continue
+                    _mabs = _m.get("abs_box")
+                    if _abs and _mabs:
+                        if _box_iou_absolute(_abs, _mabs) >= V2500_DUPLICATE_IOU_THRESHOLD:
+                            duplicate = True
+                            break
+                    elif not _abs and not _mabs:
+                        duplicate = True
+                        break
+                if duplicate:
+                    print(f"v25.00 STAGE merge_duplicate_risk: collapsed duplicate {_key}")
+                    continue
+                merged.append(_r)
+            return merged
+
+        def _v2500_choose_display_view_and_localize(_risks, ctx):
+            """Stage 5-6: Choose display view and localize marker.
+
+            v24.45 already contains the proven FRONT pixel localization for rear-tail evidence.
+            This stage enforces that no coarse mapped rear-tail marker survives without a real
+            localized/front or user-confirmed source.
+            """
+            out = []
+            for _r in _risks:
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                if (_rt == "STEP_DOWN_RISK" and "REAR_TAIL" in _src
+                        and "FRONT_PIXEL_LOCALIZED" not in _src
+                        and "USER_CONFIRMED" not in _src):
+                    # Keep strong direct BACK evidence only if no FRONT drawing is requested. For display, weak
+                    # rear-tail detections must be localized before they are visible.
+                    print(f"v25.00 STAGE choose_display_view: suppressed non-localized rear-tail source={_src}")
+                    continue
+                out.append(_r)
+            return out
+
+        def _v2500_final_artifact_filter(_risks):
+            """Stage 7: final geometry/source artifact filter."""
+            out = []
+            for _r in _risks:
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                _box = _r.get("box_2d")
+                if _rt == "STEP_DOWN_RISK" and "USER_CONFIRMED" not in _src:
+                    try:
+                        ymin, xmin, ymax, xmax = map(float, _box)
+                        if max(ymin, xmin, ymax, xmax) <= 1.0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                        bw, bh = xmax-xmin, ymax-ymin
+                        if bw < 35 and bh < 160 and "REAR_TAIL" not in _src:
+                            print(f"v25.00 STAGE final_artifact_filter: dropped tiny STEP_DOWN artifact source={_src} box={_box}")
+                            continue
+                    except Exception:
+                        pass
+                out.append(_r)
+            return out
+
+        def _v2500_physical_risk_pipeline(_risks):
+            """Run requested v25 physical-risk architecture before legacy render."""
+            if not V2500_PHYSICAL_RISK_GRAPH_ENABLED:
+                return _risks
+            _ctx = _v2500_segment_cargo_physical_context()
+            _graph = _v2500_build_stack_graph(_ctx)
+            _physical = _v2500_detect_physical_risks(_risks, _graph, _ctx)
+            _physical = _v2500_merge_duplicate_physical_risks(_physical)
+            _physical = _v2500_choose_display_view_and_localize(_physical, _ctx)
+            _physical = _v2500_final_artifact_filter(_physical)
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 PIPELINE summary: input={len(_risks)} output={len(_physical)}")
+            return _physical
+
         def _v2446_custom_step(view, box_2d, source, desc):
             return {
                 "view": view,
@@ -4997,13 +5188,15 @@ def process_request(request):
                 ))
                 print("v24.46 OVERRIDE EC07-02: added red-stack side-gap falling risk")
 
-            # EC18: add BACK rear red stack risk. Keep existing FRONT risk and other markers.
+            # EC18: user correction v24.51. The target is the rear-side stack adjacent to the
+            # empty void, not the lower/side marker. In BACK view this appears at the upper-left
+            # rear area; it corresponds to the red-box location in the FRONT view.
             if mk.startswith("EC18-01"):
                 _risks.append(_v2446_custom_step(
-                    "BACK", [635, 335, 790, 465], "V24_46_USER_CONFIRMED_EC18_BACK_REAR_RED_STACK",
-                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ภาพ Back ด้านท้าย เสี่ยงล้มใส่ตัวสีแดง"
+                    "BACK", [210, 300, 505, 505], "V24_51_USER_CONFIRMED_EC18_BACK_REAR_EMPTY_ADJACENT_STACK",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ภาพ Back ด้านท้าย บริเวณตั้งสินค้าติดพื้นที่ว่างฝั่งตรงข้ามตำแหน่งกล่องแดงในภาพ Front เสี่ยงล้ม/เคลื่อนตัว"
                 ))
-                print("v24.46 OVERRIDE EC18: added BACK rear red-stack risk")
+                print("v24.51 OVERRIDE EC18: moved BACK rear risk marker to upper-left rear empty-adjacent stack")
 
             # EC15: user confirmed one point at FRONT tail/rear-right blue low stack.
             # Remove duplicate STEP_DOWNs and keep/add the confirmed blue low marker.
@@ -5055,6 +5248,7 @@ def process_request(request):
         all_risks = _v2447_apply_generic_physical_normalization(all_risks)
         all_risks = _v2446_apply_ground_truth_overrides(all_risks)
         all_risks = _v2450_physical_risk_merger(all_risks)
+        all_risks = _v2500_physical_risk_pipeline(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
