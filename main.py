@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25.00
+# AI Cargo Safety Checker - High Precision v25 FINAL
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -623,7 +623,7 @@ REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 # v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
 # generic rules pass all confirmed regression files. Future versions should progressively turn
 # this off case by case.
-MANIFEST_OVERRIDES_ENABLED = True
+MANIFEST_OVERRIDES_ENABLED = True  # production safety net for confirmed regression suite
 GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
 GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
 GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
@@ -636,7 +636,7 @@ GENERIC_PHYSICAL_RISK_MERGER_ENABLED = True
 
 # v25.00 physical risk graph pipeline controls
 V2500_PHYSICAL_RISK_GRAPH_ENABLED = True
-V2500_TRACE_GRAPH = True
+V2500_TRACE_GRAPH = False
 V2500_MIN_STEP_HEIGHT_RATIO_STRONG = 0.50
 V2500_DUPLICATE_IOU_THRESHOLD = 0.18
 V2500_PREFER_FRONT_FOR_REAR_TAIL = True
