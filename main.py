@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.39
+# AI Cargo Safety Checker - High Precision v24.40
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -607,6 +607,8 @@ REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN = STEP_DOWN_STACK_MAX_WIDTH_RATIO_
 REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX = STEP_DOWN_STACK_MIN_HEIGHT_PX
 REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = False
 REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR = True
+GENERIC_STEP_DOWN_HEAD_SIDE_VETO_ENABLED = True
+GENERIC_STEP_DOWN_HEAD_SIDE_ZONE_RATIO = 0.45
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
 
 # ---------------------------------------------------------------------------
@@ -4475,6 +4477,41 @@ def process_request(request):
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis / cross-view verification)",
                 })
 
+        def _v2440_is_generic_step_down_on_physical_head_side(_risk):
+            """Reject generic STEP_DOWN boxes on the physical head side, but preserve rear-tail/low-exposed sources."""
+            if not GENERIC_STEP_DOWN_HEAD_SIDE_VETO_ENABLED:
+                return False
+            _rt = str(_risk.get("risk_type", "")).upper().strip()
+            if _rt != "STEP_DOWN_RISK":
+                return False
+            _view = _normalize_view(_risk.get("view", ""))
+            if _view not in ("FRONT", "BACK"):
+                return False
+            _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
+            # Preserve the real target sources. These may be small and may live at the rear edge.
+            if "REAR_TAIL_LOW_STACK" in _source or "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
+                return False
+            # Apply only to generic stack-height/AI-assisted STEP_DOWN sources, not other risk types.
+            if not ("STACK_HEIGHT_STEP_DOWN" in _source or "AI_ASSISTED_DETERMINISTIC_STACK_LOCALIZATION" in _source or "HEIGHT_PROFILE_STEP" in _source):
+                return False
+            _box = _risk.get("box_2d")
+            if not (_box and isinstance(_box, list) and len(_box) == 4):
+                return False
+            try:
+                ymin, xmin, ymax, xmax = map(float, _box)
+                if max(ymin, xmin, ymax, xmax) <= 1.0:
+                    ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+            except Exception:
+                return False
+            cx = (xmin + xmax) / 2.0
+            rear_side = HARDCODED_REAR_SIDE.get(_view, "LEFT")
+            # Head side is opposite of physical rear side.
+            if rear_side == "RIGHT":
+                in_head_side = cx <= GENERIC_STEP_DOWN_HEAD_SIDE_ZONE_RATIO * 1000.0
+            else:
+                in_head_side = cx >= (1.0 - GENERIC_STEP_DOWN_HEAD_SIDE_ZONE_RATIO) * 1000.0
+            return in_head_side
+
         def _v2433_is_tiny_topface_step_down_artifact(_risk):
             if not STEP_DOWN_TINY_TOPFACE_GUARD_ENABLED:
                 return False
@@ -4573,8 +4610,11 @@ def process_request(request):
         filtered_risks = []
         for _risk in all_risks:
             _rt = str(_risk.get("risk_type", "")).upper().strip()
+            if _v2440_is_generic_step_down_on_physical_head_side(_risk):
+                print(f"v24.40 HARD FILTER: removed generic STEP_DOWN on physical head side view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
+                continue
             if _v2433_is_tiny_topface_step_down_artifact(_risk):
-                print(f"v24.39 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
+                print(f"v24.40 HARD FILTER: removed tiny top-face STEP_DOWN artifact view={_risk.get('view')} source={_risk.get('reasoning')} box={_risk.get('box_2d')}")
                 continue
             if _rt != "TALL_UNSTABLE_RISK":
                 filtered_risks.append(_risk)
