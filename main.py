@@ -19,8 +19,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v26.01
-# v26.01 - Regression Framework + Rule Tuning Baseline
+# AI Cargo Safety Checker - High Precision v26.02
+# v26.02 - Neutral Rule Engine Phase 2: marker localization and LEFT_RIGHT priority
 # Phase 1 converts observed review behavior into manifest-independent neutral families.
 # It keeps legacy risk_type labels for renderer compatibility, while adding neutral_family,
 # neutral_marker_policy, and neutral_rule_reason fields for downstream suppression and audit.
@@ -630,7 +630,7 @@ REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 # v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
 # generic rules pass all confirmed regression files. Future versions should progressively turn
 # this off case by case.
-MANIFEST_OVERRIDES_ENABLED = False  # v26.01 neutral-rule mode: manifest overrides disabled by default
+MANIFEST_OVERRIDES_ENABLED = False  # v26.00 neutral-rule mode: manifest overrides disabled by default
 GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
 GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
 GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
@@ -721,8 +721,6 @@ V2517_MIN_LIGHT_CYAN_BRIGHTNESS = 340
 # v26.00 Neutral Rule Engine Phase 1 controls
 V2600_NEUTRAL_RULE_ENGINE_ENABLED = True
 V2600_TRACE_NEUTRAL_RULES = True
-# v26.01 tuning policy: keep manifest overrides off and validate every rule change via regression golden cases.
-V2601_REGRESSION_FRAMEWORK_ENABLED = True
 V2600_FULL_SUPPORT_SAFE_CUBE_PCT = 90.0
 V2600_LOW_MEDIUM_UTIL_CUBE_PCT = 75.0
 V2600_ZONE_MARKER_MIN_UNUSED_FLOOR_MM = 250.0
@@ -731,6 +729,15 @@ V2600_BROAD_ZONE_BOX_MAX_AREA = 180000.0
 V2600_FAMILY_CLUSTER_IOU = 0.22
 V2600_FAMILY_CLUSTER_CONTAINMENT = 0.58
 V2600_ALLOW_SOURCE_AND_ZONE_COEXIST = True
+
+# v26.02 marker localization and LEFT_RIGHT controls
+V2602_MARKER_LOCALIZATION_ENABLED = True
+V2602_SOURCE_BOX_EXPAND_RATIO = 0.12
+V2602_SOURCE_BOX_EXPAND_MIN_PX = 12
+V2602_BROAD_RED_BOX_DROP_AREA_RATIO = 0.055
+V2602_LEFT_RIGHT_FRONT_TAIL_PRIORITY = True
+V2602_LEFT_RIGHT_MAX_PRIMARY_SOURCE_RISKS = 1
+V2602_LEFT_RIGHT_SUPPRESS_WEAK_GAP_WHEN_SOURCE_EXISTS = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -6149,8 +6156,152 @@ def process_request(request):
         all_risks = _v2446_apply_ground_truth_overrides(all_risks)
         all_risks = _v2450_physical_risk_merger(all_risks)
         all_risks = _v2500_physical_risk_pipeline(all_risks)
+        def _v2602_img_size():
+            try:
+                return int(img.size[0]), int(img.size[1])
+            except Exception:
+                return 2000, 1400
+
+        def _v2602_box(_risk):
+            box = _risk.get("bbox") or _risk.get("box") or [0, 0, 0, 0]
+            try:
+                return [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+            except Exception:
+                return [0.0, 0.0, 0.0, 0.0]
+
+        def _v2602_set_box(_risk, box):
+            b = [int(round(v)) for v in box]
+            _risk["bbox"] = b
+            if "box" in _risk:
+                _risk["box"] = b
+
+        def _v2602_expand_source_box(_risk):
+            """Expand localized red/pink source markers so the box covers the whole physical source group.
+            This is intentionally modest: it fixes under-sized source markers without turning them into
+            a broad source+void union box.
+            """
+            w_img, h_img = _v2602_img_size()
+            x1, y1, x2, y2 = _v2602_box(_risk)
+            w = max(0.0, x2 - x1)
+            h = max(0.0, y2 - y1)
+            if w <= 1 or h <= 1:
+                return _risk
+            mx = max(V2602_SOURCE_BOX_EXPAND_MIN_PX, w * V2602_SOURCE_BOX_EXPAND_RATIO)
+            my = max(V2602_SOURCE_BOX_EXPAND_MIN_PX, h * V2602_SOURCE_BOX_EXPAND_RATIO)
+            # More vertical margin for low-stack / step-down source boxes because earlier versions often
+            # clipped the top or bottom part of the physical carton stack.
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", ""))).upper()
+            if "LOW" in u or "STEP" in u or "TAIL" in u:
+                my = max(my, h * 0.18, 16)
+            nb = [
+                max(0, x1 - mx),
+                max(0, y1 - my),
+                min(w_img - 1, x2 + mx),
+                min(h_img - 1, y2 + my),
+            ]
+            _v2602_set_box(_risk, nb)
+            _risk["v2602_marker_localization"] = "expanded_source_box_without_void_union"
+            return _risk
+
+        def _v2602_is_source_family(_risk):
+            fam = str(_risk.get("neutral_family", "")).upper()
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", ""))).upper()
+            return fam in ("SOURCE_OBJECT", "SUPPORT_FAILURE", "VERTICAL_VOID") or any(t in u for t in ("STEP_DOWN", "OVERHANG", "TALL_UNSTABLE", "LOW_EXPOSED", "FALL_PATH"))
+
+        def _v2602_is_gap_or_empty(_risk):
+            fam = str(_risk.get("neutral_family", "")).upper()
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", ""))).upper()
+            return fam in ("FLOOR_EMPTY", "REAR_EMPTY", "FRONT_EMPTY", "SIDE_GAP") or any(t in u for t in ("EMPTY", "GAP", "VOID"))
+
+        def _v2602_is_broad_red_fallback(_risk):
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", "")) + " " + str(_risk.get("source", ""))).upper()
+            if not any(t in u for t in ("FALL_PATH", "STEP_DOWN", "OVERHANG", "COMBINED_AREA", "FALLBACK", "CARGO EXTENT")):
+                return False
+            area = _v2600_norm_area(_risk)
+            w_img, h_img = _v2602_img_size()
+            return area >= (w_img * h_img * V2602_BROAD_RED_BOX_DROP_AREA_RATIO)
+
+        def _v2602_left_right_score(_risk):
+            """Rank source-object risks for LEFT_RIGHT pages. Front tail low-stack source gets priority.
+            This implements the user's AC03 pattern as a neutral geometry rule, not a manifest override.
+            """
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", "")) + " " + str(_risk.get("source", ""))).upper()
+            view = str(_risk.get("view", "")).upper()
+            score = 0
+            if view == "FRONT": score += 100
+            if "TAIL" in u or "REAR" in u: score += 45
+            if "LOW" in u or "STEP" in u or "HEIGHT" in u: score += 35
+            if "SOURCE" in str(_risk.get("neutral_marker_policy", "")).upper(): score += 15
+            if "BACK" == view: score -= 80
+            if "OVERHANG" in u and view == "BACK": score -= 70
+            if _v2602_is_gap_or_empty(_risk): score -= 50
+            # Prefer a localized physical box over a very broad fallback region.
+            if _v2602_is_broad_red_fallback(_risk): score -= 30
+            return score
+
+        def _v2602_marker_localization_and_left_right(_risks):
+            if not V2602_MARKER_LOCALIZATION_ENABLED:
+                return _risks
+            layout_now = str(locals().get("layout", "") or "").upper()
+            out = []
+            for r in _risks:
+                nr = dict(r)
+                if _v2602_is_source_family(nr) and not _v2602_is_broad_red_fallback(nr):
+                    nr = _v2602_expand_source_box(nr)
+                out.append(nr)
+
+            # Suppress broad red fallback boxes that mainly represent an empty zone or source+void union.
+            # Empty space should remain represented by its own empty/gap marker, not by a large red box.
+            filtered = []
+            for nr in out:
+                if _v2602_is_broad_red_fallback(nr):
+                    if any(_v2602_is_gap_or_empty(x) for x in out):
+                        if V2600_TRACE_NEUTRAL_RULES:
+                            print(f"v26.02 Marker Rule: dropped broad red fallback/union marker view={nr.get('view')} type={nr.get('risk_type')} box={nr.get('bbox')}")
+                        continue
+                filtered.append(nr)
+            out = filtered
+
+            # LEFT_RIGHT special flow: first find true high-low/source impact point, then consider empty-space evidence.
+            # If a Front-tail source exists, keep the best source marker and suppress weak Back overhang/gap artifacts.
+            if V2602_LEFT_RIGHT_FRONT_TAIL_PRIORITY and layout_now == "LEFT_RIGHT":
+                source_candidates = [r for r in out if _v2602_is_source_family(r)]
+                front_sources = [r for r in source_candidates if str(r.get("view", "")).upper() == "FRONT"]
+                if front_sources:
+                    primary = max(front_sources, key=_v2602_left_right_score)
+                    primary_id = id(primary)
+                    # If the list contains copies, match by bbox/type/view rather than only object identity.
+                    pbox = primary.get("bbox")
+                    ptype = primary.get("risk_type")
+                    kept = []
+                    for r in out:
+                        view = str(r.get("view", "")).upper()
+                        u = (str(r.get("risk_type", "")) + " " + str(r.get("reasoning", "")) + " " + str(r.get("source", ""))).upper()
+                        same_primary = (r.get("bbox") == pbox and r.get("risk_type") == ptype and view == "FRONT")
+                        if same_primary:
+                            r["v2602_left_right_primary"] = "front_tail_low_stack_or_source_object"
+                            kept.append(r)
+                            continue
+                        if view == "BACK" and any(t in u for t in ("OVERHANG", "FALL_PATH", "TALL_UNSTABLE", "STEP_DOWN")):
+                            if V2600_TRACE_NEUTRAL_RULES:
+                                print(f"v26.02 LEFT_RIGHT: suppressed BACK artifact type={r.get('risk_type')} source={r.get('reasoning')}")
+                            continue
+                        if V2602_LEFT_RIGHT_SUPPRESS_WEAK_GAP_WHEN_SOURCE_EXISTS and _v2602_is_gap_or_empty(r):
+                            if V2600_TRACE_NEUTRAL_RULES:
+                                print(f"v26.02 LEFT_RIGHT: suppressed weak gap/empty evidence because Front source exists type={r.get('risk_type')} view={view}")
+                            continue
+                        # In LEFT_RIGHT mode, if there is a primary Front source, keep at most one source family marker.
+                        if _v2602_is_source_family(r) and not same_primary:
+                            if V2600_TRACE_NEUTRAL_RULES:
+                                print(f"v26.02 LEFT_RIGHT: suppressed non-primary source marker type={r.get('risk_type')} view={view}")
+                            continue
+                        kept.append(r)
+                    out = kept
+            return out
+
         all_risks = _v2511_visual_deduplicate_risks(all_risks)
         all_risks = _v2600_neutral_rule_engine_phase1(all_risks)
+        all_risks = _v2602_marker_localization_and_left_right(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
