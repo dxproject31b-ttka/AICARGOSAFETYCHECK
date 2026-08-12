@@ -19,8 +19,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v26.00
-# v26.00 - Neutral Rule Engine Phase 1
+# AI Cargo Safety Checker - High Precision v26.01
+# v26.01 - Regression Framework + Rule Tuning Baseline
 # Phase 1 converts observed review behavior into manifest-independent neutral families.
 # It keeps legacy risk_type labels for renderer compatibility, while adding neutral_family,
 # neutral_marker_policy, and neutral_rule_reason fields for downstream suppression and audit.
@@ -630,7 +630,7 @@ REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 # v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
 # generic rules pass all confirmed regression files. Future versions should progressively turn
 # this off case by case.
-MANIFEST_OVERRIDES_ENABLED = False  # v26.00 neutral-rule mode: manifest overrides disabled by default
+MANIFEST_OVERRIDES_ENABLED = False  # v26.01 neutral-rule mode: manifest overrides disabled by default
 GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
 GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
 GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
@@ -721,6 +721,8 @@ V2517_MIN_LIGHT_CYAN_BRIGHTNESS = 340
 # v26.00 Neutral Rule Engine Phase 1 controls
 V2600_NEUTRAL_RULE_ENGINE_ENABLED = True
 V2600_TRACE_NEUTRAL_RULES = True
+# v26.01 tuning policy: keep manifest overrides off and validate every rule change via regression golden cases.
+V2601_REGRESSION_FRAMEWORK_ENABLED = True
 V2600_FULL_SUPPORT_SAFE_CUBE_PCT = 90.0
 V2600_LOW_MEDIUM_UTIL_CUBE_PCT = 75.0
 V2600_ZONE_MARKER_MIN_UNUSED_FLOOR_MM = 250.0
