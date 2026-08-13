@@ -19,8 +19,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v26.02
-# v26.02 - Neutral Rule Engine Phase 2: marker localization and LEFT_RIGHT priority
+# AI Cargo Safety Checker - High Precision v26.08
+# v26.08 - Neutral Rule Engine Phase 4: target-box relocalization and false-marker suppression
 # Phase 1 converts observed review behavior into manifest-independent neutral families.
 # It keeps legacy risk_type labels for renderer compatibility, while adding neutral_family,
 # neutral_marker_policy, and neutral_rule_reason fields for downstream suppression and audit.
@@ -481,7 +481,7 @@ RISK_COLORS = {
     "REAR_EMPTY_RISK": "orange",
     "REAR_LATERAL_IMBALANCE": "deeppink",
     "REAR_COMBINED_RISK": "orange",
-    "COMBINED_AREA_RISK": "purple",
+    "COMBINED_AREA_RISK": "review_target",
     "FRONT_EMPTY_RISK": "yellow",
     "LATERAL_GAP_RISK": "cyan",
     "TALL_UNSTABLE_RISK": "magenta",
@@ -738,6 +738,20 @@ V2602_BROAD_RED_BOX_DROP_AREA_RATIO = 0.055
 V2602_LEFT_RIGHT_FRONT_TAIL_PRIORITY = True
 V2602_LEFT_RIGHT_MAX_PRIMARY_SOURCE_RISKS = 1
 V2602_LEFT_RIGHT_SUPPRESS_WEAK_GAP_WHEN_SOURCE_EXISTS = True
+
+# v26.08 neutral correction controls
+# These controls use reviewed annotations only as target-location evidence and false-marker evidence.
+# They do not introduce any color/shape semantics from user markup.
+V2604_TARGET_BOX_RELOCALIZATION_ENABLED = True
+V2604_FALSE_MARKER_SUPPRESSION_ENABLED = True
+V2604_SUPPRESS_GAP_EVIDENCE_WHEN_SOURCE_EXISTS = True
+V2604_KEEP_ONE_PRIMARY_SOURCE_PER_VIEW = True
+V2604_FRONT_TAIL_SIDE_BIAS = "LEFT"
+V2604_BACK_TAIL_SIDE_BIAS = "RIGHT"
+V2604_BROAD_SOURCE_AREA_RATIO = 0.045
+V2604_BROAD_EMPTY_UNION_AREA_RATIO = 0.040
+V2604_SOURCE_CLUSTER_IOU = 0.18
+V2604_SOURCE_CLUSTER_CONTAINMENT = 0.45
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -6300,8 +6314,179 @@ def process_request(request):
             return out
 
         all_risks = _v2511_visual_deduplicate_risks(all_risks)
+        def _v2604_target_side_score(_risk):
+            """Neutral score for choosing the primary source-impact marker.
+            Reviewed correction images are used only as evidence that the desired marker should be on the
+            physical source/impact cargo group, while crossed/incorrect examples indicate non-primary markers
+            should be suppressed. This function does not use annotation colors or symbols as runtime criteria.
+            """
+            w_img, h_img = _v2602_img_size()
+            x1, y1, x2, y2 = _v2602_box(_risk)
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            area_ratio = _v2600_norm_area(_risk) / max(1.0, w_img * h_img)
+            view = str(_risk.get("view", "")).upper()
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", "")) + " " + str(_risk.get("source", ""))).upper()
+            score = 0.0
+            # Geometry bias: most reviewed Front source/impact mistakes were corrected toward physical tail/left,
+            # while Back-source corrections trend toward physical tail/right in TOP_BOTTOM views.
+            if view == "FRONT":
+                score += ((w_img - cx) / max(1.0, w_img)) * 60.0
+            elif view == "BACK":
+                score += (cx / max(1.0, w_img)) * 60.0
+            # Prefer visible cargo body over tiny top-face artifacts.
+            score += (cy / max(1.0, h_img)) * 18.0
+            # Prefer explicit high-low/source evidence.
+            if any(t in u for t in ("LOW", "STEP", "HEIGHT", "TAIL", "REAR_TAIL", "SOURCE", "IMPACT")):
+                score += 30.0
+            if any(t in u for t in ("OVERHANG", "TALL_UNSTABLE")):
+                score += 8.0
+            # Penalize broad fallback/source+void union boxes.
+            score -= min(90.0, area_ratio * 850.0)
+            if any(t in u for t in ("FALLBACK", "CARGO EXTENT", "COMBINED_AREA", "COMBINED:")):
+                score -= 45.0
+            if _v2602_is_gap_or_empty(_risk):
+                score -= 55.0
+            return score
+
+        def _v2604_is_broad_source_union(_risk):
+            w_img, h_img = _v2602_img_size()
+            area_ratio = _v2600_norm_area(_risk) / max(1.0, w_img * h_img)
+            u = (str(_risk.get("risk_type", "")) + " " + str(_risk.get("reasoning", "")) + " " + str(_risk.get("source", ""))).upper()
+            if not _v2602_is_source_family(_risk):
+                return False
+            if area_ratio >= V2604_BROAD_SOURCE_AREA_RATIO:
+                return True
+            if any(t in u for t in ("FALLBACK", "CARGO EXTENT", "COMBINED_AREA", "COMBINED:")) and area_ratio >= V2604_BROAD_EMPTY_UNION_AREA_RATIO:
+                return True
+            return False
+
+        def _v2604_refine_target_boxes_and_suppress_false_markers(_risks):
+            if not (V2604_TARGET_BOX_RELOCALIZATION_ENABLED or V2604_FALSE_MARKER_SUPPRESSION_ENABLED):
+                return _risks
+            if not _risks:
+                return _risks
+            # Step 1: expand small source markers enough to cover the physical cargo group, without merging them
+            # with empty floor/void zones.
+            stage = []
+            for r in _risks:
+                nr = dict(r)
+                if V2604_TARGET_BOX_RELOCALIZATION_ENABLED and _v2602_is_source_family(nr) and not _v2604_is_broad_source_union(nr):
+                    nr = _v2602_expand_source_box(nr)
+                    nr["v2604_target_box_relocalization"] = "source_group_box_expanded"
+                stage.append(nr)
+
+            source_exists = any(_v2602_is_source_family(r) for r in stage)
+            filtered = []
+            for r in stage:
+                if V2604_FALSE_MARKER_SUPPRESSION_ENABLED and source_exists and V2604_SUPPRESS_GAP_EVIDENCE_WHEN_SOURCE_EXISTS and _v2602_is_gap_or_empty(r):
+                    # Empirical correction: when a physical source/impact cargo group exists, empty/gap markers are
+                    # supporting evidence and should not appear as extra red risk boxes.
+                    if V2600_TRACE_NEUTRAL_RULES:
+                        print(f"v26.08 False Marker Suppression: removed gap/empty evidence marker view={r.get('view')} type={r.get('risk_type')}")
+                    continue
+                if V2604_FALSE_MARKER_SUPPRESSION_ENABLED and _v2604_is_broad_source_union(r):
+                    # Broad boxes that cover high stack plus void/floor region are not good target boxes. Keep only if
+                    # there is no alternative source marker at all.
+                    alternatives = [x for x in stage if x is not r and _v2602_is_source_family(x) and not _v2604_is_broad_source_union(x)]
+                    if alternatives:
+                        if V2600_TRACE_NEUTRAL_RULES:
+                            print(f"v26.08 False Marker Suppression: removed broad source/void union view={r.get('view')} type={r.get('risk_type')} box={r.get('bbox')}")
+                        continue
+                filtered.append(r)
+            stage = filtered
+
+            # Step 2: if there are multiple source markers in the same view, select the one that best represents the
+            # physical source/impact location and suppress non-primary duplicates.
+            if V2604_FALSE_MARKER_SUPPRESSION_ENABLED and V2604_KEEP_ONE_PRIMARY_SOURCE_PER_VIEW:
+                by_view = {}
+                for r in stage:
+                    if _v2602_is_source_family(r):
+                        by_view.setdefault(str(r.get("view", "")).upper(), []).append(r)
+                keep_ids = set()
+                for view, arr in by_view.items():
+                    if len(arr) <= 1:
+                        for r in arr:
+                            keep_ids.add(id(r))
+                        continue
+                    best = max(arr, key=_v2604_target_side_score)
+                    keep_ids.add(id(best))
+                    best["v2604_primary_source_marker"] = f"selected_by_target_side_score_{_v2604_target_side_score(best):.1f}"
+                    if V2600_TRACE_NEUTRAL_RULES:
+                        print(f"v26.08 Target Box Relocalization: selected primary source view={view} type={best.get('risk_type')} score={_v2604_target_side_score(best):.1f}")
+                final = []
+                for r in stage:
+                    if _v2602_is_source_family(r) and id(r) not in keep_ids:
+                        if V2600_TRACE_NEUTRAL_RULES:
+                            print(f"v26.08 False Marker Suppression: removed non-primary source marker view={r.get('view')} type={r.get('risk_type')} box={r.get('bbox')}")
+                        continue
+                    final.append(r)
+                stage = final
+            return stage
+
+        def _v2607_box_area_ratio_from_risk(_risk):
+            box = _risk.get("box_2d") or _risk.get("boundingBox") or _risk.get("box")
+            if not (box and isinstance(box, list) and len(box) == 4):
+                return None
+            try:
+                y0, x0, y1, x1 = map(float, box)
+                if max(y0, x0, y1, x1) <= 1.0:
+                    y0, x0, y1, x1 = y0 * 1000, x0 * 1000, y1 * 1000, x1 * 1000
+                return max(0.0, (x1 - x0) / 1000.0) * max(0.0, (y1 - y0) / 1000.0)
+            except Exception:
+                return None
+
+        def _v2607_reset_correction_filter(_risks):
+            # v26.08 RESET CORRECTION:
+            # 1) Roll back broad source/union box behavior that created false red rectangles across whole cargo blocks.
+            # 2) Keep measured empty/gap arrow risks because those are based on local container/cargo geometry.
+            # 3) For box-based risks, keep only user-confirmed or very compact source boxes. Large/broad boxes are
+            #    treated as perspective/isometric artifacts unless supported by a precise compact box.
+            out = []
+            dropped = 0
+            for r in _risks:
+                rt = str(r.get("risk_type", "")).upper().strip()
+                if rt == "ERROR" or rt in GAP_ARROW_RISK_TYPES:
+                    out.append(r); continue
+                if rt not in BOX_BASED_RISK_TYPES and rt not in ("COMBINED_AREA_RISK", "REAR_COMBINED_RISK"):
+                    out.append(r); continue
+                u = (str(r.get("reasoning", "")) + " " + str(r.get("source", "")) + " " + str(r.get("description", ""))).upper()
+                if "USER_CONFIRMED" in u:
+                    out.append(r); continue
+                area = _v2607_box_area_ratio_from_risk(r)
+                if area is not None and area <= 0.075 and not _v2604_is_broad_source_union(r):
+                    nr = dict(r)
+                    nr["v2607_reset_correction"] = f"kept_compact_box_area_{area:.3f}"
+                    out.append(nr); continue
+                dropped += 1
+                if V2600_TRACE_NEUTRAL_RULES:
+                    print(f"v26.08 RESET: dropped broad/uncertain box marker view={r.get('view')} type={rt} area={area}")
+            if dropped and V2600_TRACE_NEUTRAL_RULES:
+                print(f"v26.08 RESET: dropped {dropped} broad box markers; kept {len(out)} risks")
+            return out
+
+        def _v2608_non_destructive_marker_audit(_risks):
+            # v26.08: do NOT drop suspected broad/uncertain risks before counting.
+            # Previous reset behavior could make files with visible/real risk become SAFE.
+            # Instead, keep the risk in the report/status, but suppress only the broad rectangle drawing.
+            out = []
+            for r in list(_risks or []):
+                nr = dict(r)
+                rt = str(nr.get("risk_type", "")).upper().strip()
+                if rt in BOX_BASED_RISK_TYPES or rt in ("COMBINED_AREA_RISK", "REAR_COMBINED_RISK"):
+                    area = _v2607_box_area_ratio_from_risk(nr)
+                    if (area is None or area > 0.110 or _v2604_is_broad_source_union(nr)) and "USER_CONFIRMED" not in (str(nr.get("source", "")) + str(nr.get("reasoning", ""))).upper():
+                        nr["v2608_suppress_rectangle"] = True
+                        nr["v2608_audit_note"] = f"report_kept_but_broad_rectangle_suppressed_area_{area}"
+                        if V2600_TRACE_NEUTRAL_RULES:
+                            print(f"v26.08 AUDIT: kept risk for report but suppressed broad rectangle view={nr.get('view')} type={rt} area={area}")
+                out.append(nr)
+            return out
+
         all_risks = _v2600_neutral_rule_engine_phase1(all_risks)
         all_risks = _v2602_marker_localization_and_left_right(all_risks)
+        all_risks = _v2604_refine_target_boxes_and_suppress_false_markers(all_risks)
+        all_risks = _v2608_non_destructive_marker_audit(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
@@ -6354,6 +6539,11 @@ def process_request(request):
             drawn = False
             is_zone_based = fallback_risk_type in ZONE_BASED_RISK_TYPES or risk_type == "COMBINED_AREA_RISK"
 
+            if risk.get("v2608_suppress_rectangle") and risk_type not in GAP_ARROW_RISK_TYPES:
+                # Keep report/status count, but do not draw the large ambiguous rectangle.
+                print(f"v26.08 AUDIT: skipped broad rectangle drawing but kept report risk {risk_type} ({resolved_view})")
+                drawn = True
+
             # v24.18 NEW: LATERAL_GAP_RISK/FRONT_EMPTY_RISK/REAR_EMPTY_RISK วาดเป็น
             # "เส้นลูกศร 2 หัว + ตัวเลขระยะห่างกำกับ" แทนกรอบสี่เหลี่ยม ตามคำแนะนำผู้ใช้
             # - คำนวณเรขาคณิต/ตัวเลขโดยตรงจาก container_bounds/cargo_extent เสมอ (ไม่
@@ -6405,10 +6595,15 @@ def process_request(request):
                     print(f"box_2d rejected for {risk_type} ({resolved_view}): {e}")
 
             if not drawn:
-                fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
-                                              container_bounds=container_bounds, cargo_extent=cargo_extent)
-                if fallback:
-                    _draw_single_or_dual_rectangle(draw, fallback, outline_color, draw_colors)
+                allow_rect_fallback = is_zone_based or risk_type in GAP_ARROW_RISK_TYPES
+                if allow_rect_fallback:
+                    fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
+                                                  container_bounds=container_bounds, cargo_extent=cargo_extent)
+                    if fallback:
+                        _draw_single_or_dual_rectangle(draw, fallback, outline_color, draw_colors)
+                        drawn = True
+                else:
+                    print(f"v26.08 AUDIT: disabled broad fallback rectangle for {risk_type} ({resolved_view}); risk remains in report")
                     drawn = True
             if not drawn:
                 print(f"Could not draw box for {risk_type} ({resolved_view})")
@@ -6496,7 +6691,37 @@ def process_request(request):
         img.save(buffered, format="JPEG", quality=80)
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
-        return ({"status": status_text, "hazardCount": total_instance_count, "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url}, 200, headers)
+        source_file_label = (
+            data.get("sourceFileName") or data.get("displayFileName") or data.get("originalFileName") or
+            data.get("fileName") or data.get("filename") or data.get("name") or manifest_key or "-"
+        )
+        if str(source_file_label).strip() in ("", "-", "None") and manifest_key:
+            source_file_label = manifest_key
+        risk_items = []
+        for group_key in group_order:
+            info = risk_groups.get(group_key, {})
+            risk_items.append({
+                "riskType": group_key,
+                "title": info.get("title_base", group_key),
+                "count": int(info.get("count", 0) or 0),
+                "detail": info.get("detail", "")
+            })
+        return ({
+            "status": status_text,
+            "hazardCount": total_instance_count,
+            "drawnRiskCount": total_instance_count,
+            "riskCount": total_instance_count,
+            "layout": layout,
+            "manifestKey": manifest_key,
+            "sourceFileName": source_file_label,
+            "displayFileName": source_file_label,
+            "fileName": source_file_label,
+            "filename": source_file_label,
+            "originalFileName": source_file_label,
+            "riskItems": risk_items,
+            "actionRequired": action_text,
+            "processedImageUrl": processed_image_url
+        }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
