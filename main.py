@@ -16,7 +16,9 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.03
+# AI Cargo Safety Checker - High Precision v24.05
+# v24.05 - RearLateralImbalanceTune: tune BACK-frame marker to visible stacked cargo, emit deterministic box_2d, and avoid lower-floor fallback for rear lateral.
+# v24.04 - OverhangStackSizeGuard: redefine OVERHANG as visible stacked-box size/support mismatch, suppress isometric edge-only artifacts.
 # v24.03 - LocalizationFix: OVERHANG pair-box validation, BACK rear-lateral final-shift, strict inter-stack lateral-gap: OVERHANG cause-box, BACK REAR_LATERAL box shift up 50%, inter-stack-only LATERAL_GAP.
 # v24.01 - TallUnstableGuard: strict deterministic gate for TALL_UNSTABLE_RISK only. Other risk detectors unchanged.
 #
@@ -1207,6 +1209,30 @@ V2402_LATERAL_GAP_MIN_INTER_STACK_GAP_PX = 18
 V2402_LATERAL_GAP_MIN_VERTICAL_OVERLAP_RATIO = 0.20
 V2402_TRACE = True
 
+# v24.04 OVERHANG_RISK controls
+# New definition from user review:
+# - consider a cargo stack only when boxes are visibly stacked from lower to upper box;
+# - if adjacent stacked boxes in the same stack have clearly different visible width/size,
+#   treat it as an unstable support/overhang candidate;
+# - reject edge-only/isometric artifacts where only a thin outer strip is detected.
+V2404_OVERHANG_STACK_SIZE_GUARD_ENABLED = True
+V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO = 0.18
+V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX = 14
+V2404_OVERHANG_MIN_VERTICAL_TOUCH_RATIO = 0.12
+V2404_OVERHANG_MARK_PAIR_BOX = True
+V2404_OVERHANG_REJECT_EDGE_STRIP_ONLY = True
+V2404_OVERHANG_TRACE = True
+
+# v24.05 REAR_LATERAL_IMBALANCE tuning controls
+# Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
+# left-right rear height imbalance, not the lower/floor area.
+V2405_REAR_LATERAL_TUNE_ENABLED = True
+V2405_REAR_LATERAL_BACK_SHIFT_UP_RATIO = 0.50
+V2405_REAR_LATERAL_USE_DET_BOX_FOR_FORCED = True
+V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK = True
+V2405_REAR_LATERAL_MARK_VISIBLE_PAIR_ONLY = True
+V2405_REAR_LATERAL_TRACE = True
+
 LATERAL_IMBALANCE_MIN_RATIO = 0.40
 
 # v24 NEW: เกณฑ์สำหรับ VETO ของ REAR_LATERAL_IMBALANCE - ถ้า deterministic วัดว่า
@@ -1696,54 +1722,91 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def detect_overhang_regions_for_view(stacks):
-    """v24.02 OVERHANG cause-box.
+    """v24.04 OverhangStackSizeGuard.
 
-    OVERHANG_RISK means the upper cargo extends beyond the supporting lower cargo. The old marker
-    boxed the union of upper + lower boxes, which did not communicate the actual risk location.
-    This version returns a compact box around only the unsupported overhanging portion of the upper
-    box, while preserving the same detection threshold.
+    New reviewed definition:
+    OVERHANG_RISK is not a thin side strip caused by isometric perspective. It is a visible stacked
+    cargo pair in the same stack where the lower-to-upper boxes can be seen and their visible sizes
+    are clearly different. The risk marker must explain which stacked pair is unstable.
+
+    This keeps the detector conservative:
+    - only compare adjacent vertical boxes inside the same detected stack;
+    - require both boxes to have visible width;
+    - require a meaningful width/size mismatch;
+    - mark the upper+lower cause pair, not an outer edge strip;
+    - suppress edge-only artifacts from isometric distortion.
     """
     regions = []
-    for s in stacks:
+    trace = globals().get("V2404_OVERHANG_TRACE", False)
+    min_ratio = globals().get("V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO", 0.18)
+    min_px = globals().get("V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX", 14)
+    min_touch_ratio = globals().get("V2404_OVERHANG_MIN_VERTICAL_TOUCH_RATIO", 0.12)
+
+    for stack_idx, s in enumerate(stacks or []):
         boxes = s.get("boxes", [])
+        if len(boxes) < 2:
+            continue
         for i in range(len(boxes) - 1):
             upper = boxes[i]
             lower = boxes[i + 1]
-            lower_width = max(1, lower["x_right"] - lower["x_left"])
-            left_overhang = max(0, lower["x_left"] - upper["x_left"])
-            right_overhang = max(0, upper["x_right"] - lower["x_right"])
-            overhang_px = max(left_overhang, right_overhang)
-            ratio = overhang_px / lower_width
-            if ratio >= OVERHANG_MIN_RATIO and overhang_px >= OVERHANG_MIN_ABS_PX:
-                # Mark the unsupported part only, not the entire upper/lower cargo pair.
-                if left_overhang >= right_overhang and left_overhang > 0:
-                    x_min = upper["x_left"]
-                    x_max = min(upper["x_right"], lower["x_left"])
-                    side = "LEFT_UNSUPPORTED_EDGE"
-                else:
-                    x_min = max(upper["x_left"], lower["x_right"])
-                    x_max = upper["x_right"]
-                    side = "RIGHT_UNSUPPORTED_EDGE"
-                # If segmentation makes the unsupported strip too thin after clipping, fall back to
-                # a narrow edge strip on the upper box so the marker remains visible and causal.
-                if x_max - x_min < 8:
-                    if side.startswith("LEFT"):
-                        x_min = upper["x_left"]
-                        x_max = min(upper["x_right"], upper["x_left"] + max(8, int(overhang_px)))
-                    else:
-                        x_max = upper["x_right"]
-                        x_min = max(upper["x_left"], upper["x_right"] - max(8, int(overhang_px)))
-                y_pad = max(2, int((upper["y_max"] - upper["y_min"]) * 0.08))
-                regions.append({
-                    "x_min": x_min,
-                    "y_min": max(0, upper["y_min"] - y_pad),
-                    "x_max": x_max,
-                    "y_max": upper["y_max"] + y_pad,
-                    "ratio": ratio,
-                    "overhang_px": overhang_px,
-                    "overhang_side": side,
-                    "v2402_marker_policy": "upper_unsupported_cause_box",
-                })
+            uw = max(1, upper["x_right"] - upper["x_left"])
+            lw = max(1, lower["x_right"] - lower["x_left"])
+            width_delta = abs(uw - lw)
+            mismatch_ratio = width_delta / max(1, max(uw, lw))
+
+            # Adjacent stacked boxes should vertically touch or nearly touch. If there is a large
+            # vertical separation, it is not a reliable stacked support pair.
+            vertical_gap = max(0, lower["y_min"] - upper["y_max"])
+            pair_h = max(1, lower["y_max"] - upper["y_min"])
+            touch_ratio = 1.0 - min(1.0, vertical_gap / pair_h)
+
+            if width_delta < min_px or mismatch_ratio < min_ratio:
+                if trace:
+                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: width_delta={width_delta}px ratio={mismatch_ratio:.2f} < thresholds")
+                continue
+            if touch_ratio < min_touch_ratio:
+                if trace:
+                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: poor vertical touch ratio={touch_ratio:.2f}")
+                continue
+
+            # Reject thin edge-only detections. True marker should include both boxes, not only a
+            # narrow sliver at the outer edge.
+            x_min = min(upper["x_left"], lower["x_left"])
+            x_max = max(upper["x_right"], lower["x_right"])
+            y_min = upper["y_min"]
+            y_max = lower["y_max"]
+            box_w = max(1, x_max - x_min)
+            if globals().get("V2404_OVERHANG_REJECT_EDGE_STRIP_ONLY", True) and box_w < max(BOX_MIN_HEIGHT_PX * 3, min_px * 2):
+                if trace:
+                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: pair box too narrow ({box_w}px), likely edge artifact")
+                continue
+
+            # Direction indicates which visible box is wider. Wider upper over narrower lower is
+            # classic overhang; narrower upper over wider lower is still a size/support mismatch
+            # per reviewed definition, but the marker remains the cause pair.
+            if uw > lw:
+                support_case = "UPPER_WIDER_THAN_LOWER"
+            elif lw > uw:
+                support_case = "LOWER_WIDER_THAN_UPPER_SIZE_MISMATCH"
+            else:
+                support_case = "EQUAL_WIDTH"
+
+            pad_x = max(4, int(box_w * 0.05))
+            pad_y = max(3, int((y_max - y_min) * 0.06))
+            regions.append({
+                "x_min": x_min - pad_x,
+                "y_min": max(0, y_min - pad_y),
+                "x_max": x_max + pad_x,
+                "y_max": y_max + pad_y,
+                "ratio": mismatch_ratio,
+                "width_delta_px": width_delta,
+                "upper_width_px": uw,
+                "lower_width_px": lw,
+                "support_case": support_case,
+                "v2404_marker_policy": "stacked_upper_lower_pair_box",
+            })
+            if trace:
+                print(f"v24.04 OVERHANG accept stack={stack_idx} pair={i}: {support_case}, upper_w={uw}px lower_w={lw}px mismatch={mismatch_ratio:.2f}")
     return regions
 
 def detect_tall_unstable_regions_for_view(stacks):
@@ -1852,10 +1915,11 @@ def _v2402_shift_abs_box_up(box, shift_ratio=0.50):
 
 
 def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_label=None):
-    """Compare adjacent rear-zone stack heights.
+    """v24.05 rear-lateral tuning.
 
-    v24.02: when the view is BACK, shift the marker box upward by 50% of its own height so the
-    frame lands on the visible cargo boxes instead of the lower/floor area.
+    Compare adjacent rear-zone stack heights and return a marker box that covers the visible cargo
+    pair causing the height imbalance. For BACK view, marker is shifted upward so it lands on the
+    green/blue/red cargo block area rather than the lower floor region.
     """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
@@ -1866,19 +1930,78 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
         hb = max(1, b["floor_y"] - b["top_y"]) if b.get("boxes") else 0
         if ha == 0 or hb == 0:
             continue
+        taller_stack, shorter_stack = (a, b) if ha >= hb else (b, a)
         taller, shorter = (ha, hb) if ha >= hb else (hb, ha)
         ratio = 1 - (shorter / taller)
         if ratio >= LATERAL_IMBALANCE_MIN_RATIO:
-            x_min = min(a["x0"], b["x0"]); x_max = max(a["x1"], b["x1"])
-            y_min = min(a["top_y"], b["top_y"]); y_max = max(a["floor_y"], b["floor_y"])
+            # Use visible cargo pair area, with top anchored to visible upper cargo and bottom kept
+            # around the cargo body, not the floor. This makes AA04-05 BACK marker cover the blue/
+            # green/red cargo stacks instead of the lower white/floor area.
+            x_min = min(a["x0"], b["x0"])
+            x_max = max(a["x1"], b["x1"])
+            y_top_pair = min(a["top_y"], b["top_y"])
+            y_floor_pair = max(a["floor_y"], b["floor_y"])
+            pair_h = max(1, y_floor_pair - y_top_pair)
+            # Cropping bottom by 18% reduces low/floor overreach while keeping visible box body.
+            y_min = y_top_pair
+            y_max = y_floor_pair - int(pair_h * 0.18) if globals().get("V2405_REAR_LATERAL_MARK_VISIBLE_PAIR_ONLY", True) else y_floor_pair
+            if y_max <= y_min:
+                y_max = y_floor_pair
             if str(view_label or "").upper() == "BACK":
-                x_min, y_min, x_max, y_max = _v2402_shift_abs_box_up((x_min, y_min, x_max, y_max), V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO)
+                x_min, y_min, x_max, y_max = _v2405_shift_abs_box_up_for_back((x_min, y_min, x_max, y_max), view_label)
             regions.append({
                 "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
                 "ratio": ratio,
-                "v2402_back_shift_up": str(view_label or "").upper() == "BACK",
+                "v2405_back_shift_up": str(view_label or "").upper() == "BACK",
+                "v2405_source": "adjacent_rear_stack_height_pair",
+                "v2405_taller_height": taller,
+                "v2405_shorter_height": shorter,
             })
+            if globals().get("V2405_REAR_LATERAL_TRACE", False):
+                print(f"v24.05 REAR_LATERAL accept {view_label}: pair=({i},{i+1}) ratio={ratio:.2f} box=[{x_min},{y_min},{x_max},{y_max}]")
     return regions
+
+def _v2405_region_to_box_2d(region, crop_w, crop_h, crop_y_start):
+    try:
+        return [
+            ((float(region["y_min"]) - crop_y_start) / crop_h) * 1000,
+            (float(region["x_min"]) / crop_w) * 1000,
+            ((float(region["y_max"]) - crop_y_start) / crop_h) * 1000,
+            (float(region["x_max"]) / crop_w) * 1000,
+        ]
+    except Exception:
+        return None
+
+
+def _v2405_shift_box_2d_up_for_back(box_2d, view_label, shift_ratio=None):
+    if str(view_label or "").upper() != "BACK" or not box_2d or len(box_2d) != 4:
+        return box_2d
+    if not globals().get("V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK", True):
+        return box_2d
+    shift_ratio = globals().get("V2405_REAR_LATERAL_BACK_SHIFT_UP_RATIO", 0.50) if shift_ratio is None else shift_ratio
+    try:
+        y0, x0, y1, x1 = [float(v) for v in box_2d]
+        h = max(1.0, y1 - y0)
+        shift = h * float(shift_ratio)
+        return [max(0.0, y0 - shift), x0, max(0.0, y1 - shift), x1]
+    except Exception:
+        return box_2d
+
+
+def _v2405_shift_abs_box_up_for_back(box, view_label, shift_ratio=None):
+    if str(view_label or "").upper() != "BACK" or not box or len(box) != 4:
+        return box
+    if not globals().get("V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK", True):
+        return box
+    shift_ratio = globals().get("V2405_REAR_LATERAL_BACK_SHIFT_UP_RATIO", 0.50) if shift_ratio is None else shift_ratio
+    try:
+        x0, y0, x1, y1 = [float(v) for v in box]
+        h = max(1.0, y1 - y0)
+        shift = h * float(shift_ratio)
+        return (int(x0), int(y0 - shift), int(x1), int(y1 - shift))
+    except Exception:
+        return box
+
 
 def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     """v24 NEW: คืนค่า "อัตราส่วนความแตกต่างความสูงสูงสุด" ระหว่างคู่ตั้งที่อยู่ติดกัน
@@ -2167,7 +2290,7 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
   OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
-- OVERHANG_RISK: upper-tier cargo clearly overhanging past the edge of the cargo below it.
+- OVERHANG_RISK: cargo boxes are visibly stacked in the same stack from lower box to upper box, and the visible size/width of the stacked boxes is clearly different so the upper/lower support is mismatched. Do NOT flag thin outer edges or isometric perspective artifacts unless the upper-lower box pair and size mismatch are clear.
 
 Look carefully at EVERY pair of adjacent stacks in both views before concluding there are no risks.
 A fully and evenly loaded container should return an EMPTY array [].
@@ -2679,7 +2802,7 @@ def process_request(request):
                     "view": view_label, "risk_type": "OVERHANG_RISK",
                     "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_OVERHANG",
-                    "description": f"พบสินค้าชั้นบนยื่นพ้นขอบฐานรองรับด้านล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างกล่องล่าง (marker ชี้เฉพาะส่วนที่ยื่น: {region.get('overhang_side','UNSUPPORTED_EDGE')})",
+                    "description": f"พบกล่องสินค้าซ้อนกันในกองเดียวกันที่ขนาด/ความกว้างของกล่องบน-ล่างไม่เท่ากันประมาณ {region['ratio']*100:.0f}% (marker ชี้คู่กล่องต้นเหตุ: {region.get('support_case','STACK_SIZE_MISMATCH')})",
                 })
             for region in tall_unstable_regions.get(view_label, []):
                 if region["ratio"] < V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO:
@@ -2768,7 +2891,7 @@ def process_request(request):
                         precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb
                     if rear_zone_risk_val in ("REAR_LATERAL_IMBALANCE", "BOTH"):
                         if view_label == "BACK":
-                            pb = _v2402_shift_abs_box_up(pb, V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO)
+                            pb = _v2405_shift_abs_box_up_for_back(pb, view_label)
                         precise_boxes[(view_label, "REAR_LATERAL_IMBALANCE")] = pb
 
         if isinstance(front_result_from_front_view, dict) and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
@@ -2877,6 +3000,22 @@ def process_request(request):
                 return True
             return False
 
+        def _v2405_best_rear_lateral_box_2d(view_label):
+            cb = container_bounds.get(view_label)
+            if not cb:
+                return None
+            rear_side = HARDCODED_REAR_SIDE[view_label]
+            container_width = cb["xmax"] - cb["xmin"]
+            if rear_side == "LEFT":
+                rear_x0, rear_x1 = cb["xmin"], cb["xmin"] + int(container_width * 0.45)
+            else:
+                rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
+            det_regions = detect_lateral_imbalance_regions_for_view(stack_box_model.get(view_label, []), rear_x0, rear_x1, view_label=view_label)
+            if not det_regions:
+                return None
+            best = max(det_regions, key=lambda rr: rr.get("ratio", 0))
+            return _v2405_region_to_box_2d(best, crop_w, crop_h, crop_y_start)
+
         # v21: ผ่อนเกณฑ์ confidence ของ REAR_LATERAL_IMBALANCE จาก "HIGH เท่านั้น" เป็น
         # "HIGH หรือ MEDIUM" (เดิมเข้มงวดกว่า REAR_EMPTY_RISK โดยไม่มีเหตุผลชัดเจน)
         for view_label, rear_result in (("FRONT", rear_result_front), ("BACK", rear_result_back)):
@@ -2899,7 +3038,7 @@ def process_request(request):
                     print(f"REAR_LATERAL_IMBALANCE claim ({view_label}) VETOED - deterministic per-box segmentation "
                           f"shows no genuine height difference in rear zone (AI reasoning: {rear_result.get('reasoning','')[:150]})")
                 else:
-                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": None})
+                    all_risks.append({"view": view_label, "risk_type": "REAR_LATERAL_IMBALANCE", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": rear_result.get("reasoning", ""), "description": "พบสินค้าท้ายตู้สูงต่ำไม่เท่ากัน (วิเคราะห์จาก Zoom ท้ายตู้)", "box_2d": _v2405_best_rear_lateral_box_2d(view_label)})
                     print(f"REAR_LATERAL_IMBALANCE ({view_label}) accepted with confidence={confidence}")
 
         # v22 FORCE: deterministic corroboration สำหรับ REAR_LATERAL_IMBALANCE เฉพาะ
@@ -2928,7 +3067,7 @@ def process_request(request):
                     "direction": "LATERAL", "lateral_side": "N/A",
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_LATERAL_IMBALANCE",
                     "description": f"พบสินค้าท้ายตู้สูงต่ำไม่เท่ากันประมาณ {region['ratio']*100:.0f}% (ตรวจจับจาก per-box segmentation, AI ไม่พบ)",
-                    "box_2d": None,
+                    "box_2d": _v2405_region_to_box_2d(region, crop_w, crop_h, crop_y_start),
                 })
                 break
 
@@ -3087,6 +3226,8 @@ def process_request(request):
             if is_zone_based and risk_type != "COMBINED_AREA_RISK":
                 precise = precise_boxes.get((resolved_view, risk_type))
                 if precise:
+                    if risk_type == "REAR_LATERAL_IMBALANCE":
+                        precise = _v2405_shift_abs_box_up_for_back(precise, resolved_view)
                     _draw_single_or_dual_rectangle(draw, precise, outline_color, draw_colors)
                     drawn = True
 
@@ -3099,6 +3240,8 @@ def process_request(request):
                     abs_xmax = max(abs_xmin + 1, min(int(xmax * crop_w / 1000.0), crop_w))
                     abs_ymin = max(crop_y_start, min(int(crop_y_start + (ymin * crop_h / 1000.0)), crop_y_end - 1))
                     abs_ymax = max(abs_ymin + 1, min(int(crop_y_start + (ymax * crop_h / 1000.0)), crop_y_end))
+                    if risk_type == "REAR_LATERAL_IMBALANCE":
+                        abs_xmin, abs_ymin, abs_xmax, abs_ymax = _v2405_shift_abs_box_up_for_back((abs_xmin, abs_ymin, abs_xmax, abs_ymax), resolved_view)
 
                     if layout == "TOP_BOTTOM":
                         crosses_boundary = (abs_ymax > mid_y_local) if resolved_view == "FRONT" else (abs_ymin < mid_y_local)
@@ -3123,6 +3266,8 @@ def process_request(request):
                 fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
                                               container_bounds=container_bounds, cargo_extent=cargo_extent)
                 if fallback:
+                    if risk_type == "REAR_LATERAL_IMBALANCE":
+                        fallback = _v2405_shift_abs_box_up_for_back(fallback, resolved_view)
                     _draw_single_or_dual_rectangle(draw, fallback, outline_color, draw_colors)
                     drawn = True
             if not drawn:
@@ -3162,8 +3307,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.03",
-            "benchmarkMode": "v24.03_localization_fix"}, 200, headers)
+            "checkerVersion": "V24.05",
+            "benchmarkMode": "v24.05_rear_lateral_imbalance_tune"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3176,3 +3321,11 @@ V2403_LOCALIZATION_FIX=True
 # OVERHANG: require real upper/lower pair and suppress perspective-only edge markers.
 # REAR_LATERAL_IMBALANCE: apply final BACK marker upward shift (50%) at draw stage.
 # LATERAL_GAP: accept only gaps bounded by left and right cargo stacks.
+
+
+# V24.04 build marker
+V2404_OVERHANG_STACK_SIZE_GUARD_BUILD = True
+
+
+# V24.05 build marker
+V2405_REAR_LATERAL_IMBALANCE_TUNE_BUILD = True
