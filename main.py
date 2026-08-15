@@ -16,7 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.06
+# AI Cargo Safety Checker - High Precision v24.07
+# v24.07 - OverhangAuditStepDownFix: OVERHANG audit-only until segmentation is trusted; add stack-adjacent STEP_DOWN detector for AA04-05 style risk.
 # v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
 # v24.05 - RearLateralImbalanceTune: tune BACK-frame marker to visible stacked cargo, emit deterministic box_2d, and avoid lower-floor fallback for rear lateral.
 # v24.04 - OverhangStackSizeGuard: redefine OVERHANG as visible stacked-box size/support mismatch, suppress isometric edge-only artifacts.
@@ -1048,6 +1049,55 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
     return risky_segments
 
 
+def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
+    """v24.07 STEP_DOWN from adjacent stack model.
+
+    This catches AA04-05 style risk: adjacent cargo stacks have a visible height drop at their
+    boundary. It uses the already-built stack/box model, not the global height profile, so the
+    marker can be placed on the lower stack next to the height discontinuity.
+    """
+    min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
+    min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
+    ss = [s for s in (stacks or []) if s.get("boxes")]
+    ss = sorted(ss, key=lambda s: s.get("x0", 0))
+    regions = []
+    for idx in range(len(ss) - 1):
+        a, b = ss[idx], ss[idx + 1]
+        ha = max(1, a["floor_y"] - a["top_y"])
+        hb = max(1, b["floor_y"] - b["top_y"])
+        taller_h = max(ha, hb)
+        shorter_h = min(ha, hb)
+        diff = taller_h - shorter_h
+        ratio = diff / max(1, taller_h)
+        if diff < min_abs_px or ratio < min_ratio:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.07 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f}")
+            continue
+        lower = a if ha < hb else b
+        higher = b if ha < hb else a
+        # Mark lower stack near the boundary to the higher stack.
+        boundary_x = lower["x1"] if lower["x0"] < higher["x0"] else lower["x0"]
+        mark_w = max(18, int((lower["x1"] - lower["x0"]) * 0.55))
+        if lower["x0"] < higher["x0"]:
+            x0 = max(lower["x0"], boundary_x - mark_w)
+            x1 = lower["x1"]
+        else:
+            x0 = lower["x0"]
+            x1 = min(lower["x1"], boundary_x + mark_w)
+        y0 = lower["top_y"]
+        y1 = lower["floor_y"]
+        regions.append({
+            "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+            "ratio": ratio,
+            "v2407_source": "adjacent_stack_height_drop",
+            "v2407_pair_index": (idx, idx + 1),
+            "v2407_heights": (ha, hb),
+        })
+        if globals().get("V2407_TRACE", True):
+            print(f"v24.07 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} marker=[{x0},{y0},{x1},{y1}]")
+    return regions
+
+
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
@@ -1233,6 +1283,18 @@ V2406_OVERHANG_DISABLE_FALLBACK_MARKER = True
 V2406_OVERHANG_SUPPRESS_EDGE_ARTIFACT = True
 V2406_OVERHANG_AA02_SAFE_REFERENCE = True
 V2406_OVERHANG_TRACE = True
+
+# v24.07 focused controls
+# OVERHANG remains audit-only because AA02-01 proves the active scanner can still map
+# isometric/segmentation artifacts into a false green marker. No OVERHANG hazard/marker is emitted.
+V2407_OVERHANG_AUDIT_ONLY = True
+V2407_OVERHANG_ACTIVE_DETECTION = False
+V2407_OVERHANG_DISABLE_AI_ACCEPT = True
+V2407_STEP_DOWN_STACK_ADJACENCY_ENABLED = True
+V2407_STEP_DOWN_STACK_HEIGHT_RATIO = 0.22
+V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX = 18
+V2407_STEP_DOWN_MARK_LOWER_STACK = True
+V2407_TRACE = True
 
 # v24.05 REAR_LATERAL_IMBALANCE tuning controls
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
@@ -1733,30 +1795,25 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def detect_overhang_regions_for_view(stacks):
-    """v24.06 OverhangFivePercentGuard.
+    """v24.07 OVERHANG audit-only scanner.
 
-    Reviewed definition:
-    OVERHANG_RISK is evaluated only from a visible upper/lower box pair in the same stack.
-    If the visible size/width difference between the upper box and lower box is about 5% or more,
-    the pair is a candidate. Edge-only marks, container-wall marks, and isometric perspective
-    artifacts are rejected.
-
-    Marker policy:
-    - draw the upper+lower cause pair box;
-    - never draw a fallback zone for OVERHANG;
-    - if the detector cannot identify a real upper/lower pair, return no risk.
+    Current status from AA02-01 regression:
+    - the definition is clear, but active detection still produces false green markers due to
+      segmentation/isometric mapping errors;
+    - therefore OVERHANG candidates are logged for diagnosis but are NOT emitted as hazards or
+      markers until the stack/box segmentation is proven reliable.
     """
-    regions = []
-    trace = globals().get("V2406_OVERHANG_TRACE", True)
+    audit_regions = []
+    active = globals().get("V2407_OVERHANG_ACTIVE_DETECTION", False)
+    trace = globals().get("V2407_TRACE", True) or globals().get("V2406_OVERHANG_TRACE", True)
     min_ratio = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_RATIO", 0.05)
     min_px = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_PX", 6)
 
     for stack_idx, s in enumerate(stacks or []):
         boxes = s.get("boxes", [])
-        if len(boxes) < 2:
-            continue
-        # boxes are ordered top to bottom by existing segmentation.
-        for pair_idx in range(len(boxes) - 1):
+        if trace:
+            print(f"v24.07 OVERHANG_AUDIT stack={stack_idx} box_count={len(boxes)}")
+        for pair_idx in range(max(0, len(boxes) - 1)):
             upper = boxes[pair_idx]
             lower = boxes[pair_idx + 1]
             uw = max(1, upper["x_right"] - upper["x_left"])
@@ -1765,60 +1822,37 @@ def detect_overhang_regions_for_view(stacks):
             lh = max(1, lower["y_max"] - lower["y_min"])
             width_delta = abs(uw - lw)
             width_ratio = width_delta / max(1, max(uw, lw))
-
-            # Must be a visible stacked pair. If the pair has almost no vertical adjacency, skip.
             vertical_gap = max(0, lower["y_min"] - upper["y_max"])
             pair_h = max(1, lower["y_max"] - upper["y_min"])
-            if vertical_gap > max(8, int(pair_h * 0.20)):
-                if trace:
-                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: vertical_gap={vertical_gap}px too large")
-                continue
-
-            # Require 5% visible size difference AND minimum pixel difference.
+            reason = []
             if width_ratio < min_ratio or width_delta < min_px:
-                if trace:
-                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f} < 5%")
-                continue
-
-            # Reject likely segmentation artifacts: extremely thin boxes or very narrow pair area.
+                reason.append("size_diff_below_5pct")
+            if vertical_gap > max(8, int(pair_h * 0.20)):
+                reason.append("not_visible_stacked_pair")
             if uw < 10 or lw < 10 or uh < 4 or lh < 4:
-                if trace:
-                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: tiny segmented box upper=({uw}x{uh}) lower=({lw}x{lh})")
+                reason.append("tiny_segment_artifact")
+            if trace:
+                print(f"v24.07 OVERHANG_AUDIT stack={stack_idx} pair={pair_idx} upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f} vertical_gap={vertical_gap}px status={'REJECT ' + ','.join(reason) if reason else 'CANDIDATE_BUT_AUDIT_ONLY'}")
+            if reason:
                 continue
-
             x_min = min(upper["x_left"], lower["x_left"])
             x_max = max(upper["x_right"], lower["x_right"])
             y_min = upper["y_min"]
             y_max = lower["y_max"]
-            pair_w = max(1, x_max - x_min)
-            pair_h = max(1, y_max - y_min)
-
-            # Suppress edge/perspective artifact: a true pair marker must have meaningful area.
-            if globals().get("V2406_OVERHANG_SUPPRESS_EDGE_ARTIFACT", True):
-                if pair_w < max(18, min_px * 2) or pair_h < 12:
-                    if trace:
-                        print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: edge artifact pair_box={pair_w}x{pair_h}")
-                    continue
-
-            support_case = "UPPER_WIDER_THAN_LOWER" if uw > lw else "LOWER_WIDER_THAN_UPPER_SIZE_MISMATCH"
-            pad_x = max(3, int(pair_w * 0.04))
-            pad_y = max(3, int(pair_h * 0.05))
-            region = {
-                "x_min": x_min - pad_x,
-                "y_min": max(0, y_min - pad_y),
-                "x_max": x_max + pad_x,
-                "y_max": y_max + pad_y,
+            audit_regions.append({
+                "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
                 "ratio": width_ratio,
                 "width_delta_px": width_delta,
                 "upper_width_px": uw,
                 "lower_width_px": lw,
-                "support_case": support_case,
-                "v2406_marker_policy": "upper_lower_pair_5_percent_diff",
-            }
-            regions.append(region)
-            if trace:
-                print(f"v24.06 OVERHANG ACCEPT stack={stack_idx} pair={pair_idx}: {support_case}; upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f}; marker=[{region['x_min']},{region['y_min']},{region['x_max']},{region['y_max']}]")
-    return regions
+                "support_case": "UPPER_LOWER_SIZE_DIFF_AUDIT",
+                "v2407_audit_only": True,
+            })
+    if globals().get("V2407_OVERHANG_AUDIT_ONLY", True) or not active:
+        if trace and audit_regions:
+            print(f"v24.07 OVERHANG_AUDIT_ONLY: {len(audit_regions)} candidate(s) suppressed; no OVERHANG marker/hazard emitted")
+        return []
+    return audit_regions
 
 def detect_tall_unstable_regions_for_view(stacks):
     """v24.01 TallUnstableGuard.
@@ -2730,6 +2764,13 @@ def process_request(request):
         # สำหรับรายละเอียด root cause (พบจากผู้ใช้ชี้ตำแหน่งด้วยการวงสีแดงใน EC50-01/EC51-02)
         local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
                                                                      crop_y_start, container_bounds, cargo_extent)
+        if globals().get("V2407_STEP_DOWN_STACK_ADJACENCY_ENABLED", True):
+            for _view in ("FRONT", "BACK"):
+                _extra_step_regions = detect_step_down_regions_from_stack_model(stack_box_model.get(_view, []), view_label=_view)
+                if _extra_step_regions:
+                    step_down_regions.setdefault(_view, [])
+                    step_down_regions[_view].extend(_extra_step_regions)
+
         inter_stack_gap_regions = {"FRONT": [], "BACK": []}
         for _v in ("FRONT", "BACK"):
             inter_stack_gap_regions[_v] = detect_inter_stack_lateral_gap_regions_for_view(stack_box_model.get(_v, []))
@@ -2758,7 +2799,9 @@ def process_request(request):
                 else:
                     print(f"Gemini STEP_DOWN_RISK claim REJECTED - missing valid view/box_2d for verification")
             elif rt == "OVERHANG_RISK":
-                if has_valid_box:
+                if globals().get("V2407_OVERHANG_DISABLE_AI_ACCEPT", True) or globals().get("V2407_OVERHANG_AUDIT_ONLY", True):
+                    print(f"v24.07 OVERHANG AI claim REJECTED: audit-only mode (description: {r.get('description', '')[:100]})")
+                elif has_valid_box:
                     regions_for_view = overhang_regions.get(view_of_claim, [])
                     if _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
                         all_risks.append(r)
@@ -2799,6 +2842,9 @@ def process_request(request):
 
         for view_label in ("FRONT", "BACK"):
             for region in overhang_regions.get(view_label, []):
+                if globals().get("V2407_OVERHANG_AUDIT_ONLY", True):
+                    print("v24.07 OVERHANG forced candidate suppressed: audit-only mode")
+                    continue
                 if region["ratio"] < OVERHANG_MIN_RATIO:
                     continue
                 if _view_already_has_overlapping_claim(view_label, "OVERHANG_RISK", region, all_risks):
@@ -3318,8 +3364,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.06",
-            "benchmarkMode": "v24.06_overhang_five_percent_guard"}, 200, headers)
+            "checkerVersion": "V24.07",
+            "benchmarkMode": "v24.07_overhang_audit_step_down_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3343,4 +3389,4 @@ V2405_REAR_LATERAL_IMBALANCE_TUNE_BUILD = True
 
 
 # V24.06 build marker
-V2406_OVERHANG_FIVE_PERCENT_GUARD_BUILD = True
+V2407_OVERHANG_AUDIT_STEP_DOWN_FIX_BUILD = True
