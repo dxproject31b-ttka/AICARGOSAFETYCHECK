@@ -16,7 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24
+# AI Cargo Safety Checker - High Precision v24.01
+# v24.01 - TallUnstableGuard: strict deterministic gate for TALL_UNSTABLE_RISK only. Other risk detectors unchanged.
 #
 # v24 - แก้ปัญหา ROOT CAUSE สำคัญที่สุดที่พบจากการตรวจสอบ /ooda /scout กับไฟล์จริง 6
 #   ไฟล์ (ED85-02, ED86-03, EC51-02, EC50-01, EC20-01, EC25-01) ที่ผู้ใช้รายงานว่า
@@ -1183,6 +1184,20 @@ OVERHANG_MIN_RATIO = 0.20
 OVERHANG_MIN_ABS_PX = 20
 TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.35
 TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.65
+
+# v24.01 TallUnstableGuard controls
+# Keep legacy constants above for compatibility, but use stricter v24.01 gates only inside
+# detect_tall_unstable_regions_for_view(). This patch intentionally does not change any
+# other risk detector.
+V2401_TALL_UNSTABLE_GUARD_ENABLED = True
+V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.45
+V2401_TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.55
+V2401_TALL_UNSTABLE_REQUIRE_BOX_COUNT_GT_NEIGHBORS = True
+V2401_TALL_UNSTABLE_MIN_WIDTH_RATIO_OF_MEDIAN = 0.70
+V2401_TALL_UNSTABLE_MAX_WIDTH_RATIO_OF_MEDIAN = 1.60
+V2401_TALL_UNSTABLE_MIN_ABS_HEIGHT_PX = 25
+V2401_TALL_UNSTABLE_TRACE = True
+
 LATERAL_IMBALANCE_MIN_RATIO = 0.40
 
 # v24 NEW: เกณฑ์สำหรับ VETO ของ REAR_LATERAL_IMBALANCE - ถ้า deterministic วัดว่า
@@ -1692,25 +1707,98 @@ def detect_overhang_regions_for_view(stacks):
 
 
 def detect_tall_unstable_regions_for_view(stacks):
-    """เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน ต้องมีเพื่อนบ้านทั้ง 2 ฝั่ง
-    เท่านั้นจึงจะพิจารณา (ป้องกัน false positive จากตั้งริมขอบเขตการวิเคราะห์)"""
+    """v24.01 TallUnstableGuard.
+
+    Original v24 considered a stack tall-unstable mainly from pixel height difference versus
+    left/right neighbors. That caused false positives when isometric perspective or segmentation
+    made equal-layer cargo appear taller.
+
+    v24.01 changes ONLY this detector:
+    - require a true interior stack with two neighbors;
+    - require stronger height contrast;
+    - require the candidate to have more detected boxes/layers than both neighbors;
+    - reject suspiciously narrow edge fragments and overly wide merged stacks;
+    - keep AI TALL_UNSTABLE claims gated by these deterministic regions downstream.
+    """
     regions = []
-    n = len(stacks)
+    n = len(stacks or [])
     if n < 3:
         return regions
-    heights = [max(1, s["floor_y"] - s["top_y"]) if s["boxes"] else 0 for s in stacks]
-    for i in range(1, n - 1):
-        h_this = heights[i]
-        if h_this <= 0:
-            continue
-        neighbor_heights = [heights[i - 1], heights[i + 1]]
-        if all(nh <= h_this * TALL_UNSTABLE_NEIGHBOR_MAX_RATIO for nh in neighbor_heights):
-            diff_ratio = 1 - (max(neighbor_heights) / h_this)
-            if diff_ratio >= TALL_UNSTABLE_MIN_HEIGHT_RATIO:
-                s = stacks[i]
-                regions.append({"x_min": s["x0"], "y_min": s["top_y"], "x_max": s["x1"], "y_max": s["floor_y"], "ratio": diff_ratio})
-    return regions
 
+    heights = [max(1, s["floor_y"] - s["top_y"]) if s.get("boxes") else 0 for s in stacks]
+    widths = [max(1, s["x1"] - s["x0"]) for s in stacks]
+    median_w = _median_of(widths) or 1
+
+    if globals().get("V2401_TALL_UNSTABLE_GUARD_ENABLED", True):
+        min_ratio = globals().get("V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO", 0.45)
+        neighbor_max_ratio = globals().get("V2401_TALL_UNSTABLE_NEIGHBOR_MAX_RATIO", 0.55)
+        min_w_ratio = globals().get("V2401_TALL_UNSTABLE_MIN_WIDTH_RATIO_OF_MEDIAN", 0.70)
+        max_w_ratio = globals().get("V2401_TALL_UNSTABLE_MAX_WIDTH_RATIO_OF_MEDIAN", 1.60)
+        min_abs_h = globals().get("V2401_TALL_UNSTABLE_MIN_ABS_HEIGHT_PX", 25)
+        require_box_count = globals().get("V2401_TALL_UNSTABLE_REQUIRE_BOX_COUNT_GT_NEIGHBORS", True)
+    else:
+        min_ratio = TALL_UNSTABLE_MIN_HEIGHT_RATIO
+        neighbor_max_ratio = TALL_UNSTABLE_NEIGHBOR_MAX_RATIO
+        min_w_ratio = 0.0
+        max_w_ratio = 999.0
+        min_abs_h = 1
+        require_box_count = False
+
+    trace = globals().get("V2401_TALL_UNSTABLE_TRACE", False)
+
+    for i in range(1, n - 1):
+        s = stacks[i]
+        h_this = heights[i]
+        if h_this < min_abs_h:
+            if trace:
+                print(f"v24.01 TALL_UNSTABLE reject idx={i}: height {h_this}px < min_abs {min_abs_h}px")
+            continue
+
+        current_w = widths[i]
+        width_ratio = current_w / max(1, median_w)
+        if width_ratio < min_w_ratio or width_ratio > max_w_ratio:
+            if trace:
+                print(f"v24.01 TALL_UNSTABLE reject idx={i}: width_ratio={width_ratio:.2f} outside [{min_w_ratio:.2f},{max_w_ratio:.2f}]")
+            continue
+
+        left_h, right_h = heights[i - 1], heights[i + 1]
+        if left_h <= 0 or right_h <= 0:
+            if trace:
+                print(f"v24.01 TALL_UNSTABLE reject idx={i}: missing neighbor height left={left_h} right={right_h}")
+            continue
+
+        if require_box_count:
+            cur_count = len(s.get("boxes") or [])
+            left_count = len(stacks[i - 1].get("boxes") or [])
+            right_count = len(stacks[i + 1].get("boxes") or [])
+            if cur_count <= max(left_count, right_count):
+                if trace:
+                    print(f"v24.01 TALL_UNSTABLE reject idx={i}: box_count current={cur_count} neighbors=({left_count},{right_count})")
+                continue
+
+        neighbor_heights = [left_h, right_h]
+        if not all(nh <= h_this * neighbor_max_ratio for nh in neighbor_heights):
+            if trace:
+                print(f"v24.01 TALL_UNSTABLE reject idx={i}: neighbor ratios=({left_h/h_this:.2f},{right_h/h_this:.2f}) > max {neighbor_max_ratio:.2f}")
+            continue
+
+        diff_ratio = 1 - (max(neighbor_heights) / h_this)
+        if diff_ratio < min_ratio:
+            if trace:
+                print(f"v24.01 TALL_UNSTABLE reject idx={i}: diff_ratio={diff_ratio:.2f} < min {min_ratio:.2f}")
+            continue
+
+        regions.append({
+            "x_min": s["x0"], "y_min": s["top_y"], "x_max": s["x1"], "y_max": s["floor_y"],
+            "ratio": diff_ratio,
+            "v2401_guard": True,
+            "v2401_width_ratio": width_ratio,
+            "v2401_height_px": h_this,
+            "v2401_current_box_count": len(s.get("boxes") or []),
+            "v2401_left_box_count": len(stacks[i - 1].get("boxes") or []),
+            "v2401_right_box_count": len(stacks[i + 1].get("boxes") or []),
+        })
+    return regions
 
 def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
     """เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน เฉพาะในโซนประตูท้ายตู้"""
@@ -2409,7 +2497,7 @@ def process_request(request):
             for r in tall_unstable_regions[view_label]:
                 print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view_label}): "
                       f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
-                      f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={TALL_UNSTABLE_MIN_HEIGHT_RATIO*100:.0f}%)")
+                      f"height_diff_ratio={r['ratio']*100:.1f}% (threshold={V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO*100:.0f}%, v24.01 guard)")
 
         # v24.3 NEW: LOCAL DEPTH-GAP SCAN - จับ "หลุมเฉพาะจุด" ที่ compute_lateral_gap_ratio
         # แบบเดิม (whole-container average) พลาดไป - ดู CHANGELOG ที่ค่าคงที่ LOCAL_GAP_*
@@ -2497,7 +2585,7 @@ def process_request(request):
                     "description": f"พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างกล่องล่าง (ตรวจจับจาก per-box segmentation)",
                 })
             for region in tall_unstable_regions.get(view_label, []):
-                if region["ratio"] < TALL_UNSTABLE_MIN_HEIGHT_RATIO:
+                if region["ratio"] < V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO:
                     continue
                 if _view_already_has_overlapping_claim(view_label, "TALL_UNSTABLE_RISK", region, all_risks):
                     continue
@@ -3023,7 +3111,9 @@ def process_request(request):
         img.save(buffered, format="JPEG", quality=80)
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
-        return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url}, 200, headers)
+        return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
+            "checkerVersion": "V24.01",
+            "benchmarkMode": "v24.01_tall_unstable_guard"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
