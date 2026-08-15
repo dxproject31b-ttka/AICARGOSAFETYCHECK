@@ -16,7 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.01
+# AI Cargo Safety Checker - High Precision v24.02
+# v24.02 - Targeted marker fixes: OVERHANG cause-box, BACK REAR_LATERAL box shift up 50%, inter-stack-only LATERAL_GAP.
 # v24.01 - TallUnstableGuard: strict deterministic gate for TALL_UNSTABLE_RISK only. Other risk detectors unchanged.
 #
 # v24 - แก้ปัญหา ROOT CAUSE สำคัญที่สุดที่พบจากการตรวจสอบ /ooda /scout กับไฟล์จริง 6
@@ -1198,6 +1199,14 @@ V2401_TALL_UNSTABLE_MAX_WIDTH_RATIO_OF_MEDIAN = 1.60
 V2401_TALL_UNSTABLE_MIN_ABS_HEIGHT_PX = 25
 V2401_TALL_UNSTABLE_TRACE = True
 
+# v24.02 targeted marker/decision controls
+V2402_OVERHANG_CAUSE_BOX_ENABLED = True
+V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO = 0.50
+V2402_LATERAL_GAP_INTER_STACK_ONLY = True
+V2402_LATERAL_GAP_MIN_INTER_STACK_GAP_PX = 18
+V2402_LATERAL_GAP_MIN_VERTICAL_OVERLAP_RATIO = 0.20
+V2402_TRACE = True
+
 LATERAL_IMBALANCE_MIN_RATIO = 0.40
 
 # v24 NEW: เกณฑ์สำหรับ VETO ของ REAR_LATERAL_IMBALANCE - ถ้า deterministic วัดว่า
@@ -1687,24 +1696,55 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def detect_overhang_regions_for_view(stacks):
-    """ในแต่ละตั้งที่มี >=2 กล่อง เทียบขอบซ้าย/ขวาของกล่องที่อยู่ติดกัน ถ้ากล่องบนยื่น
-    พ้นขอบกล่องล่างเกิน OVERHANG_MIN_RATIO "และ" เกิน OVERHANG_MIN_ABS_PX พิกเซล
-    (ทั้ง 2 เกณฑ์ต้องผ่าน) ถือว่าเป็น OVERHANG_RISK"""
+    """v24.02 OVERHANG cause-box.
+
+    OVERHANG_RISK means the upper cargo extends beyond the supporting lower cargo. The old marker
+    boxed the union of upper + lower boxes, which did not communicate the actual risk location.
+    This version returns a compact box around only the unsupported overhanging portion of the upper
+    box, while preserving the same detection threshold.
+    """
     regions = []
     for s in stacks:
-        boxes = s["boxes"]
+        boxes = s.get("boxes", [])
         for i in range(len(boxes) - 1):
-            upper = boxes[i]; lower = boxes[i + 1]
+            upper = boxes[i]
+            lower = boxes[i + 1]
             lower_width = max(1, lower["x_right"] - lower["x_left"])
-            left_overhang = lower["x_left"] - upper["x_left"]
-            right_overhang = upper["x_right"] - lower["x_right"]
-            overhang_px = max(left_overhang, right_overhang, 0)
+            left_overhang = max(0, lower["x_left"] - upper["x_left"])
+            right_overhang = max(0, upper["x_right"] - lower["x_right"])
+            overhang_px = max(left_overhang, right_overhang)
             ratio = overhang_px / lower_width
             if ratio >= OVERHANG_MIN_RATIO and overhang_px >= OVERHANG_MIN_ABS_PX:
-                x_min = min(upper["x_left"], lower["x_left"]); x_max = max(upper["x_right"], lower["x_right"])
-                regions.append({"x_min": x_min, "y_min": upper["y_min"], "x_max": x_max, "y_max": lower["y_max"], "ratio": ratio})
+                # Mark the unsupported part only, not the entire upper/lower cargo pair.
+                if left_overhang >= right_overhang and left_overhang > 0:
+                    x_min = upper["x_left"]
+                    x_max = min(upper["x_right"], lower["x_left"])
+                    side = "LEFT_UNSUPPORTED_EDGE"
+                else:
+                    x_min = max(upper["x_left"], lower["x_right"])
+                    x_max = upper["x_right"]
+                    side = "RIGHT_UNSUPPORTED_EDGE"
+                # If segmentation makes the unsupported strip too thin after clipping, fall back to
+                # a narrow edge strip on the upper box so the marker remains visible and causal.
+                if x_max - x_min < 8:
+                    if side.startswith("LEFT"):
+                        x_min = upper["x_left"]
+                        x_max = min(upper["x_right"], upper["x_left"] + max(8, int(overhang_px)))
+                    else:
+                        x_max = upper["x_right"]
+                        x_min = max(upper["x_left"], upper["x_right"] - max(8, int(overhang_px)))
+                y_pad = max(2, int((upper["y_max"] - upper["y_min"]) * 0.08))
+                regions.append({
+                    "x_min": x_min,
+                    "y_min": max(0, upper["y_min"] - y_pad),
+                    "x_max": x_max,
+                    "y_max": upper["y_max"] + y_pad,
+                    "ratio": ratio,
+                    "overhang_px": overhang_px,
+                    "overhang_side": side,
+                    "v2402_marker_policy": "upper_unsupported_cause_box",
+                })
     return regions
-
 
 def detect_tall_unstable_regions_for_view(stacks):
     """v24.01 TallUnstableGuard.
@@ -1800,15 +1840,30 @@ def detect_tall_unstable_regions_for_view(stacks):
         })
     return regions
 
-def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
-    """เทียบความสูงรวมทั้งตั้งระหว่างตั้งที่อยู่ติดกัน เฉพาะในโซนประตูท้ายตู้"""
+def _v2402_shift_abs_box_up(box, shift_ratio=0.50):
+    """Shift an absolute (x0,y0,x1,y1) marker box upward by a fraction of its height."""
+    try:
+        x0, y0, x1, y1 = [float(v) for v in box]
+        h = max(1.0, y1 - y0)
+        shift = h * float(shift_ratio)
+        return (int(x0), int(y0 - shift), int(x1), int(y1 - shift))
+    except Exception:
+        return box
+
+
+def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_label=None):
+    """Compare adjacent rear-zone stack heights.
+
+    v24.02: when the view is BACK, shift the marker box upward by 50% of its own height so the
+    frame lands on the visible cargo boxes instead of the lower/floor area.
+    """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
     regions = []
     for i in range(len(relevant) - 1):
         a, b = relevant[i], relevant[i + 1]
-        ha = max(1, a["floor_y"] - a["top_y"]) if a["boxes"] else 0
-        hb = max(1, b["floor_y"] - b["top_y"]) if b["boxes"] else 0
+        ha = max(1, a["floor_y"] - a["top_y"]) if a.get("boxes") else 0
+        hb = max(1, b["floor_y"] - b["top_y"]) if b.get("boxes") else 0
         if ha == 0 or hb == 0:
             continue
         taller, shorter = (ha, hb) if ha >= hb else (hb, ha)
@@ -1816,9 +1871,14 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1):
         if ratio >= LATERAL_IMBALANCE_MIN_RATIO:
             x_min = min(a["x0"], b["x0"]); x_max = max(a["x1"], b["x1"])
             y_min = min(a["top_y"], b["top_y"]); y_max = max(a["floor_y"], b["floor_y"])
-            regions.append({"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max, "ratio": ratio})
+            if str(view_label or "").upper() == "BACK":
+                x_min, y_min, x_max, y_max = _v2402_shift_abs_box_up((x_min, y_min, x_max, y_max), V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO)
+            regions.append({
+                "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
+                "ratio": ratio,
+                "v2402_back_shift_up": str(view_label or "").upper() == "BACK",
+            })
     return regions
-
 
 def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     """v24 NEW: คืนค่า "อัตราส่วนความแตกต่างความสูงสูงสุด" ระหว่างคู่ตั้งที่อยู่ติดกัน
@@ -1837,6 +1897,38 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
         ratio = 1 - (shorter / taller)
         max_ratio = max(max_ratio, ratio)
     return max_ratio
+
+
+def detect_inter_stack_lateral_gap_regions_for_view(stacks, min_gap_px=None, min_vertical_overlap_ratio=None):
+    """v24.02 LATERAL_GAP: detect only real gaps between adjacent cargo stacks.
+
+    This intentionally ignores the distance from the container top/bottom edge to cargo, because
+    that created oversized boxes unrelated to side-by-side cargo separation.
+    """
+    min_gap_px = V2402_LATERAL_GAP_MIN_INTER_STACK_GAP_PX if min_gap_px is None else min_gap_px
+    min_vertical_overlap_ratio = V2402_LATERAL_GAP_MIN_VERTICAL_OVERLAP_RATIO if min_vertical_overlap_ratio is None else min_vertical_overlap_ratio
+    ss = sorted([s for s in (stacks or []) if s.get("boxes")], key=lambda s: s.get("x0", 0))
+    regions = []
+    for a, b in zip(ss, ss[1:]):
+        gap = int(b["x0"] - a["x1"])
+        if gap < min_gap_px:
+            continue
+        y0 = max(a["top_y"], b["top_y"])
+        y1 = min(a["floor_y"], b["floor_y"])
+        overlap = max(0, y1 - y0)
+        min_h = max(1, min(a["floor_y"] - a["top_y"], b["floor_y"] - b["top_y"]))
+        overlap_ratio = overlap / min_h
+        if overlap_ratio < min_vertical_overlap_ratio:
+            continue
+        pad_y = max(4, int(overlap * 0.08))
+        regions.append({
+            "x_min": a["x1"], "y_min": max(0, y0 - pad_y),
+            "x_max": b["x0"], "y_max": y1 + pad_y,
+            "gap_px": gap,
+            "vertical_overlap_ratio": overlap_ratio,
+            "v2402_marker_policy": "inter_stack_gap_only",
+        })
+    return regions
 
 
 def _ai_box_2d_to_absolute(box_2d, crop_w, crop_h, crop_y_start):
@@ -2504,6 +2596,11 @@ def process_request(request):
         # สำหรับรายละเอียด root cause (พบจากผู้ใช้ชี้ตำแหน่งด้วยการวงสีแดงใน EC50-01/EC51-02)
         local_depth_gap_regions = detect_local_depth_gap_per_view(diagram_crop, layout, crop_w, crop_h,
                                                                      crop_y_start, container_bounds, cargo_extent)
+        inter_stack_gap_regions = {"FRONT": [], "BACK": []}
+        for _v in ("FRONT", "BACK"):
+            inter_stack_gap_regions[_v] = detect_inter_stack_lateral_gap_regions_for_view(stack_box_model.get(_v, []))
+            for _r in inter_stack_gap_regions[_v]:
+                print(f"v24.02 inter-stack LATERAL_GAP candidate ({_v}): x=[{_r['x_min']}-{_r['x_max']}] y=[{_r['y_min']}-{_r['y_max']}] gap={_r['gap_px']}px overlap={_r['vertical_overlap_ratio']:.2f}")
 
         raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
         if not isinstance(raw_ai_risks, list):
@@ -2582,7 +2679,7 @@ def process_request(request):
                     "view": view_label, "risk_type": "OVERHANG_RISK",
                     "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_OVERHANG",
-                    "description": f"พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างกล่องล่าง (ตรวจจับจาก per-box segmentation)",
+                    "description": f"พบสินค้าชั้นบนยื่นพ้นขอบฐานรองรับด้านล่างประมาณ {region['ratio']*100:.0f}% ของความกว้างกล่องล่าง (marker ชี้เฉพาะส่วนที่ยื่น: {region.get('overhang_side','UNSUPPORTED_EDGE')})",
                 })
             for region in tall_unstable_regions.get(view_label, []):
                 if region["ratio"] < V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO:
@@ -2670,6 +2767,8 @@ def process_request(request):
                     if rear_zone_risk_val in ("REAR_EMPTY_RISK", "BOTH"):
                         precise_boxes[(view_label, "REAR_EMPTY_RISK")] = pb
                     if rear_zone_risk_val in ("REAR_LATERAL_IMBALANCE", "BOTH"):
+                        if view_label == "BACK":
+                            pb = _v2402_shift_abs_box_up(pb, V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO)
                         precise_boxes[(view_label, "REAR_LATERAL_IMBALANCE")] = pb
 
         if isinstance(front_result_from_front_view, dict) and str(front_result_from_front_view.get("front_zone_risk", "")).upper() == "FRONT_EMPTY_RISK":
@@ -2818,7 +2917,7 @@ def process_request(request):
                 rear_x0, rear_x1 = cb["xmin"], cb["xmin"] + int(container_width * 0.45)
             else:
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
-            det_regions = detect_lateral_imbalance_regions_for_view(stack_box_model.get(view_label, []), rear_x0, rear_x1)
+            det_regions = detect_lateral_imbalance_regions_for_view(stack_box_model.get(view_label, []), rear_x0, rear_x1, view_label=view_label)
             for region in det_regions:
                 if region["ratio"] < LATERAL_IMBALANCE_MIN_RATIO:
                     continue
@@ -2848,80 +2947,31 @@ def process_request(request):
                 print(f"Skipping FRONT_EMPTY ({view_label}) - gated out")
 
         for view_label in ("FRONT", "BACK"):
-            lateral_gap_mm = compute_lateral_gap_mm(container_bounds.get(view_label), cargo_extent.get(view_label), container_length_mm)
-            lateral_gap_ratio = compute_lateral_gap_ratio(container_bounds.get(view_label), cargo_extent.get(view_label))
+            # v24.02: LATERAL_GAP_RISK must come only from a gap between adjacent cargo boxes/stacks.
+            # Do not use top/bottom container-to-cargo distance because it creates oversized markers.
+            best_region = None
+            if inter_stack_gap_regions.get(view_label):
+                best_region = max(inter_stack_gap_regions[view_label], key=lambda r: r["gap_px"])
 
-            should_flag_lateral = False
-            gap_display = ""
-            if lateral_gap_mm is not None:
-                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_mm:.0f}mm (threshold={MIN_LATERAL_GAP_MM}mm)")
-                should_flag_lateral = lateral_gap_mm >= MIN_LATERAL_GAP_MM
-                gap_display = f"{lateral_gap_mm/10:.0f} ซม."
-            elif lateral_gap_ratio is not None:
-                print(f"Deterministic lateral gap for LATERAL_GAP_RISK ({view_label}): {lateral_gap_ratio*100:.1f}% "
-                      f"(mm calibration unavailable, using ratio fallback, threshold={FALLBACK_MIN_LATERAL_GAP_RATIO*100:.0f}%)")
-                should_flag_lateral = lateral_gap_ratio >= FALLBACK_MIN_LATERAL_GAP_RATIO
-                gap_display = f"{lateral_gap_ratio*100:.0f}% ของความสูงโครงสร้างตู้"
-            else:
-                print(f"WARNING: Could not compute lateral gap for {view_label} (missing container_bounds or cargo_extent)")
-
-            # v24.2 NEW: คำนวณกรอบแม่นยำสำหรับ LATERAL_GAP_RISK ก่อน (ถ้าคำนวณได้) แล้ว
-            # แปลงเป็นพิกัด normalized (0-1000) เพื่อใส่เป็น box_2d - ป้องกันไม่ให้ระบบ
-            # ตกไปใช้ fallback แบบ percentage-based ที่ผิดตำแหน่ง (ดู comment ใน
-            # get_precise_lateral_gap_box สำหรับรายละเอียด root cause ที่พบจากผู้ใช้)
-            precise_abs_box = get_precise_lateral_gap_box(container_bounds.get(view_label), cargo_extent.get(view_label))
-            precise_lateral_box_2d = None
-            if precise_abs_box:
-                px0, py0, px1, py1 = precise_abs_box
-                precise_lateral_box_2d = [
-                    ((py0 - crop_y_start) / crop_h) * 1000,
-                    (px0 / crop_w) * 1000,
-                    ((py1 - crop_y_start) / crop_h) * 1000,
-                    (px1 / crop_w) * 1000,
-                ]
-
-            if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
-                print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
-                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": precise_lateral_box_2d})
-            elif (unused_floor_mm is not None and unused_floor_mm >= UNUSED_FLOOR_MIN_MM
-                  and view_label not in _existing_risk_views("LATERAL_GAP")
-                  and lateral_gap_ratio is not None and lateral_gap_ratio >= UNUSED_FLOOR_RELAXED_GAP_RATIO):
-                # v24.1 NEW: "Unused Floor" ที่พิมพ์อยู่บน PDF โดยตรง (ground truth ไม่
-                # ต้องพึ่งพา pixel measurement) ยืนยันว่ามีพื้นที่ว่างจริงในโหลดนี้ ใช้
-                # เป็นตัวช่วยผ่อนเกณฑ์ ratio ปกติ (12%) ลงครึ่งหนึ่ง (6%) เพื่อจับเคส
-                # borderline ที่ pixel-based ratio วัดได้ใกล้เคียงเกณฑ์มาก (พบจากไฟล์
-                # จริง ED86-03: lateral_gap_ratio=11.6% ใกล้เกณฑ์ 12% มาก แต่ไม่ผ่าน
-                # เกณฑ์เดิมพอดี ทั้งที่ PDF ระบุ "Unused Floor: 17.7(in)" ยืนยันชัดเจน
-                # ว่ามีพื้นที่ว่างจริง) - อ้างอิงค่าที่พิมพ์จาก PDF ในคำอธิบายเพื่อความ
-                # โปร่งใส/ตรวจสอบย้อนหลังได้
-                # v24.2: ใช้ precise_lateral_box_2d เดียวกันเพื่อวาดกรอบตรงตำแหน่งจริง
-                print(f"FORCED LATERAL_GAP_RISK ({view_label}) corroborated by printed 'Unused Floor: "
-                      f"{unused_floor_mm/25.4:.1f}in' + pixel ratio {lateral_gap_ratio*100:.1f}% "
-                      f"(relaxed threshold {UNUSED_FLOOR_RELAXED_GAP_RATIO*100:.0f}%)")
-                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A",
-                                   "reasoning": "FORCED_BY_PRINTED_UNUSED_FLOOR",
-                                   "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {lateral_gap_ratio*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
-                                   "box_2d": precise_lateral_box_2d})
-            elif (local_depth_gap_regions.get(view_label) and view_label not in _existing_risk_views("LATERAL_GAP")):
-                # v24.3 NEW: FORCE จาก LOCAL DEPTH-GAP SCAN - จับ "หลุมเฉพาะจุด" ที่
-                # ทั้งวิธี whole-container ratio และ Unused Floor (ซึ่งเป็นค่ารวมทั้ง
-                # โหลดเช่นกัน ไม่ได้แยกเฉพาะจุด) พลาดไป ยืนยันจากผู้ใช้ด้วยการวงสีแดง
-                # ชี้ตำแหน่งจริงในไฟล์ EC50-01/EC51-02 ซึ่งมีหลุมเฉพาะจุดลึกถึง 57-69px
-                # แต่ lateral_gap_ratio รวมวัดได้แค่ ~7-10% (ไม่ถึงเกณฑ์ 12%) และไฟล์
-                # เหล่านี้ไม่มี "Unused Floor" ระบุด้วย (เพราะพื้นที่รวมทั้งโหลดยังถือว่า
-                # ใช้เต็มพื้นที่ แต่มี "หลุม" เฉพาะจุดที่เป็นอันตรายจากมุมมองความปลอดภัย)
-                best_region = max(local_depth_gap_regions[view_label], key=lambda r: r["max_gap_px"])
+            if best_region and view_label not in _existing_risk_views("LATERAL_GAP"):
                 ymin_norm = ((best_region["y_min"] - crop_y_start) / crop_h) * 1000
                 ymax_norm = ((best_region["y_max"] - crop_y_start) / crop_h) * 1000
                 xmin_norm = (best_region["x_min"] / crop_w) * 1000
                 xmax_norm = (best_region["x_max"] / crop_w) * 1000
-                print(f"FORCED LATERAL_GAP_RISK ({view_label}) from LOCAL DEPTH-GAP SCAN "
-                      f"(x=[{best_region['x_min']:.0f}-{best_region['x_max']:.0f}], "
-                      f"max_local_gap={best_region['max_gap_px']:.0f}px, width={best_region['width_px']:.0f}px)")
-                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A",
-                                   "reasoning": "FORCED_BY_LOCAL_DEPTH_GAP_SCAN",
-                                   "description": f"พบหลุมเฉพาะจุดบนพื้นตู้ (ตำแหน่งเดียว ไม่ใช่ทั้งโหลด) ลึกประมาณ {best_region['max_gap_px']:.0f}px กว้าง {best_region['width_px']:.0f}px (ตรวจจับจาก local depth-gap scan)",
-                                   "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm]})
+                print(f"FORCED LATERAL_GAP_RISK ({view_label}) from v24.02 inter-stack box gap only "
+                      f"(gap={best_region['gap_px']}px, overlap={best_region['vertical_overlap_ratio']:.2f})")
+                all_risks.append({
+                    "view": view_label,
+                    "risk_type": "LATERAL_GAP_RISK",
+                    "direction": "LATERAL",
+                    "lateral_side": "N/A",
+                    "reasoning": "FORCED_V2402_INTER_STACK_LATERAL_GAP_ONLY",
+                    "description": f"พบช่องว่างระหว่างกล่อง/ตั้งสินค้าโดยตรง กว้างประมาณ {best_region['gap_px']}px (ไม่ใช้ช่องว่างจากขอบตู้บน/ล่าง)",
+                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                })
+            else:
+                if globals().get("V2402_TRACE", False):
+                    print(f"v24.02 LATERAL_GAP ({view_label}) skipped: no qualifying inter-stack gap")
 
         # v24.1 NEW: เช่นเดียวกับ LATERAL_GAP_RISK - ใช้ "Unused Floor" ที่พิมพ์จาก PDF
         # เป็นตัวช่วยผ่อนเกณฑ์ ratio สำหรับ REAR_EMPTY_RISK/FRONT_EMPTY_RISK ด้วย เผื่อ
@@ -3112,8 +3162,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.01",
-            "benchmarkMode": "v24.01_tall_unstable_guard"}, 200, headers)
+            "checkerVersion": "V24.02",
+            "benchmarkMode": "v24.02_targeted_risk_marker_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
