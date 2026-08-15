@@ -16,7 +16,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.08
+# AI Cargo Safety Checker - High Precision v24.09
 # v24.07 - OverhangAuditStepDownFix: OVERHANG audit-only until segmentation is trusted; add stack-adjacent STEP_DOWN detector for AA04-05 style risk.
 # v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
 # v24.05 - RearLateralImbalanceTune: tune BACK-frame marker to visible stacked cargo, emit deterministic box_2d, and avoid lower-floor fallback for rear lateral.
@@ -1291,12 +1291,10 @@ V2407_OVERHANG_AUDIT_ONLY = True
 V2407_OVERHANG_ACTIVE_DETECTION = False
 V2407_OVERHANG_DISABLE_AI_ACCEPT = True
 V2407_STEP_DOWN_STACK_ADJACENCY_ENABLED = True
-V2408_STEP_DOWN_STACK_HEIGHT_RATIO = 0.30
+V2407_STEP_DOWN_STACK_HEIGHT_RATIO = 0.22
 V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX = 18
 V2407_STEP_DOWN_MARK_LOWER_STACK = True
 V2407_TRACE = True
-V2408_STEPDOWN_STRONGEST_ONLY = True
-V2408_STEPDOWN_BOUNDARY_ZONE_RATIO = 0.30
 
 # v24.05 REAR_LATERAL_IMBALANCE tuning controls
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
@@ -3366,8 +3364,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.08",
-            "benchmarkMode": "v24.08_step_down_boundary_focus"}, 200, headers)
+            "checkerVersion": "V24.09",
+            "benchmarkMode": "v24.09_stepdown_strongest_pair"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3393,5 +3391,9 @@ V2405_REAR_LATERAL_IMBALANCE_TUNE_BUILD = True
 # V24.06 build marker
 V2407_OVERHANG_AUDIT_STEP_DOWN_FIX_BUILD = True
 
-# V24.08 build marker
-V2408_STEPDOWN_BOUNDARY_BUILD=True
+
+# V24.09 controls
+V2409_STEPDOWN_STRONGEST_ONLY=True
+V2409_STEPDOWN_DISABLE_MERGE=True
+V2409_STEPDOWN_BOUNDARY_RATIO=0.25
+V2409_BUILD=True
