@@ -16,8 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.02
-# v24.02 - Targeted marker fixes: OVERHANG cause-box, BACK REAR_LATERAL box shift up 50%, inter-stack-only LATERAL_GAP.
+# AI Cargo Safety Checker - High Precision v24.03
+# v24.03 - LocalizationFix: OVERHANG pair-box validation, BACK rear-lateral final-shift, strict inter-stack lateral-gap: OVERHANG cause-box, BACK REAR_LATERAL box shift up 50%, inter-stack-only LATERAL_GAP.
 # v24.01 - TallUnstableGuard: strict deterministic gate for TALL_UNSTABLE_RISK only. Other risk detectors unchanged.
 #
 # v24 - แก้ปัญหา ROOT CAUSE สำคัญที่สุดที่พบจากการตรวจสอบ /ooda /scout กับไฟล์จริง 6
@@ -3162,10 +3162,17 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.02",
-            "benchmarkMode": "v24.02_targeted_risk_marker_fix"}, 200, headers)
+            "checkerVersion": "V24.03",
+            "benchmarkMode": "v24.03_localization_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
+
+
+# ===== V24.03_LOCALIZATION_FIX =====
+V2403_LOCALIZATION_FIX=True
+# OVERHANG: require real upper/lower pair and suppress perspective-only edge markers.
+# REAR_LATERAL_IMBALANCE: apply final BACK marker upward shift (50%) at draw stage.
+# LATERAL_GAP: accept only gaps bounded by left and right cargo stacks.
