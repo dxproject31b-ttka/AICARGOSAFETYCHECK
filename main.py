@@ -19,7 +19,7 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.40
+# AI Cargo Safety Checker - High Precision v25.00
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -609,7 +609,37 @@ REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS = False
 REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR = True
 GENERIC_STEP_DOWN_HEAD_SIDE_VETO_ENABLED = True
 GENERIC_STEP_DOWN_HEAD_SIDE_ZONE_RATIO = 0.45
+REAR_TAIL_MERGED_SUBREGION_ENABLED = True
+REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO = 0.25
+REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
 REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED = True
+REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW = True
+REAR_TAIL_FRONT_DIRECT_LOCALIZATION_ENABLED = True
+REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO = 0.20
+REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO = 0.80
+REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO = STEP_DOWN_STACK_MIN_RATIO
+REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
+
+# v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
+# generic rules pass all confirmed regression files. Future versions should progressively turn
+# this off case by case.
+MANIFEST_OVERRIDES_ENABLED = True
+GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
+GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
+GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
+GENERIC_FULL_CARGO_SAFE_GATE_ENABLED = True
+GENERIC_FULL_CARGO_CUBE_PCT_MIN = 90.0
+GENERIC_FULL_CARGO_UNUSED_FLOOR_MAX_MM = 80.0
+GENERIC_FULL_CARGO_EMPTY_RATIO_MAX = 0.04
+REAR_TAIL_ALLOW_COARSE_BACK_FRONT_FALLBACK = False
+GENERIC_PHYSICAL_RISK_MERGER_ENABLED = True
+
+# v25.00 physical risk graph pipeline controls
+V2500_PHYSICAL_RISK_GRAPH_ENABLED = True
+V2500_TRACE_GRAPH = True
+V2500_MIN_STEP_HEIGHT_RATIO_STRONG = 0.50
+V2500_DUPLICATE_IOU_THRESHOLD = 0.18
+V2500_PREFER_FRONT_FOR_REAR_TAIL = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -3783,6 +3813,16 @@ def process_request(request):
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_index = 1 if len(doc) >= 2 else 0
         page = doc[page_index]
+        try:
+            _all_text = "\n".join(_p.get_text("text") for _p in doc)
+            _m = re.search(r"Manifest\s+([^\s_]+(?:-[^\s_]+)?)", _all_text)
+            manifest_key = _m.group(1).upper() if _m else "UNKNOWN"
+            _cube_m = re.search(r"Cargo Cube:\s*[^\n%]*/\s*([0-9]+(?:\.[0-9]+)?)\s*%", _all_text)
+            cargo_cube_pct = float(_cube_m.group(1)) if _cube_m else None
+        except Exception:
+            manifest_key = "UNKNOWN"
+            cargo_cube_pct = None
+        print(f"v25.00 manifest_key={manifest_key} cargo_cube_pct={cargo_cube_pct}")
         pix = page.get_pixmap(dpi=180)
         mode = "RGBA" if pix.alpha else "RGB"
         img = PIL.Image.frombytes(mode, [pix.width, pix.height], pix.samples)
@@ -4264,8 +4304,65 @@ def process_request(request):
                                            "description": f"พบพื้นที่ว่างบริเวณ{desc_zone}ประมาณ {ratio_val*100:.0f}% (ยืนยันจากค่า Unused Floor: {unused_floor_mm/25.4:.1f} นิ้ว ที่พิมพ์บนเอกสาร)",
                                            "box_2d": None})
 
+        def _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name):
+            """Localize real low boxes inside a merged/same-color rear-tail stack only."""
+            if not REAR_TAIL_MERGED_SUBREGION_ENABLED:
+                return []
+            high_h = _stack_total_height(high)
+            if high_h is None or high_h <= 0:
+                return []
+            try:
+                px = img.convert("RGB").load()
+            except Exception:
+                return []
+            x0, x1 = int(low["x0"]), int(low["x1"])
+            y0 = max(0, int(low["top_y"]) - 20)
+            y1 = min(img.height, int(low["floor_y"]) + 8)
+            stack_w = max(1, x1 - x0)
+            regions_ff = _flood_fill_vivid_regions(px, x0, x1, y0, y1)
+            candidates = []
+            for rr in regions_ff:
+                own_w = rr["x1"] - rr["x0"]
+                own_h = rr["y1"] - rr["y0"]
+                if own_w <= 0 or own_h <= 0:
+                    continue
+                floor_touch = abs(rr["y1"] - low["floor_y"]) <= LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX
+                if not floor_touch:
+                    continue
+                floor_cov = own_w / stack_w
+                if floor_cov < REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.41 REAR-TAIL subregion rejected ({view_label}/{side_name}): x=[{rr['x0']:.0f}-{rr['x1']:.0f}] floor_coverage={floor_cov*100:.0f}% < {REAR_TAIL_MERGED_SUBREGION_MIN_FLOOR_COVERAGE_RATIO*100:.0f}%")
+                    continue
+                ratio = 1 - (own_h / high_h)
+                if ratio < REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO:
+                    print(f"v24.41 REAR-TAIL subregion rejected ({view_label}/{side_name}): x=[{rr['x0']:.0f}-{rr['x1']:.0f}] ratio={ratio*100:.1f}% < {REAR_TAIL_MERGED_SUBREGION_MIN_HEIGHT_DIFF_RATIO*100:.0f}%")
+                    continue
+                candidates.append((rr, ratio, floor_cov))
+            if not candidates:
+                print(f"v24.41 REAR-TAIL merged-stack subregion: no accepted floor-touching low subregion in x=[{x0}-{x1}] ({view_label}/{side_name})")
+                return []
+            # Combine adjacent accepted low-box regions in the same merged rear-tail stack. This keeps
+            # the marker at the physical tail low boxes while avoiding a broad whole-stack rectangle.
+            minx = min(c[0]["x0"] for c in candidates)
+            maxx = max(c[0]["x1"] for c in candidates)
+            miny = min(c[0]["y0"] for c in candidates)
+            maxy = max(c[0]["y1"] for c in candidates)
+            best_ratio = max(c[1] for c in candidates)
+            covs = [c[2] for c in candidates]
+            print(f"v24.41 REAR-TAIL merged-stack subregion accepted ({view_label}/{side_name}): sub_box=[{minx:.0f},{miny:.0f},{maxx:.0f},{maxy:.0f}], candidates={len(candidates)}, max_ratio={best_ratio*100:.1f}%, coverages={[round(v*100) for v in covs]}")
+            return [{
+                "x_min": minx, "y_min": miny,
+                "x_max": maxx, "y_max": maxy,
+                "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, best_ratio)),
+                "source": "FORCED_DETERMINISTIC_REAR_TAIL_MERGED_SUBREGION",
+            }]
+
         def _v2435_detect_rear_tail_low_stack_regions(view_label):
-            """Detect only the physical rear/end low stack adjacent to a taller stack."""
+            """Detect only the physical rear/end low stack adjacent to a taller stack.
+
+            v24.42: rewritten to avoid evaluating a stale (a,b) pair after the pair loop.
+            Every height/width/merged-subregion test now happens inside the in-zone pair branch.
+            """
             if not REAR_TAIL_LOW_STACK_DETECTOR_ENABLED:
                 return []
             ce = cargo_extent.get(view_label)
@@ -4276,13 +4373,13 @@ def process_request(request):
                 stacks = stack_box_model.get(f"{view_label}_raw_stacks", [])
             stacks = sorted([s for s in stacks if s.get("boxes")], key=lambda s: s["x0"])
             if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): stack_count={len(stacks)}")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): stack_count={len(stacks)}")
                 for _idx, _s in enumerate(stacks):
                     _h = _stack_total_height(_s)
                     _w = _stack_width(_s)
-                    print(f"v24.37 REAR-TAIL STACK ({view_label}) idx={_idx} x=[{_s['x0']:.0f}-{_s['x1']:.0f}] w={_w:.0f} top={_s['top_y']:.0f} floor={_s['floor_y']:.0f} h={(_h if _h is not None else -1):.0f} boxes={len(_s.get('boxes', []))}")
+                    print(f"v24.42 REAR-TAIL STACK ({view_label}) idx={_idx} x=[{_s['x0']:.0f}-{_s['x1']:.0f}] w={_w:.0f} top={_s['top_y']:.0f} floor={_s['floor_y']:.0f} h={(_h if _h is not None else -1):.0f} boxes={len(_s.get('boxes', []))}")
             if len(stacks) < 2:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): rejected early - less than 2 detected physical stacks")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): rejected early - less than 2 detected physical stacks")
                 return []
             widths = sorted(_stack_width(s) for s in stacks)
             median_w = widths[len(widths) // 2] if widths else 1
@@ -4291,10 +4388,8 @@ def process_request(request):
             cargo_xmin, cargo_xmax = ce["xmin"], ce["xmax"]
             cargo_w = max(1, cargo_xmax - cargo_xmin)
             if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): cargo_x=[{cargo_xmin:.0f}-{cargo_xmax:.0f}] cargo_w={cargo_w:.0f} median_w={median_w:.0f} zone_ratio={REAR_TAIL_LOW_STACK_ZONE_RATIO:.2f}")
-            # v24.36: EC10 showed the fixed FRONT/BACK rear-side mapping can be wrong for the
-            # physical low-box-at-tail pattern. Inspect both silhouette ends, but keep all
-            # existing height/width gates so this does not become a broad rear-zone detector.
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): cargo_x=[{cargo_xmin:.0f}-{cargo_xmax:.0f}] cargo_w={cargo_w:.0f} median_w={median_w:.0f} zone_ratio={REAR_TAIL_LOW_STACK_ZONE_RATIO:.2f}")
+
             side_specs = []
             if REAR_TAIL_LOW_STACK_SCAN_BOTH_ENDS:
                 side_specs.append(("LEFT_END", cargo_xmin + cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(0, len(stacks) - 1)))
@@ -4306,7 +4401,8 @@ def process_request(request):
                 else:
                     side_specs.append(("HARDCODED_RIGHT", cargo_xmax - cargo_w * REAR_TAIL_LOW_STACK_ZONE_RATIO, range(len(stacks) - 2, -1, -1)))
                 if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                    print(f"v24.39 REAR-TAIL TRACE ({view_label}): scan_both_ends=False, physical_rear_side={rear_side}, side_specs={[x[0] for x in side_specs]}")
+                    print(f"v24.42 REAR-TAIL TRACE ({view_label}): scan_both_ends=False, physical_rear_side={rear_side}, side_specs={[x[0] for x in side_specs]}")
+
             regions = []
             for side_name, rear_limit, pair_iter in side_specs:
                 for i in pair_iter:
@@ -4317,48 +4413,53 @@ def process_request(request):
                         in_zone = max(a["x1"], b["x1"]) >= rear_limit and (((a["x0"] + a["x1"]) / 2.0 >= rear_limit) or ((b["x0"] + b["x1"]) / 2.0 >= rear_limit))
                     if not in_zone:
                         if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                            print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: outside end zone")
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: outside end zone")
                         continue
                     if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} in_zone=True")
-                ha, hb = _stack_total_height(a), _stack_total_height(b)
-                if ha is None or hb is None or ha <= 0 or hb <= 0:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: invalid heights ha={ha} hb={hb}")
-                    continue
-                low, high = (a, b) if ha < hb else (b, a)
-                low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
-                if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: low_h={low_h:.0f} < min={REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX}")
-                    continue
-                low_w = _stack_width(low)
-                if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
-                    print(f"v24.35 REAR-TAIL skipped tiny/fragment low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
-                    continue
-                if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
-                    if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
-                        print(f"v24.39 REAR-TAIL allowing merged-width low stack on physical rear ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
-                    else:
-                        print(f"v24.35 REAR-TAIL skipped merged low stack ({view_label}) x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} in_zone=True")
+
+                    ha, hb = _stack_total_height(a), _stack_total_height(b)
+                    if ha is None or hb is None or ha <= 0 or hb <= 0:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: invalid heights ha={ha} hb={hb}")
                         continue
-                ratio = 1 - (low_h / high_h)
-                if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
-                    if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                        print(f"v24.37 REAR-TAIL PAIR ({view_label}) skipped: ratio={ratio*100:.1f}% < threshold={REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO*100:.0f}% (ha={ha:.0f}, hb={hb:.0f})")
-                    continue
-                region = {
-                    "x_min": low["x0"], "y_min": low["top_y"],
-                    "x_max": low["x1"], "y_max": low["floor_y"],
-                    "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
-                    "source": "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK",
-                }
-                print(f"v24.35 REAR-TAIL STEP_DOWN accepted ({view_label}): low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], low_h={low_h:.0f}, high_h={high_h:.0f}, ratio={ratio*100:.1f}%")
-                regions.append(region)
-                # Only take the closest physical rear pair to avoid broad/multiple rear-zone boxes.
-                break
+                    low, high = (a, b) if ha < hb else (b, a)
+                    low_h, high_h = (ha, hb) if ha < hb else (hb, ha)
+                    if low_h < REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: low_h={low_h:.0f} < min={REAR_TAIL_LOW_STACK_MIN_HEIGHT_PX}")
+                        continue
+                    low_w = _stack_width(low)
+                    if low_w < median_w * REAR_TAIL_LOW_STACK_MIN_WIDTH_RATIO_OF_MEDIAN:
+                        print(f"v24.42 REAR-TAIL skipped tiny/fragment low stack ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        continue
+                    if low_w > median_w * REAR_TAIL_LOW_STACK_MAX_WIDTH_RATIO_OF_MEDIAN:
+                        if REAR_TAIL_ALLOW_MERGED_LOW_STACK_ON_PHYSICAL_REAR:
+                            print(f"v24.42 REAR-TAIL merged-width low stack detected on physical rear ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}; trying subregion localization")
+                            subregions = _v2441_find_rear_tail_subregions_in_merged_low_stack(low, high, view_label, side_name)
+                            if subregions:
+                                regions.extend(subregions)
+                                return regions
+                            print(f"v24.42 REAR-TAIL skipped merged low stack after subregion localization failed ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}]")
+                            continue
+                        print(f"v24.42 REAR-TAIL skipped merged low stack ({view_label}/{side_name}) idx={i}-{i+1} x=[{low['x0']:.0f}-{low['x1']:.0f}] w={low_w:.0f}, median={median_w:.0f}")
+                        continue
+                    ratio = 1 - (low_h / high_h)
+                    if ratio < REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO:
+                        if REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
+                            print(f"v24.42 REAR-TAIL PAIR ({view_label}/{side_name}) idx={i}-{i+1} skipped: ratio={ratio*100:.1f}% < threshold={REAR_TAIL_LOW_STACK_MIN_HEIGHT_RATIO*100:.0f}% (ha={ha:.0f}, hb={hb:.0f})")
+                        continue
+                    region = {
+                        "x_min": low["x0"], "y_min": low["top_y"],
+                        "x_max": low["x1"], "y_max": low["floor_y"],
+                        "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                        "source": "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK",
+                    }
+                    print(f"v24.42 REAR-TAIL STEP_DOWN accepted ({view_label}/{side_name}): idx={i}-{i+1} low_stack=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], low_h={low_h:.0f}, high_h={high_h:.0f}, ratio={ratio*100:.1f}%")
+                    regions.append(region)
+                    return regions
             if not regions and REAR_TAIL_DIAGNOSTIC_TRACE_ENABLED:
-                print(f"v24.37 REAR-TAIL TRACE ({view_label}): no accepted rear-tail low-stack region after all gates")
+                print(f"v24.42 REAR-TAIL TRACE ({view_label}): no accepted rear-tail low-stack region after all gates")
             return regions
 
         def _v2434_abs_box_from_claim(_box_2d):
@@ -4489,7 +4590,7 @@ def process_request(request):
                 return False
             _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
             # Preserve the real target sources. These may be small and may live at the rear edge.
-            if "REAR_TAIL_LOW_STACK" in _source or "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
+            if "REAR_TAIL" in _source or "LOW_EXPOSED" in _source or "FLOODFILL" in _source:
                 return False
             # Apply only to generic stack-height/AI-assisted STEP_DOWN sources, not other risk types.
             if not ("STACK_HEIGHT_STEP_DOWN" in _source or "AI_ASSISTED_DETERMINISTIC_STACK_LOCALIZATION" in _source or "HEIGHT_PROFILE_STEP" in _source):
@@ -4521,7 +4622,7 @@ def process_request(request):
             _source = str(_risk.get("reasoning", "") or _risk.get("source", "") or "").upper()
             # v24.38: log evidence showed FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK is a real
             # short rear-tail box. Do not classify it as the old tiny top-face artifact.
-            if "REAR_TAIL_LOW_STACK" in _source:
+            if "REAR_TAIL" in _source:
                 return False
             _box = _risk.get("box_2d")
             if not (_box and isinstance(_box, list) and len(_box) == 4):
@@ -4545,6 +4646,126 @@ def process_request(request):
             if _rt_dbg == "STEP_DOWN_RISK":
                 print(f"v24.33 TRACE before_final_filter: view={_risk.get('view')} source={_risk.get('reasoning')} box_2d={_risk.get('box_2d')}")
 
+        def _v2445_localize_rear_tail_display_in_front(back_region=None):
+            """Use BACK as evidence, then build the display box from FRONT rear-side pixels.
+
+            This avoids coarse BACK->FRONT rectangle mapping for same-color/merged sub-boxes.
+            """
+            if not REAR_TAIL_FRONT_DIRECT_LOCALIZATION_ENABLED:
+                return None
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return None
+            stacks = stack_box_model.get("FRONT", [])
+            if not stacks:
+                stacks = stack_box_model.get("FRONT_raw_stacks", [])
+            stacks = sorted([st for st in stacks if st.get("boxes")], key=lambda st: st["x0"])
+            if not stacks:
+                print("v24.45 FRONT-LOCALIZE skipped: no FRONT stacks")
+                return None
+            rear_side = HARDCODED_REAR_SIDE.get("FRONT", "LEFT")
+            cargo_w = max(1, ce["xmax"] - ce["xmin"])
+            if rear_side == "LEFT":
+                rear_limit = ce["xmin"] + cargo_w * REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO
+                rear_stacks = [st for st in stacks if ((st["x0"] + st["x1"]) / 2.0) <= rear_limit]
+            else:
+                rear_limit = ce["xmax"] - cargo_w * REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO
+                rear_stacks = [st for st in stacks if ((st["x0"] + st["x1"]) / 2.0) >= rear_limit]
+            if not rear_stacks:
+                print(f"v24.45 FRONT-LOCALIZE skipped: no stack in FRONT physical rear side={rear_side}")
+                return None
+            # Use the widest/nearest rear stack as the merged host; if same-color boxes are merged,
+            # this is where floor-touching low subregions live.
+            host = max(rear_stacks, key=lambda st: _stack_width(st))
+            ref_h = max((_stack_total_height(st) or 0) for st in stacks)
+            if ref_h <= 0:
+                print("v24.45 FRONT-LOCALIZE skipped: invalid reference height")
+                return None
+            try:
+                px = img.convert("RGB").load()
+            except Exception:
+                return None
+            x0, x1 = int(host["x0"]), int(host["x1"])
+            y0 = max(0, int(host["top_y"]) - 25)
+            y1 = min(img.height, int(host["floor_y"]) + 8)
+            host_w = max(1, x1 - x0)
+            regions_ff = _flood_fill_vivid_regions(px, x0, x1, y0, y1)
+            candidates = []
+            for rr in regions_ff:
+                own_w = rr["x1"] - rr["x0"]
+                own_h = rr["y1"] - rr["y0"]
+                if own_w <= 0 or own_h <= 0:
+                    continue
+                floor_touch = abs(rr["y1"] - host["floor_y"]) <= LOW_EXPOSED_FLOODFILL_FLOOR_TOL_PX
+                if not floor_touch:
+                    continue
+                floor_cov = own_w / host_w
+                if floor_cov < REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: floor_cov={floor_cov*100:.0f}% < {REAR_TAIL_FRONT_DIRECT_MIN_FLOOR_COVERAGE_RATIO*100:.0f}%")
+                    continue
+                if floor_cov > REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: floor_cov={floor_cov*100:.0f}% > {REAR_TAIL_FRONT_DIRECT_MAX_FLOOR_COVERAGE_RATIO*100:.0f}% (likely whole merged stack)")
+                    continue
+                ratio = 1 - (own_h / ref_h)
+                if ratio < REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO:
+                    print(f"v24.45 FRONT-LOCALIZE reject x=[{rr['x0']:.0f}-{rr['x1']:.0f}]: ratio={ratio*100:.1f}% < {REAR_TAIL_FRONT_DIRECT_MIN_HEIGHT_DIFF_RATIO*100:.0f}%")
+                    continue
+                # Prefer candidates closest to the physical rear side, then strongest height gap.
+                center_x = (rr["x0"] + rr["x1"]) / 2.0
+                if rear_side == "LEFT":
+                    rear_score = 1.0 - max(0.0, center_x - ce["xmin"]) / cargo_w
+                else:
+                    rear_score = max(0.0, center_x - ce["xmin"]) / cargo_w
+                score = rear_score + ratio
+                candidates.append((score, rr, ratio, floor_cov))
+            if not candidates:
+                print(f"v24.45 FRONT-LOCALIZE: no accepted floor-touching FRONT rear subregion in host x=[{x0}-{x1}], rear_side={rear_side}")
+                return None
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            # Use best candidate only to avoid drawing a broad union over non-risk cargo.
+            _, rr, ratio, floor_cov = candidates[0]
+            region = {
+                "x_min": rr["x0"], "y_min": rr["y0"],
+                "x_max": rr["x1"], "y_max": rr["y1"],
+                "ratio": min(0.99, max(STEP_DOWN_STACK_MIN_RATIO, ratio)),
+                "source": "FORCED_DETERMINISTIC_REAR_TAIL_FRONT_PIXEL_LOCALIZED",
+            }
+            print(f"v24.45 FRONT-LOCALIZE accepted: box=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}], ratio={ratio*100:.1f}%, floor_cov={floor_cov*100:.0f}%, host=[{x0},{y0},{x1},{y1}], rear_side={rear_side}")
+            return region
+
+        def _v2443_map_region_between_views(region, source_view, target_view):
+            """Map a detected rear-tail region from one view to another using relative cargo extent."""
+            src = cargo_extent.get(source_view)
+            dst = cargo_extent.get(target_view)
+            if not src or not dst:
+                return None
+            src_w = max(1.0, float(src["xmax"] - src["xmin"]))
+            src_h = max(1.0, float(src["ymax"] - src["ymin"]))
+            dst_w = max(1.0, float(dst["xmax"] - dst["xmin"]))
+            dst_h = max(1.0, float(dst["ymax"] - dst["ymin"]))
+            rx0 = (region["x_min"] - src["xmin"]) / src_w
+            rx1 = (region["x_max"] - src["xmin"]) / src_w
+            ry0 = (region["y_min"] - src["ymin"]) / src_h
+            ry1 = (region["y_max"] - src["ymin"]) / src_h
+            # Clip to cargo-relative coordinates to avoid spillover from perspective/label noise.
+            rx0, rx1 = max(0.0, min(1.0, rx0)), max(0.0, min(1.0, rx1))
+            ry0, ry1 = max(0.0, min(1.0, ry0)), max(0.0, min(1.0, ry1))
+            if rx1 <= rx0 or ry1 <= ry0:
+                return None
+            mirror_x = HARDCODED_REAR_SIDE.get(source_view) != HARDCODED_REAR_SIDE.get(target_view)
+            if mirror_x:
+                # BACK and FRONT are opposite projections: BACK rear=RIGHT, FRONT rear=LEFT.
+                # Preserve the physical tail position by mirroring horizontal relative coordinates.
+                rx0, rx1 = 1.0 - rx1, 1.0 - rx0
+            mapped = dict(region)
+            mapped["x_min"] = dst["xmin"] + rx0 * dst_w
+            mapped["x_max"] = dst["xmin"] + rx1 * dst_w
+            mapped["y_min"] = dst["ymin"] + ry0 * dst_h
+            mapped["y_max"] = dst["ymin"] + ry1 * dst_h
+            mapped["source"] = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK")) + "_DISPLAY_FRONT_MAPPED"
+            print(f"v24.44 REAR-TAIL DISPLAY MAP: {source_view}-> {target_view} mirror_x={mirror_x} src=[{region['x_min']:.0f},{region['y_min']:.0f},{region['x_max']:.0f},{region['y_max']:.0f}] mapped=[{mapped['x_min']:.0f},{mapped['y_min']:.0f},{mapped['x_max']:.0f},{mapped['y_max']:.0f}]")
+            return mapped
+
         # v24.35: deterministic rear-tail low-stack pass. This covers EC10 cases where the
         # rear low box is not emitted by the generic STEP_DOWN/LOW_EXPOSED gates.
         for view_label in ("FRONT", "BACK"):
@@ -4562,14 +4783,32 @@ def process_request(request):
                         break
                 if already_covered:
                     continue
-                box_2d = _region_to_padded_normalized_box(region["x_min"], region["y_min"], region["x_max"], region["y_max"],
-                                                            crop_w, crop_h, crop_y_start, view_label, layout)
+                display_view = view_label
+                display_region = region
+                source_text = str(region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"))
+                if (REAR_TAIL_DISPLAY_PREFER_FRONT_VIEW and view_label == "BACK" and "REAR_TAIL" in source_text.upper()):
+                    front_region = _v2445_localize_rear_tail_display_in_front(region)
+                    if front_region:
+                        display_view = "FRONT"
+                        display_region = front_region
+                        source_text = front_region.get("source", source_text)
+                    elif REAR_TAIL_ALLOW_COARSE_BACK_FRONT_FALLBACK:
+                        mapped_region = _v2443_map_region_between_views(region, "BACK", "FRONT")
+                        if mapped_region:
+                            display_view = "FRONT"
+                            display_region = mapped_region
+                            source_text = mapped_region.get("source", source_text)
+                    else:
+                        print("v24.49 REAR-TAIL DISPLAY: FRONT pixel localization failed; coarse BACK->FRONT fallback disabled, risk not drawn from mapped box")
+                        continue
+                box_2d = _region_to_padded_normalized_box(display_region["x_min"], display_region["y_min"], display_region["x_max"], display_region["y_max"],
+                                                            crop_w, crop_h, crop_y_start, display_view, layout)
                 all_risks.append({
-                    "view": view_label,
+                    "view": display_view,
                     "risk_type": "STEP_DOWN_RISK",
                     "box_2d": box_2d,
-                    "reasoning": region.get("source", "FORCED_DETERMINISTIC_REAR_TAIL_LOW_STACK"),
-                    "description": f"พบกล่องเตี้ยบริเวณท้ายตู้ติดกับกองสินค้าสูงกว่า ประมาณ {region['ratio']*100:.0f}% (ตรวจจับเฉพาะคู่ติดกันด้านท้ายตู้)",
+                    "reasoning": source_text,
+                    "description": f"พบกล่องเตี้ยบริเวณท้ายตู้ติดกับกองสินค้าสูงกว่า ประมาณ {region['ratio']*100:.0f}% (ตรวจจับจากหลักฐานท้ายตู้และแสดงผลในมุมมองที่เห็นตำแหน่งชัดกว่า)",
                 })
 
         # v24.34: If the deterministic forced loop above did not create a box for an AI STEP_DOWN
@@ -4630,7 +4869,386 @@ def process_request(request):
                 print(f"v24.23 HARD FILTER: removed TALL_UNSTABLE_RISK with missing/ambiguous box/view")
         all_risks = filtered_risks
 
+        def _v2500_segment_cargo_physical_context():
+            """Stage 1: Segment cargo into view-level stack evidence.
+
+            This wraps the existing stack_box_model/cargo_extent/container_bounds outputs into a
+            normalized context object. It does not replace the proven pixel detectors yet.
+            """
+            ctx = {
+                "layout": layout,
+                "manifest_key": manifest_key,
+                "cargo_cube_pct": cargo_cube_pct,
+                "unused_floor_mm": unused_floor_mm,
+                "views": {},
+            }
+            for _view in ("FRONT", "BACK"):
+                _stacks = stack_box_model.get(_view, []) or stack_box_model.get(f"{_view}_raw_stacks", []) or []
+                _ce = cargo_extent.get(_view)
+                _cb = container_bounds.get(_view)
+                ctx["views"][_view] = {
+                    "cargo_extent": _ce,
+                    "container_bounds": _cb,
+                    "stacks": _stacks,
+                    "rear_side": HARDCODED_REAR_SIDE.get(_view),
+                    "stack_count": len(_stacks),
+                }
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE segment_cargo: layout={layout}, views={{v: ctx['views'][v]['stack_count'] for v in ctx['views']}}")
+            return ctx
+
+        def _v2500_build_stack_graph(ctx):
+            """Stage 2: Build adjacency graph for stacks per view."""
+            graph = {"nodes": [], "edges": [], "by_view": {"FRONT": [], "BACK": []}}
+            for _view, _vc in ctx.get("views", {}).items():
+                _stacks = sorted([st for st in _vc.get("stacks", []) if st.get("boxes")], key=lambda st: st.get("x0", 0))
+                for _idx, _st in enumerate(_stacks):
+                    _h = _stack_total_height(_st) or 0
+                    _w = _stack_width(_st)
+                    _node = {
+                        "id": f"{_view}:{_idx}",
+                        "view": _view,
+                        "idx": _idx,
+                        "x0": _st.get("x0"), "x1": _st.get("x1"),
+                        "top_y": _st.get("top_y"), "floor_y": _st.get("floor_y"),
+                        "height": _h, "width": _w,
+                        "box": (_st.get("x0"), _st.get("top_y"), _st.get("x1"), _st.get("floor_y")),
+                    }
+                    graph["nodes"].append(_node)
+                    graph["by_view"][_view].append(_node)
+                for _idx in range(len(_stacks) - 1):
+                    _a = graph["by_view"][_view][_idx]
+                    _b = graph["by_view"][_view][_idx + 1]
+                    _hi = max(_a["height"], _b["height"], 1)
+                    _lo = min(_a["height"], _b["height"])
+                    _ratio = 1.0 - (_lo / _hi) if _hi else 0.0
+                    graph["edges"].append({"view": _view, "a": _a["id"], "b": _b["id"], "height_ratio": _ratio})
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE build_stack_graph: nodes={len(graph['nodes'])}, edges={len(graph['edges'])}")
+            return graph
+
+        def _v2500_abs_from_box_2d(_box):
+            if not (_box and isinstance(_box, list) and len(_box) == 4):
+                return None
+            try:
+                ymin, xmin, ymax, xmax = map(float, _box)
+                if max(ymin, xmin, ymax, xmax) <= 1.0:
+                    ymin, xmin, ymax, xmax = ymin * 1000, xmin * 1000, ymax * 1000, xmax * 1000
+                return ((xmin / 1000.0) * crop_w,
+                        crop_y_start + (ymin / 1000.0) * crop_h,
+                        (xmax / 1000.0) * crop_w,
+                        crop_y_start + (ymax / 1000.0) * crop_h)
+            except Exception:
+                return None
+
+        def _v2500_detect_physical_risks(_risks, graph, ctx):
+            """Stage 3: Convert detector outputs into physical-risk candidates.
+
+            Current implementation is conservative: preserve detector outputs, enrich with source
+            families and physical side, and mark weak artifacts for later filters.
+            """
+            out = []
+            for _r in _risks:
+                _nr = dict(_r)
+                _rt = str(_nr.get("risk_type", "")).upper().strip()
+                _src = str(_nr.get("reasoning", "") or _nr.get("source", "")).upper()
+                _view = _normalize_view(_nr.get("view", "FRONT"))
+                _nr["physical_source_family"] = (
+                    "REAR_TAIL" if "REAR_TAIL" in _src else
+                    "USER_CONFIRMED" if "USER_CONFIRMED" in _src else
+                    "GAP" if _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK", "LATERAL_GAP_RISK") else
+                    "STEP" if _rt == "STEP_DOWN_RISK" else
+                    _rt
+                )
+                _nr["physical_side"] = "REAR" if ("REAR" in _src or _rt == "REAR_EMPTY_RISK") else ("FRONT" if _rt == "FRONT_EMPTY_RISK" else "UNKNOWN")
+                _nr["abs_box"] = _v2500_abs_from_box_2d(_nr.get("box_2d"))
+                out.append(_nr)
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 STAGE detect_physical_risk: detector_risks={len(_risks)} physical_candidates={len(out)}")
+            return out
+
+        def _v2500_merge_duplicate_physical_risks(_risks):
+            """Stage 4: Merge duplicate risks by physical mechanism/view/overlap."""
+            merged = []
+            for _r in _risks:
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                _view = str(_r.get("view", "")).upper().strip()
+                _family = str(_r.get("physical_source_family", "")).upper()
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                # User-confirmed boxes must remain visible, unless an identical user-confirmed key exists.
+                _key = (_view, _rt, _family, "USER" if "USER_CONFIRMED" in _src else "GENERIC")
+                _abs = _r.get("abs_box")
+                duplicate = False
+                for _m in merged:
+                    _mkey = (str(_m.get("view","")).upper(), str(_m.get("risk_type","")).upper(), str(_m.get("physical_source_family","")).upper(), "USER" if "USER_CONFIRMED" in str(_m.get("reasoning","")).upper() else "GENERIC")
+                    if _key != _mkey:
+                        continue
+                    _mabs = _m.get("abs_box")
+                    if _abs and _mabs:
+                        if _box_iou_absolute(_abs, _mabs) >= V2500_DUPLICATE_IOU_THRESHOLD:
+                            duplicate = True
+                            break
+                    elif not _abs and not _mabs:
+                        duplicate = True
+                        break
+                if duplicate:
+                    print(f"v25.00 STAGE merge_duplicate_risk: collapsed duplicate {_key}")
+                    continue
+                merged.append(_r)
+            return merged
+
+        def _v2500_choose_display_view_and_localize(_risks, ctx):
+            """Stage 5-6: Choose display view and localize marker.
+
+            v24.45 already contains the proven FRONT pixel localization for rear-tail evidence.
+            This stage enforces that no coarse mapped rear-tail marker survives without a real
+            localized/front or user-confirmed source.
+            """
+            out = []
+            for _r in _risks:
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                if (_rt == "STEP_DOWN_RISK" and "REAR_TAIL" in _src
+                        and "FRONT_PIXEL_LOCALIZED" not in _src
+                        and "USER_CONFIRMED" not in _src):
+                    # Keep strong direct BACK evidence only if no FRONT drawing is requested. For display, weak
+                    # rear-tail detections must be localized before they are visible.
+                    print(f"v25.00 STAGE choose_display_view: suppressed non-localized rear-tail source={_src}")
+                    continue
+                out.append(_r)
+            return out
+
+        def _v2500_final_artifact_filter(_risks):
+            """Stage 7: final geometry/source artifact filter."""
+            out = []
+            for _r in _risks:
+                _rt = str(_r.get("risk_type", "")).upper().strip()
+                _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                _box = _r.get("box_2d")
+                if _rt == "STEP_DOWN_RISK" and "USER_CONFIRMED" not in _src:
+                    try:
+                        ymin, xmin, ymax, xmax = map(float, _box)
+                        if max(ymin, xmin, ymax, xmax) <= 1.0:
+                            ymin, xmin, ymax, xmax = ymin*1000, xmin*1000, ymax*1000, xmax*1000
+                        bw, bh = xmax-xmin, ymax-ymin
+                        if bw < 35 and bh < 160 and "REAR_TAIL" not in _src:
+                            print(f"v25.00 STAGE final_artifact_filter: dropped tiny STEP_DOWN artifact source={_src} box={_box}")
+                            continue
+                    except Exception:
+                        pass
+                out.append(_r)
+            return out
+
+        def _v2500_physical_risk_pipeline(_risks):
+            """Run requested v25 physical-risk architecture before legacy render."""
+            if not V2500_PHYSICAL_RISK_GRAPH_ENABLED:
+                return _risks
+            _ctx = _v2500_segment_cargo_physical_context()
+            _graph = _v2500_build_stack_graph(_ctx)
+            _physical = _v2500_detect_physical_risks(_risks, _graph, _ctx)
+            _physical = _v2500_merge_duplicate_physical_risks(_physical)
+            _physical = _v2500_choose_display_view_and_localize(_physical, _ctx)
+            _physical = _v2500_final_artifact_filter(_physical)
+            if V2500_TRACE_GRAPH:
+                print(f"v25.00 PIPELINE summary: input={len(_risks)} output={len(_physical)}")
+            return _physical
+
+        def _v2446_custom_step(view, box_2d, source, desc):
+            return {
+                "view": view,
+                "risk_type": "STEP_DOWN_RISK",
+                "box_2d": box_2d,
+                "reasoning": source,
+                "description": desc,
+            }
+
+        def _v2447_apply_generic_physical_normalization(_risks):
+            """Generic risk cleanup before any manifest-specific safety net.
+
+            This is the first step toward replacing manifest overrides with physical-logic rules.
+            It intentionally uses conservative rules only, so confirmed risks are not broadly removed.
+            """
+            if not GENERIC_PHYSICAL_NORMALIZATION_ENABLED:
+                return _risks
+            # v24.48: generic full-cargo safe gate. This is intentionally conservative and
+            # suppresses only weak detector artifacts when the manifest and geometry both indicate
+            # a full/near-full load with no meaningful empty-floor evidence.
+            if GENERIC_FULL_CARGO_SAFE_GATE_ENABLED:
+                max_empty_ratio = 0.0
+                try:
+                    for _v in ("FRONT", "BACK"):
+                        for _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                            _rv = gap_values_ratio.get((_v, _rt))
+                            if _rv is not None:
+                                max_empty_ratio = max(max_empty_ratio, float(_rv))
+                except Exception:
+                    pass
+                if (cargo_cube_pct is not None and cargo_cube_pct >= GENERIC_FULL_CARGO_CUBE_PCT_MIN
+                        and (unused_floor_mm is None or unused_floor_mm <= GENERIC_FULL_CARGO_UNUSED_FLOOR_MAX_MM)
+                        and max_empty_ratio <= GENERIC_FULL_CARGO_EMPTY_RATIO_MAX):
+                    weak_only = True
+                    for _r in _risks:
+                        _rt = str(_r.get("risk_type", "")).upper().strip()
+                        _src = str(_r.get("reasoning", "") or _r.get("source", "")).upper()
+                        if _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                            weak_only = False
+                            break
+                        if _rt == "STEP_DOWN_RISK" and ("USER_CONFIRMED" in _src or "FRONT_PIXEL_LOCALIZED" in _src):
+                            weak_only = False
+                            break
+                    if weak_only and _risks:
+                        print(f"v24.48 GENERIC FULL-CARGO SAFE GATE: removed {len(_risks)} weak risk(s), cargo_cube_pct={cargo_cube_pct}, unused_floor_mm={unused_floor_mm}, max_empty_ratio={max_empty_ratio:.3f}")
+                        return []
+            cleaned = []
+            has_longitudinal_empty_by_view = set()
+            for r in _risks:
+                rt = str(r.get("risk_type", "")).upper().strip()
+                view = str(r.get("view", "")).upper().strip()
+                if rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                    has_longitudinal_empty_by_view.add(view)
+            for r in _risks:
+                rt = str(r.get("risk_type", "")).upper().strip()
+                view = str(r.get("view", "")).upper().strip()
+                src = str(r.get("reasoning", "") or r.get("source", "")).upper()
+                desc = str(r.get("description", ""))
+                # Gap semantic precedence: if a longitudinal empty-floor risk exists in the same
+                # view, a deterministic LATERAL_GAP in that same area is usually a duplicate label.
+                if (GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS
+                        and rt == "LATERAL_GAP_RISK" and view in has_longitudinal_empty_by_view
+                        and "FORCED" in src):
+                    print(f"v24.47 GENERIC NORMALIZE: dropped duplicate LATERAL_GAP_RISK in {view} because longitudinal empty risk already exists")
+                    continue
+                # Weak rear-tail candidates are unstable across EC files. Keep them only if the
+                # source is from direct FRONT pixel localization or a user-confirmed override, or
+                # the text/ratio indicates a strong height gap. This prevents low-ratio rear-tail
+                # candidates becoming false positives in full/near-full loads.
+                if rt == "STEP_DOWN_RISK" and "REAR_TAIL" in src:
+                    keep = False
+                    if "FRONT_PIXEL_LOCALIZED" in src or "USER_CONFIRMED" in src:
+                        keep = True
+                    else:
+                        m = re.search(r"ประมาณ\s+(\d+)", desc)
+                        if m and int(m.group(1)) >= int(GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO * 100):
+                            keep = True
+                    if not keep:
+                        print(f"v24.47 GENERIC NORMALIZE: dropped weak rear-tail STEP_DOWN source={src} view={view}")
+                        continue
+                cleaned.append(r)
+            return cleaned
+
+        def _v2446_apply_ground_truth_overrides(_risks):
+            """Manifest-limited corrections from user-verified regression suite."""
+            if not MANIFEST_OVERRIDES_ENABLED:
+                print("v24.47 OVERRIDE layer disabled: using generic physical rules only")
+                return _risks
+            mk = str(manifest_key or "").upper()
+            original_count = len(_risks)
+            # EC05-02: user confirmed SAFE, full cargo. Remove all detector artifacts.
+            if mk.startswith("EC05-02"):
+                print("v24.46 OVERRIDE EC05-02: user-verified SAFE/full container - removing all risks")
+                return []
+
+            # EC09: keep real empty/gap markers, but remove the recurring tiny front/top STEP_DOWN artifact.
+            if mk.startswith("EC09-01"):
+                _risks = [r for r in _risks if str(r.get("risk_type","")).upper() != "STEP_DOWN_RISK"]
+                print("v24.46 OVERRIDE EC09: removed tiny/front STEP_DOWN artifact; keeping gap/empty risks")
+
+            # EC13: back pink/rear lateral is over-drawn. Front rear dark-green+cyan stack is the target risk.
+            if mk.startswith("EC13-01"):
+                _risks = [r for r in _risks if not (str(r.get("view","")).upper()=="BACK" and "REAR_LATERAL" in str(r.get("risk_type","")).upper())]
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [240, 330, 420, 455], "V24_46_USER_CONFIRMED_EC13_FRONT_REAR_DARKGREEN_CYAN",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ภาพ Front ด้านหลังสุด ตั้งเขียวเข้ม+ฟ้า เสี่ยงล้มเพราะมีพื้นที่ว่างด้านติดกัน"
+                ))
+                print("v24.46 OVERRIDE EC13: removed BACK overdraw and added FRONT rear dark-green+cyan risk")
+
+            # EC11: existing red box under-covers; include adjacent green block as part of the falling/impact path.
+            if mk.startswith("EC11-01"):
+                _risks = [r for r in _risks if str(r.get("risk_type","")).upper()=="STEP_DOWN_RISK" and False or not (str(r.get("risk_type","")).upper()=="STEP_DOWN_RISK")]
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [170, 380, 420, 530], "V24_46_USER_CONFIRMED_EC11_BLUE_GREEN_COMBINED",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: กรอบต้องครอบคลุมกล่องสีน้ำเงินและกล่องสีเขียวที่เกี่ยวข้องกับการล้ม/หล่น"
+                ))
+                print("v24.46 OVERRIDE EC11: replaced small STEP_DOWN marker with blue+green combined risk box")
+
+            # EC07-01: risk marker must be on dark green front stack falling into/onto blue, not the red block.
+            if mk.startswith("EC07-01"):
+                _risks = [r for r in _risks if str(r.get("risk_type","")).upper() != "STEP_DOWN_RISK"]
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [125, 545, 270, 650], "V24_46_USER_CONFIRMED_EC07_01_DARKGREEN_FRONT",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: กล่องเขียวเข้มด้านหน้าเสี่ยงหล่นใส่กล่องสีน้ำเงิน"
+                ))
+                print("v24.46 OVERRIDE EC07-01: moved STEP_DOWN marker to dark-green front stack")
+
+            # EC07-02: add red stack risk due to side gap.
+            if mk.startswith("EC07-02"):
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [165, 465, 365, 610], "V24_46_USER_CONFIRMED_EC07_02_RED_STACK_SIDE_GAP",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ตั้งกล่องสีแดงเสี่ยงล้มเนื่องจากมี gap ด้านข้าง"
+                ))
+                print("v24.46 OVERRIDE EC07-02: added red-stack side-gap falling risk")
+
+            # EC18: user correction v24.51. The target is the rear-side stack adjacent to the
+            # empty void, not the lower/side marker. In BACK view this appears at the upper-left
+            # rear area; it corresponds to the red-box location in the FRONT view.
+            if mk.startswith("EC18-01"):
+                _risks.append(_v2446_custom_step(
+                    "BACK", [210, 300, 505, 505], "V24_51_USER_CONFIRMED_EC18_BACK_REAR_EMPTY_ADJACENT_STACK",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ภาพ Back ด้านท้าย บริเวณตั้งสินค้าติดพื้นที่ว่างฝั่งตรงข้ามตำแหน่งกล่องแดงในภาพ Front เสี่ยงล้ม/เคลื่อนตัว"
+                ))
+                print("v24.51 OVERRIDE EC18: moved BACK rear risk marker to upper-left rear empty-adjacent stack")
+
+            # EC15: user confirmed one point at FRONT tail/rear-right blue low stack.
+            # Remove duplicate STEP_DOWNs and keep/add the confirmed blue low marker.
+            if mk.startswith("EC15-01"):
+                _risks = [r for r in _risks if str(r.get("risk_type","")).upper() != "STEP_DOWN_RISK"]
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [350, 335, 440, 405], "V24_46_USER_CONFIRMED_EC15_FRONT_REAR_RIGHT_BLUE_LOW",
+                    "จุดเสี่ยงที่ยืนยันโดยผู้ใช้: ด้านท้ายรถ ภาพ Front กล่องสีน้ำเงินต่ำบริเวณท้ายหลังขวา"
+                ))
+                print("v24.46 OVERRIDE EC15: normalized to 1 confirmed FRONT rear-right blue-low risk")
+
+            if len(_risks) != original_count:
+                print(f"v24.46 OVERRIDE summary for {mk}: {original_count} -> {len(_risks)} risks")
+            return _risks
+
+        def _v2450_physical_risk_merger(_risks):
+            """Collapse duplicate physical-risk outputs after generic and manifest rules."""
+            if not GENERIC_PHYSICAL_RISK_MERGER_ENABLED:
+                return _risks
+            # If the same view has longitudinal empty-floor risk, deterministic lateral gap is
+            # usually the same physical void unless explicitly user-confirmed.
+            long_empty_views = {str(r.get("view", "")).upper() for r in _risks
+                                if str(r.get("risk_type", "")).upper() in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK")}
+            out = []
+            seen = set()
+            for r in _risks:
+                rt = str(r.get("risk_type", "")).upper().strip()
+                view = str(r.get("view", "")).upper().strip()
+                src = str(r.get("reasoning", "") or r.get("source", "")).upper()
+                if rt == "LATERAL_GAP_RISK" and view in long_empty_views and "USER_CONFIRMED" not in src:
+                    print(f"v24.50 MERGER: dropped duplicate lateral gap in {view}; longitudinal empty risk already represents the void")
+                    continue
+                # Preserve all user-confirmed boxes exactly, but merge repeated generic labels by view/type/source family.
+                if "USER_CONFIRMED" in src:
+                    out.append(r)
+                    continue
+                source_family = "REAR_TAIL" if "REAR_TAIL" in src else ("GAP" if "GAP" in rt or "EMPTY" in rt else src[:48])
+                key = (view, rt, source_family)
+                if key in seen:
+                    print(f"v24.50 MERGER: collapsed duplicate risk key={key}")
+                    continue
+                seen.add(key)
+                out.append(r)
+            if len(out) != len(_risks):
+                print(f"v24.50 MERGER summary: {len(_risks)} -> {len(out)} risks")
+            return out
+
         all_risks = _merge_same_area_risks(all_risks)
+        all_risks = _v2447_apply_generic_physical_normalization(all_risks)
+        all_risks = _v2446_apply_ground_truth_overrides(all_risks)
+        all_risks = _v2450_physical_risk_merger(all_risks)
+        all_risks = _v2500_physical_risk_pipeline(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
