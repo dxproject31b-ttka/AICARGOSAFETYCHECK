@@ -16,7 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.05
+# AI Cargo Safety Checker - High Precision v24.06
+# v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
 # v24.05 - RearLateralImbalanceTune: tune BACK-frame marker to visible stacked cargo, emit deterministic box_2d, and avoid lower-floor fallback for rear lateral.
 # v24.04 - OverhangStackSizeGuard: redefine OVERHANG as visible stacked-box size/support mismatch, suppress isometric edge-only artifacts.
 # v24.03 - LocalizationFix: OVERHANG pair-box validation, BACK rear-lateral final-shift, strict inter-stack lateral-gap: OVERHANG cause-box, BACK REAR_LATERAL box shift up 50%, inter-stack-only LATERAL_GAP.
@@ -1216,12 +1217,22 @@ V2402_TRACE = True
 #   treat it as an unstable support/overhang candidate;
 # - reject edge-only/isometric artifacts where only a thin outer strip is detected.
 V2404_OVERHANG_STACK_SIZE_GUARD_ENABLED = True
-V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO = 0.18
-V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX = 14
+V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO = 0.05
+V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX = 6
 V2404_OVERHANG_MIN_VERTICAL_TOUCH_RATIO = 0.12
 V2404_OVERHANG_MARK_PAIR_BOX = True
 V2404_OVERHANG_REJECT_EDGE_STRIP_ONLY = True
 V2404_OVERHANG_TRACE = True
+
+# v24.06 OVERHANG strict controls
+V2406_OVERHANG_FIVE_PERCENT_GUARD_ENABLED = True
+V2406_OVERHANG_MIN_SIZE_DIFF_RATIO = 0.05
+V2406_OVERHANG_MIN_SIZE_DIFF_PX = 6
+V2406_OVERHANG_REQUIRE_SAME_STACK_VISIBLE_PAIR = True
+V2406_OVERHANG_DISABLE_FALLBACK_MARKER = True
+V2406_OVERHANG_SUPPRESS_EDGE_ARTIFACT = True
+V2406_OVERHANG_AA02_SAFE_REFERENCE = True
+V2406_OVERHANG_TRACE = True
 
 # v24.05 REAR_LATERAL_IMBALANCE tuning controls
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
@@ -1722,91 +1733,91 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def detect_overhang_regions_for_view(stacks):
-    """v24.04 OverhangStackSizeGuard.
+    """v24.06 OverhangFivePercentGuard.
 
-    New reviewed definition:
-    OVERHANG_RISK is not a thin side strip caused by isometric perspective. It is a visible stacked
-    cargo pair in the same stack where the lower-to-upper boxes can be seen and their visible sizes
-    are clearly different. The risk marker must explain which stacked pair is unstable.
+    Reviewed definition:
+    OVERHANG_RISK is evaluated only from a visible upper/lower box pair in the same stack.
+    If the visible size/width difference between the upper box and lower box is about 5% or more,
+    the pair is a candidate. Edge-only marks, container-wall marks, and isometric perspective
+    artifacts are rejected.
 
-    This keeps the detector conservative:
-    - only compare adjacent vertical boxes inside the same detected stack;
-    - require both boxes to have visible width;
-    - require a meaningful width/size mismatch;
-    - mark the upper+lower cause pair, not an outer edge strip;
-    - suppress edge-only artifacts from isometric distortion.
+    Marker policy:
+    - draw the upper+lower cause pair box;
+    - never draw a fallback zone for OVERHANG;
+    - if the detector cannot identify a real upper/lower pair, return no risk.
     """
     regions = []
-    trace = globals().get("V2404_OVERHANG_TRACE", False)
-    min_ratio = globals().get("V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO", 0.18)
-    min_px = globals().get("V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX", 14)
-    min_touch_ratio = globals().get("V2404_OVERHANG_MIN_VERTICAL_TOUCH_RATIO", 0.12)
+    trace = globals().get("V2406_OVERHANG_TRACE", True)
+    min_ratio = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_RATIO", 0.05)
+    min_px = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_PX", 6)
 
     for stack_idx, s in enumerate(stacks or []):
         boxes = s.get("boxes", [])
         if len(boxes) < 2:
             continue
-        for i in range(len(boxes) - 1):
-            upper = boxes[i]
-            lower = boxes[i + 1]
+        # boxes are ordered top to bottom by existing segmentation.
+        for pair_idx in range(len(boxes) - 1):
+            upper = boxes[pair_idx]
+            lower = boxes[pair_idx + 1]
             uw = max(1, upper["x_right"] - upper["x_left"])
             lw = max(1, lower["x_right"] - lower["x_left"])
+            uh = max(1, upper["y_max"] - upper["y_min"])
+            lh = max(1, lower["y_max"] - lower["y_min"])
             width_delta = abs(uw - lw)
-            mismatch_ratio = width_delta / max(1, max(uw, lw))
+            width_ratio = width_delta / max(1, max(uw, lw))
 
-            # Adjacent stacked boxes should vertically touch or nearly touch. If there is a large
-            # vertical separation, it is not a reliable stacked support pair.
+            # Must be a visible stacked pair. If the pair has almost no vertical adjacency, skip.
             vertical_gap = max(0, lower["y_min"] - upper["y_max"])
             pair_h = max(1, lower["y_max"] - upper["y_min"])
-            touch_ratio = 1.0 - min(1.0, vertical_gap / pair_h)
-
-            if width_delta < min_px or mismatch_ratio < min_ratio:
+            if vertical_gap > max(8, int(pair_h * 0.20)):
                 if trace:
-                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: width_delta={width_delta}px ratio={mismatch_ratio:.2f} < thresholds")
-                continue
-            if touch_ratio < min_touch_ratio:
-                if trace:
-                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: poor vertical touch ratio={touch_ratio:.2f}")
+                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: vertical_gap={vertical_gap}px too large")
                 continue
 
-            # Reject thin edge-only detections. True marker should include both boxes, not only a
-            # narrow sliver at the outer edge.
+            # Require 5% visible size difference AND minimum pixel difference.
+            if width_ratio < min_ratio or width_delta < min_px:
+                if trace:
+                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f} < 5%")
+                continue
+
+            # Reject likely segmentation artifacts: extremely thin boxes or very narrow pair area.
+            if uw < 10 or lw < 10 or uh < 4 or lh < 4:
+                if trace:
+                    print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: tiny segmented box upper=({uw}x{uh}) lower=({lw}x{lh})")
+                continue
+
             x_min = min(upper["x_left"], lower["x_left"])
             x_max = max(upper["x_right"], lower["x_right"])
             y_min = upper["y_min"]
             y_max = lower["y_max"]
-            box_w = max(1, x_max - x_min)
-            if globals().get("V2404_OVERHANG_REJECT_EDGE_STRIP_ONLY", True) and box_w < max(BOX_MIN_HEIGHT_PX * 3, min_px * 2):
-                if trace:
-                    print(f"v24.04 OVERHANG reject stack={stack_idx} pair={i}: pair box too narrow ({box_w}px), likely edge artifact")
-                continue
+            pair_w = max(1, x_max - x_min)
+            pair_h = max(1, y_max - y_min)
 
-            # Direction indicates which visible box is wider. Wider upper over narrower lower is
-            # classic overhang; narrower upper over wider lower is still a size/support mismatch
-            # per reviewed definition, but the marker remains the cause pair.
-            if uw > lw:
-                support_case = "UPPER_WIDER_THAN_LOWER"
-            elif lw > uw:
-                support_case = "LOWER_WIDER_THAN_UPPER_SIZE_MISMATCH"
-            else:
-                support_case = "EQUAL_WIDTH"
+            # Suppress edge/perspective artifact: a true pair marker must have meaningful area.
+            if globals().get("V2406_OVERHANG_SUPPRESS_EDGE_ARTIFACT", True):
+                if pair_w < max(18, min_px * 2) or pair_h < 12:
+                    if trace:
+                        print(f"v24.06 OVERHANG reject stack={stack_idx} pair={pair_idx}: edge artifact pair_box={pair_w}x{pair_h}")
+                    continue
 
-            pad_x = max(4, int(box_w * 0.05))
-            pad_y = max(3, int((y_max - y_min) * 0.06))
-            regions.append({
+            support_case = "UPPER_WIDER_THAN_LOWER" if uw > lw else "LOWER_WIDER_THAN_UPPER_SIZE_MISMATCH"
+            pad_x = max(3, int(pair_w * 0.04))
+            pad_y = max(3, int(pair_h * 0.05))
+            region = {
                 "x_min": x_min - pad_x,
                 "y_min": max(0, y_min - pad_y),
                 "x_max": x_max + pad_x,
                 "y_max": y_max + pad_y,
-                "ratio": mismatch_ratio,
+                "ratio": width_ratio,
                 "width_delta_px": width_delta,
                 "upper_width_px": uw,
                 "lower_width_px": lw,
                 "support_case": support_case,
-                "v2404_marker_policy": "stacked_upper_lower_pair_box",
-            })
+                "v2406_marker_policy": "upper_lower_pair_5_percent_diff",
+            }
+            regions.append(region)
             if trace:
-                print(f"v24.04 OVERHANG accept stack={stack_idx} pair={i}: {support_case}, upper_w={uw}px lower_w={lw}px mismatch={mismatch_ratio:.2f}")
+                print(f"v24.06 OVERHANG ACCEPT stack={stack_idx} pair={pair_idx}: {support_case}; upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f}; marker=[{region['x_min']},{region['y_min']},{region['x_max']},{region['y_max']}]")
     return regions
 
 def detect_tall_unstable_regions_for_view(stacks):
@@ -2290,7 +2301,7 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
   OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
-- OVERHANG_RISK: cargo boxes are visibly stacked in the same stack from lower box to upper box, and the visible size/width of the stacked boxes is clearly different so the upper/lower support is mismatched. Do NOT flag thin outer edges or isometric perspective artifacts unless the upper-lower box pair and size mismatch are clear.
+- OVERHANG_RISK: cargo boxes are visibly stacked in the same stack from lower box to upper box, and the visible size/width of the stacked boxes differs by about 5% or more so the upper/lower support is mismatched. Do NOT flag thin outer edges or isometric perspective artifacts unless the upper-lower box pair and size mismatch are clear.
 
 Look carefully at EVERY pair of adjacent stacks in both views before concluding there are no risks.
 A fully and evenly loaded container should return an EMPTY array [].
@@ -2802,7 +2813,7 @@ def process_request(request):
                     "view": view_label, "risk_type": "OVERHANG_RISK",
                     "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
                     "reasoning": "FORCED_DETERMINISTIC_PER_BOX_OVERHANG",
-                    "description": f"พบกล่องสินค้าซ้อนกันในกองเดียวกันที่ขนาด/ความกว้างของกล่องบน-ล่างไม่เท่ากันประมาณ {region['ratio']*100:.0f}% (marker ชี้คู่กล่องต้นเหตุ: {region.get('support_case','STACK_SIZE_MISMATCH')})",
+                    "description": f"พบกล่องสินค้าซ้อนกันในกองเดียวกันที่ขนาด/ความกว้างของกล่องบน-ล่างต่างกันตั้งแต่ประมาณ 5% ขึ้นไป วัดได้ {region['ratio']*100:.0f}% (marker ชี้คู่กล่องต้นเหตุ: {region.get('support_case','STACK_SIZE_MISMATCH')})",
                 })
             for region in tall_unstable_regions.get(view_label, []):
                 if region["ratio"] < V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO:
@@ -3307,8 +3318,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.05",
-            "benchmarkMode": "v24.05_rear_lateral_imbalance_tune"}, 200, headers)
+            "checkerVersion": "V24.06",
+            "benchmarkMode": "v24.06_overhang_five_percent_guard"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3329,3 +3340,7 @@ V2404_OVERHANG_STACK_SIZE_GUARD_BUILD = True
 
 # V24.05 build marker
 V2405_REAR_LATERAL_IMBALANCE_TUNE_BUILD = True
+
+
+# V24.06 build marker
+V2406_OVERHANG_FIVE_PERCENT_GUARD_BUILD = True
