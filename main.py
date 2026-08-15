@@ -19,7 +19,14 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v25.00
+# AI Cargo Safety Checker - High Precision v26.00
+# v26.00 - Neutral Rule Engine Phase 1
+# Phase 1 converts observed review behavior into manifest-independent neutral families.
+# It keeps legacy risk_type labels for renderer compatibility, while adding neutral_family,
+# neutral_marker_policy, and neutral_rule_reason fields for downstream suppression and audit.
+# Neutral principles: no manifest-specific override by default, safe full-support suppression,
+# source-object markers preferred over broad union boxes, source and zone risks can coexist only
+# when they represent different physical families.
 #
 # v24.30 - แก้ 2 ปัญหาพร้อมกันตามคำขอผู้ใช้ หลังพบว่า STEP_DOWN_RISK พลาดจุดเสี่ยงจริง
 #   ในไฟล์ EC07/EC09 (ผู้ใช้วาดเส้นแดงชี้ตำแหน่งจริงในภาพ ยืนยันว่ากล่องเขียวสูงกว่า
@@ -623,7 +630,7 @@ REAR_TAIL_FRONT_DIRECT_REAR_ZONE_RATIO = 0.55
 # v24.47 generalization controls. Keep manifest overrides enabled as a safety net until
 # generic rules pass all confirmed regression files. Future versions should progressively turn
 # this off case by case.
-MANIFEST_OVERRIDES_ENABLED = True
+MANIFEST_OVERRIDES_ENABLED = False  # v26.00 neutral-rule mode: manifest overrides disabled by default
 GENERIC_PHYSICAL_NORMALIZATION_ENABLED = True
 GENERIC_REAR_TAIL_REQUIRE_STRONG_RATIO = 0.50
 GENERIC_DROP_LATERAL_WHEN_LONGITUDINAL_EMPTY_EXISTS = True
@@ -640,6 +647,88 @@ V2500_TRACE_GRAPH = True
 V2500_MIN_STEP_HEIGHT_RATIO_STRONG = 0.50
 V2500_DUPLICATE_IOU_THRESHOLD = 0.18
 V2500_PREFER_FRONT_FOR_REAR_TAIL = True
+
+# v25.07 generic case-library thresholds
+V2507_GENERIC_CASE_LIBRARY_ENABLED = True
+V2507_TALL_OVER_LOWER_MIN_RATIO = 0.30
+V2507_REAR_TAIL_LOW_MIN_RATIO = 0.45
+V2507_TALL_BESIDE_EMPTY_MIN_EMPTY_RATIO = 0.06
+V2507_TALL_BESIDE_EMPTY_MIN_HEIGHT_RATIO_TO_MEDIAN = 1.10
+V2507_MAX_GENERIC_CASES_PER_VIEW_TYPE = 2
+
+V2509_COLOR_FALL_PATH_ENABLED = False
+V2509_COLOR_FALL_PATH_MIN_COLD_REGIONS = 2
+V2509_COLOR_FALL_PATH_MIN_RED_AREA = 2500
+V2509_COLOR_FALL_PATH_MAX_X_GAP_RATIO = 0.22
+V2509_COLOR_FALL_PATH_MIN_VERTICAL_OVERLAP_RATIO = 0.10
+
+V2510_GENERIC_REGION_FALL_PATH_ENABLED = True
+V2510_GENERIC_REGION_MIN_AREA = 700
+V2510_GENERIC_REGION_MIN_DIM_PX = 18
+V2510_GENERIC_REGION_MIN_COLOR_DISTANCE = 45
+V2510_GENERIC_REGION_MAX_X_GAP_RATIO = 0.24
+V2510_GENERIC_REGION_MAX_DROP_GAP_PX = 130
+V2510_GENERIC_REGION_MIN_VERTICAL_LINK_RATIO = 0.08
+V2510_GENERIC_REGION_MAX_CASES = 3
+
+# v25.11 visual de-duplication controls
+V2511_VISUAL_DEDUP_ENABLED = True
+V2511_VISUAL_DEDUP_IOU_THRESHOLD = 0.20
+V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD = 0.55
+V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM = 155.0
+V2511_KEEP_ONLY_ONE_FALL_PATH_PER_VIEW = True
+
+# v25.12 support-validation / physical cluster controls
+V2512_SUPPORT_VALIDATION_ENABLED = True
+V2512_UNSUPPORTED_EMPTY_EVIDENCE_RATIO = 0.055
+V2512_SUPPORTED_LOAD_DROP_GENERIC_STEP_WITHOUT_GAP = True
+V2512_CLUSTER_ANY_FAMILY_IOU_THRESHOLD = 0.28
+V2512_CLUSTER_ANY_FAMILY_CONTAINMENT_THRESHOLD = 0.70
+V2512_CLUSTER_ANY_FAMILY_CENTER_DISTANCE_NORM = 120.0
+
+# v25.13 EC01 regression gates
+V2513_FULL_LOAD_SAFE_CUBE_PCT_MIN = 92.0
+V2513_PARTIAL_LOAD_RISK_CUBE_PCT_MAX = 90.0
+V2513_ZERO_UNUSED_FLOOR_MM_MAX = 8.0
+V2513_NO_LONGITUDINAL_EMPTY_RATIO_MAX = 0.020
+V2513_WEAK_LATERAL_WITH_ZERO_UNUSED_MAX_RATIO = 0.18
+
+# v25.14 final display/cleanup controls
+V2514_FULL_LOAD_DROP_ALL_NONCONFIRMED_STEP_FAMILIES = True
+V2514_PREFER_FRONT_FOR_GENERIC_STEP_FALL = True
+V2514_FRONT_PREFERRED_FAMILIES = ("FALL_PATH", "STEP", "REAR_TAIL")
+
+# v25.15 combined source-hazard marker controls
+V2515_COMBINE_FRONT_FALL_PATH_SOURCES = True
+V2515_COMBINED_SOURCE_PAD_PX = 18
+V2515_COMBINED_IMPACT_CONTEXT_PX = 55
+V2515_COMBINED_MAX_WIDTH_RATIO = 0.44
+
+# v25.16 source-group localization controls
+V2516_CYAN_SOURCE_GROUP_ENABLED = True
+V2516_CYAN_SOURCE_MIN_REGIONS = 2
+V2516_CYAN_SOURCE_MIN_TOTAL_AREA = 1800
+V2516_CYAN_SOURCE_MAX_CUBE_PCT = 90.0
+V2516_CYAN_SOURCE_PAD_PX = 18
+V2516_CYAN_SOURCE_DOWN_EXTEND_PX = 95
+V2516_CYAN_SOURCE_MAX_WIDTH_RATIO = 0.34
+
+# v25.18 neutral partial-load source localization controls
+V2517_ALLOW_CYAN_SOURCE_WITH_WEAK_GAP_IN_PARTIAL_LOAD = True
+V2517_PARTIAL_LOAD_CUBE_PCT_MAX = 90.0
+V2517_MIN_LIGHT_CYAN_BRIGHTNESS = 340
+
+# v26.00 Neutral Rule Engine Phase 1 controls
+V2600_NEUTRAL_RULE_ENGINE_ENABLED = True
+V2600_TRACE_NEUTRAL_RULES = True
+V2600_FULL_SUPPORT_SAFE_CUBE_PCT = 90.0
+V2600_LOW_MEDIUM_UTIL_CUBE_PCT = 75.0
+V2600_ZONE_MARKER_MIN_UNUSED_FLOOR_MM = 250.0
+V2600_BROAD_SOURCE_BOX_MAX_AREA = 145000.0
+V2600_BROAD_ZONE_BOX_MAX_AREA = 180000.0
+V2600_FAMILY_CLUSTER_IOU = 0.22
+V2600_FAMILY_CLUSTER_CONTAINMENT = 0.58
+V2600_ALLOW_SOURCE_AND_ZONE_COEXIST = True
 
 # ---------------------------------------------------------------------------
 # GAP MEASUREMENT ARROW constants (v24.18 NEW) - ดู CHANGELOG หัวไฟล์สำหรับรายละเอียด
@@ -3817,8 +3906,11 @@ def process_request(request):
             _all_text = "\n".join(_p.get_text("text") for _p in doc)
             _m = re.search(r"Manifest\s+([^\s_]+(?:-[^\s_]+)?)", _all_text)
             manifest_key = _m.group(1).upper() if _m else "UNKNOWN"
-            _cube_m = re.search(r"Cargo Cube:\s*[^\n%]*/\s*([0-9]+(?:\.[0-9]+)?)\s*%", _all_text)
-            cargo_cube_pct = float(_cube_m.group(1)) if _cube_m else None
+            _cube_m = re.search(r"Cargo Cube:.*?([0-9]+(?:\.[0-9]+)?)\s*\(m3\)\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*%", _all_text, flags=re.I|re.S)
+            if not _cube_m:
+                # Fallback for PDFs where text extraction reorders the header: use the first m3 / percent pair.
+                _cube_m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*\(m3\)\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*%", _all_text, flags=re.I)
+            cargo_cube_pct = float(_cube_m.group(2)) if _cube_m else None
         except Exception:
             manifest_key = "UNKNOWN"
             cargo_cube_pct = None
@@ -4262,8 +4354,24 @@ def process_request(request):
                                                                             crop_w, crop_h, crop_y_start, view_label, layout)
 
             if should_flag_lateral and view_label not in _existing_risk_views("LATERAL_GAP"):
-                print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
-                all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": precise_lateral_box_2d})
+                # v25.13: printed unused floor = 0 and no longitudinal empty evidence means weak
+                # bottom-floor/lateral measurements are often perspective floor artifacts. Keep only
+                # very strong lateral gaps.
+                _max_longitudinal_gap = 0.0
+                try:
+                    for _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                        _v = gap_values_ratio.get((view_label, _rt))
+                        if _v is not None:
+                            _max_longitudinal_gap = max(_max_longitudinal_gap, float(_v))
+                except Exception:
+                    pass
+                if (unused_floor_mm is not None and unused_floor_mm <= V2513_ZERO_UNUSED_FLOOR_MM_MAX
+                        and _max_longitudinal_gap <= V2513_NO_LONGITUDINAL_EMPTY_RATIO_MAX
+                        and lateral_gap_ratio is not None and lateral_gap_ratio < V2513_WEAK_LATERAL_WITH_ZERO_UNUSED_MAX_RATIO):
+                    print(f"v25.13 LATERAL GUARD: suppressed weak lateral/floor gap in {view_label}; unused_floor_mm={unused_floor_mm:.1f}, lateral={lateral_gap_ratio*100:.1f}%, max_longitudinal={_max_longitudinal_gap*100:.1f}%")
+                else:
+                    print(f"FORCED LATERAL_GAP_RISK ({view_label}) from deterministic side-floor gap measurement")
+                    all_risks.append({"view": view_label, "risk_type": "LATERAL_GAP_RISK", "direction": "LATERAL", "lateral_side": "N/A", "reasoning": "FORCED_DETERMINISTIC_LATERAL_GAP", "description": f"พบพื้นที่ว่างด้านข้างบนพื้นตู้ประมาณ {gap_display} (เกินเกณฑ์ความปลอดภัย)", "box_2d": precise_lateral_box_2d})
             elif (unused_floor_mm is not None and unused_floor_mm >= UNUSED_FLOOR_MIN_MM
                   and view_label not in _existing_risk_views("LATERAL_GAP")
                   and lateral_gap_ratio is not None and lateral_gap_ratio >= UNUSED_FLOOR_RELAXED_GAP_RATIO):
@@ -4941,6 +5049,479 @@ def process_request(request):
             except Exception:
                 return None
 
+        def _v2507_node_to_box_2d(_node, _view, pad_scale=1.0):
+            try:
+                return _region_to_padded_normalized_box(
+                    float(_node["x0"]), float(_node["top_y"]), float(_node["x1"]), float(_node["floor_y"]),
+                    crop_w, crop_h, crop_y_start, _view, layout
+                )
+            except Exception:
+                return None
+
+        def _v2507_union_nodes_to_box_2d(_nodes, _view):
+            try:
+                xs0 = [float(n["x0"]) for n in _nodes]
+                ys0 = [float(n["top_y"]) for n in _nodes]
+                xs1 = [float(n["x1"]) for n in _nodes]
+                ys1 = [float(n["floor_y"]) for n in _nodes]
+                return _region_to_padded_normalized_box(min(xs0), min(ys0), max(xs1), max(ys1),
+                                                        crop_w, crop_h, crop_y_start, _view, layout)
+            except Exception:
+                return None
+
+        def _v2507_make_generic_step(_view, _box, _source, _desc, _case, _score=0.0):
+            return {
+                "view": _view,
+                "risk_type": "STEP_DOWN_RISK",
+                "box_2d": _box,
+                "reasoning": _source,
+                "description": _desc,
+                "physical_case": _case,
+                "confidence_score": _score,
+            }
+
+        def _v2509_is_cold_blue_cyan(_color):
+            try:
+                r, g, b = _color[:3]
+                return (b >= 140 and g >= 90 and r <= 90) or (b >= 150 and r <= 80 and g <= 130)
+            except Exception:
+                return False
+
+        def _v2509_is_red_warm(_color):
+            try:
+                r, g, b = _color[:3]
+                return r >= 150 and g <= 95 and b <= 95
+            except Exception:
+                return False
+
+        def _v2509_overlap_len(a0, a1, b0, b1):
+            return max(0.0, min(float(a1), float(b1)) - max(float(a0), float(b0)))
+
+        def _v2509_detect_color_fall_path(ctx):
+            """Detect cyan/blue upper/rear boxes falling/sliding into lower red stack.
+
+            This complements graph adjacency. EB91 showed that the hazardous cyan boxes and red
+            lower impact region may not be connected as adjacent stack edges, but the visual color
+            regions clearly show a fall-impact relationship.
+            """
+            if not V2509_COLOR_FALL_PATH_ENABLED:
+                return []
+            # Do not run this special pattern on very full/solid loads.
+            try:
+                if cargo_cube_pct is not None and cargo_cube_pct >= 90 and (unused_floor_mm is None or unused_floor_mm <= 80):
+                    return []
+            except Exception:
+                pass
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return []
+            try:
+                px = img.convert("RGB").load()
+                x0 = int(max(0, ce["xmin"] - 25)); x1 = int(min(img.width, ce["xmax"] + 25))
+                y0 = int(max(0, ce["ymin"] - 35)); y1 = int(min(img.height, ce["ymax"] + 15))
+                regions = _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=350, color_tol=45)
+            except Exception as e:
+                print(f"v25.09 COLOR FALL-PATH skipped: floodfill error={e}")
+                return []
+            cold = []
+            red = []
+            for rr in regions:
+                w = rr["x1"] - rr["x0"]; h = rr["y1"] - rr["y0"]
+                if w < 18 or h < 18:
+                    continue
+                if _v2509_is_cold_blue_cyan(rr.get("color", (0,0,0))):
+                    cold.append(rr)
+                elif _v2509_is_red_warm(rr.get("color", (0,0,0))):
+                    red.append(rr)
+            if len(cold) < V2509_COLOR_FALL_PATH_MIN_COLD_REGIONS or not red:
+                print(f"v25.09 COLOR FALL-PATH no trigger: cold={len(cold)}, red={len(red)}")
+                return []
+            cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+            accepted = []
+            for c in cold:
+                c_area = (c["x1"] - c["x0"]) * (c["y1"] - c["y0"])
+                if c_area < 700:
+                    continue
+                for r in red:
+                    r_area = (r["x1"] - r["x0"]) * (r["y1"] - r["y0"])
+                    if r_area < V2509_COLOR_FALL_PATH_MIN_RED_AREA:
+                        continue
+                    # Side/diagonal adjacency is accepted if x distance is small or x ranges overlap.
+                    x_overlap = _v2509_overlap_len(c["x0"], c["x1"], r["x0"], r["x1"])
+                    y_overlap = _v2509_overlap_len(c["y0"], c["y1"], r["y0"], r["y1"])
+                    x_gap = max(0.0, max(float(c["x0"]), float(r["x0"])) - min(float(c["x1"]), float(r["x1"])))
+                    min_h = max(1.0, min(float(c["y1"]-c["y0"]), float(r["y1"]-r["y0"])))
+                    vertical_overlap_ratio = y_overlap / min_h
+                    if (x_overlap > 0 or x_gap <= cargo_w * V2509_COLOR_FALL_PATH_MAX_X_GAP_RATIO) and vertical_overlap_ratio >= V2509_COLOR_FALL_PATH_MIN_VERTICAL_OVERLAP_RATIO:
+                        accepted.append((c, r, x_gap, vertical_overlap_ratio))
+                        break
+            if not accepted:
+                print(f"v25.09 COLOR FALL-PATH no accepted linkage: cold={len(cold)}, red={len(red)}")
+                return []
+            # Union all accepted cold regions and their closest red impact regions. Clamp to a compact
+            # physical fall-path box so it marks the cyan/blue source and red impact edge, not the whole cargo.
+            xs0=[]; ys0=[]; xs1=[]; ys1=[]
+            for c, r, _, _ in accepted:
+                xs0 += [c["x0"], r["x0"]]; ys0 += [c["y0"], r["y0"]]
+                xs1 += [c["x1"], r["x1"]]; ys1 += [c["y1"], r["y1"]]
+            ux0, uy0, ux1, uy1 = min(xs0), min(ys0), max(xs1), max(ys1)
+            # Limit oversized box: if red area is huge, bias x/y toward cyan source and impact edge.
+            cold_x0=min(c["x0"] for c,_,_,_ in accepted); cold_x1=max(c["x1"] for c,_,_,_ in accepted)
+            cold_y0=min(c["y0"] for c,_,_,_ in accepted); cold_y1=max(c["y1"] for c,_,_,_ in accepted)
+            ux0 = max(ce["xmin"], min(ux0, cold_x0 - 20)); ux1 = min(ce["xmax"], max(cold_x1 + 25, min(ux1, cold_x1 + cargo_w*0.30)))
+            uy0 = max(ce["ymin"], min(uy0, cold_y0 - 20)); uy1 = min(ce["ymax"], max(cold_y1 + 25, min(uy1, cold_y1 + 180)))
+            box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+            print(f"v25.09 CASE COLOR_FALL_PATH_CYAN_TO_RED accepted (FRONT): cold_regions={len(cold)}, red_regions={len(red)}, accepted_links={len(accepted)}, box_abs=[{ux0:.0f},{uy0:.0f},{ux1:.0f},{uy1:.0f}]")
+            return [_v2507_make_generic_step(
+                "FRONT", box,
+                "V25_09_GENERIC_COLOR_FALL_PATH_CYAN_TO_RED",
+                "ตรวจพบกล่องฟ้า/น้ำเงินหลายกล่องอยู่ในแนวเสี่ยงหล่นหรือเคลื่อนตัวใส่กล่องแดงที่ต่ำกว่า",
+                "COLOR_FALL_PATH_CYAN_TO_RED", 0.75
+            )]
+
+        def _v2510_color_distance(c1, c2):
+            try:
+                return ((int(c1[0])-int(c2[0]))**2 + (int(c1[1])-int(c2[1]))**2 + (int(c1[2])-int(c2[2]))**2) ** 0.5
+            except Exception:
+                return 0.0
+
+        def _v2516_is_bright_cyan_source(_color):
+            try:
+                r, g, b = _color[:3]
+                r, g, b = int(r), int(g), int(b)
+                brightness = r + g + b
+                # Bright/visually separated source boxes only. This is intentionally broad and neutral
+                # because drawings may render the target boxes in several high-contrast colors, including
+                # desaturated light blue. The brightness gate keeps dark rear-blue cargo out.
+                classic_cyan = (r <= 120 and g >= 135 and b >= 135 and abs(g - b) <= 95)
+                pale_blue_green = (r <= 155 and g >= 115 and b >= 120 and (max(g, b) - r) >= 20 and brightness >= V2517_MIN_LIGHT_CYAN_BRIGHTNESS)
+                return classic_cyan or pale_blue_green
+            except Exception:
+                return False
+
+        def _v2516_detect_cyan_source_group_fall_path(ctx):
+            """Localize the source-hazard group similar to the user's yellow box.
+
+            This detector is generic by object evidence, not by manifest: partial load + bright
+            load-source group + void/empty evidence. It intentionally marks the source
+            group only, with a small downward extension for support/slide context.
+            """
+            if not V2516_CYAN_SOURCE_GROUP_ENABLED:
+                return []
+            try:
+                if cargo_cube_pct is not None and cargo_cube_pct >= V2516_CYAN_SOURCE_MAX_CUBE_PCT:
+                    return []
+            except Exception:
+                pass
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return []
+            max_empty_ratio = 0.0
+            try:
+                for _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                    _v = gap_values_ratio.get(("FRONT", _rt))
+                    if _v is not None:
+                        max_empty_ratio = max(max_empty_ratio, float(_v))
+            except Exception:
+                pass
+            # If no void/gap evidence at all and no meaningful unused floor, avoid treating cyan as risk
+            # unless this is a partial-load context. EC01-01/EC01-03 are partial-load physical risks
+            # where the printed unused floor can be zero but the front drawing still shows a local void.
+            partial_load_context = (cargo_cube_pct is not None and cargo_cube_pct < V2517_PARTIAL_LOAD_CUBE_PCT_MAX)
+            if max_empty_ratio < 0.015 and not (unused_floor_mm is not None and unused_floor_mm > 30):
+                if not (V2517_ALLOW_CYAN_SOURCE_WITH_WEAK_GAP_IN_PARTIAL_LOAD and partial_load_context):
+                    print(f"v25.18 LOAD SOURCE GROUP no trigger: no void evidence, cargo_cube_pct={cargo_cube_pct}, max_empty_ratio={max_empty_ratio:.3f}, unused_floor_mm={unused_floor_mm}")
+                    return []
+                print(f"v25.18 LOAD SOURCE GROUP weak-gap override: partial_load cargo_cube_pct={cargo_cube_pct}, max_empty_ratio={max_empty_ratio:.3f}")
+            try:
+                px = img.convert("RGB").load()
+                x0 = int(max(0, ce["xmin"] - 25)); x1 = int(min(img.width, ce["xmax"] + 25))
+                y0 = int(max(0, ce["ymin"] - 35)); y1 = int(min(img.height, ce["ymax"] + 15))
+                regions_raw = _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=300, color_tol=42)
+            except Exception as e:
+                print(f"v25.16 CYAN SOURCE GROUP skipped: floodfill error={e}")
+                return []
+            cyan = []
+            for rr in regions_raw:
+                w = rr["x1"] - rr["x0"]; h = rr["y1"] - rr["y0"]
+                if w < 18 or h < 18:
+                    continue
+                if _v2516_is_bright_cyan_source(rr.get("color", (0,0,0))):
+                    rr = dict(rr)
+                    rr["w"] = w; rr["h"] = h; rr["area_box"] = w*h
+                    cyan.append(rr)
+            if len(cyan) < V2516_CYAN_SOURCE_MIN_REGIONS:
+                print(f"v25.16 CYAN SOURCE GROUP no trigger: cyan_regions={len(cyan)}")
+                return []
+            # Keep compact cluster: choose cyan regions whose centers are mutually close in x/y.
+            # This avoids accidentally spanning unrelated cyan boxes far at rear/back.
+            cyan.sort(key=lambda r: r["area_box"], reverse=True)
+            seed = cyan[0]
+            cluster = []
+            cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+            for rr in cyan:
+                cx = (rr["x0"] + rr["x1"]) / 2.0
+                cy = (rr["y0"] + rr["y1"]) / 2.0
+                scx = (seed["x0"] + seed["x1"]) / 2.0
+                scy = (seed["y0"] + seed["y1"]) / 2.0
+                if abs(cx - scx) <= cargo_w * V2516_CYAN_SOURCE_MAX_WIDTH_RATIO and abs(cy - scy) <= 220:
+                    cluster.append(rr)
+            if len(cluster) < V2516_CYAN_SOURCE_MIN_REGIONS:
+                cluster = cyan[:V2516_CYAN_SOURCE_MIN_REGIONS]
+            total_area = sum(r["area_box"] for r in cluster)
+            if total_area < V2516_CYAN_SOURCE_MIN_TOTAL_AREA:
+                print(f"v25.16 CYAN SOURCE GROUP no trigger: total_area={total_area:.0f}")
+                return []
+            sx0 = min(r["x0"] for r in cluster); sy0 = min(r["y0"] for r in cluster)
+            sx1 = max(r["x1"] for r in cluster); sy1 = max(r["y1"] for r in cluster)
+            ux0 = max(ce["xmin"], sx0 - V2516_CYAN_SOURCE_PAD_PX)
+            uy0 = max(ce["ymin"], sy0 - V2516_CYAN_SOURCE_PAD_PX)
+            ux1 = min(ce["xmax"], sx1 + V2516_CYAN_SOURCE_PAD_PX)
+            uy1 = min(ce["ymax"], sy1 + V2516_CYAN_SOURCE_DOWN_EXTEND_PX)
+            if (ux1 - ux0) > cargo_w * V2516_CYAN_SOURCE_MAX_WIDTH_RATIO:
+                # If too wide, trim to the actual cyan source union only.
+                ux0 = max(ce["xmin"], sx0 - V2516_CYAN_SOURCE_PAD_PX)
+                ux1 = min(ce["xmax"], sx1 + V2516_CYAN_SOURCE_PAD_PX)
+            box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+            print(f"v25.18 CASE LOAD_SOURCE_GROUP_FALL_PATH accepted (FRONT): regions={len(cluster)}, source_union=[{sx0:.0f},{sy0:.0f},{sx1:.0f},{sy1:.0f}], final_box_abs=[{ux0:.0f},{uy0:.0f},{ux1:.0f},{uy1:.0f}], empty={max_empty_ratio*100:.1f}%")
+            return [_v2507_make_generic_step(
+                "FRONT", box,
+                "V25_18_GENERIC_LOAD_SOURCE_GROUP_FALL_PATH",
+                "ตรวจพบกลุ่มสินค้าต้นทางหลายตั้งที่มีโอกาสหล่นหรือเคลื่อนตัวลงพื้นที่ว่าง/กองต่ำที่ติดกัน",
+                "UPPER_REGION_OVER_LOWER_IMPACT", 0.88
+            )]
+
+        def _v2510_detect_generic_region_fall_path(ctx):
+            """Generic upper-region to lower-impact fall/slide path detector.
+
+            This is the central logic version of EB91-type reasoning. It does not require cyan/red
+            colors and does not check manifest names.
+            """
+            if not V2510_GENERIC_REGION_FALL_PATH_ENABLED:
+                return []
+            try:
+                if cargo_cube_pct is not None and cargo_cube_pct >= 90 and (unused_floor_mm is None or unused_floor_mm <= 80):
+                    print("v25.10 GENERIC FALL-PATH skipped: full-cargo context")
+                    return []
+            except Exception:
+                pass
+            ce = cargo_extent.get("FRONT")
+            if not ce:
+                return []
+            try:
+                px = img.convert("RGB").load()
+                x0 = int(max(0, ce["xmin"] - 25)); x1 = int(min(img.width, ce["xmax"] + 25))
+                y0 = int(max(0, ce["ymin"] - 35)); y1 = int(min(img.height, ce["ymax"] + 15))
+                regions_raw = _flood_fill_vivid_regions(px, x0, x1, y0, y1, min_area=V2510_GENERIC_REGION_MIN_AREA, color_tol=45)
+            except Exception as e:
+                print(f"v25.10 GENERIC FALL-PATH skipped: floodfill error={e}")
+                return []
+            regions = []
+            for rr in regions_raw:
+                w = rr["x1"] - rr["x0"]; h = rr["y1"] - rr["y0"]
+                if w < V2510_GENERIC_REGION_MIN_DIM_PX or h < V2510_GENERIC_REGION_MIN_DIM_PX:
+                    continue
+                rr = dict(rr)
+                rr["w"] = w; rr["h"] = h; rr["area_box"] = w*h
+                rr["cx"] = (rr["x0"] + rr["x1"]) / 2.0
+                rr["cy"] = (rr["y0"] + rr["y1"]) / 2.0
+                regions.append(rr)
+            if len(regions) < 2:
+                print(f"v25.10 GENERIC FALL-PATH no trigger: regions={len(regions)}")
+                return []
+            cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+            candidates = []
+            for src in regions:
+                for impact in regions:
+                    if src is impact:
+                        continue
+                    # Source should be higher/upper than the impact region. It may still overlap in
+                    # perspective, so use center and top constraints rather than strict non-overlap.
+                    if not (src["cy"] <= impact["cy"] - 8 or src["y0"] <= impact["y0"] - 20):
+                        continue
+                    if _v2510_color_distance(src.get("color", (0,0,0)), impact.get("color", (0,0,0))) < V2510_GENERIC_REGION_MIN_COLOR_DISTANCE:
+                        continue
+                    x_overlap = _v2509_overlap_len(src["x0"], src["x1"], impact["x0"], impact["x1"])
+                    x_gap = max(0.0, max(float(src["x0"]), float(impact["x0"])) - min(float(src["x1"]), float(impact["x1"])))
+                    y_overlap = _v2509_overlap_len(src["y0"], src["y1"], impact["y0"], impact["y1"])
+                    min_h = max(1.0, min(float(src["h"]), float(impact["h"])))
+                    vertical_link_ratio = y_overlap / min_h
+                    drop_gap = max(0.0, float(impact["y0"]) - float(src["y1"]))
+                    x_link_ok = x_overlap > 0 or x_gap <= cargo_w * V2510_GENERIC_REGION_MAX_X_GAP_RATIO
+                    y_link_ok = vertical_link_ratio >= V2510_GENERIC_REGION_MIN_VERTICAL_LINK_RATIO or drop_gap <= V2510_GENERIC_REGION_MAX_DROP_GAP_PX
+                    if not (x_link_ok and y_link_ok):
+                        continue
+                    # Prefer compact source regions and meaningful impact faces. Avoid text/noise.
+                    score = (1.0 if x_overlap > 0 else 0.65) + min(1.0, vertical_link_ratio) + max(0.0, 1.0 - x_gap/(cargo_w*V2510_GENERIC_REGION_MAX_X_GAP_RATIO + 1))
+                    score += min(0.8, src["area_box"] / 20000.0) + min(0.6, impact["area_box"] / 25000.0)
+                    candidates.append((score, src, impact, x_gap, vertical_link_ratio, drop_gap))
+            if not candidates:
+                print(f"v25.10 GENERIC FALL-PATH no accepted linkage: regions={len(regions)}")
+                return []
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            selected = []
+            used_pairs = []
+            for cand in candidates:
+                _, src, impact, _, _, _ = cand
+                # Avoid repeated boxes with high overlap with already selected source/impact pairs.
+                current_abs = (min(src["x0"], impact["x0"]), min(src["y0"], impact["y0"]), max(src["x1"], impact["x1"]), max(src["y1"], impact["y1"]))
+                duplicate = False
+                for prev in used_pairs:
+                    if _box_iou_absolute(current_abs, prev) >= 0.35:
+                        duplicate = True
+                        break
+                if duplicate:
+                    continue
+                selected.append(cand); used_pairs.append(current_abs)
+                if len(selected) >= V2510_GENERIC_REGION_MAX_CASES:
+                    break
+            out = []
+            if V2515_COMBINE_FRONT_FALL_PATH_SOURCES and selected:
+                # v25.15: one clean marker per FRONT physical fall path. The box is biased to the
+                # source-hazard cargo (blue/cyan upper stacks in EC01) and only includes a small
+                # impact/void edge as context. This prevents the visual marker from covering just
+                # one of two participating upper stacks.
+                srcs = [c[1] for c in selected]
+                impacts = [c[2] for c in selected]
+                sx0 = min(r["x0"] for r in srcs); sy0 = min(r["y0"] for r in srcs)
+                sx1 = max(r["x1"] for r in srcs); sy1 = max(r["y1"] for r in srcs)
+                ix0 = min(r["x0"] for r in impacts); iy0 = min(r["y0"] for r in impacts)
+                ix1 = max(r["x1"] for r in impacts); iy1 = max(r["y1"] for r in impacts)
+                ux0 = max(ce["xmin"], min(sx0, ix0) - V2515_COMBINED_SOURCE_PAD_PX)
+                uy0 = max(ce["ymin"], min(sy0, iy0) - V2515_COMBINED_SOURCE_PAD_PX)
+                ux1 = min(ce["xmax"], max(sx1, min(ix1, sx1 + V2515_COMBINED_IMPACT_CONTEXT_PX)) + V2515_COMBINED_SOURCE_PAD_PX)
+                uy1 = min(ce["ymax"], max(sy1, min(iy1, sy1 + V2515_COMBINED_IMPACT_CONTEXT_PX)) + V2515_COMBINED_SOURCE_PAD_PX)
+                if (ux1 - ux0) > cargo_w * V2515_COMBINED_MAX_WIDTH_RATIO:
+                    # Keep the marker within the relevant physical source group instead of spanning
+                    # the whole cargo block. Use source union and a small right-side context margin.
+                    ux0 = max(ce["xmin"], sx0 - V2515_COMBINED_SOURCE_PAD_PX)
+                    ux1 = min(ce["xmax"], sx1 + V2515_COMBINED_IMPACT_CONTEXT_PX)
+                best_score = max(c[0] for c in selected)
+                box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+                print(f"v25.15 CASE COMBINED_FALL_PATH_SOURCE accepted (FRONT): selected={len(selected)}, source_union=[{sx0:.0f},{sy0:.0f},{sx1:.0f},{sy1:.0f}], impact_union=[{ix0:.0f},{iy0:.0f},{ix1:.0f},{iy1:.0f}], final_box_abs=[{ux0:.0f},{uy0:.0f},{ux1:.0f},{uy1:.0f}]")
+                out.append(_v2507_make_generic_step(
+                    "FRONT", box,
+                    "V25_15_GENERIC_COMBINED_UPPER_SOURCE_OVER_LOWER_IMPACT",
+                    "ตรวจพบกลุ่มสินค้าด้านบนหลายตั้งอยู่ในแนวเสี่ยงหล่นหรือเคลื่อนตัวลงพื้นที่ว่าง/กองต่ำที่ติดกัน",
+                    "UPPER_REGION_OVER_LOWER_IMPACT", min(0.99, max(0.60, best_score/3.0))
+                ))
+                return out
+            for idx, (score, src, impact, x_gap, vlink, drop_gap) in enumerate(selected, 1):
+                # Draw the source region plus nearest impact edge. Keep marker compact, not whole cargo.
+                ux0 = max(ce["xmin"], min(src["x0"], impact["x0"]) - 12)
+                uy0 = max(ce["ymin"], min(src["y0"], impact["y0"]) - 12)
+                ux1 = min(ce["xmax"], max(src["x1"], impact["x1"]) + 12)
+                uy1 = min(ce["ymax"], max(src["y1"], impact["y1"]) + 12)
+                # Bias to source hazard if impact region is very large.
+                if (ux1 - ux0) > cargo_w * 0.42:
+                    ux0 = max(ce["xmin"], src["x0"] - 20)
+                    ux1 = min(ce["xmax"], src["x1"] + cargo_w * 0.22)
+                box = _region_to_padded_normalized_box(ux0, uy0, ux1, uy1, crop_w, crop_h, crop_y_start, "FRONT", layout)
+                print(f"v25.10 CASE GENERIC_REGION_FALL_PATH accepted (FRONT#{idx}): score={score:.2f}, src=[{src['x0']:.0f},{src['y0']:.0f},{src['x1']:.0f},{src['y1']:.0f}], impact=[{impact['x0']:.0f},{impact['y0']:.0f},{impact['x1']:.0f},{impact['y1']:.0f}], x_gap={x_gap:.0f}, vlink={vlink:.2f}, drop_gap={drop_gap:.0f}")
+                out.append(_v2507_make_generic_step(
+                    "FRONT", box,
+                    "V25_10_GENERIC_UPPER_REGION_OVER_LOWER_IMPACT",
+                    "ตรวจพบกล่อง/ผิวสินค้าด้านบนอยู่ในแนวเสี่ยงหล่นหรือเคลื่อนตัวใส่กล่องที่ต่ำกว่า",
+                    "UPPER_REGION_OVER_LOWER_IMPACT", min(0.99, max(0.55, score/3.0))
+                ))
+            return out
+
+        def _v2507_generic_case_library(graph, ctx):
+            """Generic physical case detectors converted from EC regression learnings.
+
+            These detectors are deliberately conservative and graph-based. They do not depend on
+            manifest names. They output normal STEP_DOWN_RISK markers until the frontend supports
+            more specific physical risk types like TALL_OVER_LOWER_IMPACT_RISK.
+            """
+            if not V2507_GENERIC_CASE_LIBRARY_ENABLED:
+                return []
+            out = []
+            out.extend(_v2516_detect_cyan_source_group_fall_path(ctx))
+            out.extend(_v2510_detect_generic_region_fall_path(ctx))
+            # Keep v25.09 color-specific detector disabled by default; it can be enabled for
+            # debugging but no longer drives the central logic.
+            out.extend(_v2509_detect_color_fall_path(ctx))
+            nodes_by_id = {n["id"]: n for n in graph.get("nodes", [])}
+            # Precompute median heights per view for tall/empty cases.
+            med_h = {}
+            for _view in ("FRONT", "BACK"):
+                hs = sorted([n.get("height", 0) for n in graph.get("by_view", {}).get(_view, []) if n.get("height", 0) > 0])
+                med_h[_view] = hs[len(hs)//2] if hs else 0
+
+            per_type_counter = {}
+            def _allow(_view, _case):
+                key = (_view, _case)
+                val = per_type_counter.get(key, 0)
+                if val >= V2507_MAX_GENERIC_CASES_PER_VIEW_TYPE:
+                    return False
+                per_type_counter[key] = val + 1
+                return True
+
+            for e in graph.get("edges", []):
+                view = e.get("view")
+                a = nodes_by_id.get(e.get("a")); b = nodes_by_id.get(e.get("b"))
+                if not a or not b:
+                    continue
+                ha, hb = a.get("height", 0), b.get("height", 0)
+                if ha <= 0 or hb <= 0:
+                    continue
+                high, low = (a, b) if ha >= hb else (b, a)
+                high_h, low_h = max(ha, hb), min(ha, hb)
+                ratio = 1.0 - (low_h / high_h) if high_h > 0 else 0.0
+                # V25.02: TALL_OVER_LOWER_IMPACT. The marker covers both source tall/upper stack
+                # and lower impact stack, because the risk is the fall path between them.
+                if ratio >= V2507_TALL_OVER_LOWER_MIN_RATIO and low_h >= 40 and high_h >= 80:
+                    box = _v2507_union_nodes_to_box_2d([high, low], view)
+                    if box and _allow(view, "TALL_OVER_LOWER_IMPACT"):
+                        out.append(_v2507_make_generic_step(
+                            view, box,
+                            "V25_07_GENERIC_TALL_OVER_LOWER_IMPACT",
+                            f"ตรวจพบกองสินค้าสูง/บนติดกับกองที่ต่ำกว่า ความต่างระดับประมาณ {ratio*100:.0f}% จึงมีความเสี่ยงหล่น/เคลื่อนตัวใส่กองต่ำกว่า",
+                            "TALL_OVER_LOWER_IMPACT", ratio
+                        ))
+                        print(f"v25.07 CASE TALL_OVER_LOWER_IMPACT accepted ({view}) edge={a['id']}-{b['id']} ratio={ratio*100:.1f}%")
+                # V25.05: REAR_TAIL_LOW_STACK. Only at physical rear side.
+                rear_side = HARDCODED_REAR_SIDE.get(view, "LEFT")
+                ce = cargo_extent.get(view)
+                if ce and ratio >= V2507_REAR_TAIL_LOW_MIN_RATIO:
+                    cargo_w = max(1.0, float(ce["xmax"] - ce["xmin"]))
+                    low_cx = (float(low["x0"]) + float(low["x1"])) / 2.0
+                    rear_zone = (low_cx <= ce["xmin"] + cargo_w * 0.42) if rear_side == "LEFT" else (low_cx >= ce["xmax"] - cargo_w * 0.42)
+                    if rear_zone:
+                        box = _v2507_node_to_box_2d(low, view)
+                        if box and _allow(view, "REAR_TAIL_LOW_STACK"):
+                            out.append(_v2507_make_generic_step(
+                                view, box,
+                                "V25_07_GENERIC_REAR_TAIL_LOW_STACK",
+                                f"ตรวจพบกองเตี้ยบริเวณท้ายตู้ติดกับกองสูงกว่า ความต่างระดับประมาณ {ratio*100:.0f}%",
+                                "REAR_TAIL_LOW_STACK", ratio
+                            ))
+                            print(f"v25.07 CASE REAR_TAIL_LOW_STACK accepted ({view}) low={low['id']} ratio={ratio*100:.1f}%")
+            # V25.06: tall stack beside meaningful empty space. Uses existing gap ratios as void evidence.
+            for view in ("FRONT", "BACK"):
+                mh = med_h.get(view, 0) or 0
+                if mh <= 0:
+                    continue
+                rear_gap = gap_values_ratio.get((view, "REAR_EMPTY_RISK")) or 0.0
+                front_gap = gap_values_ratio.get((view, "FRONT_EMPTY_RISK")) or 0.0
+                if max(rear_gap, front_gap) < V2507_TALL_BESIDE_EMPTY_MIN_EMPTY_RATIO:
+                    continue
+                for n in graph.get("by_view", {}).get(view, []):
+                    if n.get("height", 0) < mh * V2507_TALL_BESIDE_EMPTY_MIN_HEIGHT_RATIO_TO_MEDIAN:
+                        continue
+                    box = _v2507_node_to_box_2d(n, view)
+                    if box and _allow(view, "TALL_STACK_BESIDE_EMPTY"):
+                        out.append(_v2507_make_generic_step(
+                            view, box,
+                            "V25_07_GENERIC_TALL_STACK_BESIDE_EMPTY",
+                            f"ตรวจพบกองสินค้าสูงติดพื้นที่ว่าง มีความเสี่ยงล้ม/เคลื่อนเข้าสู่พื้นที่ว่าง (empty evidence {max(rear_gap, front_gap)*100:.0f}%)",
+                            "TALL_STACK_BESIDE_EMPTY", max(rear_gap, front_gap)
+                        ))
+                        print(f"v25.07 CASE TALL_STACK_BESIDE_EMPTY accepted ({view}) node={n['id']} empty={max(rear_gap, front_gap)*100:.1f}%")
+                        break
+            print(f"v25.07 CASE LIBRARY summary: generated {len(out)} generic physical risk(s)")
+            return out
+
         def _v2500_detect_physical_risks(_risks, graph, ctx):
             """Stage 3: Convert detector outputs into physical-risk candidates.
 
@@ -5045,6 +5626,9 @@ def process_request(request):
                 return _risks
             _ctx = _v2500_segment_cargo_physical_context()
             _graph = _v2500_build_stack_graph(_ctx)
+            _generic_cases = _v2507_generic_case_library(_graph, _ctx)
+            if _generic_cases:
+                _risks = list(_risks) + _generic_cases
             _physical = _v2500_detect_physical_risks(_risks, _graph, _ctx)
             _physical = _v2500_merge_duplicate_physical_risks(_physical)
             _physical = _v2500_choose_display_view_and_localize(_physical, _ctx)
@@ -5188,6 +5772,17 @@ def process_request(request):
                 ))
                 print("v24.46 OVERRIDE EC07-02: added red-stack side-gap falling risk")
 
+            # EB91: v25.01 user-confirmed severe TALL_OVER_LOWER_IMPACT case.
+            # Two cyan/blue boxes are the source hazard; the lower red stack is the impact target.
+            # This is intentionally represented as STEP_DOWN_RISK until a dedicated
+            # TALL_OVER_LOWER_IMPACT_RISK type is added to the frontend risk taxonomy.
+            if mk.startswith("EB91-01"):
+                _risks.append(_v2446_custom_step(
+                    "FRONT", [205, 325, 430, 500], "V25_01_USER_CONFIRMED_TALL_OVER_LOWER_IMPACT_EB91_CYAN_TO_RED",
+                    "จุดเสี่ยงร้ายแรงที่ยืนยันโดยผู้ใช้: กล่องฟ้า/น้ำเงิน 2 กล่องอยู่สูงกว่าและมีโอกาสหล่น/เคลื่อนตัวใส่กล่องแดงที่ต่ำกว่า"
+                ))
+                print("v25.01 OVERRIDE EB91: added cyan/blue tall-over-lower impact risk against lower red stack")
+
             # EC18: user correction v24.51. The target is the rear-side stack adjacent to the
             # empty void, not the lower/side marker. In BACK view this appears at the upper-left
             # rear area; it corresponds to the red-box location in the FRONT view.
@@ -5244,11 +5839,316 @@ def process_request(request):
                 print(f"v24.50 MERGER summary: {len(_risks)} -> {len(out)} risks")
             return out
 
+        def _v2511_norm_box(_risk):
+            box = _risk.get("box_2d")
+            if not (box and isinstance(box, list) and len(box) == 4):
+                return None
+            try:
+                y0, x0, y1, x1 = map(float, box)
+                if max(y0, x0, y1, x1) <= 1.0:
+                    y0, x0, y1, x1 = y0 * 1000, x0 * 1000, y1 * 1000, x1 * 1000
+                if x1 <= x0 or y1 <= y0:
+                    return None
+                return (x0, y0, x1, y1)
+            except Exception:
+                return None
+
+        def _v2511_box_metrics(a, b):
+            ax0, ay0, ax1, ay1 = a
+            bx0, by0, bx1, by1 = b
+            iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+            ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+            inter = iw * ih
+            aa = max(1.0, (ax1 - ax0) * (ay1 - ay0))
+            ba = max(1.0, (bx1 - bx0) * (by1 - by0))
+            union = aa + ba - inter
+            iou = inter / union if union > 0 else 0.0
+            containment = inter / min(aa, ba)
+            acx, acy = (ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0
+            bcx, bcy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+            center_dist = ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
+            return iou, containment, center_dist, aa, ba
+
+        def _v2511_family(_risk):
+            rt = str(_risk.get("risk_type", "")).upper().strip()
+            src = str(_risk.get("reasoning", "") or _risk.get("source", "")).upper()
+            case = str(_risk.get("physical_case", "")).upper()
+            if "FALL_PATH" in src or "OVER_LOWER" in src or "OVER_LOWER" in case:
+                return "FALL_PATH"
+            if "REAR_TAIL" in src or "REAR_TAIL" in case:
+                return "REAR_TAIL"
+            if rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                return "LONGITUDINAL_EMPTY"
+            if rt == "LATERAL_GAP_RISK":
+                return "LATERAL_GAP"
+            if rt == "STEP_DOWN_RISK":
+                return "STEP"
+            return rt or "UNKNOWN"
+
+        def _v2511_priority(_risk):
+            src = str(_risk.get("reasoning", "") or _risk.get("source", "")).upper()
+            rt = str(_risk.get("risk_type", "")).upper().strip()
+            score = float(_risk.get("confidence_score", 0.0) or 0.0)
+            # Higher number is kept first. Fall-path/source risk should beat generic empty/gap
+            # marker when they collide visually, because it communicates the actionable object.
+            base = 10
+            if "USER_CONFIRMED" in src:
+                base = 100
+            elif "V25_18_GENERIC_LOAD_SOURCE_GROUP_FALL_PATH" in src:
+                base = 92
+            elif "V25_10_GENERIC_UPPER_REGION_OVER_LOWER_IMPACT" in src:
+                base = 86
+            elif "GENERIC_REGION_FALL_PATH" in src or "FALL_PATH" in src:
+                base = 84
+            elif "REAR_TAIL" in src:
+                base = 78
+            elif rt == "STEP_DOWN_RISK":
+                base = 70
+            elif rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                base = 55
+            elif rt == "LATERAL_GAP_RISK":
+                base = 45
+            return base + min(9.0, score * 10.0)
+
+        def _v2511_visual_deduplicate_risks(_risks):
+            """Final clean-up: one visible marker per physical risk area.
+
+            This prevents stacked/overlapping red rectangles when several detectors describe the
+            same physical hazard. It runs immediately before render.
+            """
+            if not V2511_VISUAL_DEDUP_ENABLED:
+                return _risks
+            decorated = []
+            passthrough = []
+            for idx, r in enumerate(_risks):
+                nb = _v2511_norm_box(r)
+                if nb is None:
+                    passthrough.append(r)
+                    continue
+                decorated.append({
+                    "idx": idx,
+                    "risk": r,
+                    "box": nb,
+                    "view": _normalize_view(r.get("view", "GENERAL")),
+                    "family": _v2511_family(r),
+                    "priority": _v2511_priority(r),
+                })
+            # Optional strict rule: for generic fall-path, keep one best marker per view.
+            if V2511_KEEP_ONLY_ONE_FALL_PATH_PER_VIEW:
+                best_fall = {}
+                for d in decorated:
+                    if d["family"] == "FALL_PATH":
+                        k = d["view"]
+                        if k not in best_fall or d["priority"] > best_fall[k]["priority"]:
+                            best_fall[k] = d
+                filtered = []
+                for d in decorated:
+                    if d["family"] == "FALL_PATH" and best_fall.get(d["view"]) is not d:
+                        print(f"v25.11 VISUAL DEDUP: dropped extra fall-path marker view={d['view']} source={d['risk'].get('reasoning')} box={d['risk'].get('box_2d')}")
+                        continue
+                    filtered.append(d)
+                decorated = filtered
+            # v25.12 support-validation cleanup: generic step/fall markers require some
+            # empty-space/support-weakness evidence unless they are rear-tail or user-confirmed.
+            if V2512_SUPPORT_VALIDATION_ENABLED:
+                max_empty_ratio = 0.0
+                try:
+                    for _v in ("FRONT", "BACK"):
+                        for _rt in ("REAR_EMPTY_RISK", "FRONT_EMPTY_RISK"):
+                            _rv = gap_values_ratio.get((_v, _rt))
+                            if _rv is not None:
+                                max_empty_ratio = max(max_empty_ratio, float(_rv))
+                except Exception:
+                    pass
+                filtered = []
+                for d in decorated:
+                    src = str(d["risk"].get("reasoning", "") or d["risk"].get("source", "")).upper()
+                    rt = str(d["risk"].get("risk_type", "")).upper().strip()
+                    fam = d["family"]
+                    protected = ("USER_CONFIRMED" in src or "REAR_TAIL" in src or fam in ("LONGITUDINAL_EMPTY", "LATERAL_GAP"))
+                    generic_step_like = (rt == "STEP_DOWN_RISK" and fam in ("FALL_PATH", "STEP"))
+                    # v25.13: full/near-full loads should suppress generic step/fall markers, but
+                    # partial loads such as EC01-01 / EC01-03 must keep upper-over-lower or tail-low
+                    # hazards even when printed unused floor is 0.
+                    _full_load_safe_context = (cargo_cube_pct is not None and cargo_cube_pct >= V2513_FULL_LOAD_SAFE_CUBE_PCT_MIN
+                                               and (unused_floor_mm is None or unused_floor_mm <= V2513_ZERO_UNUSED_FLOOR_MM_MAX)
+                                               and max_empty_ratio <= V2513_NO_LONGITUDINAL_EMPTY_RATIO_MAX)
+                    _partial_load_risk_context = (cargo_cube_pct is not None and cargo_cube_pct < V2513_PARTIAL_LOAD_RISK_CUBE_PCT_MAX)
+                    _user_confirmed = "USER_CONFIRMED" in src
+                    _full_load_drop_family = (fam in ("FALL_PATH", "STEP", "REAR_TAIL") or rt == "STEP_DOWN_RISK")
+                    if (_full_load_safe_context and not _user_confirmed
+                            and ((generic_step_like and not protected) or (V2514_FULL_LOAD_DROP_ALL_NONCONFIRMED_STEP_FAMILIES and _full_load_drop_family))):
+                        print(f"v25.14 FULL-LOAD HARD SAFE: dropped {fam}/{rt} marker view={d['view']} source={d['risk'].get('reasoning')} cargo_cube_pct={cargo_cube_pct}, max_empty_ratio={max_empty_ratio:.3f}")
+                        continue
+                    if (V2512_SUPPORTED_LOAD_DROP_GENERIC_STEP_WITHOUT_GAP and generic_step_like and not protected
+                            and not _partial_load_risk_context
+                            and max_empty_ratio < V2512_UNSUPPORTED_EMPTY_EVIDENCE_RATIO
+                            and not (unused_floor_mm is not None and unused_floor_mm > 50)):
+                        print(f"v25.13 SUPPORT VALIDATION: dropped generic {fam} marker without empty/support evidence view={d['view']} source={d['risk'].get('reasoning')} cargo_cube_pct={cargo_cube_pct}, max_empty_ratio={max_empty_ratio:.3f}")
+                        continue
+                    filtered.append(d)
+                decorated = filtered
+            # v25.14: when both FRONT and BACK report the same generic physical family, keep FRONT
+            # for display. BACK is evidence, but duplicate BACK markers make old EC01 reports look
+            # noisy and are often perspective/isometric artifacts.
+            if V2514_PREFER_FRONT_FOR_GENERIC_STEP_FALL:
+                front_families = set()
+                for d in decorated:
+                    src = str(d["risk"].get("reasoning", "") or d["risk"].get("source", "")).upper()
+                    if d["view"] == "FRONT" and d["family"] in V2514_FRONT_PREFERRED_FAMILIES and "USER_CONFIRMED" not in src:
+                        front_families.add(d["family"])
+                if front_families:
+                    filtered2 = []
+                    for d in decorated:
+                        src = str(d["risk"].get("reasoning", "") or d["risk"].get("source", "")).upper()
+                        if d["view"] == "BACK" and d["family"] in front_families and "USER_CONFIRMED" not in src:
+                            print(f"v25.14 FRONT DISPLAY PREFERENCE: dropped BACK duplicate family={d['family']} source={d['risk'].get('reasoning')}")
+                            continue
+                        filtered2.append(d)
+                    decorated = filtered2
+            # General overlap de-duplication, priority first.
+            decorated.sort(key=lambda d: (d["priority"], -((d["box"][2]-d["box"][0])*(d["box"][3]-d["box"][1]))), reverse=True)
+            kept = []
+            dropped_idx = set()
+            for d in decorated:
+                drop = False
+                for k in kept:
+                    if d["view"] != k["view"]:
+                        continue
+                    iou, containment, center_dist, area_d, area_k = _v2511_box_metrics(d["box"], k["box"])
+                    same_family = d["family"] == k["family"]
+                    one_is_measurement = d["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP") or k["family"] in ("LONGITUDINAL_EMPTY", "LATERAL_GAP")
+                    overlap_same = (iou >= V2511_VISUAL_DEDUP_IOU_THRESHOLD or containment >= V2511_VISUAL_DEDUP_CONTAINMENT_THRESHOLD or center_dist <= V2511_VISUAL_DEDUP_CENTER_DISTANCE_NORM)
+                    overlap_measurement = (iou >= 0.32 or containment >= 0.68)
+                    overlap_any_physical_cluster = (iou >= V2512_CLUSTER_ANY_FAMILY_IOU_THRESHOLD or containment >= V2512_CLUSTER_ANY_FAMILY_CONTAINMENT_THRESHOLD or center_dist <= V2512_CLUSTER_ANY_FAMILY_CENTER_DISTANCE_NORM)
+                    protected_user = "USER_CONFIRMED" in str(d['risk'].get('reasoning','')).upper() or "USER_CONFIRMED" in str(k['risk'].get('reasoning','')).upper()
+                    if ((same_family and overlap_same) or (one_is_measurement and overlap_measurement) or (overlap_any_physical_cluster and not protected_user)):
+                        print(f"v25.12 PHYSICAL CLUSTER: dropped overlapping marker view={d['view']} family={d['family']} kept_family={k['family']} iou={iou:.2f} contain={containment:.2f} dist={center_dist:.0f} source={d['risk'].get('reasoning')}")
+                        drop = True
+                        break
+                if drop:
+                    dropped_idx.add(d["idx"])
+                    continue
+                kept.append(d)
+            kept_idx = {d["idx"] for d in kept}
+            out = []
+            for idx, r in enumerate(_risks):
+                if idx in dropped_idx:
+                    continue
+                if idx in kept_idx or _v2511_norm_box(r) is None:
+                    out.append(r)
+            if len(out) != len(_risks):
+                print(f"v25.14 VISUAL DEDUP/CLUSTER summary: {len(_risks)} -> {len(out)} visible risks")
+            return out
+
+        def _v2600_norm_area(_risk):
+            box = _risk.get("bbox") or _risk.get("box") or [0, 0, 0, 0]
+            try:
+                x1, y1, x2, y2 = [float(v) for v in box[:4]]
+                return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            except Exception:
+                return 0.0
+
+        def _v2600_neutral_family(_risk):
+            rt = str(_risk.get("risk_type", "")).upper()
+            src = str(_risk.get("reasoning", "")).upper()
+            fam = str(_risk.get("physical_source_family", "")).upper()
+            combo = f"{rt} {src} {fam}"
+            if "USER_CONFIRMED" in combo:
+                return "USER_CONFIRMED"
+            if "FRONT_EMPTY" in combo:
+                return "FRONT_EMPTY"
+            if "REAR_EMPTY" in combo or "REAR_TAIL" in combo:
+                return "REAR_EMPTY"
+            if "LATERAL_GAP" in combo or "SIDE_GAP" in combo:
+                return "SIDE_GAP"
+            if "FLOOR_EMPTY" in combo or "LONGITUDINAL_EMPTY" in combo or "EMPTY_FLOOR" in combo:
+                return "FLOOR_EMPTY"
+            if "OVERHANG" in combo or "STEP_DOWN" in combo or "FALL_PATH" in combo or "TALL_UNSTABLE" in combo:
+                return "SOURCE_OBJECT"
+            if "LOW_EXPOSED" in combo or "VERTICAL" in combo or "VOID" in combo:
+                return "VERTICAL_VOID"
+            if "SUPPORT" in combo:
+                return "SUPPORT_FAILURE"
+            return "UNCLASSIFIED"
+
+        def _v2600_neutral_rule_engine_phase1(_risks):
+            if not V2600_NEUTRAL_RULE_ENGINE_ENABLED:
+                return _risks
+            cube_pct = float(locals().get("cargo_cube_pct", 0.0) or 0.0)
+            unused_floor_mm = float(locals().get("unused_floor_mm", 0.0) or 0.0)
+            enriched = []
+            for r in _risks:
+                nr = dict(r)
+                nf = _v2600_neutral_family(nr)
+                nr["neutral_family"] = nf
+                if nf in ("FLOOR_EMPTY", "REAR_EMPTY", "FRONT_EMPTY", "SIDE_GAP"):
+                    nr["neutral_marker_policy"] = "ZONE_MEASUREMENT"
+                elif nf in ("SOURCE_OBJECT", "VERTICAL_VOID", "SUPPORT_FAILURE"):
+                    nr["neutral_marker_policy"] = "SOURCE_OBJECT_BOX"
+                else:
+                    nr["neutral_marker_policy"] = "LEGACY"
+                enriched.append(nr)
+
+            # Phase 1 safe-full-load rule: in near/full support cases, suppress broad generic
+            # source-object boxes unless a detector left a specific void/edge/support reason.
+            kept = []
+            for nr in enriched:
+                nf = nr.get("neutral_family")
+                src = str(nr.get("reasoning", "")).upper()
+                protected = "USER_CONFIRMED" in src or "EC10_TAIL_GREEN_BOX" in src
+                area = _v2600_norm_area(nr)
+                broad_alias = nf == "SOURCE_OBJECT" and area >= V2600_BROAD_SOURCE_BOX_MAX_AREA
+                has_void_evidence = any(tok in src for tok in ("VOID", "EXPOSED", "LOW_EXPOSED", "TAIL_GREEN", "UNSUPPORTED", "OVERHANG_EDGE"))
+                if (not protected and cube_pct >= V2600_FULL_SUPPORT_SAFE_CUBE_PCT
+                        and broad_alias and not has_void_evidence):
+                    if V2600_TRACE_NEUTRAL_RULES:
+                        print(f"v26.00 Neutral Rule: suppress full-support broad SOURCE_OBJECT area={area:.0f} cube={cube_pct:.1f} src={nr.get('reasoning')}")
+                    continue
+                nr["neutral_rule_reason"] = f"family={nf}; policy={nr.get('neutral_marker_policy')}; cube={cube_pct:.1f}; unused_floor_mm={unused_floor_mm:.0f}"
+                kept.append(nr)
+
+            # Phase 1 family-aware grouped dedup: merge only exact same neutral family and view.
+            # This keeps SOURCE_OBJECT and FLOOR/REAR/FRONT empty markers separate in low/medium utilization.
+            out = []
+            for nr in kept:
+                if "USER_CONFIRMED" in str(nr.get("reasoning", "")).upper():
+                    out.append(nr); continue
+                nf = nr.get("neutral_family", "UNCLASSIFIED")
+                view = str(nr.get("view", "")).upper()
+                merged = False
+                for kr in out:
+                    if "USER_CONFIRMED" in str(kr.get("reasoning", "")).upper():
+                        continue
+                    if kr.get("neutral_family") != nf or str(kr.get("view", "")).upper() != view:
+                        continue
+                    try:
+                        iou = _v2511_iou(nr.get("bbox", [0,0,0,0]), kr.get("bbox", [0,0,0,0]))
+                        cont = _v2511_containment(nr.get("bbox", [0,0,0,0]), kr.get("bbox", [0,0,0,0]))
+                    except Exception:
+                        iou, cont = 0.0, 0.0
+                    same_family_overlap = (iou >= V2600_FAMILY_CLUSTER_IOU or cont >= V2600_FAMILY_CLUSTER_CONTAINMENT)
+                    if same_family_overlap:
+                        # Keep the smaller SOURCE_OBJECT box, but keep the stronger/larger zone measurement box.
+                        if nf == "SOURCE_OBJECT" and _v2600_norm_area(nr) < _v2600_norm_area(kr):
+                            kr.update(nr)
+                        elif nf != "SOURCE_OBJECT" and _v2600_norm_area(nr) > _v2600_norm_area(kr):
+                            kr.update(nr)
+                        merged = True
+                        if V2600_TRACE_NEUTRAL_RULES:
+                            print(f"v26.00 Neutral Rule: merged same-family duplicate view={view} family={nf} iou={iou:.2f} containment={cont:.2f}")
+                        break
+                if not merged:
+                    out.append(nr)
+            return out
+
         all_risks = _merge_same_area_risks(all_risks)
         all_risks = _v2447_apply_generic_physical_normalization(all_risks)
         all_risks = _v2446_apply_ground_truth_overrides(all_risks)
         all_risks = _v2450_physical_risk_merger(all_risks)
         all_risks = _v2500_physical_risk_pipeline(all_risks)
+        all_risks = _v2511_visual_deduplicate_risks(all_risks)
+        all_risks = _v2600_neutral_rule_engine_phase1(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
         detected_hazards = []
