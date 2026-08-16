@@ -2351,10 +2351,38 @@ Return ONLY this exact JSON:
 
 
 def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM"):
+
     global GLOBAL_KEY_INDEX, LAST_WORKING_MODEL
+
     api_keys = get_api_keys_pool()
+
     if not api_keys:
-        return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
+        return [{
+            "risk_type": "ERROR",
+            "description": "No Gemini API Keys found."
+        }]
+
+    # ==========================
+    # V24.10 prompt variables
+    # ==========================
+
+    layout_desc = str(layout)
+
+    front_rear = HARDCODED_REAR_SIDE["FRONT"]
+
+    front_wall = (
+        "RIGHT"
+        if front_rear == "LEFT"
+        else "LEFT"
+    )
+
+    back_rear = HARDCODED_REAR_SIDE["BACK"]
+
+    back_wall = (
+        "RIGHT"
+        if back_rear == "LEFT"
+        else "LEFT"
+    )
 
     prompt = f"""
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
