@@ -1951,6 +1951,22 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
         print(f"Per-box segmentation ({view}): coverage_ratio={coverage_ratio:.2f}, "
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
+
+        # v24.14 DEBUG TRACE (diagnosis-only, does NOT change any behavior/decision):
+        # print x0/x1 (absolute pixel position on the full image), top_y/floor_y, and
+        # computed height_px for EVERY stack, one line per stack, in left-to-right order.
+        # Purpose: let the user match each stack index directly against what they see in
+        # the actual PDF image (e.g. "which stack index is the cyan MAPCA stack?") so we
+        # can confirm whether segmentation correctly separated it from its neighbors, or
+        # whether it got silently merged into an adjacent stack (under-segmentation) -
+        # see the open question raised after V2414 VALLEY reject logs on AA04-05 FRONT.
+        if globals().get("V2414_TRACE", True):
+            for idx, s in enumerate(stacks_abs):
+                stack_h = max(1, s["floor_y"] - s["top_y"])
+                print(f"V2414 DEBUG stack-detail ({view}) idx={idx}: "
+                      f"x=[{s['x0']}-{s['x1']}] (width={s['x1'] - s['x0']}px) "
+                      f"top_y={s['top_y']} floor_y={s['floor_y']} height={stack_h}px "
+                      f"box_count={len(s['boxes'])}")
     return result
 
 
