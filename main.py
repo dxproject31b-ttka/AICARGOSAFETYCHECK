@@ -17,6 +17,24 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.15 - DepthPairStepDown: STEP_DOWN detector now also catches a NEW pattern confirmed by
+#          user with real screenshots (AA04-05 FRONT+BACK): two physically different cargo
+#          stacks at different DEPTH positions (front row vs back row along the container's
+#          width) that get drawn overlapping in the SAME x-range in this diagram's isometric
+#          projection, and were previously mis-segmented by detect_boxes_in_stack as "ONE stack
+#          with 2 boxes stacked vertically" (this is exactly why OVERHANG_AUDIT for AA04-05
+#          logged stack=4 pair=0 upper_w=76 lower_w=72 diff=4px ratio=0.053 status=REJECT
+#          size_diff_below_5pct - it was never a real overhang, it was this depth-pair all
+#          along). Neither the ordinary pairwise adjacent-column STEP_DOWN check nor the
+#          v24.14 valley-pattern check could ever see this, because both only ever compare
+#          different x-column stacks against each other - never look inside a single stack's
+#          own "boxes" list. Geometric proof (see _find_depth_pair_step_down_regions
+#          docstring): this 2-box pattern can only occur when the back-row stack is TALLER
+#          than the front-row stack (otherwise front would fully occlude back into 1 box) -
+#          so front (nearer viewer, confirmed shorter by user) = boxes[-1], back = boxes[0],
+#          with certainty, no further disambiguation needed. New marker: narrow horizontal
+#          band at the top of the front (shorter) stack, at the boundary with the back stack
+#          - see V2415_DEPTH_PAIR_* constants near V2414 block.
 # v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
 #          taller stacks on BOTH sides" valley pattern (see _find_valley_regions +
 #          V2414_VALLEY_* constants) that the plain pairwise adjacent-stack check missed - real
@@ -563,52 +581,6 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
     if mx < min_brightness:
         return False
     return _hsv_saturation(rgb) >= sat_thresh
-
-
-def _find_nearest_cargo_pixel_color(px, img_w, img_h, seed_x, seed_y, max_radius=60):
-    """v24.14 DEBUG helper (diagnosis-only, not used by any detector decision).
-
-    ROOT CAUSE of the previous debug bug: sampling the exact geometric mid-point of a
-    stack's bounding box ((x0+x1)/2, (top_y+floor_y)/2) assumed the box was a simple
-    upright rectangle fully filled with cargo color. But in this isometric 3D diagram,
-    cargo faces are drawn as slanted parallelograms (see existing CHANGELOG notes on
-    "isometric parallelogram top face" under TOP_ROW_MAJORITY_RATIO) - the geometric
-    center of the axis-aligned bounding box frequently lands on white background
-    between/around the slanted cargo face, not on the cargo itself. This was confirmed
-    empirically: EVERY FRONT-view stack sample came back (255,255,255) even though all
-    8 stacks visibly contain colored cargo in the actual PDF image.
-
-    FIX: instead of trusting one fixed point, do an expanding ring search outward from
-    the seed point (spiral by increasing radius) until a pixel that passes
-    _is_vivid_cargo_color(...) is found, and return THAT pixel's raw RGB. This finds the
-    actual cargo color robustly regardless of exactly where within the stack's bounding
-    box the slanted cargo face happens to be. Falls back to the raw seed-point color
-    (labeled as such) if no vivid cargo pixel is found within max_radius.
-    """
-    seed_x = min(max(0, int(seed_x)), img_w - 1)
-    seed_y = min(max(0, int(seed_y)), img_h - 1)
-    seed_color = px[seed_x, seed_y]
-    if _is_vivid_cargo_color(seed_color):
-        return seed_color, 0
-    for radius in range(2, max_radius + 1, 2):
-        found = []
-        for dx in range(-radius, radius + 1, 2):
-            for dy in (-radius, radius):
-                x, y = seed_x + dx, seed_y + dy
-                if 0 <= x < img_w and 0 <= y < img_h:
-                    c = px[x, y]
-                    if _is_vivid_cargo_color(c):
-                        found.append(c)
-        for dy in range(-radius, radius + 1, 2):
-            for dx in (-radius, radius):
-                x, y = seed_x + dx, seed_y + dy
-                if 0 <= x < img_w and 0 <= y < img_h:
-                    c = px[x, y]
-                    if _is_vivid_cargo_color(c):
-                        found.append(c)
-        if found:
-            return found[0], radius
-    return seed_color, -1  # -1 marks "no cargo pixel found, this is the raw seed color"
 
 
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
@@ -1264,6 +1236,107 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         valley_min_abs_px = globals().get("V2414_VALLEY_MIN_ABS_PX", 18)
         regions.extend(_find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px))
 
+    if globals().get("V2415_DEPTH_PAIR_STEP_DOWN_ENABLED", True):
+        regions.extend(_find_depth_pair_step_down_regions(ss, view_label))
+
+    return regions
+
+
+def _find_depth_pair_step_down_regions(ss, view_label):
+    """v24.15 DEPTH-PAIR STEP_DOWN detector (real case confirmed by user, AA04-05 FRONT+BACK).
+
+    ROOT CAUSE (confirmed with user via screenshots): the isometric diagram often shows TWO
+    physically different cargo stacks that sit at different DEPTH positions along the
+    container's width (a "front row" stack, nearer the viewer, and a "back row" stack,
+    farther from the viewer) but that happen to occupy the SAME horizontal (x) range in the
+    2D projection, because in this diagram style the width/depth axis is drawn as a purely
+    vertical offset rather than a diagonal one. Neither the pairwise adjacent-stack
+    STEP_DOWN check (detect_step_down_regions_from_stack_model's main loop, which only
+    compares stacks that are next to each other in x) nor the valley-pattern check
+    (_find_valley_regions, same limitation) can ever see this, because both only ever
+    compare DIFFERENT stack columns (different x ranges) - they never look at whether a
+    single stack column's own "boxes" list secretly contains two different physical stacks
+    merged together by detect_boxes_in_stack.
+
+    GEOMETRIC PROOF that this pattern only occurs when back > front in height: detect_boxes_in_stack
+    only ever detects box_count==2 for a single x-column when there is a real color/floor-jump
+    boundary partway up the column. Physically that can only happen when the FRONT stack (whose
+    base sits at this column's true local floor_y, per how _local_bottom_cargo_y works) does NOT
+    reach as high as the BACK stack directly behind it - i.e. the back stack's extra height above
+    the front stack's top is what creates the second, higher, narrower-looking box in the image.
+    If the front stack were equal or taller, it would fully occlude the back stack and only ONE
+    box would ever be detected. This means: front (nearer the viewer) == the LAST box in the
+    stack's boxes list (whose y_max == the column's true floor_y, i.e. the visually lower one),
+    and back (farther from viewer) == the FIRST box (whose y_min == the column's top_y, i.e. the
+    visually upper one) - confirmed by user: "the stack nearer the viewer is the shorter one."
+
+    We gate on (a) near-identical box width (same SKU depth-pair, not two genuinely different
+    boxes of different sizes stacked for some other reason) and (b) near-zero vertical gap
+    between the two box segments (they are directly adjacent, i.e. truly one continuous visual
+    stack silhouette, not two separate cargo tiers with a real physical gap between them) before
+    treating this as a depth-pair candidate at all - this avoids misfiring on genuine two-tier
+    same-stack cargo (e.g. a small box stacked on a large one) which detect_boxes_in_stack can
+    also legitimately produce.
+    """
+    regions = []
+    max_width_diff_ratio = globals().get("V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO", 0.10)
+    max_vertical_gap_px = globals().get("V2415_DEPTH_PAIR_MAX_VERTICAL_GAP_PX", 4)
+    min_step_ratio = globals().get("V2415_DEPTH_PAIR_MIN_STEP_RATIO", 0.20)
+    min_abs_step_px = globals().get("V2415_DEPTH_PAIR_MIN_ABS_STEP_PX", 18)
+    boundary_ratio = globals().get("V2415_DEPTH_PAIR_BOUNDARY_RATIO", 0.30)
+    trace = globals().get("V2415_TRACE", True)
+
+    for s_idx, s in enumerate(ss):
+        boxes = s.get("boxes") or []
+        if len(boxes) != 2:
+            continue
+        box_back, box_front = boxes[0], boxes[1]  # boxes are top-to-bottom: [0]=upper=back, [1]=lower=front
+        width_back = max(1, box_back["x_right"] - box_back["x_left"])
+        width_front = max(1, box_front["x_right"] - box_front["x_left"])
+        width_diff_ratio = abs(width_back - width_front) / max(width_back, width_front)
+        vertical_gap = box_front["y_min"] - box_back["y_max"]
+
+        if width_diff_ratio > max_width_diff_ratio or vertical_gap < 0 or vertical_gap > max_vertical_gap_px:
+            if trace:
+                print(f"v24.15 DEPTH_PAIR reject {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+                      f"width_back={width_back}px width_front={width_front}px width_diff_ratio={width_diff_ratio:.2f} "
+                      f"vertical_gap={vertical_gap}px (need width_diff_ratio<={max_width_diff_ratio}, "
+                      f"0<=gap<={max_vertical_gap_px} to qualify as depth-pair candidate)")
+            continue
+
+        height_back = box_back["height_px"]
+        height_front = box_front["height_px"]
+        total_h = max(1, height_back + height_front)
+        step_ratio = height_back / total_h
+
+        if height_back < min_abs_step_px or step_ratio < min_step_ratio:
+            if trace:
+                print(f"v24.15 DEPTH_PAIR reject {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+                      f"is depth-pair candidate but step too small - height_back={height_back}px "
+                      f"height_front={height_front}px step_ratio={step_ratio:.2f} "
+                      f"(need height_back>={min_abs_step_px}px and step_ratio>={min_step_ratio})")
+            continue
+
+        # Mark a narrow horizontal band at the TOP of the front (nearer-viewer, shorter) stack,
+        # right at the boundary with the back stack behind it - this is the exact visual "step"
+        # a person looking at the diagram sees, analogous to the narrow boundary-only marker used
+        # for ordinary pairwise adjacent-stack STEP_DOWN (V2410_STEPDOWN_BOUNDARY_RATIO).
+        mark_h = max(14, int(height_front * boundary_ratio))
+        x0 = box_front["x_left"]
+        x1 = box_front["x_right"]
+        y0 = box_front["y_min"]
+        y1 = min(box_front["y_max"], y0 + mark_h)
+        regions.append({
+            "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+            "ratio": step_ratio,
+            "v2410_source": "depth_pair_front_back_overlap_step_down",
+            "v2415_stack_idx": s_idx,
+            "v2415_heights": (height_back, height_front),
+        })
+        if trace:
+            print(f"v24.15 DEPTH_PAIR STEP_DOWN ACCEPT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+                  f"height_back={height_back}px height_front={height_front}px step_ratio={step_ratio:.2f} "
+                  f"width_diff_ratio={width_diff_ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]")
     return regions
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
@@ -1476,6 +1549,25 @@ V2414_VALLEY_PATTERN_ENABLED = True
 V2414_VALLEY_MIN_RATIO = 0.15
 V2414_VALLEY_MIN_ABS_PX = 18
 V2414_TRACE = True
+
+# v24.15 DEPTH-PAIR STEP_DOWN controls - ดู docstring ของ _find_depth_pair_step_down_regions()
+# สำหรับรายละเอียดเต็ม ROOT CAUSE: AA04-05 มีตั้งเขียว DSC1A-AD 2 ตั้งที่อยู่คนละตำแหน่ง
+# ความลึก (หน้า-หลัง ของตู้) แต่ในมุมมอง isometric ของไดอะแกรมนี้ แกนความลึก/ความกว้างตู้
+# ถูกวาดเป็น "แนวตั้งล้วน" (ไม่เอียงทแยง) ทำให้ทั้ง 2 ตั้งไปซ้อนทับกันพอดีในแนวกว้าง (x)
+# เดียวกัน - detect_boxes_in_stack เลยตรวจพบเป็น "1 ตั้ง มี 2 กล่องซ้อนกัน" (box_count=2)
+# แทนที่จะเป็น "2 ตั้งแยกกัน" ทำให้ pairwise STEP_DOWN และ VALLEY (V2414) แบบเดิมมองไม่เห็น
+# เลย เพราะทั้งคู่เทียบแค่ระหว่าง "ตั้งคนละ x" เท่านั้น ไม่เคยดูภายใน boxes ของตั้งเดียวกัน
+# ยืนยันจากผู้ใช้ (ภาพจริง + วงกรอบแดง): ตั้งที่ใกล้ผู้ดูกว่า (front) คือตัวที่ "เตี้ยกว่า"
+# เสมอ - พิสูจน์ได้ทางเรขาคณิต: ถ้า front สูงเท่ากับหรือสูงกว่า back จะบัง back มิดสนิท
+# กลายเป็นกล่องเดียว (box_count=1) ไม่มีทางเกิด box_count=2 ได้เลยนอกจาก back > front เสมอ
+# จึงกำหนดว่า boxes[0] (บนสุด) = back, boxes[-1] (ล่างสุด ติดพื้นจริง) = front ได้อย่างแน่นอน
+V2415_DEPTH_PAIR_STEP_DOWN_ENABLED = True
+V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO = 0.10  # ความกว้าง 2 กล่องต้องใกล้กันมาก (SKU เดียวกัน)
+V2415_DEPTH_PAIR_MAX_VERTICAL_GAP_PX = 4       # ต้องติดกันสนิท (silhouette เดียวต่อเนื่อง)
+V2415_DEPTH_PAIR_MIN_STEP_RATIO = 0.20         # ส่วนที่ back โผล่พ้น front ต้องมีนัยสำคัญ
+V2415_DEPTH_PAIR_MIN_ABS_STEP_PX = 18
+V2415_DEPTH_PAIR_BOUNDARY_RATIO = 0.30         # ความสูงของ marker (ส่วนบนของตั้ง front)
+V2415_TRACE = True
 
 # v24.10 focused controls
 V2410_BUILD = True
@@ -1997,42 +2089,6 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
         print(f"Per-box segmentation ({view}): coverage_ratio={coverage_ratio:.2f}, "
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
-
-        # v24.14 DEBUG TRACE v2 (diagnosis-only, does NOT change any behavior/decision):
-        # print x0/x1 (absolute pixel position), top_y/floor_y, height_px, box_count, AND
-        # the RGB color of the nearest actual cargo-colored pixel found via expanding
-        # search from the stack's geometric mid-point (see _find_nearest_cargo_pixel_color
-        # docstring for why the naive fixed-mid-point sample from the first debug attempt
-        # always returned white - isometric slanted cargo faces don't fill the axis-aligned
-        # bounding box's geometric center). Purpose: let the user match each stack index
-        # directly to the visible SKU color in the actual PDF image (cyan=MAPCA,
-        # green=DSC1A, dark red/maroon=TEP1A/TXP1A) to confirm whether segmentation
-        # correctly separated the shorter cyan stack from its taller green neighbors, or
-        # whether it got silently merged (under-segmentation) - see the open question
-        # raised after V2414 VALLEY reject logs on AA04-05 FRONT.
-        if globals().get("V2414_TRACE", True):
-            try:
-                full_px = diagram_crop.convert("RGB").load()
-                full_w, full_h = diagram_crop.size
-            except Exception:
-                full_px = None
-                full_w = full_h = 0
-            for idx, s in enumerate(stacks_abs):
-                stack_h = max(1, s["floor_y"] - s["top_y"])
-                mid_x = (s["x0"] + s["x1"]) // 2
-                mid_y = (s["top_y"] + s["floor_y"]) // 2
-                if full_px is not None:
-                    color, search_radius = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_x, mid_y)
-                    radius_note = "seed_exact" if search_radius == 0 else (
-                        f"found_at_radius={search_radius}px" if search_radius > 0 else "NO_CARGO_PIXEL_FOUND_within_60px(raw_seed_color)"
-                    )
-                else:
-                    color, radius_note = "n/a", "no_image"
-                print(f"V2414 DEBUG stack-detail ({view}) idx={idx}: "
-                      f"x=[{s['x0']}-{s['x1']}] (width={s['x1'] - s['x0']}px) "
-                      f"top_y={s['top_y']} floor_y={s['floor_y']} height={stack_h}px "
-                      f"box_count={len(s['boxes'])} mid_point=({mid_x},{mid_y}) "
-                      f"cargo_rgb={color} ({radius_note})")
     return result
 
 
@@ -3721,8 +3777,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.14",
-            "benchmarkMode": "v24.14_valley_pattern_fix"}, 200, headers)
+            "checkerVersion": "V24.15",
+            "benchmarkMode": "v24.15_depth_pair_step_down"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
