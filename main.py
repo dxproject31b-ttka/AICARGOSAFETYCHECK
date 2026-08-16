@@ -3469,8 +3469,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.10",
-            "benchmarkMode": "v24.10_auto_gemini_pool_stepdown_fix"}, 200, headers)
+            "checkerVersion": "V24.11",
+            "benchmarkMode": "v24.11_boundary_marker_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3502,3 +3502,8 @@ V2409_STEPDOWN_STRONGEST_ONLY=True
 V2409_STEPDOWN_DISABLE_MERGE=True
 V2409_STEPDOWN_BOUNDARY_RATIO=0.25
 V2409_BUILD=True
+
+
+# V24.11 Boundary Marker Fix
+V2411_BUILD=True
+V2411_DISABLE_STEPDOWN_CARGO_EXTENT_FALLBACK=True
