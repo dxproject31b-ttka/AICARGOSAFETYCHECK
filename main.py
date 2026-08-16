@@ -17,22 +17,18 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.13 - MarkerRoutingFix (REAL FIX, ยืนยันจาก Log จริงของ AA04-05): v24.11/v24.12
-#          ก่อนหน้านี้เป็นแค่การประกาศ flag ท้ายไฟล์ (V2411_DISABLE_STEPDOWN_CARGO_EXTENT_FALLBACK,
-#          V2412_STEPDOWN_FORCE_BOUNDARY_MARKER) ที่ไม่เคยถูกเรียกใช้จริงในโค้ด routing เลย
-#          จึงยังเห็น "Fallback box for STEP_DOWN_RISK ... using cargo extent" ต่อเนื่อง
-#          ROOT CAUSE ตัวจริง (ยืนยันจาก log): boundary_marker ของ v24.10 กว้างแค่ ~14px
-#          โดยตั้งใจ (ชี้เฉพาะขอบ ไม่ใช่กรอบทั้งตั้ง) แต่ routing layer เช็คขนาดด้วย
-#          "สัดส่วนต่อความกว้างภาพทั้งหมด" (ต้อง >=3%) ทำให้ 14px ถูก reject ทุกครั้ง
-#          แล้วตกไปที่ cargo-extent fallback (กรอบแดงใหญ่คลุมทั้งกอง)
-#          แก้จริง 2 จุดในฟังก์ชัน process_request (ส่วนวาดภาพ):
-#          1) ข้ามเกณฑ์ตรวจสอบขนาดแบบสัดส่วนสำหรับ box_2d ที่มาจาก
-#             reasoning=="FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP" (deterministic marker
-#             ของเราเอง) ใช้เกณฑ์พิกเซลขั้นต่ำแทน (กันแค่ 0px/ผิดพลาดจริง)
-#          2) ปิด cargo-extent fallback ถาวรสำหรับ STEP_DOWN_RISK - ถ้าวาดไม่ได้จริงๆ
-#             ให้ข้ามไปเลย (ไม่มีกรอบ) แทนที่จะคลุมทั้งกองด้วย cargo extent
-#          ดู constants "V2413_*" และ comment ละเอียดใกล้ V2410_STEPDOWN_BOUNDARY_RATIO
-#          สำหรับรายละเอียดเต็ม
+# v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
+#          taller stacks on BOTH sides" valley pattern (see _find_valley_regions +
+#          V2414_VALLEY_* constants) that the plain pairwise adjacent-stack check missed - real
+#          case confirmed by user (AA04-05: green-tall / cyan-short / green-tall) where each
+#          side's ratio alone (~0.15-0.20) was below the pairwise gate (0.22) so nothing was ever
+#          FORCED. Also carries forward v24.13's Marker Routing Fix unchanged (see below).
+# v24.13 - MarkerRoutingFix (REAL FIX, ยืนยันจาก Log จริงของ AA04-05): v24.11/v24.12 ก่อนหน้านี้
+#          เป็นแค่การประกาศ flag ท้ายไฟล์ที่ไม่เคยถูกเรียกใช้จริงในโค้ด routing เลย จึงยังเห็น
+#          "Fallback box for STEP_DOWN_RISK ... using cargo extent" ต่อเนื่อง ROOT CAUSE ตัวจริง
+#          คือ ratio-based size gate reject narrow (~14px) deterministic boundary marker ทุกครั้ง
+#          แก้จริงโดยข้าม gate นั้นสำหรับ marker ที่มาจาก detector เอง + ปิด cargo-extent
+#          fallback ถาวรสำหรับ STEP_DOWN_RISK - ดู constants "V2413_*" สำหรับรายละเอียดเต็ม
 # v24.10 - AutoGeminiPool + StepDownFix: Gemini 3.7/3.6/3.5 fallback, quota cache, no STEP_DOWN merge, strongest pair only, boundary marker only.
 # v24.07 - OverhangAuditStepDownFix: OVERHANG audit-only until segmentation is trusted; add stack-adjacent STEP_DOWN detector for AA04-05 style risk.
 # v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
@@ -1078,11 +1074,102 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
     return risky_segments
 
 
+def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
+    """v24.14 VALLEY PATTERN detector.
+
+    Detects one or more CONSECUTIVE stacks that are shorter than BOTH the stack immediately
+    to their left AND the stack immediately to their right (a "dip"/"valley" flanked by taller
+    cargo on both sides) - even when NEITHER the left-side step nor the right-side step alone
+    clears the standard pairwise gate (V2407_STEP_DOWN_STACK_HEIGHT_RATIO). This is a distinct,
+    real-world-confirmed risk pattern (AA04-05: tall green stack -> short cyan stack(s) -> tall
+    green stack again) that the pairwise-only check in detect_step_down_regions_from_stack_model
+    can completely miss when each individual side's ratio is just under threshold, because a
+    plain two-stack step-down check never looks at "shorter than BOTH neighbors" - only at one
+    adjacent pair at a time.
+
+    Physically this is arguably a MORE serious pattern than a simple two-stack step: the low
+    stack sits in a trough with taller cargo pressing in from two directions and no stack at a
+    matching height anywhere nearby to share lateral support. Because the dip is confirmed by
+    TWO independent height comparisons (left wall AND right wall) instead of one, we deliberately
+    use a lower/more sensitive ratio threshold (V2414_VALLEY_MIN_RATIO, default 0.15) than the
+    single-pair gate (V2407_STEP_DOWN_STACK_HEIGHT_RATIO, default 0.22) - the combined two-sided
+    signal is inherently less likely to be noise than one lone borderline pairwise measurement.
+
+    KNOWN LIMITATION (documented, not silently ignored): this only handles a single contiguous
+    "dip" bounded immediately by one taller stack on each side (a flat or gently-varying valley
+    floor). It does not attempt to resolve multi-level staircase valleys with more than one
+    internal rise/fall inside the dip - sufficient for the confirmed real case, but should be
+    revisited with more regression files if a more complex valley shape is found later.
+    """
+    regions = []
+    n = len(ss)
+    if n < 3:
+        return regions
+    heights = [max(1, s["floor_y"] - s["top_y"]) for s in ss]
+    i = 1
+    while i < n - 1:
+        if heights[i] >= heights[i - 1]:
+            i += 1
+            continue
+        # Descent started at i (stack i is already lower than its left wall at i-1). Extend the
+        # dip while the floor stays flat-or-still-descending, then stop as soon as it rises again.
+        bottom_end = i
+        while bottom_end + 1 < n - 1 and heights[bottom_end + 1] <= heights[bottom_end]:
+            bottom_end += 1
+        right_wall_idx = bottom_end + 1
+        if right_wall_idx >= n:
+            break  # no stack left to act as the right wall - this is a terminal step, not a valley
+        left_wall_h = heights[i - 1]
+        right_wall_h = heights[right_wall_idx]
+        valley_stacks = ss[i:bottom_end + 1]
+        valley_min_h = min(heights[i:bottom_end + 1])
+        if valley_min_h >= left_wall_h or valley_min_h >= right_wall_h:
+            i = bottom_end + 1
+            continue  # not actually lower than BOTH walls - not a genuine valley
+        diff_left = left_wall_h - valley_min_h
+        diff_right = right_wall_h - valley_min_h
+        ratio_left = diff_left / max(1, left_wall_h)
+        ratio_right = diff_right / max(1, right_wall_h)
+        min_diff = min(diff_left, diff_right)
+        min_ratio = min(ratio_left, ratio_right)
+        span_desc = f"stack[{i - 1}]-stack[{right_wall_idx}]"
+        if min_diff >= valley_min_abs_px and min_ratio >= valley_min_ratio:
+            x0 = min(s["x0"] for s in valley_stacks)
+            x1 = max(s["x1"] for s in valley_stacks)
+            y0 = min(s["top_y"] for s in valley_stacks)
+            y1 = max(s["floor_y"] for s in valley_stacks)
+            regions.append({
+                "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+                "ratio": min_ratio,
+                "v2410_source": "valley_pattern_flanked_by_taller_neighbors",
+                "v2414_pair_span": (i - 1, right_wall_idx),
+                "v2414_heights": (left_wall_h, valley_min_h, right_wall_h),
+            })
+            if globals().get("V2414_TRACE", True):
+                print(f"v24.14 VALLEY ACCEPT {view_label} span={span_desc}: "
+                      f"left_wall_h={left_wall_h} valley_h={valley_min_h} right_wall_h={right_wall_h} "
+                      f"ratio_left={ratio_left:.2f} ratio_right={ratio_right:.2f} min_ratio={min_ratio:.2f} "
+                      f"boundary_marker=[{x0},{y0},{x1},{y1}]")
+        else:
+            if globals().get("V2414_TRACE", True):
+                print(f"v24.14 VALLEY reject {view_label} span={span_desc}: "
+                      f"left_wall_h={left_wall_h} valley_h={valley_min_h} right_wall_h={right_wall_h} "
+                      f"min_diff={min_diff}px min_ratio={min_ratio:.2f} "
+                      f"(need diff>={valley_min_abs_px}px and ratio>={valley_min_ratio:.2f})")
+        i = bottom_end + 1
+    return regions
+
+
 def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
     """v24.10 STEP_DOWN from adjacent stack model.
 
     Detects adjacent stack height drops and returns a compact boundary marker on the lower stack.
     V24.10 keeps only the strongest pair later in process_request, and disables STEP_DOWN merge.
+
+    v24.14 ADDITION: also runs _find_valley_regions() (see its docstring for full root-cause /
+    rationale) to catch "shorter stack flanked by two taller stacks" patterns that this pairwise
+    loop alone cannot see - confirmed missed case: AA04-05 FRONT view (tall-short-tall valley,
+    each side individually below the 0.22 pairwise threshold at ~0.15-0.20).
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1125,6 +1212,12 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         })
         if globals().get("V2407_TRACE", True):
             print(f"v24.10 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]")
+
+    if globals().get("V2414_VALLEY_PATTERN_ENABLED", True):
+        valley_min_ratio = globals().get("V2414_VALLEY_MIN_RATIO", 0.15)
+        valley_min_abs_px = globals().get("V2414_VALLEY_MIN_ABS_PX", 18)
+        regions.extend(_find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px))
+
     return regions
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
@@ -1325,6 +1418,19 @@ V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX = 18
 V2407_STEP_DOWN_MARK_LOWER_STACK = True
 V2407_TRACE = True
 
+# v24.14 VALLEY PATTERN controls - ดู CHANGELOG หัวไฟล์และ comment ที่ _find_valley_regions()
+# สำหรับรายละเอียดเต็ม ROOT CAUSE: AA04-05 มีกอง MAPCA (เตี้ยกว่า) แทรกอยู่ระหว่างกอง
+# DSC1A-AD (สูงกว่า) 2 ฝั่ง แต่ pairwise step-down ปกติ (V2407_STEP_DOWN_STACK_HEIGHT_RATIO
+# = 0.22) วัด ratio ได้แค่ฝั่งละ ~0.15-0.20 (ต่ำกว่าเกณฑ์ทั้งคู่) จึงไม่มีคู่ไหนถูก FORCE
+# เลยทั้งที่มองด้วยตาเปล่าเห็นชัดว่าเป็นความเสี่ยงจริง (กองเตี้ยถูกขนาบด้วยกองสูงทั้ง 2
+# ข้าง ไม่มีอะไรค้ำยันข้างเคียงในระดับเดียวกันเลย) - ใช้เกณฑ์ที่ผ่อนกว่าปกติเฉพาะกรณีนี้
+# เพราะสัญญาณยืนยันจาก "ทั้ง 2 ด้าน" (ซ้ายก็ต่ำ ขวาก็ต่ำ) มีความน่าเชื่อถือมากกว่าการวัด
+# แค่คู่เดียวโดดๆ อยู่แล้วในตัวมันเอง (ดู _find_valley_regions ด้านล่าง)
+V2414_VALLEY_PATTERN_ENABLED = True
+V2414_VALLEY_MIN_RATIO = 0.15
+V2414_VALLEY_MIN_ABS_PX = 18
+V2414_TRACE = True
+
 # v24.10 focused controls
 V2410_BUILD = True
 V2410_AUTO_GEMINI_POOL = True
@@ -1336,26 +1442,13 @@ V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 # v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
 # ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
 # ("v24.10 STEP_DOWN ACCEPT ... boundary_marker=[621,1051,635,1137]") มีความกว้างจริง
-# แค่ 14px โดยตั้งใจ (mark_w = max(14, lower_w * 0.25) - ดู
-# detect_step_down_regions_from_stack_model) เพราะต้องการชี้ "ขอบ" ที่แคบเฉพาะจุด
-# ไม่ใช่กรอบกว้างทั้งตั้ง แต่ routing layer ในขั้นตอนวาดภาพ (บล็อก box_too_small/
-# box_too_large ใน process_request) เช็คด้วย "สัดส่วน" เทียบกับความกว้างรูปทั้งหมด
-# (box_w_ratio = width/crop_w) และเกณฑ์ขั้นต่ำคือ 3% ของ crop_w เสมอ (เดิมออกแบบไว้
-# สำหรับกรอบที่ AI เดามา ซึ่งควรจะกว้างพอสมควร) - 14px จาก crop_w ~1300px คิดเป็นแค่
-# ~1% จึงโดน "box size invalid (w=..) - rejected" ทุกครั้ง แล้วตกไปที่
-# _get_fallback_box() ซึ่งสำหรับ STEP_DOWN_RISK คืนค่าเป็น cargo extent (กรอบใหญ่คลุม
-# ทั้งกอง) - นี่คือสาเหตุตัวจริงของ "กรอบแดงใหญ่" ที่ยังเห็นใน v24.10-v24.12 ทั้งที่
-# detector/strongest-pair/boundary_marker ถูกต้องหมดแล้ว (v24.11/v24.12 ที่ทำมาก่อน
-# หน้านี้เป็นแค่การประกาศ flag ไว้ท้ายไฟล์โดยไม่เคยถูกเรียกใช้จริงในโค้ด routing เลย)
-#
-# วิธีแก้จริง (ทั้ง 2 จุด ต้องทำร่วมกัน):
-# 1) สำหรับ box_2d ที่มาจาก FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP (deterministic
-#    boundary marker ของเราเอง ไม่ใช่ AI claim) ให้ข้ามเกณฑ์ตรวจสอบขนาดแบบสัดส่วน
-#    (box_w_ratio/box_h_ratio) แล้วใช้เกณฑ์ขั้นต่ำแบบ "พิกเซลจริง" แทน (กันกรณี 0px/
-#    ผิดพลาดจริงๆ เท่านั้น)
-# 2) ปิด cargo-extent fallback เฉพาะ STEP_DOWN_RISK แบบถาวร (ไม่ว่า reject ด้วยเหตุผล
-#    ใดก็ตาม) - ถ้าวาด boundary marker จริงไม่ได้ ให้ "ไม่วาดกรอบ" แทนที่จะไปคลุมทั้ง
-#    กองด้วย cargo extent (ซึ่งไม่เคยเป็นตำแหน่งที่ถูกต้องสำหรับ STEP_DOWN_RISK)
+# แค่ 14px โดยตั้งใจ (mark_w = max(14, lower_w * 0.25)) เพราะต้องการชี้ "ขอบ" ที่แคบ
+# เฉพาะจุด ไม่ใช่กรอบกว้างทั้งตั้ง แต่ routing layer ในขั้นตอนวาดภาพเช็คด้วย "สัดส่วน"
+# เทียบกับความกว้างรูปทั้งหมด (>=3% เสมอ) - 14px จาก crop_w ~1300px คิดเป็นแค่ ~1%
+# จึงโดน reject ทุกครั้ง แล้วตกไปที่ cargo-extent fallback (กรอบใหญ่คลุมทั้งกอง)
+# แก้จริง: (1) ข้ามเกณฑ์สัดส่วนสำหรับ box_2d ที่มาจาก
+# FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP ใช้เกณฑ์พิกเซลขั้นต่ำแทน (2) ปิด
+# cargo-extent fallback ถาวรสำหรับ STEP_DOWN_RISK - ไม่วาดกรอบเลยดีกว่าคลุมทั้งกอง
 V2413_BUILD = True
 V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER = True
 V2413_STEPDOWN_MIN_ABS_WIDTH_PX = 6
@@ -3459,15 +3552,14 @@ def process_request(request):
                         raise ValueError("box crosses FRONT/BACK boundary - rejected")
 
                     # v24.13 REAL FIX: our own deterministic STEP_DOWN boundary marker
-                    # (FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP) is INTENTIONALLY a narrow
-                    # slice pointing at the exact lower-stack edge (see
-                    # detect_step_down_regions_from_stack_model / boundary_ratio=0.25,
-                    # min 14px wide). That narrow width is very often < 3% of the full
-                    # crop_w, so the old ratio-based box_too_small/box_too_large gate
-                    # (designed for AI-guessed general regions) rejected it every time,
-                    # which then fell through to the cargo-extent fallback -> the big red
-                    # box. Skip the ratio gate for this specific marker type and only apply
-                    # an absolute-pixel sanity floor.
+                    # (FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP - covers both the pairwise
+                    # boundary_ratio slice AND the v24.14 valley-pattern marker) is INTENTIONALLY
+                    # a narrow/tight slice pointing at the exact lower-stack edge, not a wide
+                    # AI-guessed region. That narrow width is very often < 3% of the full crop_w,
+                    # so the old ratio-based box_too_small/box_too_large gate (designed for
+                    # AI-guessed general regions) rejected it every time, which then fell through
+                    # to the cargo-extent fallback -> the big red box. Skip the ratio gate for
+                    # this specific marker type and only apply an absolute-pixel sanity floor.
                     is_forced_stepdown_marker = (
                         risk_type == "STEP_DOWN_RISK"
                         and str(risk.get("reasoning", "")).upper() == "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP"
@@ -3547,8 +3639,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.13",
-            "benchmarkMode": "v24.13_stepdown_marker_routing_real_fix"}, 200, headers)
+            "checkerVersion": "V24.14",
+            "benchmarkMode": "v24.14_valley_pattern_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3596,3 +3688,4 @@ V2412_BUILD=True
 V2412_STEPDOWN_FORCE_BOUNDARY_MARKER=True  # historical - superseded by V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER (actually wired in)
 
 V2413_BUILD_MARKER = True  # v24.13 MarkerRoutingFix build tag (see V2413_* constants above near V2410 block for the real, wired-in fix)
+V2414_BUILD_MARKER = True  # v24.14 ValleyPatternFix build tag (see V2414_* constants above near V2407 block and _find_valley_regions())
