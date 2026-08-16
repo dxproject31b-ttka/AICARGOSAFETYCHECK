@@ -2359,7 +2359,7 @@ def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM"):
     prompt = f"""
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
 
-VIEW LAYOUT: {layout_desc}
+VIEW LAYOUT: {layout}
 FIXED ORIENTATION (a known fact about how this diagram type is always drawn - trust it completely):
 - FRONT view: REAR/door side is {front_rear}; FRONT/head-wall side is {front_wall}.
 - BACK view: REAR/door side is {back_rear}; FRONT/head-wall side is {back_wall}.
