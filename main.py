@@ -17,6 +17,22 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.13 - MarkerRoutingFix (REAL FIX, ยืนยันจาก Log จริงของ AA04-05): v24.11/v24.12
+#          ก่อนหน้านี้เป็นแค่การประกาศ flag ท้ายไฟล์ (V2411_DISABLE_STEPDOWN_CARGO_EXTENT_FALLBACK,
+#          V2412_STEPDOWN_FORCE_BOUNDARY_MARKER) ที่ไม่เคยถูกเรียกใช้จริงในโค้ด routing เลย
+#          จึงยังเห็น "Fallback box for STEP_DOWN_RISK ... using cargo extent" ต่อเนื่อง
+#          ROOT CAUSE ตัวจริง (ยืนยันจาก log): boundary_marker ของ v24.10 กว้างแค่ ~14px
+#          โดยตั้งใจ (ชี้เฉพาะขอบ ไม่ใช่กรอบทั้งตั้ง) แต่ routing layer เช็คขนาดด้วย
+#          "สัดส่วนต่อความกว้างภาพทั้งหมด" (ต้อง >=3%) ทำให้ 14px ถูก reject ทุกครั้ง
+#          แล้วตกไปที่ cargo-extent fallback (กรอบแดงใหญ่คลุมทั้งกอง)
+#          แก้จริง 2 จุดในฟังก์ชัน process_request (ส่วนวาดภาพ):
+#          1) ข้ามเกณฑ์ตรวจสอบขนาดแบบสัดส่วนสำหรับ box_2d ที่มาจาก
+#             reasoning=="FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP" (deterministic marker
+#             ของเราเอง) ใช้เกณฑ์พิกเซลขั้นต่ำแทน (กันแค่ 0px/ผิดพลาดจริง)
+#          2) ปิด cargo-extent fallback ถาวรสำหรับ STEP_DOWN_RISK - ถ้าวาดไม่ได้จริงๆ
+#             ให้ข้ามไปเลย (ไม่มีกรอบ) แทนที่จะคลุมทั้งกองด้วย cargo extent
+#          ดู constants "V2413_*" และ comment ละเอียดใกล้ V2410_STEPDOWN_BOUNDARY_RATIO
+#          สำหรับรายละเอียดเต็ม
 # v24.10 - AutoGeminiPool + StepDownFix: Gemini 3.7/3.6/3.5 fallback, quota cache, no STEP_DOWN merge, strongest pair only, boundary marker only.
 # v24.07 - OverhangAuditStepDownFix: OVERHANG audit-only until segmentation is trusted; add stack-adjacent STEP_DOWN detector for AA04-05 style risk.
 # v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
@@ -1316,6 +1332,36 @@ V2410_STEPDOWN_DISABLE_MERGE = True
 V2410_STEPDOWN_STRONGEST_ONLY = True
 V2410_STEPDOWN_BOUNDARY_ONLY = True
 V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
+
+# v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
+# ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
+# ("v24.10 STEP_DOWN ACCEPT ... boundary_marker=[621,1051,635,1137]") มีความกว้างจริง
+# แค่ 14px โดยตั้งใจ (mark_w = max(14, lower_w * 0.25) - ดู
+# detect_step_down_regions_from_stack_model) เพราะต้องการชี้ "ขอบ" ที่แคบเฉพาะจุด
+# ไม่ใช่กรอบกว้างทั้งตั้ง แต่ routing layer ในขั้นตอนวาดภาพ (บล็อก box_too_small/
+# box_too_large ใน process_request) เช็คด้วย "สัดส่วน" เทียบกับความกว้างรูปทั้งหมด
+# (box_w_ratio = width/crop_w) และเกณฑ์ขั้นต่ำคือ 3% ของ crop_w เสมอ (เดิมออกแบบไว้
+# สำหรับกรอบที่ AI เดามา ซึ่งควรจะกว้างพอสมควร) - 14px จาก crop_w ~1300px คิดเป็นแค่
+# ~1% จึงโดน "box size invalid (w=..) - rejected" ทุกครั้ง แล้วตกไปที่
+# _get_fallback_box() ซึ่งสำหรับ STEP_DOWN_RISK คืนค่าเป็น cargo extent (กรอบใหญ่คลุม
+# ทั้งกอง) - นี่คือสาเหตุตัวจริงของ "กรอบแดงใหญ่" ที่ยังเห็นใน v24.10-v24.12 ทั้งที่
+# detector/strongest-pair/boundary_marker ถูกต้องหมดแล้ว (v24.11/v24.12 ที่ทำมาก่อน
+# หน้านี้เป็นแค่การประกาศ flag ไว้ท้ายไฟล์โดยไม่เคยถูกเรียกใช้จริงในโค้ด routing เลย)
+#
+# วิธีแก้จริง (ทั้ง 2 จุด ต้องทำร่วมกัน):
+# 1) สำหรับ box_2d ที่มาจาก FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP (deterministic
+#    boundary marker ของเราเอง ไม่ใช่ AI claim) ให้ข้ามเกณฑ์ตรวจสอบขนาดแบบสัดส่วน
+#    (box_w_ratio/box_h_ratio) แล้วใช้เกณฑ์ขั้นต่ำแบบ "พิกเซลจริง" แทน (กันกรณี 0px/
+#    ผิดพลาดจริงๆ เท่านั้น)
+# 2) ปิด cargo-extent fallback เฉพาะ STEP_DOWN_RISK แบบถาวร (ไม่ว่า reject ด้วยเหตุผล
+#    ใดก็ตาม) - ถ้าวาด boundary marker จริงไม่ได้ ให้ "ไม่วาดกรอบ" แทนที่จะไปคลุมทั้ง
+#    กองด้วย cargo extent (ซึ่งไม่เคยเป็นตำแหน่งที่ถูกต้องสำหรับ STEP_DOWN_RISK)
+V2413_BUILD = True
+V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER = True
+V2413_STEPDOWN_MIN_ABS_WIDTH_PX = 6
+V2413_STEPDOWN_MIN_ABS_HEIGHT_PX = 6
+V2413_STEPDOWN_DISABLE_CARGO_EXTENT_FALLBACK = True
+V2413_TRACE = True
 
 # v24.05 REAR_LATERAL_IMBALANCE tuning controls
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
@@ -3412,19 +3458,51 @@ def process_request(request):
                     if crosses_boundary:
                         raise ValueError("box crosses FRONT/BACK boundary - rejected")
 
-                    box_w_ratio = (abs_xmax - abs_xmin) / crop_w
-                    box_h_ratio = (abs_ymax - abs_ymin) / crop_h
-                    box_too_small = box_w_ratio < 0.03 or box_h_ratio < 0.03
-                    box_too_large = box_w_ratio > 0.55 or box_h_ratio > 0.55
+                    # v24.13 REAL FIX: our own deterministic STEP_DOWN boundary marker
+                    # (FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP) is INTENTIONALLY a narrow
+                    # slice pointing at the exact lower-stack edge (see
+                    # detect_step_down_regions_from_stack_model / boundary_ratio=0.25,
+                    # min 14px wide). That narrow width is very often < 3% of the full
+                    # crop_w, so the old ratio-based box_too_small/box_too_large gate
+                    # (designed for AI-guessed general regions) rejected it every time,
+                    # which then fell through to the cargo-extent fallback -> the big red
+                    # box. Skip the ratio gate for this specific marker type and only apply
+                    # an absolute-pixel sanity floor.
+                    is_forced_stepdown_marker = (
+                        risk_type == "STEP_DOWN_RISK"
+                        and str(risk.get("reasoning", "")).upper() == "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP"
+                    )
+                    if is_forced_stepdown_marker and globals().get("V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER", True):
+                        min_w_px = globals().get("V2413_STEPDOWN_MIN_ABS_WIDTH_PX", 6)
+                        min_h_px = globals().get("V2413_STEPDOWN_MIN_ABS_HEIGHT_PX", 6)
+                        box_too_small = (abs_xmax - abs_xmin) < min_w_px or (abs_ymax - abs_ymin) < min_h_px
+                        box_too_large = False
+                        if globals().get("V2413_TRACE", True):
+                            print(f"V2413 STEP_DOWN forced boundary marker - ratio size gate SKIPPED "
+                                  f"(w_px={abs_xmax - abs_xmin}, h_px={abs_ymax - abs_ymin})")
+                    else:
+                        box_w_ratio = (abs_xmax - abs_xmin) / crop_w
+                        box_h_ratio = (abs_ymax - abs_ymin) / crop_h
+                        box_too_small = box_w_ratio < 0.03 or box_h_ratio < 0.03
+                        box_too_large = box_w_ratio > 0.55 or box_h_ratio > 0.55
                     if box_too_small or box_too_large:
-                        raise ValueError(f"box size invalid (w={box_w_ratio:.2f}, h={box_h_ratio:.2f}) - rejected")
+                        raise ValueError(f"box size invalid (w_px={abs_xmax - abs_xmin}, h_px={abs_ymax - abs_ymin}) - rejected")
 
                     _draw_single_or_dual_rectangle(draw, [abs_xmin, abs_ymin, abs_xmax, abs_ymax], outline_color, draw_colors)
                     drawn = True
                 except Exception as e:
                     print(f"box_2d rejected for {risk_type} ({resolved_view}): {e}")
 
-            if not drawn:
+            # v24.13 REAL FIX: STEP_DOWN_RISK must NEVER fall back to cargo-extent (the
+            # whole-cargo bounding box is never the correct marker for a step-down edge -
+            # that was the actual source of the oversized red box confirmed from the
+            # AA04-05 log: "Fallback box for STEP_DOWN_RISK ... using cargo extent").
+            # If the deterministic boundary marker could not be drawn for any reason, skip
+            # drawing entirely instead of substituting cargo extent.
+            if not drawn and risk_type == "STEP_DOWN_RISK" and globals().get("V2413_STEPDOWN_DISABLE_CARGO_EXTENT_FALLBACK", True):
+                print(f"V2413 STEP_DOWN_RISK cargo-extent fallback DISABLED - no marker drawn for {resolved_view} "
+                      f"(boundary marker unavailable/invalid, refusing to draw oversized cargo-extent box)")
+            elif not drawn:
                 fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
                                               container_bounds=container_bounds, cargo_extent=cargo_extent)
                 if fallback:
@@ -3469,8 +3547,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.12",
-            "benchmarkMode": "v24.12_stepdown_boundary_routing_fix"}, 200, headers)
+            "checkerVersion": "V24.13",
+            "benchmarkMode": "v24.13_stepdown_marker_routing_real_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3505,8 +3583,16 @@ V2409_BUILD=True
 
 
 # V24.11 Boundary Marker Fix
+# NOTE (v24.13): the two flags below were declared here (after process_request already
+# returns) in v24.11/v24.12 but were NEVER referenced by any globals().get(...) call in
+# the routing/drawing code - confirmed by grep, they only ever appear at their own
+# definition. They were label-only and had zero effect on behavior. The real, wired-in
+# fix now lives in V2413_* near V2410_STEPDOWN_BOUNDARY_RATIO and inside the drawing loop
+# in process_request. Kept here only for historical/changelog traceability.
 V2411_BUILD=True
-V2411_DISABLE_STEPDOWN_CARGO_EXTENT_FALLBACK=True
+V2411_DISABLE_STEPDOWN_CARGO_EXTENT_FALLBACK=True  # historical - superseded by V2413_STEPDOWN_DISABLE_CARGO_EXTENT_FALLBACK (actually wired in)
 
 V2412_BUILD=True
-V2412_STEPDOWN_FORCE_BOUNDARY_MARKER=True
+V2412_STEPDOWN_FORCE_BOUNDARY_MARKER=True  # historical - superseded by V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER (actually wired in)
+
+V2413_BUILD_MARKER = True  # v24.13 MarkerRoutingFix build tag (see V2413_* constants above near V2410 block for the real, wired-in fix)
