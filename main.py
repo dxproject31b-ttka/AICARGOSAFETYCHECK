@@ -565,6 +565,52 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
     return _hsv_saturation(rgb) >= sat_thresh
 
 
+def _find_nearest_cargo_pixel_color(px, img_w, img_h, seed_x, seed_y, max_radius=60):
+    """v24.14 DEBUG helper (diagnosis-only, not used by any detector decision).
+
+    ROOT CAUSE of the previous debug bug: sampling the exact geometric mid-point of a
+    stack's bounding box ((x0+x1)/2, (top_y+floor_y)/2) assumed the box was a simple
+    upright rectangle fully filled with cargo color. But in this isometric 3D diagram,
+    cargo faces are drawn as slanted parallelograms (see existing CHANGELOG notes on
+    "isometric parallelogram top face" under TOP_ROW_MAJORITY_RATIO) - the geometric
+    center of the axis-aligned bounding box frequently lands on white background
+    between/around the slanted cargo face, not on the cargo itself. This was confirmed
+    empirically: EVERY FRONT-view stack sample came back (255,255,255) even though all
+    8 stacks visibly contain colored cargo in the actual PDF image.
+
+    FIX: instead of trusting one fixed point, do an expanding ring search outward from
+    the seed point (spiral by increasing radius) until a pixel that passes
+    _is_vivid_cargo_color(...) is found, and return THAT pixel's raw RGB. This finds the
+    actual cargo color robustly regardless of exactly where within the stack's bounding
+    box the slanted cargo face happens to be. Falls back to the raw seed-point color
+    (labeled as such) if no vivid cargo pixel is found within max_radius.
+    """
+    seed_x = min(max(0, int(seed_x)), img_w - 1)
+    seed_y = min(max(0, int(seed_y)), img_h - 1)
+    seed_color = px[seed_x, seed_y]
+    if _is_vivid_cargo_color(seed_color):
+        return seed_color, 0
+    for radius in range(2, max_radius + 1, 2):
+        found = []
+        for dx in range(-radius, radius + 1, 2):
+            for dy in (-radius, radius):
+                x, y = seed_x + dx, seed_y + dy
+                if 0 <= x < img_w and 0 <= y < img_h:
+                    c = px[x, y]
+                    if _is_vivid_cargo_color(c):
+                        found.append(c)
+        for dy in range(-radius, radius + 1, 2):
+            for dx in (-radius, radius):
+                x, y = seed_x + dx, seed_y + dy
+                if 0 <= x < img_w and 0 <= y < img_h:
+                    c = px[x, y]
+                    if _is_vivid_cargo_color(c):
+                        found.append(c)
+        if found:
+            return found[0], radius
+    return seed_color, -1  # -1 marks "no cargo pixel found, this is the raw seed color"
+
+
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
     w, h = img.size
     px = img.convert("RGB").load()
@@ -1952,26 +1998,18 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
 
-        # v24.14 DEBUG TRACE (diagnosis-only, does NOT change any behavior/decision):
+        # v24.14 DEBUG TRACE v2 (diagnosis-only, does NOT change any behavior/decision):
         # print x0/x1 (absolute pixel position), top_y/floor_y, height_px, box_count, AND
-        # (NEW) the average sampled RGB color at the visual mid-point of each stack, for
-        # EVERY stack, one line per stack, in left-to-right order.
-        #
-        # WHY the color sample was added: the first round of debug trace (x/height only)
-        # on AA04-05 FRONT showed heights=(130,159,200,226,266,251,258,207) - a smooth
-        # staircase shape with NO dip anywhere, which does not match what the user visually
-        # confirmed in the actual PDF (a clearly shorter cyan MAPCA stack flanked by taller
-        # green DSC1A-AD stacks). Also idx=4 (x=661-737, the position that should roughly
-        # align with the cyan stack) was suspiciously WIDER (76px) than its neighbors
-        # (~34-56px) AND reported box_count=2 with the TALLEST height (266px) of the whole
-        # view - the opposite of what a short cyan stack should show. This strongly
-        # suggests under-segmentation: the narrow cyan MAPCA column was likely fused into
-        # an adjacent taller green column by the boundary detector, so its true (shorter)
-        # height never surfaces as its own stack at all.
-        #
-        # Sampling color directly removes the guesswork of trying to eyeball which idx
-        # lines up with which visual SKU color - we can now match stacks to SKU colors
-        # (cyan=MAPCA, green=DSC1A, dark red/maroon=TEP1A/TXP1A) directly from the log.
+        # the RGB color of the nearest actual cargo-colored pixel found via expanding
+        # search from the stack's geometric mid-point (see _find_nearest_cargo_pixel_color
+        # docstring for why the naive fixed-mid-point sample from the first debug attempt
+        # always returned white - isometric slanted cargo faces don't fill the axis-aligned
+        # bounding box's geometric center). Purpose: let the user match each stack index
+        # directly to the visible SKU color in the actual PDF image (cyan=MAPCA,
+        # green=DSC1A, dark red/maroon=TEP1A/TXP1A) to confirm whether segmentation
+        # correctly separated the shorter cyan stack from its taller green neighbors, or
+        # whether it got silently merged (under-segmentation) - see the open question
+        # raised after V2414 VALLEY reject logs on AA04-05 FRONT.
         if globals().get("V2414_TRACE", True):
             try:
                 full_px = diagram_crop.convert("RGB").load()
@@ -1983,19 +2021,18 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
                 stack_h = max(1, s["floor_y"] - s["top_y"])
                 mid_x = (s["x0"] + s["x1"]) // 2
                 mid_y = (s["top_y"] + s["floor_y"]) // 2
-                color_str = "n/a"
                 if full_px is not None:
-                    try:
-                        sample_x = min(max(0, mid_x), full_w - 1)
-                        sample_y = min(max(0, mid_y), full_h - 1)
-                        color_str = str(full_px[sample_x, sample_y])
-                    except Exception:
-                        color_str = "sample_failed"
+                    color, search_radius = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_x, mid_y)
+                    radius_note = "seed_exact" if search_radius == 0 else (
+                        f"found_at_radius={search_radius}px" if search_radius > 0 else "NO_CARGO_PIXEL_FOUND_within_60px(raw_seed_color)"
+                    )
+                else:
+                    color, radius_note = "n/a", "no_image"
                 print(f"V2414 DEBUG stack-detail ({view}) idx={idx}: "
                       f"x=[{s['x0']}-{s['x1']}] (width={s['x1'] - s['x0']}px) "
                       f"top_y={s['top_y']} floor_y={s['floor_y']} height={stack_h}px "
                       f"box_count={len(s['boxes'])} mid_point=({mid_x},{mid_y}) "
-                      f"sampled_rgb={color_str}")
+                      f"cargo_rgb={color} ({radius_note})")
     return result
 
 
