@@ -2189,7 +2189,7 @@ def _call_gemini_json(prompt, image, api_keys):
         try:
             _reset_genai_client()
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(model_name="gemini-3.7-flash")
+            model = genai.GenerativeModel(model_name="gemini-3.6-flash")
             response = model.generate_content([prompt, image])
             clean_text = clean_json_response(response.text if response.text else "{}")
             result = json.loads(clean_text)
@@ -2360,7 +2360,7 @@ Return ONLY a JSON array (empty array if no genuine risks found):
             try:
                 _reset_genai_client()
                 genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(model_name="gemini-3.7-flash")
+                model = genai.GenerativeModel(model_name="gemini-3.6-flash")
                 response = model.generate_content([prompt, diagram_image])
                 clean_text = clean_json_response(response.text if response.text else "[]")
                 if not clean_text or clean_text in ('""', "[]"):
