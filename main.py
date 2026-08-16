@@ -16,7 +16,8 @@ import functions_framework
 import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
-# AI Cargo Safety Checker - High Precision v24.09
+# AI Cargo Safety Checker - High Precision v24.10
+# v24.10 - AutoGeminiPool + StepDownFix: Gemini 3.7/3.6/3.5 fallback, quota cache, no STEP_DOWN merge, strongest pair only, boundary marker only.
 # v24.07 - OverhangAuditStepDownFix: OVERHANG audit-only until segmentation is trusted; add stack-adjacent STEP_DOWN detector for AA04-05 style risk.
 # v24.06 - OverhangFivePercentGuard: OVERHANG requires upper/lower stacked box size mismatch >= 5%, no edge/fallback markers.
 # v24.05 - RearLateralImbalanceTune: tune BACK-frame marker to visible stacked cargo, emit deterministic box_2d, and avoid lower-floor fallback for rear lateral.
@@ -107,6 +108,18 @@ import google.generativeai as genai
 
 GLOBAL_API_KEYS = []
 GLOBAL_KEY_INDEX = 0
+
+# ==========================
+# V24.10 Gemini Auto Model Pool
+# ==========================
+GEMINI_MODEL_POOL = [
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+]
+LAST_WORKING_MODEL = None
+MODEL_DISABLED_UNTIL = {}
+MODEL_COOLDOWN_SECONDS = 1800
 
 RISK_COLORS = {
     "STEP_DOWN_RISK": "red",
@@ -1050,14 +1063,14 @@ def _detect_step_down_regions(view_img, x_start, x_end, y_start, y_end, containe
 
 
 def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
-    """v24.07 STEP_DOWN from adjacent stack model.
+    """v24.10 STEP_DOWN from adjacent stack model.
 
-    This catches AA04-05 style risk: adjacent cargo stacks have a visible height drop at their
-    boundary. It uses the already-built stack/box model, not the global height profile, so the
-    marker can be placed on the lower stack next to the height discontinuity.
+    Detects adjacent stack height drops and returns a compact boundary marker on the lower stack.
+    V24.10 keeps only the strongest pair later in process_request, and disables STEP_DOWN merge.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
+    boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
     ss = [s for s in (stacks or []) if s.get("boxes")]
     ss = sorted(ss, key=lambda s: s.get("x0", 0))
     regions = []
@@ -1071,32 +1084,32 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         ratio = diff / max(1, taller_h)
         if diff < min_abs_px or ratio < min_ratio:
             if globals().get("V2407_TRACE", True):
-                print(f"v24.07 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f}")
+                print(f"v24.10 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f}")
             continue
         lower = a if ha < hb else b
         higher = b if ha < hb else a
-        # Mark lower stack near the boundary to the higher stack.
-        boundary_x = lower["x1"] if lower["x0"] < higher["x0"] else lower["x0"]
-        mark_w = max(18, int((lower["x1"] - lower["x0"]) * 0.55))
+        # Boundary-only marker: keep a narrow slice of the lower stack next to the higher stack.
+        lower_w = max(1, lower["x1"] - lower["x0"])
+        mark_w = max(14, int(lower_w * boundary_ratio))
         if lower["x0"] < higher["x0"]:
-            x0 = max(lower["x0"], boundary_x - mark_w)
+            x0 = max(lower["x0"], lower["x1"] - mark_w)
             x1 = lower["x1"]
         else:
             x0 = lower["x0"]
-            x1 = min(lower["x1"], boundary_x + mark_w)
+            x1 = min(lower["x1"], lower["x0"] + mark_w)
+        # Keep vertical box around visible lower-stack cargo, slightly padded.
         y0 = lower["top_y"]
         y1 = lower["floor_y"]
         regions.append({
             "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
             "ratio": ratio,
-            "v2407_source": "adjacent_stack_height_drop",
-            "v2407_pair_index": (idx, idx + 1),
-            "v2407_heights": (ha, hb),
+            "v2410_source": "adjacent_stack_height_drop_boundary_only",
+            "v2410_pair_index": (idx, idx + 1),
+            "v2410_heights": (ha, hb),
         })
         if globals().get("V2407_TRACE", True):
-            print(f"v24.07 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} marker=[{x0},{y0},{x1},{y1}]")
+            print(f"v24.10 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]")
     return regions
-
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
     results = {"FRONT": [], "BACK": []}
@@ -1295,6 +1308,14 @@ V2407_STEP_DOWN_STACK_HEIGHT_RATIO = 0.22
 V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX = 18
 V2407_STEP_DOWN_MARK_LOWER_STACK = True
 V2407_TRACE = True
+
+# v24.10 focused controls
+V2410_BUILD = True
+V2410_AUTO_GEMINI_POOL = True
+V2410_STEPDOWN_DISABLE_MERGE = True
+V2410_STEPDOWN_STRONGEST_ONLY = True
+V2410_STEPDOWN_BOUNDARY_ONLY = True
+V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 
 # v24.05 REAR_LATERAL_IMBALANCE tuning controls
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
@@ -2177,8 +2198,30 @@ def _reset_genai_client():
         genai.client._client = None
 
 
+def _is_quota_error_message(msg):
+    msg = str(msg or "").upper()
+    return ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("QUOTA" in msg) or ("RATE_LIMIT" in msg)
+
+
+def _get_available_gemini_models():
+    global LAST_WORKING_MODEL
+    now = time.time()
+    ordered = []
+    if LAST_WORKING_MODEL:
+        ordered.append(LAST_WORKING_MODEL)
+    for model_name in GEMINI_MODEL_POOL:
+        if model_name not in ordered:
+            ordered.append(model_name)
+    return [m for m in ordered if now >= MODEL_DISABLED_UNTIL.get(m, 0)]
+
+
+def _mark_gemini_model_disabled(model_name, reason=""):
+    MODEL_DISABLED_UNTIL[model_name] = time.time() + MODEL_COOLDOWN_SECONDS
+    print(f"AI MODEL QUOTA COOLDOWN: {model_name} disabled for {MODEL_COOLDOWN_SECONDS}s reason={str(reason)[:120]}")
+
+
 def _call_gemini_json(prompt, image, api_keys):
-    global GLOBAL_KEY_INDEX
+    global GLOBAL_KEY_INDEX, LAST_WORKING_MODEL
     last_err = ""
     total_keys = len(api_keys)
     if total_keys == 0:
@@ -2189,21 +2232,36 @@ def _call_gemini_json(prompt, image, api_keys):
         try:
             _reset_genai_client()
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(model_name="gemini-3.6-flash")
-            response = model.generate_content([prompt, image])
-            clean_text = clean_json_response(response.text if response.text else "{}")
-            result = json.loads(clean_text)
-            if isinstance(result, list):
-                result = result[0] if result else {}
-            GLOBAL_KEY_INDEX = current_index
-            return result
+            models = _get_available_gemini_models()
+            if not models:
+                last_err = "All Gemini Flash models are temporarily disabled by quota cache"
+                print("AI DISABLED: all Gemini Flash models are in quota cooldown")
+                continue
+            for model_name in models:
+                try:
+                    print(f"AI MODEL ACTIVE: {model_name} key_index={current_index}")
+                    model = genai.GenerativeModel(model_name=model_name)
+                    response = model.generate_content([prompt, image])
+                    clean_text = clean_json_response(response.text if response.text else "{}")
+                    result = json.loads(clean_text)
+                    if isinstance(result, list):
+                        result = result[0] if result else {}
+                    GLOBAL_KEY_INDEX = current_index
+                    LAST_WORKING_MODEL = model_name
+                    return result
+                except Exception as model_err:
+                    last_err = str(model_err)
+                    if _is_quota_error_message(last_err):
+                        print(f"AI FALLBACK: {model_name} -> next model reason={last_err[:100]}")
+                        _mark_gemini_model_disabled(model_name, last_err)
+                        continue
+                    raise
         except Exception as e:
             last_err = str(e)
             print(f"API Key index {current_index} failed: {last_err[:100]}")
             time.sleep(1)
             continue
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
-
 
 def analyze_rear_zone_with_ai(rear_crop, api_keys, view_label="UNKNOWN"):
     """
@@ -2293,21 +2351,10 @@ Return ONLY this exact JSON:
 
 
 def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM"):
-    global GLOBAL_KEY_INDEX
+    global GLOBAL_KEY_INDEX, LAST_WORKING_MODEL
     api_keys = get_api_keys_pool()
     if not api_keys:
         return [{"risk_type": "ERROR", "description": "No Gemini API Keys found."}]
-
-    front_rear = HARDCODED_REAR_SIDE["FRONT"]
-    front_wall = "RIGHT" if front_rear == "LEFT" else "LEFT"
-    back_rear = HARDCODED_REAR_SIDE["BACK"]
-    back_wall = "RIGHT" if back_rear == "LEFT" else "LEFT"
-
-    layout_desc = (
-        "FRONT view is on the LEFT half; BACK view is on the RIGHT half."
-        if layout == "LEFT_RIGHT"
-        else "FRONT view is on the TOP half; BACK view is on the BOTTOM half."
-    )
 
     prompt = f"""
 You are an expert Cargo Loading Safety Inspector analyzing a 3D cargo load plan.
@@ -2360,16 +2407,34 @@ Return ONLY a JSON array (empty array if no genuine risks found):
             try:
                 _reset_genai_client()
                 genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(model_name="gemini-3.6-flash")
-                response = model.generate_content([prompt, diagram_image])
-                clean_text = clean_json_response(response.text if response.text else "[]")
-                if not clean_text or clean_text in ('""', "[]"):
-                    return []
-                risks = json.loads(clean_text)
-                if isinstance(risks, dict):
-                    risks = [risks]
-                GLOBAL_KEY_INDEX = current_index
-                return risks
+                models = _get_available_gemini_models()
+                if not models:
+                    last_error_msg = "All Gemini Flash models are temporarily disabled by quota cache"
+                    print("AI DISABLED: all Gemini Flash models are in quota cooldown")
+                    continue
+                for model_name in models:
+                    try:
+                        print(f"AI MODEL ACTIVE: {model_name} key_index={current_index} diagram")
+                        model = genai.GenerativeModel(model_name=model_name)
+                        response = model.generate_content([prompt, diagram_image])
+                        clean_text = clean_json_response(response.text if response.text else "[]")
+                        if not clean_text or clean_text in ('""', "[]"):
+                            GLOBAL_KEY_INDEX = current_index
+                            LAST_WORKING_MODEL = model_name
+                            return []
+                        risks = json.loads(clean_text)
+                        if isinstance(risks, dict):
+                            risks = [risks]
+                        GLOBAL_KEY_INDEX = current_index
+                        LAST_WORKING_MODEL = model_name
+                        return risks
+                    except Exception as model_err:
+                        last_error_msg = str(model_err)
+                        if _is_quota_error_message(last_error_msg):
+                            print(f"AI FALLBACK: {model_name} -> next model reason={last_error_msg[:100]}")
+                            _mark_gemini_model_disabled(model_name, last_error_msg)
+                            continue
+                        raise
             except Exception as e:
                 last_error_msg = str(e)
                 print(f"API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
@@ -2563,6 +2628,9 @@ def _merge_same_area_risks(all_risks):
     groups = []
     for i, r in enumerate(all_risks):
         rt = str(r.get("risk_type", "")).upper().strip()
+        if rt == "STEP_DOWN_RISK" and globals().get("V2410_STEPDOWN_DISABLE_MERGE", True):
+            groups.append({"key": ("STEP_DOWN_KEEP", i), "items": [(i, r)]})
+            continue
         if rt == "ERROR":
             groups.append({"key": ("ERROR", i), "items": [(i, r)]})
             continue
@@ -2770,6 +2838,15 @@ def process_request(request):
                 if _extra_step_regions:
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
+
+        # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
+        if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
+            for _view in ("FRONT", "BACK"):
+                _regions = list(step_down_regions.get(_view, []) or [])
+                if len(_regions) > 1:
+                    _best = max(_regions, key=lambda rr: rr.get("ratio", 0))
+                    print(f"v24.10 STEP_DOWN strongest-only ({_view}): kept ratio={_best.get('ratio',0)*100:.1f}% from {len(_regions)} candidate(s)")
+                    step_down_regions[_view] = [_best]
 
         inter_stack_gap_regions = {"FRONT": [], "BACK": []}
         for _v in ("FRONT", "BACK"):
@@ -3364,8 +3441,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.09",
-            "benchmarkMode": "v24.09_stepdown_strongest_pair"}, 200, headers)
+            "checkerVersion": "V24.10",
+            "benchmarkMode": "v24.10_auto_gemini_pool_stepdown_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
