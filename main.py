@@ -17,28 +17,24 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.20 - CrossViewMultiMarker: fixes a bug found in v24.19's live test on real AA04-05
-#          data. The exact position the user had circled since the very first screenshot
-#          (idx=4, x=[661-737], near label "3600-3600") DID pass the cross-view collision
-#          ratio check (0.18, close to the 0.22 threshold) - but its marker was still not
-#          drawn, because V2410_STEPDOWN_STRONGEST_ONLY (designed for ordinary pairwise
-#          STEP_DOWN, which only ever has ONE strongest point per view) discarded it in
-#          favor of idx=3 (x=[605-661], ratio=0.28, a green-vs-green mismatch) which had a
-#          higher ratio. User confirmed (choice "A") that cross-view collisions are
-#          different from ordinary pairwise STEP_DOWN: multiple genuine, physically distinct
-#          collision points can and do occur at once along the truck's length, and should
-#          ALL be marked, not just the single highest-ratio one. User also confirmed with
-#          real-world context: "หากวัดความสูงต่ำ เขียวกับเขียว มีมากกว่า เขียวกับฟ้า" -
-#          both the green-green (idx=3) and green-cyan (idx=4) mismatches are real risks.
-#          Fix: cross-view collision regions are now tagged
-#          ("v2410_source": "cross_view_profile_collision") and explicitly EXEMPTED from the
-#          strongest-only filter - ALL qualifying cross-view collisions are drawn, while
-#          ordinary pairwise/valley STEP_DOWN sources still keep only their single strongest
-#          candidate per view (unchanged behavior for those sources).
-# v24.19 - CrossViewCollisionRefView (superseded by v24.20 above): added dynamic reference-
-#          view selection (use whichever of FRONT/BACK has more segmented stacks) but still
-#          subject to the same single-marker-per-view strongest-only filter as ordinary
-#          pairwise STEP_DOWN, which silently discarded valid additional collision points.
+# v24.21 - CrossViewMarkerFix: two fixes confirmed by user against a real, unedited v24.20
+#          output image. (1) The position circled since v24.12 (idx=4, green-vs-cyan MAPCA
+#          pair) consistently measured cross-view ratio=0.18 across every version, just
+#          under the borrowed pairwise threshold (0.22) - user confirmed cross-view
+#          collision is inherently a stronger signal than a lone pairwise comparison (two
+#          independent viewpoints agreeing), so it now uses its own dedicated, lower
+#          threshold (V2421_CROSS_VIEW_MIN_RATIO=0.15, same value as V2414 Valley Pattern)
+#          instead of sharing V2407_STEP_DOWN_STACK_HEIGHT_RATIO with ordinary pairwise
+#          STEP_DOWN. (2) The marker that v24.20 DID draw (idx=3, green-vs-green pair) was a
+#          narrow band at just the top ~25% of the stack, which the user confirmed doesn't
+#          visually communicate "this stack conflicts with the other view" - now draws a box
+#          covering the reference stack's FULL height (top_y to floor_y) instead.
+# v24.20 - CrossViewMultiMarker (superseded by v24.21 above): exempted cross-view collision
+#          regions from the single-marker-per-view strongest-only filter, but the circled
+#          position (idx=4) still didn't qualify because its ratio (0.18) was below the
+#          shared pairwise threshold (0.22) - the strongest-only exemption alone wasn't the
+#          actual blocker for that specific point.
+# v24.19 - CrossViewCollisionRefView: added dynamic reference-view selection.
 # v24.18 - CrossViewProfileCollision: initial cross-view height-profile comparison
 #          architecture, always used FRONT as reference.
 # v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
@@ -1455,36 +1451,36 @@ V2414_VALLEY_MIN_RATIO = 0.15
 V2414_VALLEY_MIN_ABS_PX = 18
 V2414_TRACE = True
 
-# v24.18/19/20 CROSS-VIEW PROFILE COLLISION - ดู docstring ของ
+# v24.18/19/20/21 CROSS-VIEW PROFILE COLLISION - ดู docstring ของ
 # _find_cross_view_profile_collision_regions() สำหรับรายละเอียดเต็ม
 #
-# ประวัติ: v24.15/16/17 พยายามแก้ปัญหา "ตั้ง 2 ตั้งคนละความลึก หน้า-หลัง ที่ซ้อนทับกันใน
-# ภาพ isometric เดียว" ด้วยการแยก "2 boxes" ในคอลัมน์เดียวกัน แล้วยืนยันด้วยสี - เปราะบาง
-# เกินไปในทางปฏิบัติจริง ผู้ใช้จึงเสนอสถาปัตยกรรมใหม่ (v24.18):
-#   "1. มองเป็นระนาบ จากภาพ front และจากภาพ back
-#    2. นำค่าที่ได้แต่ละตำแหน่งจากระนาบ ตามทิศทาง หัวรถถึงท้ายรถของแต่ละภาพ มากระทบ
-#       ตัวเลขกัน หากว่ามี gap ที่เข้าเกณฑ์ ถือว่าเสี่ยง เป็นคู่ตรงข้ามที่เสี่ยง"
-# v24.19: เพิ่มการเลือก reference view แบบไดนามิก (ใช้ view ที่มีจำนวนตั้งมากกว่า)
+# ประวัติโดยย่อ: v24.15/16/17 พยายามแยก "2 boxes" ในคอลัมน์เดียวกันของภาพเดียวแล้วยืนยัน
+# ด้วยสี - เปราะบางเกินไป ผู้ใช้เสนอสถาปัตยกรรมใหม่ (v24.18): เอาโปรไฟล์ความสูงจาก FRONT
+# และ BACK (มองจากคนละทิศของตู้เดียวกัน) มาเทียบกันตามตำแหน่งจริง (mirror mapping) v24.19
+# เพิ่มการเลือก reference view แบบไดนามิก v24.20 แก้ปัญหา marker ถูกกรองทิ้งจาก
+# strongest-only เมื่อมีคู่ที่ผ่านเกณฑ์มากกว่า 1 คู่พร้อมกัน
 #
-# v24.20 BUG FOUND & FIXED (จาก log จริง AA04-05): แม้ตำแหน่ง idx=4 (x=[661-737], ใกล้
-# label "3600-3600" - จุดที่ผู้ใช้วงไว้ตั้งแต่ V24.12) จะผ่านเกณฑ์ cross-view ratio ในระดับ
-# ที่ยอมรับได้ (0.18 ใกล้เกณฑ์ 0.22) แต่ marker กลับไม่ถูกวาด เพราะ
-# `V2410_STEPDOWN_STRONGEST_ONLY` (ออกแบบมาแต่เดิมสำหรับ pairwise STEP_DOWN ที่หาจุดแรง
-# ที่สุดแค่จุดเดียวต่อ view) ไปเก็บแค่ idx=3 (ratio=0.28, สูงกว่า) ทิ้ง idx=4 ไป ทั้งที่ทั้ง
-# สองจุดเป็นความเสี่ยงที่แยกจากกันจริงทางกายภาพ (คนละตำแหน่งตามแนวยาวตู้) - ผู้ใช้ยืนยัน
-# แนวทางแก้ไข (แนวทาง A): Cross-View Collision ไม่ควรถูกจำกัดด้วย strongest-only แบบ
-# pairwise เดิม เพราะสามารถมีคู่ตำแหน่งที่ชนกันได้พร้อมกันหลายจุดจริง (ไม่เหมือน pairwise
-# ที่มักมีจุดเดียวที่เด่นชัดที่สุด) - v24.20 จึงแยก step_down_regions ออกเป็น 2 กลุ่ม
-# (pairwise/valley เดิม vs cross-view ใหม่) และให้ cross-view "รอด" จากการกรอง
-# strongest-only เสมอ (วาดได้ทุกจุดที่ผ่านเกณฑ์ ไม่ถูกจำกัดเหลือจุดเดียว)
+# v24.21 สองประเด็นที่แก้ (ยืนยันจากภาพผลลัพธ์จริงของผู้ใช้ ไม่มีการแต่งเติม):
 #
-# ผู้ใช้ยังยืนยันเพิ่มเติม (บริบทภาพจริง): ที่ตำแหน่งนี้ "หากวัดความสูงต่ำ เขียวกับเขียว
-# มีมากกว่า เขียวกับฟ้า" - หมายความว่าคู่ตำแหน่งเขียว(front)-เขียว(back) ที่ idx=3 จับได้
-# (ratio=0.28) เป็นสัญญาณที่แรงกว่าคู่เขียว(front)-ฟ้า(back) ที่ idx=4 จับได้ (ratio=0.18)
-# จริง - ยืนยันว่าทั้ง 2 จุดเป็นความเสี่ยงจริงที่ควรวาดพร้อมกัน ไม่ใช่เลือกจุดเดียว
+# (1) เกณฑ์แยกสำหรับ Cross-View: จุดที่ผู้ใช้วงไว้ตั้งแต่ v24.12 (idx=4, x=[661-737],
+#     คู่เขียว-ฟ้า MAPCA) วัด ratio ได้ 0.18 สม่ำเสมอทุกเวอร์ชันที่ผ่านมา - ต่ำกว่าเกณฑ์
+#     pairwise เดิม (V2407_STEP_DOWN_STACK_HEIGHT_RATIO=0.22) ที่ยืมมาใช้ร่วมกันเพียง
+#     เล็กน้อย แต่ผู้ใช้ยืนยันซ้ำหลายรอบด้วยภาพจริงว่าเป็นจุดเสี่ยงจริง สัญญาณ Cross-View
+#     มีความน่าเชื่อถือกว่า pairwise เดี่ยวๆ อยู่แล้วโดยธรรมชาติ (มาจาก 2 มุมมองอิสระยืนยัน
+#     ร่วมกัน) จึงแยกเกณฑ์ออกจาก pairwise เดิมและลดลงเหลือ 0.15 (เท่ากับ Valley Pattern
+#     ซึ่งใช้เหตุผลเดียวกัน) - ทำให้ idx=4 (ratio=0.18) ผ่านเกณฑ์ได้แล้ว พร้อมกับ idx=3
+#     (ratio=0.28) ที่ผ่านอยู่แล้วเดิม
+#
+# (2) รูปแบบ Marker: ผู้ใช้ยืนยันด้วยภาพผลลัพธ์จริงของ v24.20 ว่า marker ที่วาดได้ (idx=3)
+#     เป็นแถบแคบที่ขอบบนของตั้งอ้างอิงเพียงอย่างเดียว (สูงแค่ 25% ของตั้ง) ไม่สื่อความหมาย
+#     ว่าเป็นการชนกันข้าม 2 มุมมอง - เปลี่ยนเป็นวาดกรอบที่ครอบคลุม "ทั้งความสูงของตั้ง
+#     อ้างอิง" (จาก top_y ถึง floor_y เต็ม ไม่ใช่แค่ 25% บนสุด) เพื่อให้เห็นรูปทรงทั้งแท่ง
+#     ชัดเจนว่านี่คือตั้งที่ความสูงขัดแย้งกับอีกมุมมอง
 V2418_CROSS_VIEW_COLLISION_ENABLED = True
 V2418_TRACE = True
 V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY = True  # แนวทาง A: ไม่จำกัดด้วย strongest-only
+V2421_CROSS_VIEW_MIN_RATIO = 0.15  # แยกเกณฑ์ออกจาก pairwise (0.22) ตามที่ผู้ใช้ยืนยัน
+V2421_CROSS_VIEW_FULL_HEIGHT_MARKER = True  # วาดกรอบเต็มความสูงตั้ง แทนแถบแคบ 25%
 
 # v24.10 focused controls
 V2410_BUILD = True
@@ -2010,40 +2006,43 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
-    """v24.18/19/20 CROSS-VIEW PROFILE COLLISION detector.
+    """v24.18/19/20/21 CROSS-VIEW PROFILE COLLISION detector.
 
-    See the V2418_* constants block (near V2414) for the full root-cause / design
-    rationale and version history (this replaces the v24.15/16/17 depth-pair-color
+    See the V2418_* / V2421_* constants block (near V2414) for the full root-cause /
+    design rationale and version history (this replaces the v24.15/16/17 depth-pair-color
     approach entirely).
 
     CORE IDEA (per user's explicit design): treat FRONT and BACK as two independent
     height-profile "planes" measured along the truck's hood-to-tail axis, but from OPPOSITE
     ends. For a given real position along the truck's length, look up the height reported
     by BOTH views at that position and compare them - if they disagree by more than the
-    ordinary step-down threshold, that is a genuine structural risk.
+    threshold, that is a genuine structural risk. Example given by user to confirm the
+    height-difference semantics: stack A height=10, stack B height=7 -> gap=3 -> ratio=0.30,
+    qualifies as a risk (this matches exactly what ref_h/sec_h/diff/ratio compute below).
+
+    v24.19: reference view (iterated over, marker drawn on it) is whichever of FRONT/BACK
+    has MORE segmented stacks (finer -> more sensible marker position). Ties default FRONT.
+
+    v24.20: cross-view collision regions are tagged and EXEMPT from
+    V2410_STEPDOWN_STRONGEST_ONLY, since multiple genuine collisions can occur at once
+    along the truck's length (confirmed: idx=3 ratio=0.28 AND idx=4 ratio=0.18 both real).
+
+    v24.21 TWO FIXES (confirmed by user against real, unedited v24.20 output image):
+    (1) SEPARATE, LOWER THRESHOLD: the position user circled since v24.12 (idx=4,
+        green-vs-cyan MAPCA pair) consistently measured ratio=0.18 across every version -
+        just under the borrowed pairwise threshold (V2407_STEP_DOWN_STACK_HEIGHT_RATIO=
+        0.22). Cross-view collision is inherently a stronger signal than a single pairwise
+        comparison (confirmed by two independent viewpoints agreeing), so it now uses its
+        own, lower threshold (V2421_CROSS_VIEW_MIN_RATIO=0.15, same value/reasoning as
+        V2414 Valley Pattern) instead of sharing the pairwise one.
+    (2) FULL-HEIGHT MARKER: v24.20's marker was a narrow band at just the top ~25% of the
+        reference stack, which the user confirmed does not visually communicate "this stack
+        conflicts with the other view" at all. Now draws a box covering the reference
+        stack's FULL height (top_y to floor_y) so the whole silhouette that's in conflict is
+        visible, not just a sliver at the top.
 
     MIRROR MAPPING: position ratio p (0..1) along one view's own cargo_extent corresponds
     to position ratio (1-p) along the other view's own cargo_extent.
-
-    v24.19: reference view (the one iterated over, and where the marker is drawn) is
-    whichever of FRONT/BACK has MORE segmented stacks (finer -> more sensible marker
-    position). Ties default to FRONT.
-
-    v24.20 IMPORTANT: unlike ordinary pairwise STEP_DOWN, cross-view collisions can
-    legitimately occur at MULTIPLE distinct positions along the truck's length at once
-    (confirmed by user with real AA04-05 data: idx=3 at x=[605-661] ratio=0.28 AND idx=4 at
-    x=[661-737] ratio=0.18 are BOTH genuine, physically distinct risk points - not one
-    "strongest" point like typical pairwise STEP_DOWN). Each accepted region here is tagged
-    "v2410_source": "cross_view_profile_collision" specifically so process_request can
-    exempt this source from the V2410_STEPDOWN_STRONGEST_ONLY single-marker-per-view filter
-    (see V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY) - all qualifying cross-view collisions
-    are returned, not just the single highest-ratio one.
-
-    THRESHOLD: reuses the exact same pairwise STEP_DOWN thresholds
-    (V2407_STEP_DOWN_STACK_HEIGHT_RATIO/MIN_ABS_HEIGHT_PX) per user's explicit instruction.
-
-    MARKER: drawn on the reference view at that view's own stack x-position, narrow band
-    near its top (same boundary-marker convention as other STEP_DOWN sources).
 
     KNOWN LIMITATION (documented): each reference-view stack is matched to its single
     nearest secondary-view stack by mirrored position - if the two views' stack counts
@@ -2082,8 +2081,11 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     ref_span = max(1, ref_xmax - ref_xmin)
     sec_span = max(1, sec_xmax - sec_xmin)
 
-    min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22)
+    # v24.21: dedicated cross-view threshold, no longer shared with ordinary pairwise
+    # STEP_DOWN (V2407_STEP_DOWN_STACK_HEIGHT_RATIO). See constants docstring above.
+    min_ratio = globals().get("V2421_CROSS_VIEW_MIN_RATIO", 0.15)
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18)
+    full_height_marker = globals().get("V2421_CROSS_VIEW_FULL_HEIGHT_MARKER", True)
     boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
 
     sec_sorted = sorted(sec_stacks, key=lambda s: s["x0"])
@@ -2111,18 +2113,26 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
 
         if diff < min_abs_px or ratio < min_ratio:
             if trace:
-                print(f"v24.19 CROSS_VIEW reject {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
+                print(f"v24.21 CROSS_VIEW reject {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
                       f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
                       f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
                       f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} "
-                      f"(need diff>={min_abs_px}px and ratio>={min_ratio})")
+                      f"(need diff>={min_abs_px}px and ratio>={min_ratio}, v24.21 dedicated threshold)")
             continue
 
-        shorter_h = min(ref_h, sec_h)
-        mark_h = max(14, int(shorter_h * boundary_ratio))
-        x0, x1 = rs["x0"], rs["x1"]
-        y0 = rs["top_y"]
-        y1 = min(rs["floor_y"], y0 + mark_h)
+        if full_height_marker:
+            # v24.21 FIX: draw the FULL stack silhouette (top_y..floor_y), not just a
+            # narrow ~25%-height band at the top - so the whole conflicting stack is
+            # visible, matching what the user needs to see at a glance.
+            x0, x1 = rs["x0"], rs["x1"]
+            y0, y1 = rs["top_y"], rs["floor_y"]
+        else:
+            shorter_h = min(ref_h, sec_h)
+            mark_h = max(14, int(shorter_h * boundary_ratio))
+            x0, x1 = rs["x0"], rs["x1"]
+            y0 = rs["top_y"]
+            y1 = min(rs["floor_y"], y0 + mark_h)
+
         regions_by_view[reference_view].append({
             "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
             "ratio": ratio,
@@ -2133,12 +2143,11 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
             "v2419_sec_match_x": (matched["x0"], matched["x1"]),
         })
         if trace:
-            print(f"v24.20 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
+            print(f"v24.21 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
                   f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
                   f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
                   f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} "
-                  f"boundary_marker=[{x0},{y0},{x1},{y1}] "
-                  f"(exempt from strongest-only={globals().get('V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY', True)})")
+                  f"boundary_marker=[{x0},{y0},{x1},{y1}] (full_height_marker={full_height_marker})")
     return regions_by_view
 
 
@@ -3194,10 +3203,12 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
 
-        # v24.18/19/20: CROSS-VIEW PROFILE COLLISION - compare FRONT vs BACK height profiles
-        # at mirrored positions along the truck's hood-to-tail axis (see V2418_* constants and
-        # _find_cross_view_profile_collision_regions docstring). Must run BEFORE the
-        # strongest-only filter below so its regions can be tagged and exempted (v24.20).
+        # v24.18/19/20/21: CROSS-VIEW PROFILE COLLISION - compare FRONT vs BACK height
+        # profiles at mirrored positions along the truck's hood-to-tail axis (see V2418_* /
+        # V2421_* constants and _find_cross_view_profile_collision_regions docstring). Must
+        # run BEFORE the strongest-only filter below so its regions can be tagged and
+        # exempted (v24.20), and uses its own dedicated threshold + full-height marker
+        # (v24.21).
         if globals().get("V2418_CROSS_VIEW_COLLISION_ENABLED", True):
             _cross_view_regions_by_view = _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent)
             for _view in ("FRONT", "BACK"):
@@ -3207,14 +3218,11 @@ def process_request(request):
                     step_down_regions[_view].extend(_cv_regions)
 
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
-        # v24.20 FIX (confirmed by user with real AA04-05 data + choice "A"): cross-view
-        # collision regions ("v2410_source": "cross_view_profile_collision") are EXEMPT from
-        # this single-marker-per-view filter, because unlike ordinary pairwise STEP_DOWN,
-        # multiple cross-view collisions can be genuine, physically distinct risks at once
-        # (user confirmed both idx=3 x=[605-661] ratio=0.28 green-vs-green AND idx=4
-        # x=[661-737] ratio=0.18 green-vs-cyan are real risks that should both be drawn, not
-        # just the higher-ratio one). Only non-cross-view (ordinary pairwise/valley) regions
-        # are still reduced to a single strongest candidate per view.
+        # v24.20: cross-view collision regions ("v2410_source": "cross_view_profile_collision")
+        # are EXEMPT from this single-marker-per-view filter, because unlike ordinary pairwise
+        # STEP_DOWN, multiple cross-view collisions can be genuine, physically distinct risks
+        # at once. Only non-cross-view (ordinary pairwise/valley) regions are still reduced to
+        # a single strongest candidate per view.
         if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
             exempt_cross_view = globals().get("V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY", True)
             for _view in ("FRONT", "BACK"):
@@ -3856,8 +3864,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.20",
-            "benchmarkMode": "v24.20_cross_view_multi_marker"}, 200, headers)
+            "checkerVersion": "V24.21",
+            "benchmarkMode": "v24.21_cross_view_marker_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
