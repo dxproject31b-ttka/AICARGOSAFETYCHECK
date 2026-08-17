@@ -17,27 +17,21 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.17 - DepthPairColorFix: fixed a bug found in v24.16's live test on AA04-05. v24.16
-#          added a color-verification gate (require box_back/box_front to be genuinely
-#          different colors before accepting a depth-pair STEP_DOWN candidate), but it used
-#          a naive single-center-point RGB sample - the live log showed box_front sampled
-#          as pure (255,255,255) white background, NOT real cargo color, which made the
-#          "colors are different" check pass trivially (anything differs from white) without
-#          actually proving anything. v24.17 replaces this with the SAME expanding-ring-
-#          search color sampler (_find_nearest_cargo_pixel_color) that was already proven to
-#          fix an identical problem earlier (in the FRONT stack-detail color debug trace,
-#          where every one of 8 stacks sampled as white using a naive center-point). Now BOTH
-#          box_back and box_front must resolve to a genuine cargo color (not background) via
-#          expanding search before the color-distance comparison is trusted at all; if either
-#          side can't find valid cargo color, the candidate is rejected outright with a clear
-#          "cannot verify color" trace instead of silently proceeding on a bad sample.
-# v24.16 - DepthPairColorDebug (superseded by v24.17 above): added color verification but
-#          used unreliable naive-center-point sampling - correctly identified via live test
-#          that a color check was needed, but the sampling method itself had the same bug
-#          previously found and fixed in the FRONT stack-detail debug trace.
-# v24.15 - DepthPairStepDown: initial depth-pair detector (no color verification) - correctly
-#          fired on real AA04-05 test but drew the marker at a position later determined to
-#          be wrong (height split didn't match the true green/cyan visual boundary).
+# v24.19 - CrossViewCollisionRefView: fixes v24.18's fixed "always iterate FRONT, mirror to
+#          BACK, draw marker on FRONT" assumption. User pointed out: when FRONT and BACK
+#          segment the container into a DIFFERENT number of stacks, the view with MORE
+#          stacks should be used as the reference (both for iteration/matching AND for where
+#          the marker gets drawn) - because the more finely-segmented view gives a narrower,
+#          more sensible marker position. Iterating over the coarser view would force the
+#          marker to span the combined width of multiple finer-view stacks unnecessarily.
+#          v24.19 dynamically picks reference_view = view with more stacks (ties default to
+#          FRONT, preserving v24.18's original behavior for the common equal-count case).
+#          Threshold unchanged (still reuses V2407_STEP_DOWN_* per user's original
+#          instruction). See V2418_* constants near V2414 block and
+#          _find_cross_view_profile_collision_regions() docstring for full detail.
+# v24.18 - CrossViewProfileCollision (superseded by v24.19 above): initial cross-view height-
+#          profile comparison architecture, always used FRONT as reference and drew marker
+#          only on FRONT regardless of relative stack counts between the two views.
 # v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
 #          taller stacks on BOTH sides" valley pattern (see _find_valley_regions +
 #          V2414_VALLEY_* constants) that the plain pairwise adjacent-stack check missed - real
@@ -584,57 +578,6 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
     if mx < min_brightness:
         return False
     return _hsv_saturation(rgb) >= sat_thresh
-
-
-def _find_nearest_cargo_pixel_color(px, img_w, img_h, seed_x, seed_y, max_radius=60):
-    """v24.14 DEBUG / v24.17 REUSED helper for color-based diagnostics.
-
-    ROOT CAUSE this fixes (confirmed twice now - first for the FRONT-stack color debug in
-    v24.14/24.16's stack-detail trace, and AGAIN in v24.16's depth-pair color check): sampling
-    the exact geometric mid-point of a box's bounding box assumes the box is a simple upright
-    rectangle fully filled with cargo color. In this isometric 3D diagram, cargo faces are
-    drawn as slanted parallelograms - the geometric center of the axis-aligned bounding box
-    frequently lands on white background or dimension-line text between/around the slanted
-    cargo face, not on the cargo itself. Confirmed in the v24.16 live test: box_front's center
-    sampled as (255,255,255) pure white (clearly background/text area), which made the
-    color-distance gate meaningless (any real color looks "different" from white).
-
-    FIX: do an expanding ring search outward from the seed point until a pixel that passes
-    _is_vivid_cargo_color(...) is found, and return THAT pixel's raw RGB plus the radius it
-    was found at (0 = seed itself was already valid cargo color). Returns (color, radius) where
-    radius == -1 means NO valid cargo pixel was found within max_radius at all - callers MUST
-    treat this as "color unknown / unverifiable", not silently accept a possibly-wrong sample.
-    """
-    seed_x = min(max(0, int(seed_x)), img_w - 1)
-    seed_y = min(max(0, int(seed_y)), img_h - 1)
-    seed_color = px[seed_x, seed_y]
-    if _is_vivid_cargo_color(seed_color):
-        return seed_color, 0
-    for radius in range(2, max_radius + 1, 2):
-        found = []
-        for dx in range(-radius, radius + 1, 2):
-            for dy in (-radius, radius):
-                x, y = seed_x + dx, seed_y + dy
-                if 0 <= x < img_w and 0 <= y < img_h:
-                    c = px[x, y]
-                    if _is_vivid_cargo_color(c):
-                        found.append(c)
-        for dy in range(-radius, radius + 1, 2):
-            for dx in (-radius, radius):
-                x, y = seed_x + dx, seed_y + dy
-                if 0 <= x < img_w and 0 <= y < img_h:
-                    c = px[x, y]
-                    if _is_vivid_cargo_color(c):
-                        found.append(c)
-        if found:
-            return found[0], radius
-    return seed_color, -1  # -1 marks "no cargo pixel found, this is the raw (unreliable) seed color"
-
-
-def _color_distance(c1, c2):
-    if c1 is None or c2 is None:
-        return None
-    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
 
 
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
@@ -1232,7 +1175,7 @@ def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
     return regions
 
 
-def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None, diagram_crop=None):
+def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
     """v24.10 STEP_DOWN from adjacent stack model.
 
     Detects adjacent stack height drops and returns a compact boundary marker on the lower stack.
@@ -1242,18 +1185,10 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     rationale) to catch "shorter stack flanked by two taller stacks" patterns that this pairwise
     loop alone cannot see - confirmed missed case: AA04-05 FRONT view (tall-short-tall valley,
     each side individually below the 0.22 pairwise threshold at ~0.15-0.20).
-
-    v24.15/16/17 ADDITION: also runs _find_depth_pair_step_down_regions() to catch two
-    physically different stacks at different container depths (front row vs back row) that
-    overlap in the same x-range in this diagram's isometric projection - see that function's
-    docstring. diagram_crop is passed through so the depth-pair detector can sample raw pixel
-    colors of the two box segments (using expanding-search, not naive center-point sampling -
-    see v24.17 fix in _find_nearest_cargo_pixel_color) for verification before accepting.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
     boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
-    _diagram_crop_for_step_down = diagram_crop
     ss = [s for s in (stacks or []) if s.get("boxes")]
     ss = sorted(ss, key=lambda s: s.get("x0", 0))
     regions = []
@@ -1298,141 +1233,6 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         valley_min_abs_px = globals().get("V2414_VALLEY_MIN_ABS_PX", 18)
         regions.extend(_find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px))
 
-    if globals().get("V2415_DEPTH_PAIR_STEP_DOWN_ENABLED", True):
-        regions.extend(_find_depth_pair_step_down_regions(ss, view_label, diagram_crop=_diagram_crop_for_step_down))
-
-    return regions
-
-
-def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
-    """v24.15/16/17 DEPTH-PAIR STEP_DOWN detector (real case confirmed by user with photos,
-    AA04-05 FRONT+BACK: red boxes around two green DSC1A-AD stacks at different container
-    depths - front row nearer viewer, back row farther, confirmed by user "ตั้งเขียว 2 ตั้ง
-    ที่อยู่คนละตำแหน่งความลึก (หน้า-หลัง) ของตู้" and "ใกล้ผู้ดู" = the shorter one).
-
-    See V2415_* constants near V2414 block for the full root-cause writeup and version
-    history (v24.15 initial detector -> v24.16 added naive color check that had its own bug
-    -> v24.17 fixes that bug using the proven expanding-search color sampler).
-
-    GEOMETRIC PROOF (unchanged since v24.15): detect_boxes_in_stack only ever detects
-    box_count==2 for a single x-column when there is a real boundary partway up the column.
-    Physically that can only happen when the FRONT stack (whose base sits at the column's
-    true local floor_y) does NOT reach as high as the BACK stack directly behind it. If front
-    were equal or taller, it would fully occlude back into ONE box. So: front (nearer viewer)
-    == boxes[-1] (bottom, touches true floor_y), back == boxes[0] (top).
-
-    v24.17 COLOR VERIFICATION (fixed from v24.16's bug): sample the actual RGB color of
-    box_back and box_front using _find_nearest_cargo_pixel_color's expanding-ring search
-    (NOT a naive single center-point sample, which v24.16's live test proved unreliable -
-    it returned pure white/background for box_front, making the color-distance check
-    meaningless). Both samples MUST resolve to a genuine cargo color (radius != -1) before
-    we trust the color-distance comparison at all; if either side can't find valid cargo
-    color nearby, we reject with a clear "cannot verify color" trace instead of silently
-    proceeding on an unreliable sample.
-    """
-    regions = []
-    max_width_diff_ratio = globals().get("V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO", 0.10)
-    max_vertical_gap_px = globals().get("V2415_DEPTH_PAIR_MAX_VERTICAL_GAP_PX", 4)
-    min_step_ratio = globals().get("V2415_DEPTH_PAIR_MIN_STEP_RATIO", 0.20)
-    min_abs_step_px = globals().get("V2415_DEPTH_PAIR_MIN_ABS_STEP_PX", 18)
-    boundary_ratio = globals().get("V2415_DEPTH_PAIR_BOUNDARY_RATIO", 0.30)
-    require_color_diff = globals().get("V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF", True)
-    min_color_dist = globals().get("V2415_DEPTH_PAIR_MIN_COLOR_DIST", 60)
-    require_valid_cargo_color = globals().get("V2417_DEPTH_PAIR_REQUIRE_VALID_CARGO_COLOR", True)
-    trace = globals().get("V2415_TRACE", True)
-
-    try:
-        full_px = diagram_crop.convert("RGB").load() if diagram_crop is not None else None
-        full_w, full_h = diagram_crop.size if diagram_crop is not None else (0, 0)
-    except Exception:
-        full_px = None
-        full_w = full_h = 0
-
-    for s_idx, s in enumerate(ss):
-        boxes = s.get("boxes") or []
-        if len(boxes) != 2:
-            continue
-        box_back, box_front = boxes[0], boxes[1]  # top-to-bottom: [0]=upper=back, [1]=lower=front
-        width_back = max(1, box_back["x_right"] - box_back["x_left"])
-        width_front = max(1, box_front["x_right"] - box_front["x_left"])
-        width_diff_ratio = abs(width_back - width_front) / max(width_back, width_front)
-        vertical_gap = box_front["y_min"] - box_back["y_max"]
-
-        color_back = color_front = None
-        radius_back = radius_front = -1
-        if full_px is not None:
-            mid_back_x = (box_back["x_left"] + box_back["x_right"]) / 2
-            mid_back_y = (box_back["y_min"] + box_back["y_max"]) / 2
-            mid_front_x = (box_front["x_left"] + box_front["x_right"]) / 2
-            mid_front_y = (box_front["y_min"] + box_front["y_max"]) / 2
-            color_back, radius_back = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_back_x, mid_back_y)
-            color_front, radius_front = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_front_x, mid_front_y)
-        color_dist = _color_distance(color_back, color_front)
-
-        if trace:
-            print(f"v24.17 DEPTH_PAIR DEBUG {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                  f"box_back y=[{box_back['y_min']}-{box_back['y_max']}] color_back={color_back} "
-                  f"(radius={radius_back}) | box_front y=[{box_front['y_min']}-{box_front['y_max']}] "
-                  f"color_front={color_front} (radius={radius_front}) | "
-                  f"color_dist={color_dist if color_dist is None else round(color_dist,1)} "
-                  f"(need>={min_color_dist} AND both radius!=-1 if checks enabled)")
-
-        if width_diff_ratio > max_width_diff_ratio or vertical_gap < 0 or vertical_gap > max_vertical_gap_px:
-            if trace:
-                print(f"v24.15 DEPTH_PAIR reject {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                      f"width_back={width_back}px width_front={width_front}px width_diff_ratio={width_diff_ratio:.2f} "
-                      f"vertical_gap={vertical_gap}px (need width_diff_ratio<={max_width_diff_ratio}, "
-                      f"0<=gap<={max_vertical_gap_px} to qualify as depth-pair candidate)")
-            continue
-
-        if require_valid_cargo_color and (radius_back == -1 or radius_front == -1):
-            if trace:
-                print(f"v24.17 DEPTH_PAIR REJECT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                      f"CANNOT VERIFY COLOR - one or both samples did not find a genuine cargo "
-                      f"color within search radius (radius_back={radius_back}, radius_front={radius_front}). "
-                      f"Refusing to accept a depth-pair candidate based on unreliable/background color "
-                      f"samples - this is the exact bug found in v24.16's live test (box_front sampled "
-                      f"as pure white background).")
-            continue
-
-        if require_color_diff and (color_dist is None or color_dist < min_color_dist):
-            if trace:
-                print(f"v24.16 DEPTH_PAIR REJECT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                      f"colors too similar (color_dist={color_dist}) - this split is likely a spurious "
-                      f"internal boundary within ONE colored stack, not a true front/back depth-pair "
-                      f"junction. Refusing to mark a position that isn't the real color boundary.")
-            continue
-
-        height_back = box_back["height_px"]
-        height_front = box_front["height_px"]
-        total_h = max(1, height_back + height_front)
-        step_ratio = height_back / total_h
-
-        if height_back < min_abs_step_px or step_ratio < min_step_ratio:
-            if trace:
-                print(f"v24.15 DEPTH_PAIR reject {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                      f"is depth-pair candidate but step too small - height_back={height_back}px "
-                      f"height_front={height_front}px step_ratio={step_ratio:.2f} "
-                      f"(need height_back>={min_abs_step_px}px and step_ratio>={min_step_ratio})")
-            continue
-
-        mark_h = max(14, int(height_front * boundary_ratio))
-        x0 = box_front["x_left"]
-        x1 = box_front["x_right"]
-        y0 = box_front["y_min"]
-        y1 = min(box_front["y_max"], y0 + mark_h)
-        regions.append({
-            "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
-            "ratio": step_ratio,
-            "v2410_source": "depth_pair_front_back_overlap_step_down",
-            "v2415_stack_idx": s_idx,
-            "v2415_heights": (height_back, height_front),
-        })
-        if trace:
-            print(f"v24.17 DEPTH_PAIR STEP_DOWN ACCEPT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                  f"height_back={height_back}px height_front={height_front}px step_ratio={step_ratio:.2f} "
-                  f"width_diff_ratio={width_diff_ratio:.2f} color_back={color_back} color_front={color_front} "
-                  f"color_dist={color_dist} boundary_marker=[{x0},{y0},{x1},{y1}]")
     return regions
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
@@ -1646,36 +1446,36 @@ V2414_VALLEY_MIN_RATIO = 0.15
 V2414_VALLEY_MIN_ABS_PX = 18
 V2414_TRACE = True
 
-# v24.15/v24.16/v24.17 DEPTH-PAIR STEP_DOWN controls - ดู docstring ของ
-# _find_depth_pair_step_down_regions() สำหรับรายละเอียดเต็ม
+# v24.18/v24.19 CROSS-VIEW PROFILE COLLISION - ดู docstring ของ
+# _find_cross_view_profile_collision_regions() สำหรับรายละเอียดเต็ม
 #
-# ROOT CAUSE (v24.15): AA04-05 มีตั้งเขียว DSC1A-AD 2 ตั้งที่อยู่คนละตำแหน่งความลึก
-# (หน้า-หลัง ของตู้) แต่ในมุมมอง isometric ของไดอะแกรมนี้ ซ้อนทับกันพอดีในแนวกว้าง (x)
-# เดียวกัน - detect_boxes_in_stack เลยตรวจพบเป็น "1 ตั้ง มี 2 กล่องซ้อนกัน" (box_count=2)
-# แทนที่จะเป็น "2 ตั้งแยกกัน" - ไม่มี detector เดิมตัวไหนมองเห็น pattern นี้เลย
+# ประวัติ: v24.15/16/17 พยายามแก้ปัญหา "ตั้ง 2 ตั้งคนละความลึก หน้า-หลัง ที่ซ้อนทับกันใน
+# ภาพ isometric เดียว" ด้วยการแยก "2 boxes" ที่ detect_boxes_in_stack เจอในคอลัมน์เดียวกัน
+# แล้วยืนยันด้วยสี - แต่การทดสอบจริงหลายรอบพบว่าเปราะบางเกินไป (เส้นแบ่งมักไม่ใช่รอยต่อสี
+# จริง, การสุ่มสีจากจุดกึ่งกลางมักโดนพื้นหลัง/ข้อความบัง, และโครงสร้างจริงซับซ้อนกว่าที่คิด
+# เป็น "ขั้นบันได" หลายชั้นความลึก) ผู้ใช้จึงเสนอสถาปัตยกรรมใหม่ (v24.18):
+#   "1. มองเป็นระนาบ จากภาพ front และจากภาพ back
+#    2. นำค่าที่ได้แต่ละตำแหน่งจากระนาบ ตามทิศทาง หัวรถถึงท้ายรถของแต่ละภาพ มากระทบ
+#       ตัวเลขกัน หากว่ามี gap ที่เข้าเกณฑ์ ถือว่าเสี่ยง เป็นคู่ตรงข้ามที่เสี่ยง"
+# กล่าวคือ ใช้ประโยชน์จาก "2 มุมมองอิสระ" ของตู้เดียวกัน (FRONT มองจากหัวรถ, BACK มองจาก
+# ท้ายรถ) เอาโปรไฟล์ความสูงจากทั้ง 2 มุมมองมาเทียบกัน (mirror ตำแหน่งเพราะมองคนละทิศ)
+# แทนที่จะพยายามแยกสีภายในภาพเดียวอีกต่อไป
 #
-# v24.16: ทดสอบจริงพบว่า marker ตำแหน่งผิด (height_back=232px height_front=34px = 13%
-# ทั้งที่ภาพจริงควรใกล้เคียงกันกว่านี้มาก) - เพิ่มการเช็คสีเพื่อยืนยันว่าเป็นรอยต่อจริง
-# ระหว่าง 2 สี ไม่ใช่รอยแบ่งปลอมภายในสีเดียวกัน
+# v24.19 UPDATE (จำนวนตั้งไม่เท่ากันระหว่าง FRONT/BACK): เดิม v24.18 ยึด FRONT เป็นฝั่ง
+# อ้างอิงเสมอ (iterate ทุกตั้งใน FRONT แล้ว mirror ไปหา BACK) แต่ผู้ใช้ชี้ว่าถ้าจำนวนตั้ง
+# ของทั้ง 2 view ไม่เท่ากัน ควรยึด "view ที่มีจำนวนตั้งมากกว่า" เป็นฝั่งอ้างอิงแทน เพราะ
+# view ที่แบ่งตั้งได้ละเอียดกว่า (จำนวนมากกว่า) ให้ตำแหน่ง marker ที่สมเหตุสมผลกว่า (แคบ
+# กว่า ตรงจุดกว่า) ถ้ายึด view หยาบเป็นฝั่งอ้างอิง จะได้ marker กว้างเกินความจำเป็นเพราะ
+# ต้องครอบคลุมพื้นที่ของหลายตั้งในอีก view เข้าด้วยกัน
+# ดังนั้น v24.19 จึงเลือก reference_view = view ที่ len(stacks) มากกว่า แบบไดนามิก (ไม่ยึด
+# FRONT ตายตัวอีกต่อไป) แล้ว iterate ตั้งของ reference_view, mirror ไปหา secondary_view,
+# เทียบความสูง, และวาด marker ที่ reference_view (ไม่ใช่ FRONT ตายตัว) - ถ้าจำนวนเท่ากัน
+# พอดี ให้ยึด FRONT เป็นค่าเริ่มต้น (คงพฤติกรรมเดิมของ v24.18 ไว้)
 #
-# v24.17 BUG FOUND & FIXED: การเช็คสีของ v24.16 ใช้จุดกึ่งกลางเรขาคณิตธรรมดา (ไม่ขยาย
-# ค้นหา) ผลจริงจาก log: color_front=(255,255,255) ขาวล้วน = สุ่มโดนพื้นหลัง/ป้ายชื่อ ไม่ใช่
-# เนื้อสีคาร์โก้จริงเลย ทำให้ color_dist=122 ที่ "ผ่านเกณฑ์" ไม่ได้พิสูจน์อะไรจริง (เทียบกับ
-# สีขาวยังไงก็ต่างสีเสมอ) แก้โดยเปลี่ยนมาใช้ _find_nearest_cargo_pixel_color() (expanding
-# ring search + ตรวจด้วย _is_vivid_cargo_color) ที่เคยแก้ปัญหาเดียวกันนี้มาแล้วรอบก่อน
-# (ตอน debug FRONT stack-detail ที่สีออกมาขาวหมดทั้ง 8 ตัว) - ทั้ง box_back และ box_front
-# ต้องหาสี cargo จริงเจอ (ไม่ใช่ -1/พื้นหลัง) ก่อนจะยอมรับผลเปรียบเทียบสี มิฉะนั้น reject
-# ทันทีพร้อม log ชัดเจนว่า "ไม่สามารถยืนยันสีได้" แทนที่จะเดาต่อ
-V2415_DEPTH_PAIR_STEP_DOWN_ENABLED = True
-V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO = 0.10  # ความกว้าง 2 กล่องต้องใกล้กันมาก (SKU เดียวกัน)
-V2415_DEPTH_PAIR_MAX_VERTICAL_GAP_PX = 4       # ต้องติดกันสนิท (silhouette เดียวต่อเนื่อง)
-V2415_DEPTH_PAIR_MIN_STEP_RATIO = 0.20         # ส่วนที่ back โผล่พ้น front ต้องมีนัยสำคัญ
-V2415_DEPTH_PAIR_MIN_ABS_STEP_PX = 18
-V2415_DEPTH_PAIR_BOUNDARY_RATIO = 0.30         # ความสูงของ marker (ส่วนบนของตั้ง front)
-V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF = True     # ต้องยืนยันสีต่างกันจริงก่อนยอมรับ
-V2415_DEPTH_PAIR_MIN_COLOR_DIST = 60            # ระยะห่างสี RGB ขั้นต่ำ (0-441) ระหว่าง back/front
-V2417_DEPTH_PAIR_REQUIRE_VALID_CARGO_COLOR = True  # v24.17: ทั้ง 2 ฝั่งต้องหาสี cargo จริงเจอ
-V2415_TRACE = True
+# เกณฑ์ตัดสินใจ: ใช้ตัวเดียวกับ pairwise STEP_DOWN เดิมตามที่ผู้ใช้ยืนยัน (ไม่สร้างเกณฑ์
+# ใหม่) - V2407_STEP_DOWN_STACK_HEIGHT_RATIO / V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX
+V2418_CROSS_VIEW_COLLISION_ENABLED = True
+V2418_TRACE = True
 
 # v24.10 focused controls
 V2410_BUILD = True
@@ -2198,6 +1998,141 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
               f"{len(stacks_abs)} stack(s) detected, "
               f"box counts per stack = {[len(s['boxes']) for s in stacks_abs]}")
     return result
+
+
+def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
+    """v24.18/v24.19 CROSS-VIEW PROFILE COLLISION detector.
+
+    See the V2418_* constants block (near V2414) for the full root-cause / design
+    rationale and version history (this replaces the v24.15/16/17 depth-pair-color
+    approach entirely).
+
+    CORE IDEA (per user's explicit design): treat FRONT and BACK as two independent
+    height-profile "planes" measured along the truck's hood-to-tail axis, but from OPPOSITE
+    ends (FRONT measures from the front/hood end, BACK measures from the tail end). For a
+    given real position along the truck's length, look up the height reported by BOTH views
+    at that position and compare them - if they disagree by more than the ordinary step-down
+    threshold, that is a genuine structural risk, regardless of how the isometric rendering
+    happened to segment individual stacks/boxes in either single image.
+
+    MIRROR MAPPING: position ratio p (0..1) along one view's own cargo_extent corresponds to
+    position ratio (1-p) along the other view's own cargo_extent (proportional mapping, robust
+    to the two views having slightly different crop widths/scales - confirmed close in
+    practice: FRONT container bounds x=[502-1039] vs BACK x=[501-1030] from real logs).
+
+    v24.19 REFERENCE-VIEW SELECTION (per user's explicit follow-up instruction): when FRONT
+    and BACK segment the container into a DIFFERENT number of stacks, iterate over (and draw
+    the marker on) whichever view has MORE stacks - the more finely-segmented view gives a
+    narrower, more sensible marker position, whereas iterating over the coarser view would
+    force the marker to span the combined width of multiple finer-view stacks unnecessarily.
+    If both views report the same stack count, FRONT is used as the reference by default
+    (preserves v24.18's original default behavior for the common case).
+
+    THRESHOLD: reuses the exact same pairwise STEP_DOWN thresholds
+    (V2407_STEP_DOWN_STACK_HEIGHT_RATIO/MIN_ABS_HEIGHT_PX) per user's explicit instruction -
+    no new threshold invented.
+
+    MARKER: drawn on the reference view (see v24.19 selection rule above) at that view's own
+    stack x-position, narrow band near its top (same boundary-marker convention as other
+    STEP_DOWN sources so it flows through the existing V2413 marker-routing fix unchanged).
+
+    KNOWN LIMITATION (documented, not hidden): each reference-view stack is matched to its
+    single nearest secondary-view stack by mirrored position - if the two views' stack counts
+    differ substantially, some matches may be approximate. Accepted trade-off per the user's
+    simplified design; revisit with more regression files if mismatches are found common.
+    """
+    regions_by_view = {"FRONT": [], "BACK": []}
+    front_stacks = stack_box_model.get("FRONT", []) or []
+    back_stacks = stack_box_model.get("BACK", []) or []
+    ce_front = cargo_extent.get("FRONT")
+    ce_back = cargo_extent.get("BACK")
+    trace = globals().get("V2418_TRACE", True)
+
+    if not front_stacks or not back_stacks or not ce_front or not ce_back:
+        if trace:
+            print(f"v24.18 CROSS_VIEW skipped: missing data "
+                  f"(front_stacks={len(front_stacks)}, back_stacks={len(back_stacks)}, "
+                  f"ce_front={'ok' if ce_front else 'MISSING'}, ce_back={'ok' if ce_back else 'MISSING'})")
+        return regions_by_view
+
+    # v24.19: choose reference view = the one with MORE stacks (finer segmentation ->
+    # narrower, more sensible marker). Tie -> default to FRONT (v24.18 original behavior).
+    if len(back_stacks) > len(front_stacks):
+        reference_view, secondary_view = "BACK", "FRONT"
+    else:
+        reference_view, secondary_view = "FRONT", "BACK"
+    ref_stacks = stack_box_model.get(reference_view, [])
+    sec_stacks = stack_box_model.get(secondary_view, [])
+    ce_ref = cargo_extent.get(reference_view)
+    ce_sec = cargo_extent.get(secondary_view)
+
+    if trace:
+        print(f"v24.19 CROSS_VIEW reference-view selection: FRONT has {len(front_stacks)} stack(s), "
+              f"BACK has {len(back_stacks)} stack(s) -> using {reference_view} as reference "
+              f"(marker will be drawn on {reference_view})")
+
+    ref_xmin, ref_xmax = ce_ref["xmin"], ce_ref["xmax"]
+    sec_xmin, sec_xmax = ce_sec["xmin"], ce_sec["xmax"]
+    ref_span = max(1, ref_xmax - ref_xmin)
+    sec_span = max(1, sec_xmax - sec_xmin)
+
+    min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22)
+    min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18)
+    boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
+
+    sec_sorted = sorted(sec_stacks, key=lambda s: s["x0"])
+
+    for r_idx, rs in enumerate(sorted(ref_stacks, key=lambda s: s["x0"])):
+        ref_mid_x = (rs["x0"] + rs["x1"]) / 2.0
+        pos_ratio = (ref_mid_x - ref_xmin) / ref_span
+        pos_ratio = min(1.0, max(0.0, pos_ratio))
+        mirror_ratio = 1.0 - pos_ratio
+        sec_target_x = sec_xmin + mirror_ratio * sec_span
+
+        matched = None
+        for ss in sec_sorted:
+            if ss["x0"] <= sec_target_x <= ss["x1"]:
+                matched = ss
+                break
+        if matched is None:
+            matched = min(sec_sorted, key=lambda ss: abs(((ss["x0"] + ss["x1"]) / 2.0) - sec_target_x))
+
+        ref_h = max(1, rs["floor_y"] - rs["top_y"])
+        sec_h = max(1, matched["floor_y"] - matched["top_y"])
+        diff = abs(ref_h - sec_h)
+        total = max(ref_h, sec_h)
+        ratio = diff / total
+
+        if diff < min_abs_px or ratio < min_ratio:
+            if trace:
+                print(f"v24.19 CROSS_VIEW reject {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
+                      f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
+                      f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
+                      f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} "
+                      f"(need diff>={min_abs_px}px and ratio>={min_ratio})")
+            continue
+
+        shorter_h = min(ref_h, sec_h)
+        mark_h = max(14, int(shorter_h * boundary_ratio))
+        x0, x1 = rs["x0"], rs["x1"]
+        y0 = rs["top_y"]
+        y1 = min(rs["floor_y"], y0 + mark_h)
+        regions_by_view[reference_view].append({
+            "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+            "ratio": ratio,
+            "v2410_source": "cross_view_profile_collision",
+            "v2419_reference_view": reference_view,
+            "v2419_ref_h": ref_h,
+            "v2419_sec_h": sec_h,
+            "v2419_sec_match_x": (matched["x0"], matched["x1"]),
+        })
+        if trace:
+            print(f"v24.19 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
+                  f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
+                  f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
+                  f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} "
+                  f"boundary_marker=[{x0},{y0},{x1},{y1}]")
+    return regions_by_view
 
 
 def detect_overhang_regions_for_view(stacks):
@@ -3247,10 +3182,24 @@ def process_request(request):
                                                                      crop_y_start, container_bounds, cargo_extent)
         if globals().get("V2407_STEP_DOWN_STACK_ADJACENCY_ENABLED", True):
             for _view in ("FRONT", "BACK"):
-                _extra_step_regions = detect_step_down_regions_from_stack_model(stack_box_model.get(_view, []), view_label=_view, diagram_crop=diagram_crop)
+                _extra_step_regions = detect_step_down_regions_from_stack_model(stack_box_model.get(_view, []), view_label=_view)
                 if _extra_step_regions:
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
+
+        # v24.18/v24.19: CROSS-VIEW PROFILE COLLISION - compare FRONT vs BACK height profiles
+        # at mirrored positions along the truck's hood-to-tail axis (see V2418_* constants and
+        # _find_cross_view_profile_collision_regions docstring for full rationale). Replaces
+        # the earlier v24.15/16/17 depth-pair-color approach entirely. v24.19: marker is drawn
+        # on whichever view (FRONT or BACK) has MORE segmented stacks (finer -> more sensible
+        # marker position), not FRONT unconditionally - see function docstring.
+        if globals().get("V2418_CROSS_VIEW_COLLISION_ENABLED", True):
+            _cross_view_regions_by_view = _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent)
+            for _view in ("FRONT", "BACK"):
+                _cv_regions = _cross_view_regions_by_view.get(_view, [])
+                if _cv_regions:
+                    step_down_regions.setdefault(_view, [])
+                    step_down_regions[_view].extend(_cv_regions)
 
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
         if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
@@ -3885,8 +3834,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.17",
-            "benchmarkMode": "v24.17_depth_pair_color_fix"}, 200, headers)
+            "checkerVersion": "V24.19",
+            "benchmarkMode": "v24.19_cross_view_collision_ref_view"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
