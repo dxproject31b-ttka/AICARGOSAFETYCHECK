@@ -17,6 +17,25 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.27 - WidthSanityFallback: user reported a real case (AC03-01, BACK view) where a
+#          genuine AI-detected REAR_LATERAL_IMBALANCE risk (AI explicitly described a real
+#          1-tier-vs-2-tier, ~50% height difference) was incorrectly VETOed and the file
+#          reported SAFE. Root cause: BACK's coarse segmentation (3 stacks: widths
+#          29px/31px/392px) got ALL 3 stacks flagged suspect by the v24.24/25 width-sanity
+#          gate simultaneously (idx0/1 too narrow, idx2 a merged blob at 12.65x median) -
+#          leaving ZERO clean pairs to compare. The VETO gate's max_ratio then defaulted to
+#          its initial value 0.0 (the "no pairs found" case, not "measured, no difference"),
+#          which was indistinguishable downstream from "genuinely no imbalance" and
+#          incorrectly triggered a VETO of the real risk. Fixed by adding a fallback guard
+#          inside _flag_width_outlier_stacks() itself (used centrally by every stack-
+#          comparison detector since v24.25): if filtering would leave fewer than
+#          V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean stacks in a given call, the suspect
+#          flags for that call are discarded and the caller proceeds on the raw,
+#          unfiltered stack list instead - "not enough reliable data to filter with
+#          confidence" must never silently collapse into "no risk found". Verified: the
+#          AC03-01 BACK case (3 stacks, all 3 suspect -> clean_count=0 < min=2) now
+#          triggers the fallback and falls through to comparing the raw stacks, so the
+#          genuine height difference is measurable again instead of reading as 0.0.
 # v24.26 - RearLateralNoShift: user reported a real case (AB01-02, BACK view) where the
 #          REAR_LATERAL_IMBALANCE marker was drawn floating ABOVE the container's own top
 #          edge, outside the drawn artwork entirely. Root cause: V2405's hardcoded 50%
@@ -1271,6 +1290,38 @@ def _flag_width_outlier_stacks(ss, view_label=None):
                 print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px vs median={median_w}px "
                       f"ratio={ratio_vs_median:.2f} > max={max_ratio} -> flagged as suspect "
                       f"(likely merged multi-stack blob)")
+
+    # v24.27 FALLBACK GUARD - see V2427_* constants near V2424 block for full root-cause
+    # writeup. ROOT CAUSE this fixes (confirmed by real log evidence, AC03-01 BACK view):
+    # when segmentation for an ENTIRE view is coarse enough that width-sanity flags ALL (or
+    # nearly all) of that view's stacks as suspect, every caller of this function loses ALL
+    # its comparison pairs simultaneously - not just the one bad pair the gate was designed
+    # to remove. Downstream, a "0 comparable pairs" state is easy to misread as "0.0 = no
+    # height difference / no risk", which is a completely different (and false) conclusion
+    # from "not enough reliable data to measure at all". Confirmed real case: BACK view
+    # segmented into 3 stacks [1,2,1 boxes], ALL 3 flagged suspect (idx0/1 too narrow at
+    # 29px/31px, idx2 a 392px merged blob at 12.65x median) -> zero clean pairs ->
+    # REAR_LATERAL_IMBALANCE VETO gate read max_ratio=0.0 and incorrectly vetoed a
+    # genuine AI-detected risk (AI reasoning explicitly described a real 1-tier-vs-2-tier,
+    # ~50% height difference) as "no imbalance found", producing a false SAFE report.
+    # FIX: if filtering leaves FEWER than V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean (non-
+    # suspect) stacks - i.e. not enough survivors to form even one reliable comparison -
+    # discard the suspect flags for THIS view/call and fall back to the raw, unfiltered
+    # stack list instead of silently returning "no risk found" or "no pairs at all". This
+    # matches every other risk type's behavior: when in doubt, don't invent a wrong
+    # conclusion from an empty gate - defer to the underlying raw measurement instead.
+    if globals().get("V2427_WIDTH_SANITY_FALLBACK_ENABLED", True):
+        min_clean = globals().get("V2427_WIDTH_SANITY_MIN_CLEAN_STACKS", 2)
+        clean_count = len(ss) - len(suspects)
+        if clean_count < min_clean:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.27 WIDTH_SANITY FALLBACK {view_label}: filtering would leave only "
+                      f"{clean_count} clean stack(s) out of {len(ss)} (need >= {min_clean} to "
+                      f"compare anything) - this view's segmentation is too coarse for the "
+                      f"width-sanity gate to be reliable here. Falling back to UNFILTERED "
+                      f"comparison (suspects cleared) instead of silently reporting 'no risk' "
+                      f"or 'no pairs' from an empty-after-filtering result.")
+            return set()
     return suspects
 
 
@@ -1588,6 +1639,20 @@ V2423_PAIRWISE_FULL_WIDTH_MARKER = True
 V2424_PAIRWISE_WIDTH_SANITY_ENABLED = True
 V2424_PAIRWISE_MIN_STACK_WIDTH_PX = 40
 V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN = 2.5
+
+# v24.27 WIDTH-SANITY FALLBACK GUARD - see the full root-cause writeup inside
+# _flag_width_outlier_stacks() docstring/comment. Summary: real log evidence (AC03-01 BACK
+# view) showed that when an ENTIRE view's segmentation is too coarse, the v24.24/25
+# width-sanity gate can flag ALL stacks in that view as suspect at once - leaving zero
+# clean pairs for every downstream detector (STEP_DOWN, Valley, Cross-View,
+# REAR_LATERAL_IMBALANCE FORCE/VETO, LATERAL_GAP_RISK). A "zero comparable pairs" result
+# was then misread downstream as "0.0 ratio = no risk", incorrectly VETOing a genuine
+# AI-detected REAR_LATERAL_IMBALANCE and reporting a false SAFE. Fix: if filtering would
+# leave fewer than V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean stacks, discard the suspect
+# flags entirely for that call and fall back to the raw, unfiltered stack list - "not
+# enough reliable data to filter with confidence" should never silently become "no risk".
+V2427_WIDTH_SANITY_FALLBACK_ENABLED = True
+V2427_WIDTH_SANITY_MIN_CLEAN_STACKS = 2
 
 # v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
 # ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
@@ -3916,8 +3981,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.26",
-            "benchmarkMode": "v24.26_rear_lateral_no_shift"}, 200, headers)
+            "checkerVersion": "V24.27",
+            "benchmarkMode": "v24.27_width_sanity_fallback"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
