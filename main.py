@@ -17,24 +17,33 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.23 - PairwiseFullHeightMarker: per user request ("ปรับขนาด marker เป็นแบบ cross-view
-#          ด้วย" applied to the ordinary pairwise STEP_DOWN mechanism, e.g. the separate red
-#          box the user saw on BACK view near the dark-brown TEP1A-F1 stack, which is NOT
-#          from cross-view since BACK had fewer stacks than FRONT). Previously
-#          detect_step_down_regions_from_stack_model's ACCEPT block drew only a narrow
-#          ~25%-width slice of the lower stack next to the higher one (real log evidence:
-#          boundary_marker=[621,1051,635,1137] -> width=14px out of a lower stack width of
-#          ~30-75px), even though the vertical dimension already used the lower stack's
-#          FULL height. Now draws the lower stack's ENTIRE silhouette (full x0..x1 width,
-#          full top_y..floor_y height) - matching the full-stack box style already used by
-#          cross-view collision markers since v24.21/22, for visual consistency across both
-#          detector types. See V2423_PAIRWISE_FULL_WIDTH_MARKER near V2410 block.
+# v24.24 - WidthSanityGate: fixes a root-cause bug found in v24.23's live test on real
+#          AA04-05 BACK view. Even after v24.23 fixed the marker to be full-width/full-
+#          height, the resulting box still looked wrong because the underlying comparison
+#          itself was invalid: BACK's coarse segmentation (only 5 stacks vs FRONT's 8)
+#          produced idx=0 (width=27px) and idx=1 (width=30px) as suspiciously narrow
+#          segmentation-fragment slivers, and idx=2 (width=228px, ~4x the view's median of
+#          57px) as a suspiciously wide "merged blob" of what were likely several real
+#          stacks segmentation failed to separate. The pairwise loop was comparing pair
+#          (idx=1, idx=2) - a narrow artifact against a merged blob - producing a
+#          height_diff_ratio=63.2% that was purely a segmentation artifact, not a genuine
+#          physical risk. FIX: added _flag_width_outlier_stacks() which flags any stack
+#          narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX=40px, or wider than
+#          V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN=2.5x the view's median stack width, as
+#          "suspect" - any adjacent pair touching a suspect stack is now skipped entirely
+#          (excluded as unreliable input, not compared on ratio grounds at all). Verified:
+#          this correctly flags idx=0,1,2 in the real BACK data, leaving only pair
+#          (idx=3, idx=4) - heights (218,163), ratio=25% - which involves no suspect stack
+#          and was always a genuine signal; it survives unaffected.
+# v24.23 - PairwiseFullHeightMarker: draws the lower stack's FULL silhouette (full width,
+#          full height) instead of a narrow ~25%-width slice, for visual consistency with
+#          cross-view collision markers (v24.21/22).
 # v24.22 - CrossViewSingleBox: merge all accepted cross-view collision candidates per view
-#          into ONE bounding box instead of drawing each one separately.
-# v24.21 - CrossViewMarkerFix: separated cross-view threshold from pairwise (0.22->0.15)
-#          and switched cross-view marker to cover the reference stack's full height.
+#          into ONE bounding box.
+# v24.21 - CrossViewMarkerFix: dedicated, lower cross-view threshold (0.22->0.15); full-
+#          height cross-view marker.
 # v24.20 - CrossViewMultiMarker: exempted cross-view collision regions from strongest-only.
-# v24.19 - CrossViewCollisionRefView: added dynamic reference-view selection.
+# v24.19 - CrossViewCollisionRefView: dynamic reference-view selection.
 # v24.18 - CrossViewProfileCollision: initial cross-view height-profile comparison.
 # v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
 #          taller stacks on BOTH sides" valley pattern (see _find_valley_regions +
@@ -1179,6 +1188,47 @@ def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
     return regions
 
 
+def _flag_width_outlier_stacks(ss, view_label=None):
+    """v24.24 WIDTH-SANITY GATE. See V2424_* constants block (near V2410) for full
+    root-cause writeup: fixes a bug found in v24.23's live test on AA04-05 BACK view, where
+    the pairwise STEP_DOWN loop compared a narrow segmentation-artifact sliver against a
+    merged multi-stack "blob" and reported a spurious height_diff_ratio=63.2% that was
+    never a genuine physical risk - it was purely an artifact of coarse segmentation
+    (BACK only detected 5 stacks vs FRONT's 8).
+
+    Flags any stack index whose width is either:
+      (a) narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX (likely a segmentation fragment,
+          not a real full cargo stack), or
+      (b) wider than V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN times the view's median
+          stack width (likely several real stacks merged into one blob by segmentation).
+
+    Returns a set of suspect indices (into the `ss` list, same indexing used by the
+    pairwise loop) so the caller can skip any pair touching a suspect stack.
+    """
+    if not globals().get("V2424_PAIRWISE_WIDTH_SANITY_ENABLED", True) or len(ss) < 2:
+        return set()
+    min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
+    max_ratio = globals().get("V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN", 2.5)
+    widths = [max(1, s["x1"] - s["x0"]) for s in ss]
+    sorted_w = sorted(widths)
+    median_w = sorted_w[len(sorted_w) // 2]
+    suspects = set()
+    for i, w in enumerate(widths):
+        ratio_vs_median = w / max(1, median_w)
+        if w < min_w:
+            suspects.add(i)
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px < min={min_w}px "
+                      f"-> flagged as suspect (likely segmentation fragment)")
+        elif ratio_vs_median > max_ratio:
+            suspects.add(i)
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px vs median={median_w}px "
+                      f"ratio={ratio_vs_median:.2f} > max={max_ratio} -> flagged as suspect "
+                      f"(likely merged multi-stack blob)")
+    return suspects
+
+
 def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
     """v24.10 STEP_DOWN from adjacent stack model.
 
@@ -1189,14 +1239,29 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     rationale) to catch "shorter stack flanked by two taller stacks" patterns that this pairwise
     loop alone cannot see - confirmed missed case: AA04-05 FRONT view (tall-short-tall valley,
     each side individually below the 0.22 pairwise threshold at ~0.15-0.20).
+
+    v24.23 ADDITION: draws the FULL silhouette of the lower stack (not a narrow slice) for
+    visual consistency with cross-view collision markers.
+
+    v24.24 ADDITION: skips any pair where either stack is a width outlier (too narrow =
+    likely segmentation fragment, or too wide vs the view's median = likely a merged
+    multi-stack blob) - see _flag_width_outlier_stacks() and V2424_* constants for the full
+    root-cause writeup (real AA04-05 BACK case: a 63.2%-ratio pair turned out to be a narrow
+    artifact vs a merged blob, not a genuine risk).
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
     boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
     ss = [s for s in (stacks or []) if s.get("boxes")]
     ss = sorted(ss, key=lambda s: s.get("x0", 0))
+    suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
     regions = []
     for idx in range(len(ss) - 1):
+        if idx in suspect_indices or (idx + 1) in suspect_indices:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
+                      f"skipped - one or both stacks flagged as width-outlier (see v24.24 WIDTH_SANITY above)")
+            continue
         a, b = ss[idx], ss[idx + 1]
         ha = max(1, a["floor_y"] - a["top_y"])
         hb = max(1, b["floor_y"] - b["top_y"])
@@ -1210,14 +1275,8 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
             continue
         lower = a if ha < hb else b
         higher = b if ha < hb else a
-        # v24.23: FULL-STACK marker, matching the v24.21/22 cross-view style (per user
-        # request "ปรับขนาด marker เป็นแบบ cross-view ด้วย"). Previously this drew only a
-        # narrow ~25%-width slice of the lower stack next to the higher one (e.g. real log
-        # boundary_marker=[621,1051,635,1137] -> width=14px out of a lower_w of ~30-75px,
-        # even though the height dimension already used the lower stack's FULL height). Now
-        # draws the lower stack's entire silhouette (full x0..x1, full top_y..floor_y) for
-        # visual consistency with cross-view collision markers, which always box the whole
-        # conflicting stack rather than a thin sliver of it.
+        # v24.23: FULL-STACK marker (full x0..x1, full top_y..floor_y) instead of a narrow
+        # ~25%-width slice, for visual consistency with cross-view collision markers.
         if globals().get("V2423_PAIRWISE_FULL_WIDTH_MARKER", True):
             x0 = lower["x0"]
             x1 = lower["x1"]
@@ -1463,19 +1522,12 @@ V2414_TRACE = True
 
 # v24.18-22 CROSS-VIEW PROFILE COLLISION - ดู docstring ของ
 # _find_cross_view_profile_collision_regions() สำหรับรายละเอียดเต็ม
-#
-# ประวัติโดยย่อ: v24.18 เสนอสถาปัตยกรรมเปรียบเทียบโปรไฟล์ความสูง FRONT vs BACK (มองจาก
-# คนละทิศของตู้เดียวกัน) v24.19 เพิ่มการเลือก reference view แบบไดนามิก v24.20 แก้ปัญหา
-# marker ถูกกรองทิ้งจาก strongest-only เมื่อมีคู่ที่ผ่านเกณฑ์มากกว่า 1 คู่ v24.21 แยก
-# เกณฑ์ cross-view ออกจาก pairwise (0.22->0.15) และเปลี่ยน marker เป็นเต็มความสูงตั้ง
-# v24.22 รวม marker ทุกจุดที่ผ่านเกณฑ์เป็น 1 กรอบ/view ตามที่ผู้ใช้ยืนยันว่าความแม่นยำ
-# เพียงพอแล้ว ไม่ต้องแยกแสดงทีละคู่อีกต่อไป
 V2418_CROSS_VIEW_COLLISION_ENABLED = True
 V2418_TRACE = True
-V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY = True  # แนวทาง A: ไม่จำกัดด้วย strongest-only
-V2421_CROSS_VIEW_MIN_RATIO = 0.15  # แยกเกณฑ์ออกจาก pairwise (0.22) ตามที่ผู้ใช้ยืนยัน
-V2421_CROSS_VIEW_FULL_HEIGHT_MARKER = True  # วาดกรอบเต็มความสูงตั้ง แทนแถบแคบ 25%
-V2422_CROSS_VIEW_MERGE_INTO_SINGLE_BOX = True  # รวม marker ทุกจุดที่ผ่านเกณฑ์เป็น 1 กรอบ/view
+V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY = True
+V2421_CROSS_VIEW_MIN_RATIO = 0.15
+V2421_CROSS_VIEW_FULL_HEIGHT_MARKER = True
+V2422_CROSS_VIEW_MERGE_INTO_SINGLE_BOX = True
 
 # v24.10 focused controls
 V2410_BUILD = True
@@ -1485,16 +1537,42 @@ V2410_STEPDOWN_STRONGEST_ONLY = True
 V2410_STEPDOWN_BOUNDARY_ONLY = True
 V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 
-# v24.23 PAIRWISE FULL-WIDTH MARKER (per user request: "ปรับขนาด marker เป็นแบบ cross-view
-# ด้วย" - applied to the pre-existing ordinary pairwise STEP_DOWN mechanism, the one that
-# still draws its own marker independently on views where cross-view wasn't selected as
-# reference, e.g. BACK in AA04-05, near the dark-brown TEP1A-F1 stack). Previously only
-# drew a narrow ~25%-width slice of the lower stack (see detect_step_down_regions_from_
-# stack_model) even though the vertical dimension already used the lower stack's full
-# height - inconsistent with the full-stack box style used by cross-view collision markers
-# (v24.21/22). Now draws the lower stack's ENTIRE silhouette (full x0..x1, full
-# top_y..floor_y) for visual consistency across both detector types.
+# v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
+# STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
+# top_y..floor_y) instead of a narrow ~25%-width slice, for visual consistency with the
+# full-stack box style used by cross-view collision markers (v24.21/22).
 V2423_PAIRWISE_FULL_WIDTH_MARKER = True
+
+# v24.24 PAIRWISE WIDTH-SANITY GATE - fixes a bug found in v24.23's live test on real
+# AA04-05 BACK view: after fixing the marker to be full-width (v24.23), the resulting box
+# was STILL wrong-looking (a thin, tall sliver near the wrong position), because the
+# ROOT CAUSE was never the marker's drawing style at all - it was that the underlying
+# per-box segmentation for BACK (only 5 stacks detected, much coarser than FRONT's 8) had
+# produced two kinds of artifacts near the truck's front wall:
+#   1) idx=0 (width=27px) and idx=1 (width=30px): suspiciously NARROW slivers, likely
+#      fragments of segmentation error rather than real full cargo stacks
+#   2) idx=2 (width=228px): suspiciously WIDE blob (median stack width in this view is
+#      only 57px, so idx=2 is ~4x the median) - likely several real stacks that
+#      segmentation merged into one "blob" instead of separating them
+# The pairwise STEP_DOWN loop was comparing pair (idx=1, idx=2) - i.e. a narrow artifact
+# slice against a merged multi-stack blob - and getting height_diff_ratio=63.2%, which is
+# an artifact of bad segmentation, NOT a genuine physical structural risk. Even with a
+# geometrically correct (full-width, full-height) marker, this comparison is fundamentally
+# comparing the wrong things.
+# FIX: before forming adjacent pairs, flag any stack whose width is either narrower than
+# V2424_PAIRWISE_MIN_STACK_WIDTH_PX (likely a segmentation fragment) or wider than
+# V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN times the view's median stack width (likely a
+# merged multi-stack blob). Any pair involving a flagged/"suspect" stack is skipped
+# entirely (not compared) - it is neither ACCEPTed nor REJECTed on ratio grounds, it is
+# excluded as unreliable input data. Verified against real AA04-05 BACK numbers: this
+# correctly flags idx=0 (27px < 40px min), idx=1 (30px < 40px min), and idx=2 (228px vs
+# median 57px = 4.0x > 2.5x max) as suspect, leaving ONLY pair (idx=3, idx=4) - heights
+# (218,163), diff=55px, ratio=25% - which does NOT involve any suspect stack and is kept
+# exactly as before. This ratio=25% pair was always a genuine signal (both its stacks have
+# sane widths of 57px and 109px respectively) so it survives unaffected.
+V2424_PAIRWISE_WIDTH_SANITY_ENABLED = True
+V2424_PAIRWISE_MIN_STACK_WIDTH_PX = 40
+V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN = 2.5
 
 # v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
 # ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
@@ -2012,19 +2090,10 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
 
 
 def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
-    """v24.18-22 CROSS-VIEW PROFILE COLLISION detector. See V2418_*/V2421_*/V2422_*
-    constants block (near V2414) for full root-cause / design rationale and version
-    history. Replaces the v24.15/16/17 depth-pair-color approach entirely.
-
-    CORE IDEA: treat FRONT and BACK as two independent height-profile "planes" measured
-    along the truck's hood-to-tail axis, but from OPPOSITE ends. Look up the height
-    reported by BOTH views at the same real position (mirrored) and compare - disagreement
-    beyond threshold is a genuine structural risk.
-
-    v24.19: reference view = whichever of FRONT/BACK has more segmented stacks.
-    v24.20: cross-view regions exempt from V2410_STEPDOWN_STRONGEST_ONLY.
-    v24.21: dedicated, lower threshold (0.15 vs pairwise 0.22); full-height marker.
-    v24.22: merge ALL accepted candidates per view into ONE bounding box.
+    """v24.18-22 CROSS-VIEW PROFILE COLLISION detector. Compares FRONT vs BACK height
+    profiles at mirrored positions along the truck's hood-to-tail axis. Reference view =
+    whichever of FRONT/BACK has more segmented stacks; dedicated threshold (0.15, separate
+    from pairwise 0.22); all accepted candidates per view merged into ONE bounding box.
     """
     regions_by_view = {"FRONT": [], "BACK": []}
     front_stacks = stack_box_model.get("FRONT", []) or []
@@ -3188,10 +3257,8 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
 
-        # v24.18-22: CROSS-VIEW PROFILE COLLISION - compare FRONT vs BACK height profiles at
-        # mirrored positions along the truck's hood-to-tail axis (see V2418_*/V2421_*/
-        # V2422_* constants and _find_cross_view_profile_collision_regions docstring). Must
-        # run BEFORE the strongest-only filter below so its regions can be tagged/exempted.
+        # v24.18-22: CROSS-VIEW PROFILE COLLISION - run before strongest-only so regions can
+        # be tagged/exempted.
         if globals().get("V2418_CROSS_VIEW_COLLISION_ENABLED", True):
             _cross_view_regions_by_view = _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent)
             for _view in ("FRONT", "BACK"):
@@ -3843,8 +3910,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.23",
-            "benchmarkMode": "v24.23_pairwise_full_height_marker"}, 200, headers)
+            "checkerVersion": "V24.24",
+            "benchmarkMode": "v24.24_width_sanity_gate"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
