@@ -17,26 +17,29 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.28 - VetoAndFallbackFix: real log evidence from AC03-01 (user confirmed the AI's
-#          finding was correct against the original blue-box reference image) exposed two
-#          bugs after the v24.27 build:
-#          (1) REAR_LATERAL_IMBALANCE VETO false-fired at FRONT: the hardcoded ~45%-width
-#              rear zone only overlapped 1 segmented stack, so no comparison pair could
-#              ever form - get_max_lateral_imbalance_ratio_in_zone() silently returned its
-#              initial 0.0, indistinguishable from "measured, found no difference". Fixed
-#              by returning None ("cannot measure") whenever fewer than 2 comparable stacks
-#              exist in the zone; the VETO gate now treats None as "cannot veto" - lack of
-#              evidence is not evidence of safety, so it defers to the AI's finding.
-#          (2) v24.27's blanket "clear all width-sanity suspects when too few clean stacks
-#              remain" fallback (meant to address bug #1 indirectly) instead caused a NEW
-#              false marker: BACK view's STEP_DOWN loop compared two segmentation-fragment
-#              slivers (both already flagged suspect) against each other and accepted a
-#              spurious ratio. That blanket fallback is REMOVED - normal v24.24/25/26
-#              width-sanity filtering (skip any pair touching a suspect) is restored
-#              unconditionally for STEP_DOWN/Valley/Cross-View/LATERAL_GAP. Bug #1's
-#              original concern (0 pairs silently becoming "no risk") is now solved
-#              precisely at the VETO gate itself via the None-sentinel fix, without
-#              reintroducing unreliable comparisons anywhere else.
+# v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
+#          VCS1A zone had no marker at all) exposed that "strongest-only" discarded every
+#          ordinary STEP_DOWN candidate except the single highest-ratio one PER VIEW, even
+#          when a discarded candidate independently passed its own threshold and sat at a
+#          completely different, non-overlapping x-position (FRONT: x=[643-790] ratio=16.3%
+#          discarded vs winning x=[962-1035] ratio=24.7%, 172px apart, zero overlap; BACK
+#          had the same pattern: x=[677-800] ratio=10.7% discarded vs winning x=[590-636]
+#          ratio=63.8%). A truck can genuinely have more than one independent STEP_DOWN risk
+#          at once - this is the same class of bug that v24.22 already fixed for cross-view
+#          collisions (merge only when adjacent, keep separate boxes otherwise), just never
+#          applied to ordinary pairwise/valley candidates. Fixed by replacing the single
+#          max() selection with _select_non_overlapping_step_down_candidates(): sort by
+#          ratio descending, always keep the strongest, then keep each subsequent candidate
+#          unless its x-range overlaps an already-kept candidate by more than
+#          V2429_STEPDOWN_OVERLAP_MAX_RATIO (30%) of the smaller region's width - true
+#          duplicates (same physical location) still collapse to one marker as v24.10
+#          originally intended, but genuinely separate risks now both get their own marker.
+# v24.28 - VetoAndFallbackFix: fixed REAR_LATERAL_IMBALANCE VETO false-firing when the
+#          hardcoded rear zone only overlapped 1 stack (no pair could ever be formed, so the
+#          ratio silently defaulted to 0.0, indistinguishable from "measured, no
+#          difference"). get_max_lateral_imbalance_ratio_in_zone() now returns None
+#          ("cannot measure") in that case, and the VETO gate treats None as "cannot veto" -
+#          insufficient data is not evidence of safety.
 # v24.26 - RearLateralNoShift: user reported a real case (AB01-02, BACK view) where the
 #          REAR_LATERAL_IMBALANCE marker was drawn floating ABOVE the container's own top
 #          edge, outside the drawn artwork entirely. Root cause: V2405's hardcoded 50%
@@ -1269,16 +1272,6 @@ def _flag_width_outlier_stacks(ss, view_label=None):
 
     Returns a set of suspect indices (into the `ss` list passed in, using that list's own
     order) so each caller can skip any candidate/pair touching a suspect stack.
-
-    v24.28 NOTE: a short-lived v24.27 build added a blanket fallback here (clear ALL
-    suspect flags whenever too few clean stacks remained) to prevent a "0 comparable pairs"
-    situation from being silently misread as "no risk" by the REAR_LATERAL_IMBALANCE VETO
-    gate. That fallback is REMOVED in v24.28 - it caused a NEW bug (confirmed by user, real
-    AC03-01 BACK view: comparing two segmentation-fragment slivers against each other,
-    producing a spurious ratio and a wrongly-positioned marker). The original goal is now
-    achieved correctly and specifically at the VETO gate itself (see V2428_* constants and
-    get_max_lateral_imbalance_ratio_in_zone()/_should_veto_lateral_imbalance() for the
-    proper, narrowly-scoped fix) instead of relaxing filtering for every caller.
     """
     if not globals().get("V2424_PAIRWISE_WIDTH_SANITY_ENABLED", True) or len(ss) < 2:
         return set()
@@ -1302,6 +1295,52 @@ def _flag_width_outlier_stacks(ss, view_label=None):
                       f"ratio={ratio_vs_median:.2f} > max={max_ratio} -> flagged as suspect "
                       f"(likely merged multi-stack blob)")
     return suspects
+
+
+def _select_non_overlapping_step_down_candidates(regions, view_label=None):
+    """v24.29 GREEDY NON-OVERLAPPING SELECTION - replaces the old "keep only the single
+    strongest candidate" behavior. See the v24.29 comment above this function's call site
+    (near V2410_STEPDOWN_STRONGEST_ONLY) for the full root-cause writeup: real log evidence
+    (AC09-02) showed a truck can genuinely have more than one independent STEP_DOWN risk at
+    once, at completely different, non-overlapping positions - discarding a real risk just
+    because a stronger one exists elsewhere was a bug, not a feature.
+
+    Algorithm: sort candidates by ratio descending. Always keep the strongest. For each
+    remaining candidate (in descending ratio order), keep it too UNLESS its x-range overlaps
+    an already-kept candidate's x-range by more than V2429_STEPDOWN_OVERLAP_MAX_RATIO of the
+    smaller region's width - a large overlap means they describe the same physical location
+    (e.g. two detectors both firing on the same boundary), which should still collapse to a
+    single marker exactly as v24.10 originally intended. A small/no overlap means they are
+    genuinely different locations and both deserve their own marker.
+    """
+    max_overlap_ratio = globals().get("V2429_STEPDOWN_OVERLAP_MAX_RATIO", 0.30)
+    ordered = sorted(regions, key=lambda rr: rr.get("ratio", 0), reverse=True)
+    kept = []
+    for cand in ordered:
+        cx0, cx1 = cand.get("x_min", 0), cand.get("x_max", 0)
+        cand_w = max(1, cx1 - cx0)
+        overlaps_kept = False
+        for k in kept:
+            kx0, kx1 = k.get("x_min", 0), k.get("x_max", 0)
+            k_w = max(1, kx1 - kx0)
+            inter = max(0, min(cx1, kx1) - max(cx0, kx0))
+            smaller_w = min(cand_w, k_w)
+            overlap_ratio = inter / smaller_w if smaller_w > 0 else 0
+            if overlap_ratio > max_overlap_ratio:
+                overlaps_kept = True
+                break
+        if overlaps_kept:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.29 STEP_DOWN multi-candidate ({view_label}): discarded ratio="
+                      f"{cand.get('ratio',0)*100:.1f}% x=[{cx0:.0f}-{cx1:.0f}] - overlaps an "
+                      f"already-kept, stronger candidate at the same physical location")
+            continue
+        kept.append(cand)
+    if globals().get("V2407_TRACE", True):
+        _kept_ratios = [f"{rr.get('ratio', 0) * 100:.1f}%" for rr in kept]
+        print(f"v24.29 STEP_DOWN multi-candidate ({view_label}): kept {len(kept)} non-overlapping "
+              f"candidate(s) out of {len(regions)} - ratios={_kept_ratios}")
+    return kept
 
 
 def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
@@ -1582,6 +1621,19 @@ V2410_STEPDOWN_STRONGEST_ONLY = True
 V2410_STEPDOWN_BOUNDARY_ONLY = True
 V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 
+# v24.29 MULTI-CANDIDATE STEP_DOWN - see _select_non_overlapping_step_down_candidates() and
+# its call site (near V2410_STEPDOWN_STRONGEST_ONLY) for the full root-cause writeup. Real
+# log evidence (AC09-02): FRONT view had TWO genuine, non-overlapping STEP_DOWN candidates
+# at once (x=[643-790] ratio=16.3% in the green VCS1A zone, and x=[962-1035] ratio=24.7% in
+# the yellow MSFTA zone, 172px apart with zero overlap) - the old "keep only the single
+# strongest" logic silently discarded the green-zone risk even though it independently
+# passed its own detection threshold. V2429_STEPDOWN_OVERLAP_MAX_RATIO controls how much two
+# candidates' x-ranges must overlap (as a fraction of the smaller region's width) before
+# they're considered "the same physical location" and collapsed into one marker (preserving
+# the original v24.10 intent for true duplicates); below this threshold, both are kept as
+# separate markers.
+V2429_STEPDOWN_OVERLAP_MAX_RATIO = 0.30
+
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
 # top_y..floor_y) instead of a narrow ~25%-width slice, for visual consistency with the
@@ -1618,34 +1670,6 @@ V2423_PAIRWISE_FULL_WIDTH_MARKER = True
 V2424_PAIRWISE_WIDTH_SANITY_ENABLED = True
 V2424_PAIRWISE_MIN_STACK_WIDTH_PX = 40
 V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN = 2.5
-
-# v24.28 - VetoAndFallbackFix - see get_max_lateral_imbalance_ratio_in_zone() and
-# _should_veto_lateral_imbalance() docstrings/comments for the full root-cause writeup.
-# TWO real bugs found via log evidence from AC03-01 (user confirmed the AI's finding was
-# correct against the original blue-box reference image):
-#   (1) REAR_LATERAL_IMBALANCE VETO false-fired at FRONT because the rear zone (a
-#       HARDCODED ~45% width slice) only overlapped 1 segmented stack, so no comparison
-#       pair could ever be formed - get_max_lateral_imbalance_ratio_in_zone() silently
-#       returned its initial value 0.0, which is indistinguishable downstream from "measured
-#       a real pair, found no difference". FIX: that function now returns None ("cannot
-#       measure") whenever there are fewer than 2 comparable stacks in the zone (before or
-#       after width-sanity filtering); the VETO gate now treats None as "cannot veto" -
-#       insufficient data is not evidence of safety, so it defers to the AI's finding.
-#   (2) A short-lived v24.27 attempt at a *different* fix for a similar-looking problem
-#       (BACK view STEP_DOWN detector) added a blanket fallback inside
-#       _flag_width_outlier_stacks() that cleared ALL suspect flags whenever too few clean
-#       stacks remained, so every caller (not just the VETO gate) fell back to comparing
-#       completely unfiltered, unreliable stacks. In AC03-01's BACK view this caused the
-#       pairwise STEP_DOWN loop to compare idx=0 (29px) against idx=1 (31px) - two
-#       segmentation-fragment slivers BOTH already flagged suspect - and accept a spurious
-#       58% ratio, drawing a tiny, wrongly-positioned marker (confirmed by user against the
-#       real output image). That blanket fallback is REMOVED in v24.28: normal width-sanity
-#       filtering (v24.24/25/26 behavior - skip any pair touching a suspect stack) is
-#       restored unconditionally for STEP_DOWN/Valley/Cross-View/LATERAL_GAP. The original
-#       v24.27 goal (don't let "0 comparable pairs" silently become "no risk") is instead
-#       achieved precisely at its real source - the VETO gate above - via the None-sentinel
-#       fix, without introducing new false markers elsewhere.
-V2428_BUILD = True
 
 # v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
 # ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
@@ -2529,24 +2553,15 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     ในโซนประตูท้ายตู้ (ไม่กรองด้วย threshold) - ใช้สำหรับตัดสินใจ VETO การ claim ของ
     AI (ถ้าค่าสูงสุดที่วัดได้ต่ำมาก แสดงว่าไม่มีความไม่สมดุลจริงในโซนนี้เลย)
 
-    v24.28 FIX (root-cause writeup - see V2428_* constants near V2424 block for full
-    detail): real log evidence (AC03-01, FRONT view) showed that when the rear zone
-    (rear_x0..rear_x1, a HARDCODED ~45% slice of the container width) only overlaps ONE
-    segmented stack - either because segmentation is coarse (few stacks total) or the zone
-    boundary happens to cut most stacks out - the comparison loop below never executes even
-    once (range(len(relevant)-1) with len(relevant)<=1 is empty), so max_ratio silently
-    stayed at its initial value 0.0. That 0.0 is indistinguishable from "measured a genuine
-    pair and found no height difference", but it actually means "could not measure at all" -
-    a completely different, much weaker claim. Downstream, this caused
-    _should_veto_lateral_imbalance() to VETO a genuine AI-detected REAR_LATERAL_IMBALANCE
-    (AI explicitly described a real 1-tier-vs-2-tier ~50% difference, confirmed correct by
-    user against the original blue-box reference image) because 0.0 < veto threshold 0.2.
-    FIX: return None (a distinguishable "cannot measure" sentinel) whenever there are fewer
-    than 2 relevant stacks to compare (either before or after width-sanity filtering) -
-    "not enough data to measure" must never be conflated with "measured, found nothing".
-    The caller (_should_veto_lateral_imbalance) now treats None as "cannot veto" - lack of
-    evidence is not evidence of safety, so it defers to the AI's finding instead of
-    overriding it.
+    v24.28 FIX (real log evidence, AC03-01 FRONT view - user confirmed the AI's finding was
+    correct against the original blue-box reference image): when the rear zone (a HARDCODED
+    ~45% width slice) only overlaps ONE segmented stack, the comparison loop below never
+    executes even once, so max_ratio silently stayed at its initial value 0.0 -
+    indistinguishable from "measured a real pair, found no difference". That falsely caused
+    _should_veto_lateral_imbalance() to VETO a genuine AI-detected REAR_LATERAL_IMBALANCE.
+    FIX: return None ("cannot measure") whenever fewer than 2 comparable stacks exist in the
+    zone (before or after width-sanity filtering) - "not enough data" must never be
+    conflated with "measured, found nothing". The VETO gate treats None as "cannot veto".
     """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
@@ -3367,6 +3382,25 @@ def process_request(request):
 
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
         # v24.20: cross-view collision regions exempt from this single-marker-per-view filter.
+        #
+        # v24.29 FIX (real log evidence, AC09-02 FRONT+BACK - user confirmed a genuine risk in
+        # the green VCS1A zone was missing a marker entirely): "strongest-only" picked ONLY
+        # the single highest-ratio ordinary candidate per view and discarded every other
+        # candidate outright, even when a discarded candidate: (a) already passed its own
+        # detection threshold on its own merits, and (b) sat at a completely different,
+        # non-overlapping x-position from the winning candidate (e.g. FRONT: x=[643-790]
+        # ratio=16.3% discarded vs winning x=[962-1035] ratio=24.7% - 172px apart, no overlap
+        # at all). A single truck can genuinely have more than one independent STEP_DOWN risk
+        # at once; discarding a real, non-overlapping risk just because a stronger one exists
+        # elsewhere is the same class of bug that V2422 already fixed for cross-view
+        # collisions (merge only when adjacent/overlapping, keep separate boxes otherwise).
+        # FIX: replace pure "keep only the single strongest" with a greedy non-overlapping
+        # selection - sort ordinary candidates by ratio descending, always keep the strongest,
+        # then keep each subsequent candidate only if its x-range does NOT overlap with any
+        # already-kept candidate's x-range (by more than V2429_STEPDOWN_OVERLAP_MAX_RATIO of
+        # the smaller region's width - a small overlap from measurement noise is tolerated,
+        # a large overlap means they're really the same physical location and should still
+        # collapse to one marker, preserving the original v24.10 intent for TRUE duplicates).
         if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
             exempt_cross_view = globals().get("V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY", True)
             for _view in ("FRONT", "BACK"):
@@ -3378,10 +3412,8 @@ def process_request(request):
                     _cross_view_kept = []
                     _ordinary_regions = _regions
                 if len(_ordinary_regions) > 1:
-                    _best = max(_ordinary_regions, key=lambda rr: rr.get("ratio", 0))
-                    print(f"v24.10 STEP_DOWN strongest-only ({_view}): kept ratio={_best.get('ratio',0)*100:.1f}% from {len(_ordinary_regions)} ordinary candidate(s) "
-                          f"(cross-view collision candidates exempt: {len(_cross_view_kept)} kept as-is)")
-                    _ordinary_regions = [_best]
+                    _kept = _select_non_overlapping_step_down_candidates(_ordinary_regions, view_label=_view)
+                    _ordinary_regions = _kept
                 step_down_regions[_view] = _ordinary_regions + _cross_view_kept
 
         inter_stack_gap_regions = {"FRONT": [], "BACK": []}
@@ -3632,14 +3664,8 @@ def process_request(request):
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
             max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
             # v24.28 FIX: max_ratio can now be None ("could not measure any pair in the rear
-            # zone" - see get_max_lateral_imbalance_ratio_in_zone docstring for full
-            # root-cause). None must NEVER be treated as "measured 0.0, no imbalance" - lack
-            # of evidence is not evidence of safety. Real case confirmed by user (AC03-01,
-            # FRONT view): rear zone only overlapped 1 stack, so no pair could ever be formed;
-            # the AI's genuine REAR_LATERAL_IMBALANCE finding was incorrectly VETOed under the
-            # old 0.0-default behavior. Now: if we cannot measure, do not veto - defer to the
-            # AI's finding instead (same as the "insufficient data" default for every other
-            # gate in this file).
+            # zone"). None must NEVER be treated as "measured 0.0, no imbalance" - lack of
+            # evidence is not evidence of safety. Defer to the AI's finding instead.
             if max_ratio is None:
                 print(f"REAR_LATERAL_IMBALANCE VETO skipped ({view_label}): could not measure any "
                       f"comparable stack pair in the rear zone x=[{rear_x0}-{rear_x1}] (insufficient "
@@ -4018,8 +4044,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.28",
-            "benchmarkMode": "v24.28_veto_and_fallback_fix"}, 200, headers)
+            "checkerVersion": "V24.29",
+            "benchmarkMode": "v24.29_multi_candidate_step_down"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
