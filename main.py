@@ -17,6 +17,26 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.26 - RearLateralNoShift: user reported a real case (AB01-02, BACK view) where the
+#          REAR_LATERAL_IMBALANCE marker was drawn floating ABOVE the container's own top
+#          edge, outside the drawn artwork entirely. Root cause: V2405's hardcoded 50%
+#          upward shift for BACK view (added in v24.05 because the raw marker back then
+#          sometimes landed too low / didn't cover the cargo stack) was applied
+#          unconditionally with no clamp against container/cargo bounds. Log evidence:
+#          raw AI zoom box=[874,966,1007,1150] (already correctly positioned, inside
+#          container top y=921) got shifted up by 92px (50% of its 184px height) to
+#          [874,874,1007,1058] - y=874 is ABOVE the container's own top edge (921),
+#          floating in empty space above the drawn truck. User confirmed: if disabling
+#          this shift produces the same drawing behavior as every other risk type (i.e.
+#          just use the precise/raw box_2d directly, no artificial adjustment), that's
+#          preferred over a hardcoded shift with no bounds check. Fixed by setting
+#          V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK = False (was True since v24.05) - this
+#          single flag gates both shift helper functions (_v2405_shift_abs_box_up_for_back
+#          and _v2405_shift_box_2d_up_for_back) at all 6 call sites, so REAR_LATERAL_
+#          IMBALANCE (BACK) now draws its precise/deterministic/AI box exactly as given,
+#          same treatment as FRONT_EMPTY_RISK, LATERAL_GAP_RISK, TALL_UNSTABLE_RISK, etc.
+#          Verified: AB01-02 raw box [874,966,1007,1150] now stays as-is (y=966 >= 921,
+#          inside container bounds) instead of floating outside at y=874.
 # v24.25 - FullCodeAuditFixes: fixes from a full audit of every risk detector (single +
 #          combined) for marker-position bugs/conflicts. User approved fixes 1,2,5,6; kept
 #          3 (report grouping) and 4 (cross-view nearest-match) unchanged by choice.
@@ -1590,9 +1610,22 @@ V2413_TRACE = True
 # Main target: AA04-05 BACK view. Marker should cover the visible cargo stacks causing the
 # left-right rear height imbalance, not the lower/floor area.
 V2405_REAR_LATERAL_TUNE_ENABLED = True
+# v24.26: user confirmed the original reason for V2405's hardcoded 50% BACK shift-up was
+# that the raw marker sometimes landed too low (not covering the cargo stack). But real
+# log evidence from AB01-02 shows this fixed 50% shift, applied unconditionally with no
+# clamp against container/cargo bounds, can push the box ABOVE the container's own top
+# edge when the raw box is already positioned correctly high up (raw box y=[966-1150],
+# container top y=921 -> after shift: y=[874-1058], 874 < 921, floating above the drawn
+# container entirely). User explicitly asked: if we don't need this adjustment and the
+# result matches how every other risk type is drawn (i.e. just use the precise/raw box
+# directly, no artificial shift), do it. Disabling V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK
+# below makes both shift helper functions no-ops, so REAR_LATERAL_IMBALANCE (BACK) now
+# draws its precise/deterministic/AI box exactly like every other risk type - unchanged.
 V2405_REAR_LATERAL_BACK_SHIFT_UP_RATIO = 0.50
 V2405_REAR_LATERAL_USE_DET_BOX_FOR_FORCED = True
-V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK = True
+# v24.26: disabled per user confirmation - see comment on V2405_REAR_LATERAL_BACK_SHIFT_UP_RATIO
+# above. Was True in v24.05-v24.25.
+V2405_REAR_LATERAL_FINAL_DRAW_SHIFT_BACK = False
 V2405_REAR_LATERAL_MARK_VISIBLE_PAIR_ONLY = True
 V2405_REAR_LATERAL_TRACE = True
 
@@ -3883,8 +3916,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.25",
-            "benchmarkMode": "v24.25_full_code_audit_fixes"}, 200, headers)
+            "checkerVersion": "V24.26",
+            "benchmarkMode": "v24.26_rear_lateral_no_shift"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
