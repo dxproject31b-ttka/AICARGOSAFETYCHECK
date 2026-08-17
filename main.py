@@ -17,6 +17,22 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.25 - FullCodeAuditFixes: fixes from a full audit of every risk detector (single +
+#          combined) for marker-position bugs/conflicts. User approved fixes 1,2,5,6; kept
+#          3 (report grouping) and 4 (cross-view nearest-match) unchanged by choice.
+#          (1) Width-sanity gate (v24.24, was pairwise-STEP_DOWN-only) now also applied in
+#              Valley Pattern, Cross-View Collision, REAR_LATERAL_IMBALANCE FORCE/VETO, and
+#              LATERAL_GAP_RISK - same segmentation-artifact bug could hit any of them.
+#          (2) COMBINED_AREA_RISK's precise merged_box (computed by _merge_same_area_risks)
+#              was never actually drawn - `is_zone_based` excluded it from BOTH drawing
+#              branches simultaneously, so it always fell back to a generic zone box. Added
+#              a dedicated draw branch that uses the merged_box directly when present.
+#          (5) Cross-view merge (v24.22) combined ALL accepted candidates per view into one
+#              box regardless of adjacency, which could re-create the "giant box" problem.
+#              Now only merges stacks that are contiguous by index; non-adjacent groups get
+#              separate boxes.
+#          (6) Removed OVERHANG_RISK entirely (100% disabled since v24.07, could never fire)
+#              and the one unreachable "REAR_COMBINED_RISK" title branch (dead code).
 # v24.24 - WidthSanityGate: fixes a root-cause bug found in v24.23's live test on real
 #          AA04-05 BACK view. Even after v24.23 fixed the marker to be full-width/full-
 #          height, the resulting box still looked wrong because the underlying comparison
@@ -170,7 +186,6 @@ RISK_COLORS = {
     "FRONT_EMPTY_RISK": "yellow",
     "LATERAL_GAP_RISK": "cyan",
     "TALL_UNSTABLE_RISK": "magenta",
-    "OVERHANG_RISK": "lime",
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
@@ -184,7 +199,6 @@ BOX_BASED_RISK_TYPES = {
     "STEP_DOWN_RISK",
     "LATERAL_GAP_RISK",
     "TALL_UNSTABLE_RISK",
-    "OVERHANG_RISK",
 }
 
 HARDCODED_REAR_SIDE = {
@@ -321,13 +335,6 @@ def generate_action_report(case_type, description="", sku_list=""):
             f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
             f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
             f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
-        ),
-        "OVERHANG_RISK": (
-            f"แจ้งเตือน: พบสินค้าชั้นบนยื่นพ้นขอบสินค้าชั้นล่าง{sku_line}\n"
-            f"วิธีแก้ไข:\n"
-            f"  • จัดเรียงสินค้าชั้นบนใหม่ให้อยู่ในขอบของชั้นล่าง ไม่ให้ยื่นออกมา\n"
-            f"  • ตรวจสอบความสูงแต่ละชั้นให้เสมอกัน ก่อนวางชั้นถัดไป\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกรอบทุกชั้น ป้องกันสินค้าหล่นระหว่างเดินทาง"
         ),
     }
     return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
@@ -1134,6 +1141,11 @@ def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
     if n < 3:
         return regions
     heights = [max(1, s["floor_y"] - s["top_y"]) for s in ss]
+    # v24.25: apply the same width-sanity gate used by pairwise STEP_DOWN (v24.24) here too
+    # (see _flag_width_outlier_stacks docstring for full root-cause) - a valley whose left
+    # wall, right wall, or any interior dip stack is a segmentation fragment/merged-blob
+    # outlier is just as unreliable as a pairwise comparison touching the same outlier.
+    suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
     i = 1
     while i < n - 1:
         if heights[i] >= heights[i - 1]:
@@ -1154,13 +1166,19 @@ def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
         if valley_min_h >= left_wall_h or valley_min_h >= right_wall_h:
             i = bottom_end + 1
             continue  # not actually lower than BOTH walls - not a genuine valley
+        span_desc = f"stack[{i - 1}]-stack[{right_wall_idx}]"
+        if any(idx in suspect_indices for idx in range(i - 1, right_wall_idx + 1)):
+            if globals().get("V2414_TRACE", True):
+                print(f"v24.25 VALLEY reject {view_label} span={span_desc}: "
+                      f"one or more stacks in this span flagged as width-outlier (see WIDTH_SANITY above)")
+            i = bottom_end + 1
+            continue
         diff_left = left_wall_h - valley_min_h
         diff_right = right_wall_h - valley_min_h
         ratio_left = diff_left / max(1, left_wall_h)
         ratio_right = diff_right / max(1, right_wall_h)
         min_diff = min(diff_left, diff_right)
         min_ratio = min(ratio_left, ratio_right)
-        span_desc = f"stack[{i - 1}]-stack[{right_wall_idx}]"
         if min_diff >= valley_min_abs_px and min_ratio >= valley_min_ratio:
             x0 = min(s["x0"] for s in valley_stacks)
             x1 = max(s["x1"] for s in valley_stacks)
@@ -1189,12 +1207,19 @@ def _find_valley_regions(ss, view_label, valley_min_ratio, valley_min_abs_px):
 
 
 def _flag_width_outlier_stacks(ss, view_label=None):
-    """v24.24 WIDTH-SANITY GATE. See V2424_* constants block (near V2410) for full
-    root-cause writeup: fixes a bug found in v24.23's live test on AA04-05 BACK view, where
-    the pairwise STEP_DOWN loop compared a narrow segmentation-artifact sliver against a
-    merged multi-stack "blob" and reported a spurious height_diff_ratio=63.2% that was
-    never a genuine physical risk - it was purely an artifact of coarse segmentation
-    (BACK only detected 5 stacks vs FRONT's 8).
+    """v24.24 WIDTH-SANITY GATE (v24.25: now used by EVERY stack-comparison detector, not
+    just pairwise STEP_DOWN). See V2424_* constants block (near V2410) for full root-cause
+    writeup: fixes a bug found in v24.23's live test on AA04-05 BACK view, where the
+    pairwise STEP_DOWN loop compared a narrow segmentation-artifact sliver against a merged
+    multi-stack "blob" and reported a spurious height_diff_ratio=63.2% that was never a
+    genuine physical risk - it was purely an artifact of coarse segmentation (BACK only
+    detected 5 stacks vs FRONT's 8).
+
+    v24.25 AUDIT FINDING: this gate was originally wired into ONLY the pairwise STEP_DOWN
+    loop, leaving every other stack-comparison detector (Valley Pattern, Cross-View
+    Collision, REAR_LATERAL_IMBALANCE FORCE/VETO, LATERAL_GAP_RISK) exposed to the exact
+    same class of segmentation-artifact bug. It is now called from all of them (see each
+    detector's own comment for the specific call site).
 
     Flags any stack index whose width is either:
       (a) narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX (likely a segmentation fragment,
@@ -1202,8 +1227,8 @@ def _flag_width_outlier_stacks(ss, view_label=None):
       (b) wider than V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN times the view's median
           stack width (likely several real stacks merged into one blob by segmentation).
 
-    Returns a set of suspect indices (into the `ss` list, same indexing used by the
-    pairwise loop) so the caller can skip any pair touching a suspect stack.
+    Returns a set of suspect indices (into the `ss` list passed in, using that list's own
+    order) so each caller can skip any candidate/pair touching a suspect stack.
     """
     if not globals().get("V2424_PAIRWISE_WIDTH_SANITY_ENABLED", True) or len(ss) < 2:
         return set()
@@ -1415,10 +1440,12 @@ def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, re
 #   ขั้น 2 (แบ่ง "กล่อง" ในแต่ละตั้งตามแนวสูง): ใช้หลักการเดียวกัน (3 สัญญาณรวมกัน)
 #   ตามแนวตั้ง แล้ววัดขอบซ้าย/ขวาจริงของกล่องแต่ละใบด้วย median-of-multiple-rows
 #
-# นำแบบจำลองนี้ไปใช้กับ 3 risk type ที่เดิมพึ่ง AI 100% ใน v21:
-#   - OVERHANG_RISK, TALL_UNSTABLE_RISK: FORCE + VETO
+# นำแบบจำลองนี้ไปใช้กับ risk type ที่เดิมพึ่ง AI 100% ใน v21:
+#   - TALL_UNSTABLE_RISK: FORCE + VETO
 #   - REAR_LATERAL_IMBALANCE: FORCE เสมอ + VETO แบบมีเงื่อนไข (v24 ใหม่ - ดู
 #     process_request สำหรับ logic การ veto)
+#   (v24.25: OVERHANG_RISK ถูกนำออกจากระบบทั้งหมดแล้ว เพราะถูกปิดใช้งาน 100% มาตั้งแต่
+#    v24.07 และไม่มีทางกลายเป็นความเสี่ยงจริงได้เลย - ดู CHANGELOG หัวไฟล์)
 #
 # ข้อจำกัดที่ทราบและยอมรับ (ดู CHANGELOG หัวไฟล์สำหรับรายละเอียดเต็ม):
 #   - Occlusion ในมุมมอง isometric (ยืนยันจากไฟล์ EC51-02)
@@ -1445,8 +1472,6 @@ TOP_ROW_MAJORITY_RATIO = 0.65  # v24.1 FIX: เดิมใช้ "ANY column ha
 
 STACK_COVERAGE_MIN_RATIO = 0.60
 
-OVERHANG_MIN_RATIO = 0.20
-OVERHANG_MIN_ABS_PX = 20
 TALL_UNSTABLE_MIN_HEIGHT_RATIO = 0.35
 TALL_UNSTABLE_NEIGHBOR_MAX_RATIO = 0.65
 
@@ -1464,43 +1489,13 @@ V2401_TALL_UNSTABLE_MIN_ABS_HEIGHT_PX = 25
 V2401_TALL_UNSTABLE_TRACE = True
 
 # v24.02 targeted marker/decision controls
-V2402_OVERHANG_CAUSE_BOX_ENABLED = True
 V2402_REAR_LATERAL_BACK_BOX_SHIFT_UP_RATIO = 0.50
 V2402_LATERAL_GAP_INTER_STACK_ONLY = True
 V2402_LATERAL_GAP_MIN_INTER_STACK_GAP_PX = 18
 V2402_LATERAL_GAP_MIN_VERTICAL_OVERLAP_RATIO = 0.20
 V2402_TRACE = True
 
-# v24.04 OVERHANG_RISK controls
-# New definition from user review:
-# - consider a cargo stack only when boxes are visibly stacked from lower to upper box;
-# - if adjacent stacked boxes in the same stack have clearly different visible width/size,
-#   treat it as an unstable support/overhang candidate;
-# - reject edge-only/isometric artifacts where only a thin outer strip is detected.
-V2404_OVERHANG_STACK_SIZE_GUARD_ENABLED = True
-V2404_OVERHANG_MIN_WIDTH_MISMATCH_RATIO = 0.05
-V2404_OVERHANG_MIN_WIDTH_MISMATCH_PX = 6
-V2404_OVERHANG_MIN_VERTICAL_TOUCH_RATIO = 0.12
-V2404_OVERHANG_MARK_PAIR_BOX = True
-V2404_OVERHANG_REJECT_EDGE_STRIP_ONLY = True
-V2404_OVERHANG_TRACE = True
-
-# v24.06 OVERHANG strict controls
-V2406_OVERHANG_FIVE_PERCENT_GUARD_ENABLED = True
-V2406_OVERHANG_MIN_SIZE_DIFF_RATIO = 0.05
-V2406_OVERHANG_MIN_SIZE_DIFF_PX = 6
-V2406_OVERHANG_REQUIRE_SAME_STACK_VISIBLE_PAIR = True
-V2406_OVERHANG_DISABLE_FALLBACK_MARKER = True
-V2406_OVERHANG_SUPPRESS_EDGE_ARTIFACT = True
-V2406_OVERHANG_AA02_SAFE_REFERENCE = True
-V2406_OVERHANG_TRACE = True
-
 # v24.07 focused controls
-# OVERHANG remains audit-only because AA02-01 proves the active scanner can still map
-# isometric/segmentation artifacts into a false green marker. No OVERHANG hazard/marker is emitted.
-V2407_OVERHANG_AUDIT_ONLY = True
-V2407_OVERHANG_ACTIVE_DETECTION = False
-V2407_OVERHANG_DISABLE_AI_ACCEPT = True
 V2407_STEP_DOWN_STACK_ADJACENCY_ENABLED = True
 V2407_STEP_DOWN_STACK_HEIGHT_RATIO = 0.22
 V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX = 18
@@ -2132,10 +2127,17 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18)
     merge_single_box = globals().get("V2422_CROSS_VIEW_MERGE_INTO_SINGLE_BOX", True)
 
+    ref_sorted = sorted(ref_stacks, key=lambda s: s["x0"])
     sec_sorted = sorted(sec_stacks, key=lambda s: s["x0"])
+    # v24.25: same width-sanity gate as pairwise STEP_DOWN/Valley (see
+    # _flag_width_outlier_stacks docstring) - a reference or matched-secondary stack that is
+    # a segmentation fragment/merged-blob outlier makes the cross-view comparison unreliable
+    # regardless of how confident the ratio looks.
+    ref_suspects = _flag_width_outlier_stacks(ref_sorted, view_label=reference_view)
+    sec_suspects = _flag_width_outlier_stacks(sec_sorted, view_label=secondary_view)
     accepted = []
 
-    for r_idx, rs in enumerate(sorted(ref_stacks, key=lambda s: s["x0"])):
+    for r_idx, rs in enumerate(ref_sorted):
         ref_mid_x = (rs["x0"] + rs["x1"]) / 2.0
         pos_ratio = (ref_mid_x - ref_xmin) / ref_span
         pos_ratio = min(1.0, max(0.0, pos_ratio))
@@ -2143,12 +2145,20 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
         sec_target_x = sec_xmin + mirror_ratio * sec_span
 
         matched = None
-        for ss in sec_sorted:
+        matched_idx = None
+        for sec_idx, ss in enumerate(sec_sorted):
             if ss["x0"] <= sec_target_x <= ss["x1"]:
-                matched = ss
+                matched, matched_idx = ss, sec_idx
                 break
         if matched is None:
-            matched = min(sec_sorted, key=lambda ss: abs(((ss["x0"] + ss["x1"]) / 2.0) - sec_target_x))
+            matched_idx, matched = min(enumerate(sec_sorted),
+                                        key=lambda kv: abs(((kv[1]["x0"] + kv[1]["x1"]) / 2.0) - sec_target_x))
+
+        if r_idx in ref_suspects or matched_idx in sec_suspects:
+            if trace:
+                print(f"v24.25 CROSS_VIEW reject {reference_view} idx={r_idx}: reference or matched "
+                      f"secondary stack flagged as width-outlier (see WIDTH_SANITY above)")
+            continue
 
         ref_h = max(1, rs["floor_y"] - rs["top_y"])
         sec_h = max(1, matched["floor_y"] - matched["top_y"])
@@ -2176,23 +2186,38 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
         return regions_by_view
 
     if merge_single_box:
-        x0 = min(a["stack"]["x0"] for a in accepted)
-        x1 = max(a["stack"]["x1"] for a in accepted)
-        y0 = min(a["stack"]["top_y"] for a in accepted)
-        y1 = max(a["stack"]["floor_y"] for a in accepted)
-        best_ratio = max(a["ratio"] for a in accepted)
-        regions_by_view[reference_view].append({
-            "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
-            "ratio": best_ratio,
-            "v2410_source": "cross_view_profile_collision",
-            "v2419_reference_view": reference_view,
-            "v2422_merged_count": len(accepted),
-            "v2422_merged_indices": [a["r_idx"] for a in accepted],
-        })
-        if trace:
-            print(f"v24.22 CROSS_VIEW MERGE {reference_view}: combined {len(accepted)} accepted "
-                  f"region(s) (idx={[a['r_idx'] for a in accepted]}) into ONE box "
-                  f"x=[{x0}-{x1}] y=[{y0}-{y1}] best_ratio={best_ratio:.2f}")
+        # v24.25: only merge clusters of PHYSICALLY ADJACENT accepted stacks (contiguous by
+        # stack index, since `accepted` is already in ascending r_idx order) into a single
+        # box; non-adjacent accepted stacks are kept as separate boxes instead. ROOT CAUSE
+        # this fixes (found in full-code audit): v24.22's original merge combined ALL
+        # accepted candidates per view into ONE box regardless of adjacency - if accepted
+        # stacks were scattered across the cargo (e.g. idx=0 and idx=7 accepted but idx=1-6
+        # rejected), the merged box would span almost the entire cargo width, re-creating
+        # the "giant box" problem V2413 was built to eliminate.
+        clusters = [[accepted[0]]]
+        for prev, cur in zip(accepted, accepted[1:]):
+            if cur["r_idx"] - prev["r_idx"] == 1:
+                clusters[-1].append(cur)
+            else:
+                clusters.append([cur])
+        for cluster in clusters:
+            x0 = min(a["stack"]["x0"] for a in cluster)
+            x1 = max(a["stack"]["x1"] for a in cluster)
+            y0 = min(a["stack"]["top_y"] for a in cluster)
+            y1 = max(a["stack"]["floor_y"] for a in cluster)
+            best_ratio = max(a["ratio"] for a in cluster)
+            regions_by_view[reference_view].append({
+                "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+                "ratio": best_ratio,
+                "v2410_source": "cross_view_profile_collision",
+                "v2419_reference_view": reference_view,
+                "v2422_merged_count": len(cluster),
+                "v2422_merged_indices": [a["r_idx"] for a in cluster],
+            })
+            if trace:
+                print(f"v24.25 CROSS_VIEW MERGE {reference_view}: combined {len(cluster)} adjacent accepted "
+                      f"region(s) (idx={[a['r_idx'] for a in cluster]}) into ONE box "
+                      f"x=[{x0}-{x1}] y=[{y0}-{y1}] best_ratio={best_ratio:.2f}")
     else:
         for a in accepted:
             rs = a["stack"]
@@ -2204,66 +2229,6 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
             })
     return regions_by_view
 
-
-def detect_overhang_regions_for_view(stacks):
-    """v24.07 OVERHANG audit-only scanner.
-
-    Current status from AA02-01 regression:
-    - the definition is clear, but active detection still produces false green markers due to
-      segmentation/isometric mapping errors;
-    - therefore OVERHANG candidates are logged for diagnosis but are NOT emitted as hazards or
-      markers until the stack/box segmentation is proven reliable.
-    """
-    audit_regions = []
-    active = globals().get("V2407_OVERHANG_ACTIVE_DETECTION", False)
-    trace = globals().get("V2407_TRACE", True) or globals().get("V2406_OVERHANG_TRACE", True)
-    min_ratio = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_RATIO", 0.05)
-    min_px = globals().get("V2406_OVERHANG_MIN_SIZE_DIFF_PX", 6)
-
-    for stack_idx, s in enumerate(stacks or []):
-        boxes = s.get("boxes", [])
-        if trace:
-            print(f"v24.07 OVERHANG_AUDIT stack={stack_idx} box_count={len(boxes)}")
-        for pair_idx in range(max(0, len(boxes) - 1)):
-            upper = boxes[pair_idx]
-            lower = boxes[pair_idx + 1]
-            uw = max(1, upper["x_right"] - upper["x_left"])
-            lw = max(1, lower["x_right"] - lower["x_left"])
-            uh = max(1, upper["y_max"] - upper["y_min"])
-            lh = max(1, lower["y_max"] - lower["y_min"])
-            width_delta = abs(uw - lw)
-            width_ratio = width_delta / max(1, max(uw, lw))
-            vertical_gap = max(0, lower["y_min"] - upper["y_max"])
-            pair_h = max(1, lower["y_max"] - upper["y_min"])
-            reason = []
-            if width_ratio < min_ratio or width_delta < min_px:
-                reason.append("size_diff_below_5pct")
-            if vertical_gap > max(8, int(pair_h * 0.20)):
-                reason.append("not_visible_stacked_pair")
-            if uw < 10 or lw < 10 or uh < 4 or lh < 4:
-                reason.append("tiny_segment_artifact")
-            if trace:
-                print(f"v24.07 OVERHANG_AUDIT stack={stack_idx} pair={pair_idx} upper_w={uw}px lower_w={lw}px diff={width_delta}px ratio={width_ratio:.3f} vertical_gap={vertical_gap}px status={'REJECT ' + ','.join(reason) if reason else 'CANDIDATE_BUT_AUDIT_ONLY'}")
-            if reason:
-                continue
-            x_min = min(upper["x_left"], lower["x_left"])
-            x_max = max(upper["x_right"], lower["x_right"])
-            y_min = upper["y_min"]
-            y_max = lower["y_max"]
-            audit_regions.append({
-                "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
-                "ratio": width_ratio,
-                "width_delta_px": width_delta,
-                "upper_width_px": uw,
-                "lower_width_px": lw,
-                "support_case": "UPPER_LOWER_SIZE_DIFF_AUDIT",
-                "v2407_audit_only": True,
-            })
-    if globals().get("V2407_OVERHANG_AUDIT_ONLY", True) or not active:
-        if trace and audit_regions:
-            print(f"v24.07 OVERHANG_AUDIT_ONLY: {len(audit_regions)} candidate(s) suppressed; no OVERHANG marker/hazard emitted")
-        return []
-    return audit_regions
 
 def detect_tall_unstable_regions_for_view(stacks):
     """v24.01 TallUnstableGuard.
@@ -2379,8 +2344,17 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
     """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
+    # v24.25: same width-sanity gate as pairwise STEP_DOWN/Valley/Cross-View (see
+    # _flag_width_outlier_stacks docstring) - a segmentation fragment/merged-blob stack in
+    # the rear zone makes the REAR_LATERAL_IMBALANCE comparison just as unreliable here.
+    suspect_indices = _flag_width_outlier_stacks(relevant, view_label=view_label)
     regions = []
     for i in range(len(relevant) - 1):
+        if i in suspect_indices or (i + 1) in suspect_indices:
+            if globals().get("V2405_REAR_LATERAL_TRACE", False):
+                print(f"v24.25 REAR_LATERAL reject {view_label}: pair=({i},{i+1}) skipped - "
+                      f"width-outlier stack involved (see WIDTH_SANITY above)")
+            continue
         a, b = relevant[i], relevant[i + 1]
         ha = max(1, a["floor_y"] - a["top_y"]) if a.get("boxes") else 0
         hb = max(1, b["floor_y"] - b["top_y"]) if b.get("boxes") else 0
@@ -2465,8 +2439,14 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     AI (ถ้าค่าสูงสุดที่วัดได้ต่ำมาก แสดงว่าไม่มีความไม่สมดุลจริงในโซนนี้เลย)"""
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
+    # v24.25: exclude width-outlier stacks from the VETO decision too - a false "no
+    # imbalance" or false "big imbalance" reading caused by a segmentation artifact should
+    # not influence whether we veto the AI's REAR_LATERAL_IMBALANCE claim.
+    suspect_indices = _flag_width_outlier_stacks(relevant, view_label=None)
     max_ratio = 0.0
     for i in range(len(relevant) - 1):
+        if i in suspect_indices or (i + 1) in suspect_indices:
+            continue
         a, b = relevant[i], relevant[i + 1]
         ha = max(1, a["floor_y"] - a["top_y"]) if a["boxes"] else 0
         hb = max(1, b["floor_y"] - b["top_y"]) if b["boxes"] else 0
@@ -2487,8 +2467,14 @@ def detect_inter_stack_lateral_gap_regions_for_view(stacks, min_gap_px=None, min
     min_gap_px = V2402_LATERAL_GAP_MIN_INTER_STACK_GAP_PX if min_gap_px is None else min_gap_px
     min_vertical_overlap_ratio = V2402_LATERAL_GAP_MIN_VERTICAL_OVERLAP_RATIO if min_vertical_overlap_ratio is None else min_vertical_overlap_ratio
     ss = sorted([s for s in (stacks or []) if s.get("boxes")], key=lambda s: s.get("x0", 0))
+    # v24.25: same width-sanity gate as other detectors (see _flag_width_outlier_stacks
+    # docstring) - a gap measured against a segmentation fragment/merged-blob stack is not
+    # a reliable real gap between genuine cargo stacks.
+    suspect_indices = _flag_width_outlier_stacks(ss, view_label=None)
     regions = []
-    for a, b in zip(ss, ss[1:]):
+    for idx, (a, b) in enumerate(zip(ss, ss[1:])):
+        if idx in suspect_indices or (idx + 1) in suspect_indices:
+            continue
         gap = int(b["x0"] - a["x1"])
         if gap < min_gap_px:
             continue
@@ -2800,7 +2786,6 @@ REAR_LATERAL_IMBALANCE are analyzed separately elsewhere - do NOT report them he
 - LATERAL_GAP_RISK: an obvious empty gap between two side-by-side stacks in the middle of the load,
   OR cargo not spanning the full width of the container leaving visible empty floor on one side.
 - TALL_UNSTABLE_RISK: a single tall stack with no lateral support from neighboring cargo.
-- OVERHANG_RISK: cargo boxes are visibly stacked in the same stack from lower box to upper box, and the visible size/width of the stacked boxes differs by about 5% or more so the upper/lower support is mismatched. Do NOT flag thin outer edges or isometric perspective artifacts unless the upper-lower box pair and size mismatch are clear.
 
 Look carefully at EVERY pair of adjacent stacks in both views before concluding there are no risks.
 A fully and evenly loaded container should return an EMPTY array [].
@@ -2814,7 +2799,7 @@ BOUNDING BOX RULES:
 
 Return ONLY a JSON array (empty array if no genuine risks found):
 [
-  {{"risk_type":"STEP_DOWN_RISK"|"LATERAL_GAP_RISK"|"TALL_UNSTABLE_RISK"|"OVERHANG_RISK","view":"FRONT"|"BACK","box_2d":[ymin,xmin,ymax,xmax],"description":"describe the height difference or gap you observed"}}
+  {{"risk_type":"STEP_DOWN_RISK"|"LATERAL_GAP_RISK"|"TALL_UNSTABLE_RISK","view":"FRONT"|"BACK","box_2d":[ymin,xmin,ymax,xmax],"description":"describe the height difference or gap you observed"}}
 ]
 """
     last_error_msg = ""
@@ -2965,7 +2950,6 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             "STEP_DOWN_RISK": (0.15, y0f, 0.85, y1f),
             "LATERAL_GAP_RISK": (0.20, y0f, 0.80, y1f),
             "TALL_UNSTABLE_RISK": (0.25, y0f, 0.75, y1f),
-            "OVERHANG_RISK": (0.15, y0f, 0.85, mid_yf),
         }
     else:
         if rear_side == "LEFT":
@@ -2983,7 +2967,6 @@ def _get_fallback_box(risk_type, view_label, layout, crop_w, crop_y_start, crop_
             "STEP_DOWN_RISK": (0.08, 0.20, 0.88, 0.78),
             "LATERAL_GAP_RISK": (0.05, 0.20, 0.85, 0.80),
             "TALL_UNSTABLE_RISK": (0.05, 0.10, 0.85, 0.60),
-            "OVERHANG_RISK": (0.05, 0.10, 0.85, 0.45),
         }
 
     zp = zones_pct.get(risk_type)
@@ -3224,22 +3207,16 @@ def process_request(request):
         step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                                 container_bounds, cargo_extent)
 
-        # v22/v24: สร้าง per-box stack model (deterministic) สำหรับ OVERHANG_RISK,
+        # v22/v24: สร้าง per-box stack model (deterministic) สำหรับ
         # TALL_UNSTABLE_RISK, REAR_LATERAL_IMBALANCE - ดูหัวข้อ "PER-BOX SEGMENTATION"
         # ด้านบนสำหรับรายละเอียดอัลกอริทึมและข้อจำกัด (v24: แก้บั๊ก under-segmentation
         # หลักที่พบจากการทดสอบไฟล์จริง 6 ไฟล์)
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
-        overhang_regions = {}
         tall_unstable_regions = {}
         for view_label in ("FRONT", "BACK"):
             stacks = stack_box_model.get(view_label, [])
-            overhang_regions[view_label] = detect_overhang_regions_for_view(stacks)
             tall_unstable_regions[view_label] = detect_tall_unstable_regions_for_view(stacks)
-            for r in overhang_regions[view_label]:
-                print(f"Deterministic OVERHANG_RISK candidate ({view_label}): "
-                      f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
-                      f"overhang_ratio={r['ratio']*100:.1f}% (threshold={OVERHANG_MIN_RATIO*100:.0f}%)")
             for r in tall_unstable_regions[view_label]:
                 print(f"Deterministic TALL_UNSTABLE_RISK candidate ({view_label}): "
                       f"x=[{r['x_min']:.0f}-{r['x_max']:.0f}] y=[{r['y_min']:.0f}-{r['y_max']:.0f}] "
@@ -3313,18 +3290,6 @@ def process_request(request):
                               f"(description: {r.get('description', '')[:100]})")
                 else:
                     print(f"Gemini STEP_DOWN_RISK claim REJECTED - missing valid view/box_2d for verification")
-            elif rt == "OVERHANG_RISK":
-                if globals().get("V2407_OVERHANG_DISABLE_AI_ACCEPT", True) or globals().get("V2407_OVERHANG_AUDIT_ONLY", True):
-                    print(f"v24.07 OVERHANG AI claim REJECTED: audit-only mode (description: {r.get('description', '')[:100]})")
-                elif has_valid_box:
-                    regions_for_view = overhang_regions.get(view_of_claim, [])
-                    if _claim_overlaps_regions(box_2d, crop_w, crop_h, crop_y_start, regions_for_view):
-                        all_risks.append(r)
-                    else:
-                        print(f"Gemini OVERHANG_RISK claim for {view_of_claim} view REJECTED by deterministic "
-                              f"per-box gate (description: {r.get('description', '')[:100]})")
-                else:
-                    print("Gemini OVERHANG_RISK claim REJECTED - missing valid view/box_2d for verification")
             elif rt == "TALL_UNSTABLE_RISK":
                 if has_valid_box:
                     regions_for_view = tall_unstable_regions.get(view_of_claim, [])
@@ -3356,26 +3321,6 @@ def process_request(request):
             return False
 
         for view_label in ("FRONT", "BACK"):
-            for region in overhang_regions.get(view_label, []):
-                if globals().get("V2407_OVERHANG_AUDIT_ONLY", True):
-                    print("v24.07 OVERHANG forced candidate suppressed: audit-only mode")
-                    continue
-                if region["ratio"] < OVERHANG_MIN_RATIO:
-                    continue
-                if _view_already_has_overlapping_claim(view_label, "OVERHANG_RISK", region, all_risks):
-                    continue
-                ymin_norm = ((region["y_min"] - crop_y_start) / crop_h) * 1000
-                ymax_norm = ((region["y_max"] - crop_y_start) / crop_h) * 1000
-                xmin_norm = (region["x_min"] / crop_w) * 1000
-                xmax_norm = (region["x_max"] / crop_w) * 1000
-                print(f"FORCED OVERHANG_RISK ({view_label}) from deterministic per-box segmentation "
-                      f"(overhang_ratio={region['ratio']*100:.0f}%)")
-                all_risks.append({
-                    "view": view_label, "risk_type": "OVERHANG_RISK",
-                    "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
-                    "reasoning": "FORCED_DETERMINISTIC_PER_BOX_OVERHANG",
-                    "description": f"พบกล่องสินค้าซ้อนกันในกองเดียวกันที่ขนาด/ความกว้างของกล่องบน-ล่างต่างกันตั้งแต่ประมาณ 5% ขึ้นไป วัดได้ {region['ratio']*100:.0f}% (marker ชี้คู่กล่องต้นเหตุ: {region.get('support_case','STACK_SIZE_MISMATCH')})",
-                })
             for region in tall_unstable_regions.get(view_label, []):
                 if region["ratio"] < V2401_TALL_UNSTABLE_MIN_HEIGHT_RATIO:
                     continue
@@ -3795,7 +3740,35 @@ def process_request(request):
             drawn = False
             is_zone_based = fallback_risk_type in ZONE_BASED_RISK_TYPES or risk_type == "COMBINED_AREA_RISK"
 
-            if is_zone_based and risk_type != "COMBINED_AREA_RISK":
+            # v24.25 FIX: COMBINED_AREA_RISK from a BOX_ZONE merge carries its own precise
+            # merged_box in box_2d (computed by _merge_same_area_risks - union of every
+            # merged risk's own box). Draw it directly here FIRST. ROOT CAUSE of the
+            # original bug (found in full-code audit): is_zone_based was True for
+            # COMBINED_AREA_RISK, which made BOTH the "is_zone_based and risk_type !=
+            # COMBINED_AREA_RISK" branch below AND the "not is_zone_based" box_2d branch
+            # further down skip simultaneously for every combined risk - the precise
+            # merged_box was computed correctly but NEVER actually reached a drawing call;
+            # every combined-risk marker silently fell back to the generic percentage-based
+            # zone box instead. This only applies when merged_box is present (BOX_ZONE
+            # merges); REAR_ZONE/FRONT_ZONE merges have box_2d=None and correctly continue
+            # to the zone-based precise_boxes/fallback flow below, unchanged.
+            if risk_type == "COMBINED_AREA_RISK" and box and isinstance(box, list) and len(box) == 4:
+                try:
+                    _cymin, _cxmin, _cymax, _cxmax = map(float, box)
+                    if max(_cymin, _cxmin, _cymax, _cxmax) <= 1.0:
+                        _cymin, _cxmin, _cymax, _cxmax = _cymin * 1000, _cxmin * 1000, _cymax * 1000, _cxmax * 1000
+                    _abs_xmin = max(0, min(int(_cxmin * crop_w / 1000.0), crop_w - 1))
+                    _abs_xmax = max(_abs_xmin + 1, min(int(_cxmax * crop_w / 1000.0), crop_w))
+                    _abs_ymin = max(crop_y_start, min(int(crop_y_start + (_cymin * crop_h / 1000.0)), crop_y_end - 1))
+                    _abs_ymax = max(_abs_ymin + 1, min(int(crop_y_start + (_cymax * crop_h / 1000.0)), crop_y_end))
+                    _draw_single_or_dual_rectangle(draw, [_abs_xmin, _abs_ymin, _abs_xmax, _abs_ymax], outline_color, draw_colors)
+                    drawn = True
+                    print(f"COMBINED_AREA_RISK merged box_2d drawn ({resolved_view}): "
+                          f"[{_abs_xmin},{_abs_ymin},{_abs_xmax},{_abs_ymax}]")
+                except Exception as e:
+                    print(f"COMBINED_AREA_RISK merged box_2d rejected, falling back to zone box: {e}")
+
+            if not drawn and is_zone_based and risk_type != "COMBINED_AREA_RISK":
                 precise = precise_boxes.get((resolved_view, risk_type))
                 if precise:
                     if risk_type == "REAR_LATERAL_IMBALANCE":
@@ -3910,8 +3883,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.24",
-            "benchmarkMode": "v24.24_width_sanity_gate"}, 200, headers)
+            "checkerVersion": "V24.25",
+            "benchmarkMode": "v24.25_full_code_audit_fixes"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
@@ -3921,21 +3894,12 @@ def process_request(request):
 
 # ===== V24.03_LOCALIZATION_FIX =====
 V2403_LOCALIZATION_FIX=True
-# OVERHANG: require real upper/lower pair and suppress perspective-only edge markers.
 # REAR_LATERAL_IMBALANCE: apply final BACK marker upward shift (50%) at draw stage.
 # LATERAL_GAP: accept only gaps bounded by left and right cargo stacks.
 
 
-# V24.04 build marker
-V2404_OVERHANG_STACK_SIZE_GUARD_BUILD = True
-
-
 # V24.05 build marker
 V2405_REAR_LATERAL_IMBALANCE_TUNE_BUILD = True
-
-
-# V24.06 build marker
-V2407_OVERHANG_AUDIT_STEP_DOWN_FIX_BUILD = True
 
 
 # V24.09 controls
