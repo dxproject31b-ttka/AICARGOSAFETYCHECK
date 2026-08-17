@@ -17,25 +17,27 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.16 - DepthPairColorDebug: v24.15's DEPTH_PAIR STEP_DOWN detector went live on real
-#          AA04-05 test and DID fire (FORCED STEP_DOWN_RISK FRONT height_diff_ratio=87.2%),
-#          but the marker position was reported wrong by the user (appeared too close to the
-#          floor/dimension-line text area, not at the true green/cyan visual junction). Log
-#          showed height_back=232px height_front=34px (front only 13% of total height) - but
-#          the user's real photo shows front (MAPCA, nearer viewer) at a height comparable to
-#          back (DSC1A-AD) (~3 tiers vs ~4 tiers), not 13%/87%. This means the boundary
-#          detect_boxes_in_stack found for this stack was very likely NOT the true green/cyan
-#          transition, but a spurious secondary boundary within a single same-colored region
-#          near the floor (e.g. between two cyan MAPCA sub-tiers). Added: sample the actual
-#          RGB pixel color at the center of box_back and box_front and REQUIRE them to be
-#          genuinely different colors (Euclidean distance >= V2415_DEPTH_PAIR_MIN_COLOR_DIST)
-#          before accepting a depth-pair candidate at all - if colors are too similar, reject
-#          with a clear trace instead of drawing a marker at a position that has nothing to do
-#          with the real front/back visual junction. This is diagnosis-first (per established
-#          workflow) - the exact position-fix formula will follow once we see real color/height
-#          data from this debug build on AA04-05 again.
-# v24.15 - DepthPairStepDown (superseded by v24.16 above): initial depth-pair detector, no
-#          color verification - correctly fired on AA04-05 but drew marker at wrong position.
+# v24.17 - DepthPairColorFix: fixed a bug found in v24.16's live test on AA04-05. v24.16
+#          added a color-verification gate (require box_back/box_front to be genuinely
+#          different colors before accepting a depth-pair STEP_DOWN candidate), but it used
+#          a naive single-center-point RGB sample - the live log showed box_front sampled
+#          as pure (255,255,255) white background, NOT real cargo color, which made the
+#          "colors are different" check pass trivially (anything differs from white) without
+#          actually proving anything. v24.17 replaces this with the SAME expanding-ring-
+#          search color sampler (_find_nearest_cargo_pixel_color) that was already proven to
+#          fix an identical problem earlier (in the FRONT stack-detail color debug trace,
+#          where every one of 8 stacks sampled as white using a naive center-point). Now BOTH
+#          box_back and box_front must resolve to a genuine cargo color (not background) via
+#          expanding search before the color-distance comparison is trusted at all; if either
+#          side can't find valid cargo color, the candidate is rejected outright with a clear
+#          "cannot verify color" trace instead of silently proceeding on a bad sample.
+# v24.16 - DepthPairColorDebug (superseded by v24.17 above): added color verification but
+#          used unreliable naive-center-point sampling - correctly identified via live test
+#          that a color check was needed, but the sampling method itself had the same bug
+#          previously found and fixed in the FRONT stack-detail debug trace.
+# v24.15 - DepthPairStepDown: initial depth-pair detector (no color verification) - correctly
+#          fired on real AA04-05 test but drew the marker at a position later determined to
+#          be wrong (height split didn't match the true green/cyan visual boundary).
 # v24.14 - ValleyPatternFix: STEP_DOWN detector now also catches a "shorter stack flanked by
 #          taller stacks on BOTH sides" valley pattern (see _find_valley_regions +
 #          V2414_VALLEY_* constants) that the plain pairwise adjacent-stack check missed - real
@@ -582,6 +584,57 @@ def _is_vivid_cargo_color(rgb, sat_thresh=0.75, min_brightness=50):
     if mx < min_brightness:
         return False
     return _hsv_saturation(rgb) >= sat_thresh
+
+
+def _find_nearest_cargo_pixel_color(px, img_w, img_h, seed_x, seed_y, max_radius=60):
+    """v24.14 DEBUG / v24.17 REUSED helper for color-based diagnostics.
+
+    ROOT CAUSE this fixes (confirmed twice now - first for the FRONT-stack color debug in
+    v24.14/24.16's stack-detail trace, and AGAIN in v24.16's depth-pair color check): sampling
+    the exact geometric mid-point of a box's bounding box assumes the box is a simple upright
+    rectangle fully filled with cargo color. In this isometric 3D diagram, cargo faces are
+    drawn as slanted parallelograms - the geometric center of the axis-aligned bounding box
+    frequently lands on white background or dimension-line text between/around the slanted
+    cargo face, not on the cargo itself. Confirmed in the v24.16 live test: box_front's center
+    sampled as (255,255,255) pure white (clearly background/text area), which made the
+    color-distance gate meaningless (any real color looks "different" from white).
+
+    FIX: do an expanding ring search outward from the seed point until a pixel that passes
+    _is_vivid_cargo_color(...) is found, and return THAT pixel's raw RGB plus the radius it
+    was found at (0 = seed itself was already valid cargo color). Returns (color, radius) where
+    radius == -1 means NO valid cargo pixel was found within max_radius at all - callers MUST
+    treat this as "color unknown / unverifiable", not silently accept a possibly-wrong sample.
+    """
+    seed_x = min(max(0, int(seed_x)), img_w - 1)
+    seed_y = min(max(0, int(seed_y)), img_h - 1)
+    seed_color = px[seed_x, seed_y]
+    if _is_vivid_cargo_color(seed_color):
+        return seed_color, 0
+    for radius in range(2, max_radius + 1, 2):
+        found = []
+        for dx in range(-radius, radius + 1, 2):
+            for dy in (-radius, radius):
+                x, y = seed_x + dx, seed_y + dy
+                if 0 <= x < img_w and 0 <= y < img_h:
+                    c = px[x, y]
+                    if _is_vivid_cargo_color(c):
+                        found.append(c)
+        for dy in range(-radius, radius + 1, 2):
+            for dx in (-radius, radius):
+                x, y = seed_x + dx, seed_y + dy
+                if 0 <= x < img_w and 0 <= y < img_h:
+                    c = px[x, y]
+                    if _is_vivid_cargo_color(c):
+                        found.append(c)
+        if found:
+            return found[0], radius
+    return seed_color, -1  # -1 marks "no cargo pixel found, this is the raw (unreliable) seed color"
+
+
+def _color_distance(c1, c2):
+    if c1 is None or c2 is None:
+        return None
+    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
 
 
 def detect_cargo_extent_bbox(img, sat_thresh=0.75, min_run_width=20, min_run_height=20):
@@ -1190,11 +1243,12 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     loop alone cannot see - confirmed missed case: AA04-05 FRONT view (tall-short-tall valley,
     each side individually below the 0.22 pairwise threshold at ~0.15-0.20).
 
-    v24.15/v24.16 ADDITION: also runs _find_depth_pair_step_down_regions() to catch two
+    v24.15/16/17 ADDITION: also runs _find_depth_pair_step_down_regions() to catch two
     physically different stacks at different container depths (front row vs back row) that
     overlap in the same x-range in this diagram's isometric projection - see that function's
-    docstring. v24.16 passes diagram_crop through so the depth-pair detector can sample raw
-    pixel colors of the two box segments for diagnosis (see V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF).
+    docstring. diagram_crop is passed through so the depth-pair detector can sample raw pixel
+    colors of the two box segments (using expanding-search, not naive center-point sampling -
+    see v24.17 fix in _find_nearest_cargo_pixel_color) for verification before accepting.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1250,53 +1304,31 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     return regions
 
 
-def _sample_box_center_color(diagram_crop, x_left, x_right, y_min, y_max):
-    """v24.16 DEBUG helper: sample the raw pixel color at the geometric center of a box
-    region, for diagnosing whether two adjacent box segments are genuinely different colors
-    (different physical stacks) or just two sub-regions of the same-colored stack that got
-    split by a spurious internal boundary. NOT used for any accept/reject decision unless
-    V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF is enabled - purely diagnostic/gating by design.
-    """
-    if diagram_crop is None:
-        return None
-    try:
-        px = diagram_crop.convert("RGB").load()
-        w, h = diagram_crop.size
-        cx = min(max(0, int((x_left + x_right) / 2)), w - 1)
-        cy = min(max(0, int((y_min + y_max) / 2)), h - 1)
-        return px[cx, cy]
-    except Exception:
-        return None
-
-
-def _color_distance(c1, c2):
-    if c1 is None or c2 is None:
-        return None
-    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
-
-
 def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
-    """v24.15/v24.16 DEPTH-PAIR STEP_DOWN detector (real case confirmed by user, AA04-05
-    FRONT+BACK, screenshots with red boxes around the two green DSC1A-AD stacks at different
-    container depths). See V2415_* constants near V2414 block for full root-cause writeup.
+    """v24.15/16/17 DEPTH-PAIR STEP_DOWN detector (real case confirmed by user with photos,
+    AA04-05 FRONT+BACK: red boxes around two green DSC1A-AD stacks at different container
+    depths - front row nearer viewer, back row farther, confirmed by user "ตั้งเขียว 2 ตั้ง
+    ที่อยู่คนละตำแหน่งความลึก (หน้า-หลัง) ของตู้" and "ใกล้ผู้ดู" = the shorter one).
 
-    v24.16 CORRECTION (position bug found in v24.15 real test): the very first live test
-    showed height_back=232px / height_front=34px (front only 13% of total height) - but the
-    user's actual photo shows the front (nearer-viewer, shorter) MAPCA stack at roughly a
-    comparable height to the back DSC1A-AD stack (~3 tiers vs ~4 tiers, NOT 13%/87%). This
-    strongly suggests detect_boxes_in_stack's internal boundary for this stack was NOT the
-    true green/cyan color transition, but a spurious secondary boundary within a single
-    same-colored region (e.g. between two MAPCA sub-tiers, both cyan) close to the floor -
-    which would explain both the wrong ratio AND the marker appearing too close to the floor/
-    dimension-line labels in the rendered output, as the user reported ("ตำแหน่งพิกัดผิด").
+    See V2415_* constants near V2414 block for the full root-cause writeup and version
+    history (v24.15 initial detector -> v24.16 added naive color check that had its own bug
+    -> v24.17 fixes that bug using the proven expanding-search color sampler).
 
-    v24.16 FIX: before accepting a depth-pair candidate, sample the actual RGB color at the
-    center of box_back and box_front and require them to be genuinely different colors
-    (Euclidean RGB distance >= V2415_DEPTH_PAIR_MIN_COLOR_DIST). If the 2 boxes are actually
-    near-identical in color, this is almost certainly NOT a true depth-pair (front-row vs
-    back-row) boundary, and is rejected with a clear trace explaining why - this prevents
-    marking a position that has nothing to do with the real green/cyan visual junction the
-    user is pointing at, instead of silently accepting a wrong-but-plausible-looking split.
+    GEOMETRIC PROOF (unchanged since v24.15): detect_boxes_in_stack only ever detects
+    box_count==2 for a single x-column when there is a real boundary partway up the column.
+    Physically that can only happen when the FRONT stack (whose base sits at the column's
+    true local floor_y) does NOT reach as high as the BACK stack directly behind it. If front
+    were equal or taller, it would fully occlude back into ONE box. So: front (nearer viewer)
+    == boxes[-1] (bottom, touches true floor_y), back == boxes[0] (top).
+
+    v24.17 COLOR VERIFICATION (fixed from v24.16's bug): sample the actual RGB color of
+    box_back and box_front using _find_nearest_cargo_pixel_color's expanding-ring search
+    (NOT a naive single center-point sample, which v24.16's live test proved unreliable -
+    it returned pure white/background for box_front, making the color-distance check
+    meaningless). Both samples MUST resolve to a genuine cargo color (radius != -1) before
+    we trust the color-distance comparison at all; if either side can't find valid cargo
+    color nearby, we reject with a clear "cannot verify color" trace instead of silently
+    proceeding on an unreliable sample.
     """
     regions = []
     max_width_diff_ratio = globals().get("V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO", 0.10)
@@ -1306,7 +1338,15 @@ def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
     boundary_ratio = globals().get("V2415_DEPTH_PAIR_BOUNDARY_RATIO", 0.30)
     require_color_diff = globals().get("V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF", True)
     min_color_dist = globals().get("V2415_DEPTH_PAIR_MIN_COLOR_DIST", 60)
+    require_valid_cargo_color = globals().get("V2417_DEPTH_PAIR_REQUIRE_VALID_CARGO_COLOR", True)
     trace = globals().get("V2415_TRACE", True)
+
+    try:
+        full_px = diagram_crop.convert("RGB").load() if diagram_crop is not None else None
+        full_w, full_h = diagram_crop.size if diagram_crop is not None else (0, 0)
+    except Exception:
+        full_px = None
+        full_w = full_h = 0
 
     for s_idx, s in enumerate(ss):
         boxes = s.get("boxes") or []
@@ -1318,18 +1358,24 @@ def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
         width_diff_ratio = abs(width_back - width_front) / max(width_back, width_front)
         vertical_gap = box_front["y_min"] - box_back["y_max"]
 
-        color_back = _sample_box_center_color(diagram_crop, box_back["x_left"], box_back["x_right"],
-                                               box_back["y_min"], box_back["y_max"])
-        color_front = _sample_box_center_color(diagram_crop, box_front["x_left"], box_front["x_right"],
-                                                box_front["y_min"], box_front["y_max"])
+        color_back = color_front = None
+        radius_back = radius_front = -1
+        if full_px is not None:
+            mid_back_x = (box_back["x_left"] + box_back["x_right"]) / 2
+            mid_back_y = (box_back["y_min"] + box_back["y_max"]) / 2
+            mid_front_x = (box_front["x_left"] + box_front["x_right"]) / 2
+            mid_front_y = (box_front["y_min"] + box_front["y_max"]) / 2
+            color_back, radius_back = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_back_x, mid_back_y)
+            color_front, radius_front = _find_nearest_cargo_pixel_color(full_px, full_w, full_h, mid_front_x, mid_front_y)
         color_dist = _color_distance(color_back, color_front)
 
         if trace:
-            print(f"v24.16 DEPTH_PAIR DEBUG {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
-                  f"box_back y=[{box_back['y_min']}-{box_back['y_max']}] color_back={color_back} | "
-                  f"box_front y=[{box_front['y_min']}-{box_front['y_max']}] color_front={color_front} | "
+            print(f"v24.17 DEPTH_PAIR DEBUG {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+                  f"box_back y=[{box_back['y_min']}-{box_back['y_max']}] color_back={color_back} "
+                  f"(radius={radius_back}) | box_front y=[{box_front['y_min']}-{box_front['y_max']}] "
+                  f"color_front={color_front} (radius={radius_front}) | "
                   f"color_dist={color_dist if color_dist is None else round(color_dist,1)} "
-                  f"(need>={min_color_dist} if V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF)")
+                  f"(need>={min_color_dist} AND both radius!=-1 if checks enabled)")
 
         if width_diff_ratio > max_width_diff_ratio or vertical_gap < 0 or vertical_gap > max_vertical_gap_px:
             if trace:
@@ -1339,12 +1385,22 @@ def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
                       f"0<=gap<={max_vertical_gap_px} to qualify as depth-pair candidate)")
             continue
 
+        if require_valid_cargo_color and (radius_back == -1 or radius_front == -1):
+            if trace:
+                print(f"v24.17 DEPTH_PAIR REJECT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+                      f"CANNOT VERIFY COLOR - one or both samples did not find a genuine cargo "
+                      f"color within search radius (radius_back={radius_back}, radius_front={radius_front}). "
+                      f"Refusing to accept a depth-pair candidate based on unreliable/background color "
+                      f"samples - this is the exact bug found in v24.16's live test (box_front sampled "
+                      f"as pure white background).")
+            continue
+
         if require_color_diff and (color_dist is None or color_dist < min_color_dist):
             if trace:
                 print(f"v24.16 DEPTH_PAIR REJECT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
                       f"colors too similar (color_dist={color_dist}) - this split is likely a spurious "
                       f"internal boundary within ONE colored stack, not a true front/back depth-pair "
-                      f"junction. Refusing to mark a position that isn't the real green/cyan boundary.")
+                      f"junction. Refusing to mark a position that isn't the real color boundary.")
             continue
 
         height_back = box_back["height_px"]
@@ -1373,10 +1429,10 @@ def _find_depth_pair_step_down_regions(ss, view_label, diagram_crop=None):
             "v2415_heights": (height_back, height_front),
         })
         if trace:
-            print(f"v24.15 DEPTH_PAIR STEP_DOWN ACCEPT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
+            print(f"v24.17 DEPTH_PAIR STEP_DOWN ACCEPT {view_label} stack_idx={s_idx} x=[{s['x0']}-{s['x1']}]: "
                   f"height_back={height_back}px height_front={height_front}px step_ratio={step_ratio:.2f} "
-                  f"width_diff_ratio={width_diff_ratio:.2f} color_dist={color_dist} "
-                  f"boundary_marker=[{x0},{y0},{x1},{y1}]")
+                  f"width_diff_ratio={width_diff_ratio:.2f} color_back={color_back} color_front={color_front} "
+                  f"color_dist={color_dist} boundary_marker=[{x0},{y0},{x1},{y1}]")
     return regions
 
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
@@ -1590,29 +1646,35 @@ V2414_VALLEY_MIN_RATIO = 0.15
 V2414_VALLEY_MIN_ABS_PX = 18
 V2414_TRACE = True
 
-# v24.15/v24.16 DEPTH-PAIR STEP_DOWN controls - ดู docstring ของ
-# _find_depth_pair_step_down_regions() สำหรับรายละเอียดเต็ม ROOT CAUSE: AA04-05 มีตั้ง
-# เขียว DSC1A-AD 2 ตั้งที่อยู่คนละตำแหน่งความลึก (หน้า-หลัง ของตู้) แต่ในมุมมอง isometric
-# ของไดอะแกรมนี้ ซ้อนทับกันพอดีในแนวกว้าง (x) เดียวกัน - detect_boxes_in_stack เลยตรวจพบ
-# เป็น "1 ตั้ง มี 2 กล่องซ้อนกัน" (box_count=2) แทนที่จะเป็น "2 ตั้งแยกกัน"
+# v24.15/v24.16/v24.17 DEPTH-PAIR STEP_DOWN controls - ดู docstring ของ
+# _find_depth_pair_step_down_regions() สำหรับรายละเอียดเต็ม
 #
-# v24.16 พบปัญหาตำแหน่งพิกัดผิดจากการทดสอบจริง (AA04-05 ครั้งที่ 2): log รายงาน
-# height_back=232px height_front=34px (34px คิดเป็นแค่ 13% ของความสูงรวม) แต่จากภาพจริง
-# กองฟ้า MAPCA (front) ควรจะสูงใกล้เคียงกับกองเขียว DSC1A-AD (back) มากกว่านี้มาก (3 ชั้น
-# เทียบกับ 4 ชั้น ไม่ใช่ 13% เทียบ 87%) - แปลว่าเส้นแบ่งที่ detect_boxes_in_stack เจอ อาจ
-# ไม่ใช่รอยต่อจริงระหว่างสีเขียว/สีฟ้า แต่เป็นแค่เส้นแบ่งย่อยภายในโซนสีเดียวกัน (เช่น รอย
-# ต่อระหว่าง MAPCA-F2/MAPCA-F1 ที่เป็นสีฟ้าเหมือนกัน) ทำให้ตำแหน่ง marker ที่วาดออกมา
-# ผิดที่ (ใกล้พื้น/เส้น dimension มากเกินไป ไม่ใช่รอยต่อเขียว-ฟ้าจริง)
-# เพิ่ม debug: สุ่มสีจริงของ box_back และ box_front เพื่อยืนยันว่าเป็นคนละสีจริง
-# (เขียว vs ฟ้า) ก่อนจะเชื่อว่าเส้นแบ่งนี้คือรอยต่อจริงระหว่าง 2 ตั้ง
+# ROOT CAUSE (v24.15): AA04-05 มีตั้งเขียว DSC1A-AD 2 ตั้งที่อยู่คนละตำแหน่งความลึก
+# (หน้า-หลัง ของตู้) แต่ในมุมมอง isometric ของไดอะแกรมนี้ ซ้อนทับกันพอดีในแนวกว้าง (x)
+# เดียวกัน - detect_boxes_in_stack เลยตรวจพบเป็น "1 ตั้ง มี 2 กล่องซ้อนกัน" (box_count=2)
+# แทนที่จะเป็น "2 ตั้งแยกกัน" - ไม่มี detector เดิมตัวไหนมองเห็น pattern นี้เลย
+#
+# v24.16: ทดสอบจริงพบว่า marker ตำแหน่งผิด (height_back=232px height_front=34px = 13%
+# ทั้งที่ภาพจริงควรใกล้เคียงกันกว่านี้มาก) - เพิ่มการเช็คสีเพื่อยืนยันว่าเป็นรอยต่อจริง
+# ระหว่าง 2 สี ไม่ใช่รอยแบ่งปลอมภายในสีเดียวกัน
+#
+# v24.17 BUG FOUND & FIXED: การเช็คสีของ v24.16 ใช้จุดกึ่งกลางเรขาคณิตธรรมดา (ไม่ขยาย
+# ค้นหา) ผลจริงจาก log: color_front=(255,255,255) ขาวล้วน = สุ่มโดนพื้นหลัง/ป้ายชื่อ ไม่ใช่
+# เนื้อสีคาร์โก้จริงเลย ทำให้ color_dist=122 ที่ "ผ่านเกณฑ์" ไม่ได้พิสูจน์อะไรจริง (เทียบกับ
+# สีขาวยังไงก็ต่างสีเสมอ) แก้โดยเปลี่ยนมาใช้ _find_nearest_cargo_pixel_color() (expanding
+# ring search + ตรวจด้วย _is_vivid_cargo_color) ที่เคยแก้ปัญหาเดียวกันนี้มาแล้วรอบก่อน
+# (ตอน debug FRONT stack-detail ที่สีออกมาขาวหมดทั้ง 8 ตัว) - ทั้ง box_back และ box_front
+# ต้องหาสี cargo จริงเจอ (ไม่ใช่ -1/พื้นหลัง) ก่อนจะยอมรับผลเปรียบเทียบสี มิฉะนั้น reject
+# ทันทีพร้อม log ชัดเจนว่า "ไม่สามารถยืนยันสีได้" แทนที่จะเดาต่อ
 V2415_DEPTH_PAIR_STEP_DOWN_ENABLED = True
 V2415_DEPTH_PAIR_MAX_WIDTH_DIFF_RATIO = 0.10  # ความกว้าง 2 กล่องต้องใกล้กันมาก (SKU เดียวกัน)
 V2415_DEPTH_PAIR_MAX_VERTICAL_GAP_PX = 4       # ต้องติดกันสนิท (silhouette เดียวต่อเนื่อง)
 V2415_DEPTH_PAIR_MIN_STEP_RATIO = 0.20         # ส่วนที่ back โผล่พ้น front ต้องมีนัยสำคัญ
 V2415_DEPTH_PAIR_MIN_ABS_STEP_PX = 18
 V2415_DEPTH_PAIR_BOUNDARY_RATIO = 0.30         # ความสูงของ marker (ส่วนบนของตั้ง front)
-V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF = True     # v24.16: ต้องยืนยันสีต่างกันจริงก่อนยอมรับ
+V2415_DEPTH_PAIR_REQUIRE_COLOR_DIFF = True     # ต้องยืนยันสีต่างกันจริงก่อนยอมรับ
 V2415_DEPTH_PAIR_MIN_COLOR_DIST = 60            # ระยะห่างสี RGB ขั้นต่ำ (0-441) ระหว่าง back/front
+V2417_DEPTH_PAIR_REQUIRE_VALID_CARGO_COLOR = True  # v24.17: ทั้ง 2 ฝั่งต้องหาสี cargo จริงเจอ
 V2415_TRACE = True
 
 # v24.10 focused controls
@@ -3823,8 +3885,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.16",
-            "benchmarkMode": "v24.16_depth_pair_color_debug"}, 200, headers)
+            "checkerVersion": "V24.17",
+            "benchmarkMode": "v24.17_depth_pair_color_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
