@@ -17,25 +17,26 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.27 - WidthSanityFallback: user reported a real case (AC03-01, BACK view) where a
-#          genuine AI-detected REAR_LATERAL_IMBALANCE risk (AI explicitly described a real
-#          1-tier-vs-2-tier, ~50% height difference) was incorrectly VETOed and the file
-#          reported SAFE. Root cause: BACK's coarse segmentation (3 stacks: widths
-#          29px/31px/392px) got ALL 3 stacks flagged suspect by the v24.24/25 width-sanity
-#          gate simultaneously (idx0/1 too narrow, idx2 a merged blob at 12.65x median) -
-#          leaving ZERO clean pairs to compare. The VETO gate's max_ratio then defaulted to
-#          its initial value 0.0 (the "no pairs found" case, not "measured, no difference"),
-#          which was indistinguishable downstream from "genuinely no imbalance" and
-#          incorrectly triggered a VETO of the real risk. Fixed by adding a fallback guard
-#          inside _flag_width_outlier_stacks() itself (used centrally by every stack-
-#          comparison detector since v24.25): if filtering would leave fewer than
-#          V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean stacks in a given call, the suspect
-#          flags for that call are discarded and the caller proceeds on the raw,
-#          unfiltered stack list instead - "not enough reliable data to filter with
-#          confidence" must never silently collapse into "no risk found". Verified: the
-#          AC03-01 BACK case (3 stacks, all 3 suspect -> clean_count=0 < min=2) now
-#          triggers the fallback and falls through to comparing the raw stacks, so the
-#          genuine height difference is measurable again instead of reading as 0.0.
+# v24.28 - VetoAndFallbackFix: real log evidence from AC03-01 (user confirmed the AI's
+#          finding was correct against the original blue-box reference image) exposed two
+#          bugs after the v24.27 build:
+#          (1) REAR_LATERAL_IMBALANCE VETO false-fired at FRONT: the hardcoded ~45%-width
+#              rear zone only overlapped 1 segmented stack, so no comparison pair could
+#              ever form - get_max_lateral_imbalance_ratio_in_zone() silently returned its
+#              initial 0.0, indistinguishable from "measured, found no difference". Fixed
+#              by returning None ("cannot measure") whenever fewer than 2 comparable stacks
+#              exist in the zone; the VETO gate now treats None as "cannot veto" - lack of
+#              evidence is not evidence of safety, so it defers to the AI's finding.
+#          (2) v24.27's blanket "clear all width-sanity suspects when too few clean stacks
+#              remain" fallback (meant to address bug #1 indirectly) instead caused a NEW
+#              false marker: BACK view's STEP_DOWN loop compared two segmentation-fragment
+#              slivers (both already flagged suspect) against each other and accepted a
+#              spurious ratio. That blanket fallback is REMOVED - normal v24.24/25/26
+#              width-sanity filtering (skip any pair touching a suspect) is restored
+#              unconditionally for STEP_DOWN/Valley/Cross-View/LATERAL_GAP. Bug #1's
+#              original concern (0 pairs silently becoming "no risk") is now solved
+#              precisely at the VETO gate itself via the None-sentinel fix, without
+#              reintroducing unreliable comparisons anywhere else.
 # v24.26 - RearLateralNoShift: user reported a real case (AB01-02, BACK view) where the
 #          REAR_LATERAL_IMBALANCE marker was drawn floating ABOVE the container's own top
 #          edge, outside the drawn artwork entirely. Root cause: V2405's hardcoded 50%
@@ -1268,6 +1269,16 @@ def _flag_width_outlier_stacks(ss, view_label=None):
 
     Returns a set of suspect indices (into the `ss` list passed in, using that list's own
     order) so each caller can skip any candidate/pair touching a suspect stack.
+
+    v24.28 NOTE: a short-lived v24.27 build added a blanket fallback here (clear ALL
+    suspect flags whenever too few clean stacks remained) to prevent a "0 comparable pairs"
+    situation from being silently misread as "no risk" by the REAR_LATERAL_IMBALANCE VETO
+    gate. That fallback is REMOVED in v24.28 - it caused a NEW bug (confirmed by user, real
+    AC03-01 BACK view: comparing two segmentation-fragment slivers against each other,
+    producing a spurious ratio and a wrongly-positioned marker). The original goal is now
+    achieved correctly and specifically at the VETO gate itself (see V2428_* constants and
+    get_max_lateral_imbalance_ratio_in_zone()/_should_veto_lateral_imbalance() for the
+    proper, narrowly-scoped fix) instead of relaxing filtering for every caller.
     """
     if not globals().get("V2424_PAIRWISE_WIDTH_SANITY_ENABLED", True) or len(ss) < 2:
         return set()
@@ -1290,38 +1301,6 @@ def _flag_width_outlier_stacks(ss, view_label=None):
                 print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px vs median={median_w}px "
                       f"ratio={ratio_vs_median:.2f} > max={max_ratio} -> flagged as suspect "
                       f"(likely merged multi-stack blob)")
-
-    # v24.27 FALLBACK GUARD - see V2427_* constants near V2424 block for full root-cause
-    # writeup. ROOT CAUSE this fixes (confirmed by real log evidence, AC03-01 BACK view):
-    # when segmentation for an ENTIRE view is coarse enough that width-sanity flags ALL (or
-    # nearly all) of that view's stacks as suspect, every caller of this function loses ALL
-    # its comparison pairs simultaneously - not just the one bad pair the gate was designed
-    # to remove. Downstream, a "0 comparable pairs" state is easy to misread as "0.0 = no
-    # height difference / no risk", which is a completely different (and false) conclusion
-    # from "not enough reliable data to measure at all". Confirmed real case: BACK view
-    # segmented into 3 stacks [1,2,1 boxes], ALL 3 flagged suspect (idx0/1 too narrow at
-    # 29px/31px, idx2 a 392px merged blob at 12.65x median) -> zero clean pairs ->
-    # REAR_LATERAL_IMBALANCE VETO gate read max_ratio=0.0 and incorrectly vetoed a
-    # genuine AI-detected risk (AI reasoning explicitly described a real 1-tier-vs-2-tier,
-    # ~50% height difference) as "no imbalance found", producing a false SAFE report.
-    # FIX: if filtering leaves FEWER than V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean (non-
-    # suspect) stacks - i.e. not enough survivors to form even one reliable comparison -
-    # discard the suspect flags for THIS view/call and fall back to the raw, unfiltered
-    # stack list instead of silently returning "no risk found" or "no pairs at all". This
-    # matches every other risk type's behavior: when in doubt, don't invent a wrong
-    # conclusion from an empty gate - defer to the underlying raw measurement instead.
-    if globals().get("V2427_WIDTH_SANITY_FALLBACK_ENABLED", True):
-        min_clean = globals().get("V2427_WIDTH_SANITY_MIN_CLEAN_STACKS", 2)
-        clean_count = len(ss) - len(suspects)
-        if clean_count < min_clean:
-            if globals().get("V2407_TRACE", True):
-                print(f"v24.27 WIDTH_SANITY FALLBACK {view_label}: filtering would leave only "
-                      f"{clean_count} clean stack(s) out of {len(ss)} (need >= {min_clean} to "
-                      f"compare anything) - this view's segmentation is too coarse for the "
-                      f"width-sanity gate to be reliable here. Falling back to UNFILTERED "
-                      f"comparison (suspects cleared) instead of silently reporting 'no risk' "
-                      f"or 'no pairs' from an empty-after-filtering result.")
-            return set()
     return suspects
 
 
@@ -1640,19 +1619,33 @@ V2424_PAIRWISE_WIDTH_SANITY_ENABLED = True
 V2424_PAIRWISE_MIN_STACK_WIDTH_PX = 40
 V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN = 2.5
 
-# v24.27 WIDTH-SANITY FALLBACK GUARD - see the full root-cause writeup inside
-# _flag_width_outlier_stacks() docstring/comment. Summary: real log evidence (AC03-01 BACK
-# view) showed that when an ENTIRE view's segmentation is too coarse, the v24.24/25
-# width-sanity gate can flag ALL stacks in that view as suspect at once - leaving zero
-# clean pairs for every downstream detector (STEP_DOWN, Valley, Cross-View,
-# REAR_LATERAL_IMBALANCE FORCE/VETO, LATERAL_GAP_RISK). A "zero comparable pairs" result
-# was then misread downstream as "0.0 ratio = no risk", incorrectly VETOing a genuine
-# AI-detected REAR_LATERAL_IMBALANCE and reporting a false SAFE. Fix: if filtering would
-# leave fewer than V2427_WIDTH_SANITY_MIN_CLEAN_STACKS clean stacks, discard the suspect
-# flags entirely for that call and fall back to the raw, unfiltered stack list - "not
-# enough reliable data to filter with confidence" should never silently become "no risk".
-V2427_WIDTH_SANITY_FALLBACK_ENABLED = True
-V2427_WIDTH_SANITY_MIN_CLEAN_STACKS = 2
+# v24.28 - VetoAndFallbackFix - see get_max_lateral_imbalance_ratio_in_zone() and
+# _should_veto_lateral_imbalance() docstrings/comments for the full root-cause writeup.
+# TWO real bugs found via log evidence from AC03-01 (user confirmed the AI's finding was
+# correct against the original blue-box reference image):
+#   (1) REAR_LATERAL_IMBALANCE VETO false-fired at FRONT because the rear zone (a
+#       HARDCODED ~45% width slice) only overlapped 1 segmented stack, so no comparison
+#       pair could ever be formed - get_max_lateral_imbalance_ratio_in_zone() silently
+#       returned its initial value 0.0, which is indistinguishable downstream from "measured
+#       a real pair, found no difference". FIX: that function now returns None ("cannot
+#       measure") whenever there are fewer than 2 comparable stacks in the zone (before or
+#       after width-sanity filtering); the VETO gate now treats None as "cannot veto" -
+#       insufficient data is not evidence of safety, so it defers to the AI's finding.
+#   (2) A short-lived v24.27 attempt at a *different* fix for a similar-looking problem
+#       (BACK view STEP_DOWN detector) added a blanket fallback inside
+#       _flag_width_outlier_stacks() that cleared ALL suspect flags whenever too few clean
+#       stacks remained, so every caller (not just the VETO gate) fell back to comparing
+#       completely unfiltered, unreliable stacks. In AC03-01's BACK view this caused the
+#       pairwise STEP_DOWN loop to compare idx=0 (29px) against idx=1 (31px) - two
+#       segmentation-fragment slivers BOTH already flagged suspect - and accept a spurious
+#       58% ratio, drawing a tiny, wrongly-positioned marker (confirmed by user against the
+#       real output image). That blanket fallback is REMOVED in v24.28: normal width-sanity
+#       filtering (v24.24/25/26 behavior - skip any pair touching a suspect stack) is
+#       restored unconditionally for STEP_DOWN/Valley/Cross-View/LATERAL_GAP. The original
+#       v24.27 goal (don't let "0 comparable pairs" silently become "no risk") is instead
+#       achieved precisely at its real source - the VETO gate above - via the None-sentinel
+#       fix, without introducing new false markers elsewhere.
+V2428_BUILD = True
 
 # v24.13 REAL FIX (MarkerRoutingFix) - ดู CHANGELOG หัวไฟล์สำหรับ root cause เต็ม
 # ROOT CAUSE ที่ยืนยันจาก Log จริง (AA04-05): boundary_marker ที่ v24.10 คำนวณไว้
@@ -2534,14 +2527,40 @@ def _v2405_shift_abs_box_up_for_back(box, view_label, shift_ratio=None):
 def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     """v24 NEW: คืนค่า "อัตราส่วนความแตกต่างความสูงสูงสุด" ระหว่างคู่ตั้งที่อยู่ติดกัน
     ในโซนประตูท้ายตู้ (ไม่กรองด้วย threshold) - ใช้สำหรับตัดสินใจ VETO การ claim ของ
-    AI (ถ้าค่าสูงสุดที่วัดได้ต่ำมาก แสดงว่าไม่มีความไม่สมดุลจริงในโซนนี้เลย)"""
+    AI (ถ้าค่าสูงสุดที่วัดได้ต่ำมาก แสดงว่าไม่มีความไม่สมดุลจริงในโซนนี้เลย)
+
+    v24.28 FIX (root-cause writeup - see V2428_* constants near V2424 block for full
+    detail): real log evidence (AC03-01, FRONT view) showed that when the rear zone
+    (rear_x0..rear_x1, a HARDCODED ~45% slice of the container width) only overlaps ONE
+    segmented stack - either because segmentation is coarse (few stacks total) or the zone
+    boundary happens to cut most stacks out - the comparison loop below never executes even
+    once (range(len(relevant)-1) with len(relevant)<=1 is empty), so max_ratio silently
+    stayed at its initial value 0.0. That 0.0 is indistinguishable from "measured a genuine
+    pair and found no height difference", but it actually means "could not measure at all" -
+    a completely different, much weaker claim. Downstream, this caused
+    _should_veto_lateral_imbalance() to VETO a genuine AI-detected REAR_LATERAL_IMBALANCE
+    (AI explicitly described a real 1-tier-vs-2-tier ~50% difference, confirmed correct by
+    user against the original blue-box reference image) because 0.0 < veto threshold 0.2.
+    FIX: return None (a distinguishable "cannot measure" sentinel) whenever there are fewer
+    than 2 relevant stacks to compare (either before or after width-sanity filtering) -
+    "not enough data to measure" must never be conflated with "measured, found nothing".
+    The caller (_should_veto_lateral_imbalance) now treats None as "cannot veto" - lack of
+    evidence is not evidence of safety, so it defers to the AI's finding instead of
+    overriding it.
+    """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
+    if len(relevant) < 2:
+        if globals().get("V2407_TRACE", True):
+            print(f"v24.28 LATERAL_IMBALANCE_VETO: only {len(relevant)} stack(s) overlap the "
+                  f"rear zone x=[{rear_x0}-{rear_x1}] - not enough to form any comparison pair. "
+                  f"Returning None ('cannot measure') instead of a misleading 0.0.")
+        return None
     # v24.25: exclude width-outlier stacks from the VETO decision too - a false "no
     # imbalance" or false "big imbalance" reading caused by a segmentation artifact should
     # not influence whether we veto the AI's REAR_LATERAL_IMBALANCE claim.
     suspect_indices = _flag_width_outlier_stacks(relevant, view_label=None)
-    max_ratio = 0.0
+    max_ratio = None
     for i in range(len(relevant) - 1):
         if i in suspect_indices or (i + 1) in suspect_indices:
             continue
@@ -2552,7 +2571,11 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
             continue
         taller, shorter = (ha, hb) if ha >= hb else (hb, ha)
         ratio = 1 - (shorter / taller)
-        max_ratio = max(max_ratio, ratio)
+        max_ratio = ratio if max_ratio is None else max(max_ratio, ratio)
+    if max_ratio is None and globals().get("V2407_TRACE", True):
+        print(f"v24.28 LATERAL_IMBALANCE_VETO: {len(relevant)} stack(s) in rear zone but no "
+              f"clean (non-suspect) pair survived width-sanity filtering. Returning None "
+              f"('cannot measure') instead of a misleading 0.0.")
     return max_ratio
 
 
@@ -3608,6 +3631,20 @@ def process_request(request):
             else:
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
             max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
+            # v24.28 FIX: max_ratio can now be None ("could not measure any pair in the rear
+            # zone" - see get_max_lateral_imbalance_ratio_in_zone docstring for full
+            # root-cause). None must NEVER be treated as "measured 0.0, no imbalance" - lack
+            # of evidence is not evidence of safety. Real case confirmed by user (AC03-01,
+            # FRONT view): rear zone only overlapped 1 stack, so no pair could ever be formed;
+            # the AI's genuine REAR_LATERAL_IMBALANCE finding was incorrectly VETOed under the
+            # old 0.0-default behavior. Now: if we cannot measure, do not veto - defer to the
+            # AI's finding instead (same as the "insufficient data" default for every other
+            # gate in this file).
+            if max_ratio is None:
+                print(f"REAR_LATERAL_IMBALANCE VETO skipped ({view_label}): could not measure any "
+                      f"comparable stack pair in the rear zone x=[{rear_x0}-{rear_x1}] (insufficient "
+                      f"data, not evidence of safety) -> NOT vetoing, deferring to AI finding")
+                return False
             if max_ratio < LATERAL_IMBALANCE_VETO_MAX_RATIO:
                 print(f"REAR_LATERAL_IMBALANCE VETO candidate ({view_label}): coverage={coverage:.2f} "
                       f"(>= {LATERAL_IMBALANCE_VETO_MIN_COVERAGE}), max measured height-diff ratio in rear zone "
@@ -3981,8 +4018,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.27",
-            "benchmarkMode": "v24.27_width_sanity_fallback"}, 200, headers)
+            "checkerVersion": "V24.28",
+            "benchmarkMode": "v24.28_veto_and_fallback_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
