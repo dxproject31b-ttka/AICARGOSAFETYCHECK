@@ -17,6 +17,75 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.37 - HiddenRecessedBoxColorGradientFix + RecessedBoxDetector: user reported the v24.36
+#          markers were STILL not at the genuine risk (both FRONT/BACK markers sat near the
+#          head-wall side, and the user insisted the real risk - "เหลืองจะหล่นทับเขียว", a
+#          tall yellow stack that could fall onto a short green stack - was elsewhere).
+#          Rather than re-guessing from screenshots again, this was root-caused by directly
+#          RUNNING the actual deterministic pipeline (container/cargo bounds, stack/box
+#          segmentation) against the REAL PDF file (EC04-04-05-Aug-26.pdf) and sampling real
+#          pixel colors at every detected stack/box - not speculation. This proved TWO
+#          separate, concrete findings:
+#          (1) ROOT CAUSE: a genuinely SEPARATE, physically SHORTER green (STEMA) box sits
+#              directly beneath/in-front-of a much taller yellow (DITHL) box within the SAME
+#              detected stack-column x-range (a "recessed" box - offset in visual depth in
+#              this isometric rendering, not a different length position). Manually
+#              re-tracing the exact color_profile fed into detect_boxes_in_stack() for that
+#              column proved the color transition IS present and large (yellow (247,247,0)
+#              at the top down to green (0,92,0) at the bottom, ~290-unit RGB-space change -
+#              a real, unmistakable box-color change) - but it happens GRADUALLY over ~50
+#              rows (isometric-shading anti-aliasing at the seam), so none of the THREE
+#              existing boundary signals ever fired: _find_color_step_boundaries only
+#              compares ADJACENT rows (never reaches its 60-unit threshold in any single
+#              step), _find_jump_boundaries depends on seed-extent WIDTH changing (stayed a
+#              constant ~150px the whole time, no width jump at all), and
+#              _find_dark_boundary_lines_1d needs a dip-then-recover within
+#              BOX_BOUNDARY_MAX_THICKNESS_PX=6 rows (this is a smooth one-directional drift,
+#              not a dip). All three are correctly tuned for SHARP/LOCAL transitions (a real
+#              box seam) - none of them were ever designed to catch a large but GRADUAL
+#              cumulative drift. FIX: added _find_gradual_color_transition_boundary(),
+#              comparing a representative (median) color of the first/last
+#              GRADUAL_COLOR_TRANSITION_STABLE_WINDOW=15 rows of a box candidate - if the
+#              total distance between these two stable regions clears 140 (well above the
+#              60 used for single-row jumps, so it only fires on a genuine box-color change,
+#              not ordinary isometric shading-gradient within one uniformly-colored box),
+#              the row where the profile first crosses the midpoint is returned as a split
+#              point. Wired into detect_boxes_in_stack() (VERTICAL/height-wise box
+#              splitting) ONLY via a new include_gradual_color_transition=True opt-in
+#              parameter on _combined_boundaries() - explicitly NOT applied to
+#              detect_stack_columns()'s HORIZONTAL/width-wise stack splitting, since a
+#              gradual LEFT-RIGHT color drift between same-color adjacent stacks is the
+#              already-understood, already-handled SAME-COLOR-ADJACENT-STACKS limitation
+#              that v24.34/v24.35's merge guard deliberately RE-merges when narrow -
+#              applying this there would directly fight that fix and reintroduce
+#              over-segmentation.
+#          (2) NEW DETECTOR NEEDED: even after box-splitting correctly identifies the hidden
+#              green box as its own box, EVERY existing risk detector (pairwise STEP_DOWN,
+#              TALL_UNSTABLE, cross-view collision, REAR_LATERAL) compares WHOLE-STACK
+#              height (top_y to floor_y) - the combined stack's overall silhouette height is
+#              unchanged by an internal box split, so none of them would ever see the green
+#              box's true shorter height in isolation. Added
+#              detect_recessed_box_regions_from_stack_model(): for every stack with >=2
+#              internal boxes, compares its BOTTOM-most box's height against a reference
+#              height from immediate neighbor stacks. CRITICAL SAFEGUARD found during the
+#              same real-file test: an early version of this detector ALSO false-positived
+#              on three perfectly ordinary, safe multi-tier BACK-view stacks (idx2/5/6) where
+#              the top and bottom boxes are simply different SKU heights of the SAME color/
+#              cargo type - real color sampling showed color_dist of only 5-15 between their
+#              own top/bottom boxes, versus ~250+ for the genuine green/yellow case. FIX:
+#              store a representative color per box (in detect_boxes_in_stack, reusing the
+#              already-computed color_profile - no extra pixel scan needed) and REQUIRE the
+#              stack's top-most and bottom-most box to differ in color by
+#              V2437_RECESSED_BOX_MIN_COLOR_DIST=90 before flagging - this single gate
+#              correctly rejected all three same-color false positives while keeping the
+#              two genuine, real, color-verified mismatches (ratio 0.70 and 0.69). Verified
+#              end-to-end against the real PDF: the new marker correctly appears exactly on
+#              the hidden green STEMA-BN box (previously completely invisible to every
+#              detector), the weaker/imprecise former marker at the green-topped stack
+#              on the opposite corner is now superseded by a tighter, more accurate,
+#              higher-confidence marker via the existing strongest-only non-overlapping
+#              selection (v24.29) - no code change needed there, it "just worked" once fed
+#              the new, more precise candidate.
 # v24.36 - StepDownAiClaimPrecisionFix: real evidence from a v24.35 live run
 #          (EC04-04-05-Aug-26, execution_id dhhu6vwa33ko) showed a NEW way for a genuine
 #          rear-zone STEP_DOWN_RISK to go completely unmarked, while an unrelated marker
@@ -1808,6 +1877,135 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
 
     return regions
 
+
+V2437_RECESSED_BOX_ENABLED = True
+V2437_RECESSED_BOX_MIN_RATIO = 0.45   # the bottom box must be at least this much SHORTER than
+                                        # the reference height established by its immediate
+                                        # neighbor stacks' OWN overall height (1 - bottom/ref)
+V2437_RECESSED_BOX_MIN_ABS_PX = 20
+V2437_RECESSED_BOX_MIN_COLOR_DIST = 90  # v24.37: the top-most and bottom-most box within the
+                                        # SAME stack must differ in color by at least this much
+                                        # (in RGB-distance) - see docstring below for why this
+                                        # is required to avoid false-firing on ordinary,
+                                        # perfectly safe multi-tier stacks of the SAME color
+V2437_TRACE = True
+
+
+def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
+    """v24.37 RecessedBoxDetector.
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26): user reported a genuine risk ("เหลืองจะ
+    หล่นทับกล่องเขียว" - tall yellow could fall onto a short green box) that no existing
+    detector was catching. Direct pixel-level tracing of the ACTUAL PDF (not a screenshot
+    guess) proved: a real, physically-shorter GREEN (STEMA) box sits directly in front
+    of/below a much TALLER YELLOW (DITHL) neighbor, occupying the SAME image x-range as
+    that taller neighbor in this isometric rendering (a "recessed" box - offset in visual
+    depth, not length position). Every existing pairwise/adjacency STEP_DOWN, TALL_UNSTABLE,
+    cross-view, and REAR_LATERAL detector compares WHOLE-STACK height (top_y to floor_y) -
+    since detect_boxes_in_stack() previously treated this entire yellow+green span as ONE
+    box (see the companion HiddenRecessedBoxColorGradientFix / _find_gradual_color_
+    transition_boundary fix, which corrects the underlying box-splitting itself), the
+    combined stack's overall silhouette height looked unremarkable and no detector ever
+    saw the green box's true, much shorter height in isolation.
+
+    This detector runs AFTER box-splitting is fixed and specifically targets the pattern
+    that whole-stack comparisons cannot see: for every stack that now has >=2 internal
+    boxes, look at its BOTTOM-MOST box (the box most likely to represent a genuinely
+    separate, shorter object occluded/recessed beneath a taller box above it) and compare
+    its height against a reference height established by the immediate left/right neighbor
+    stacks' OWN overall height (what "normal" height looks like at this position). If the
+    bottom box is dramatically shorter than that reference, it is flagged with a marker
+    covering ONLY that bottom box's own precise bounding rectangle - a materially different,
+    often MORE severe signal than an ordinary whole-stack STEP_DOWN pair (real evidence: this
+    catches ratio~0.66-0.74 mismatches that were entirely invisible before, well above the
+    weaker ~0.27 ratio the ordinary pairwise loop was left to report elsewhere on this file).
+
+    v24.37 CRITICAL SAFEGUARD (found during the SAME real-file test that validated this
+    detector): a stack with >=2 internal boxes is not automatically "recessed/occluded" -
+    it is very often simply a NORMAL, perfectly safe multi-tier stack where the top and
+    bottom boxes are different physical SKU heights but the SAME color/cargo type (real
+    evidence, same file: BACK idx2/5/6 each split into 2 boxes with bottom-box-vs-neighbor
+    ratios of 0.46-0.77 - i.e. would ALL have false-positived as "recessed" under height
+    comparison alone - but direct color sampling confirmed top and bottom boxes in every one
+    of those stacks are the SAME yellow color, just an ordinary tier boundary). The
+    distinguishing signal that correctly separates the genuine case (FRONT idx2: yellow
+    top / green bottom, verified by real pixel sampling) from these false positives is
+    COLOR: only fire when the stack's TOP-most and BOTTOM-most box differ in representative
+    color (repr_color, computed once in detect_boxes_in_stack) by at least
+    V2437_RECESSED_BOX_MIN_COLOR_DIST - a genuinely different, occluded/recessed box (like a
+    different SKU/cargo type) will always show a real color difference; an ordinary same-
+    type multi-tier stack will not.
+
+    Width-outlier stacks are excluded (same _flag_width_outlier_stacks gate used everywhere
+    else) since a segmentation-fragment stack's "bottom box" is not a reliable measurement.
+    """
+    min_ratio = globals().get("V2437_RECESSED_BOX_MIN_RATIO", 0.45) if min_ratio is None else min_ratio
+    min_abs_px = globals().get("V2437_RECESSED_BOX_MIN_ABS_PX", 20) if min_abs_px is None else min_abs_px
+    min_color_dist = globals().get("V2437_RECESSED_BOX_MIN_COLOR_DIST", 90)
+    if not globals().get("V2437_RECESSED_BOX_ENABLED", True):
+        return []
+    ss = [s for s in (stacks or []) if s.get("boxes")]
+    ss = sorted(ss, key=lambda s: s.get("x0", 0))
+    n = len(ss)
+    if n < 2:
+        return []
+    suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
+    trace = globals().get("V2437_TRACE", True)
+    regions = []
+    for i, s in enumerate(ss):
+        boxes = s.get("boxes") or []
+        if len(boxes) < 2:
+            continue
+        if i in suspect_indices:
+            if trace:
+                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: width-outlier stack, skipped")
+            continue
+        top_box = boxes[0]
+        bottom_box = boxes[-1]
+        top_color = top_box.get("repr_color")
+        bottom_color = bottom_box.get("repr_color")
+        if top_color is None or bottom_color is None:
+            continue
+        color_dist = _color_distance(top_color, bottom_color)
+        if color_dist < min_color_dist:
+            if trace:
+                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: top/bottom box color_dist="
+                      f"{color_dist:.0f} < {min_color_dist} - likely an ordinary same-color/same-type "
+                      f"multi-tier stack, not a genuinely different occluded/recessed box")
+            continue
+        bottom_h = max(1, bottom_box["y_max"] - bottom_box["y_min"])
+        neighbor_heights = []
+        if i - 1 >= 0:
+            nb = ss[i - 1]
+            neighbor_heights.append(max(1, nb["floor_y"] - nb["top_y"]))
+        if i + 1 < n:
+            nb = ss[i + 1]
+            neighbor_heights.append(max(1, nb["floor_y"] - nb["top_y"]))
+        if not neighbor_heights:
+            continue
+        reference_h = sum(neighbor_heights) / len(neighbor_heights)
+        diff = reference_h - bottom_h
+        ratio = diff / max(1, reference_h)
+        if diff < min_abs_px or ratio < min_ratio:
+            if trace:
+                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: bottom_box_h={bottom_h}px "
+                      f"reference_h={reference_h:.0f}px diff={diff:.0f}px ratio={ratio:.2f}")
+            continue
+        region = {
+            "x_min": s["x0"], "y_min": bottom_box["y_min"], "x_max": s["x1"], "y_max": bottom_box["y_max"],
+            "ratio": ratio,
+            "v2410_source": "recessed_box_within_stack",
+            "v2437_reference_height": reference_h,
+            "v2437_bottom_box_height": bottom_h,
+        }
+        regions.append(region)
+        if trace:
+            print(f"v24.37 RECESSED_BOX ACCEPT {view_label} idx={i}: bottom_box_h={bottom_h}px "
+                  f"reference_h={reference_h:.0f}px ratio={ratio:.2f} "
+                  f"marker=[{region['x_min']},{region['y_min']},{region['x_max']},{region['y_max']}]")
+    return regions
+
+
 def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start, container_bounds, cargo_extent):
     results = {"FRONT": [], "BACK": []}
     for view in ("FRONT", "BACK"):
@@ -2287,17 +2485,96 @@ def _find_jump_boundaries(profile, min_jump=JUMP_MIN_PX, min_gap_between=JUMP_MI
     return boundaries
 
 
-def _combined_boundaries(color_profile, position_profile, lum_profile, min_seg_width):
+GRADUAL_COLOR_TRANSITION_MIN_TOTAL_DIST = 140  # v24.37 - see _find_gradual_color_transition_boundary
+GRADUAL_COLOR_TRANSITION_STABLE_WINDOW = 15
+
+
+def _find_gradual_color_transition_boundary(color_profile, min_total_distance=None, stable_window=None):
+    """v24.37 HiddenRecessedBoxColorGradientFix.
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26): a genuinely SEPARATE, physically shorter
+    green (STEMA) box sits directly below/in-front-of a taller yellow (DITHL) box within the
+    SAME detected stack-column x-range (a "recessed" box in this isometric rendering - the
+    green box occupies the same image x-span as its taller yellow neighbor above it, because
+    it sits at a different visual depth/row). Manually re-tracing the exact color_profile fed
+    into detect_boxes_in_stack() for that column proved the transition IS present and large
+    (yellow (247,247,0) at the top down to green (0,92,0) at the bottom - a real, ~290-unit
+    RGB-space color change) - but it happens GRADUALLY over ~50 rows (isometric-shading
+    anti-aliasing at the seam), so NO single adjacent-row step ever reaches
+    COLOR_STEP_MIN_DISTANCE=60 (_find_color_step_boundaries only compares consecutive rows),
+    the seed-extent width stayed ~150px the whole time (no _find_jump_boundaries trigger),
+    and luminance changed smoothly rather than dipping-then-recovering within
+    BOX_BOUNDARY_MAX_THICKNESS_PX=6 rows (no _find_dark_boundary_lines_1d trigger either). All
+    three existing signals are specifically tuned to catch SHARP, LOCAL transitions (a real
+    box seam/edge) and none of them are designed to catch a large but GRADUAL cumulative
+    drift - so the box-height splitter treated the entire yellow+green span as ONE box,
+    completely hiding the green box's true (much shorter) height from every downstream risk
+    detector (STEP_DOWN pairwise, TALL_UNSTABLE, cross-view collision, REAR_LATERAL_
+    IMBALANCE) - this silently masked exactly the kind of risk the user was looking for
+    ("เหลืองจะหล่นทับเขียว" - tall yellow next to/above a short green box).
+
+    FIX: compare a REPRESENTATIVE color from the top `stable_window` rows against a
+    representative color from the bottom `stable_window` rows of the profile (median per
+    channel, so a few noisy rows don't skew it). If the TOTAL distance between these two
+    stable regions clears min_total_distance (140 - intentionally set well above the 60 used
+    for single-row jumps, so this only fires on a genuine box-color change, not on ordinary
+    isometric-shading gradient within one uniformly-colored box, which real log evidence
+    from dozens of other columns shows typically stays under ~40-50 total drift end-to-end),
+    scan for the row where the profile first crosses the midpoint between the two stable
+    colors and return that as the split point.
+
+    SCOPE: this is deliberately wired into detect_boxes_in_stack() (VERTICAL/height-wise
+    splitting) ONLY, not into detect_stack_columns() (HORIZONTAL/width-wise splitting). A
+    gradual LEFT-RIGHT color drift between adjacent same-color stacks is the well-understood,
+    already-accepted SAME-COLOR-ADJACENT-STACKS limitation (see CHANGELOG header) that v24.34/
+    v24.35's merge guard already deliberately re-merges when narrow - applying this gradual-
+    transition detector horizontally too would fight directly against that fix and reintroduce
+    over-segmentation. Vertically (within one stack, box-to-box), a real color change hiding a
+    genuinely different, shorter box was never something any prior version protected against.
+    """
+    min_total_distance = GRADUAL_COLOR_TRANSITION_MIN_TOTAL_DIST if min_total_distance is None else min_total_distance
+    stable_window = GRADUAL_COLOR_TRANSITION_STABLE_WINDOW if stable_window is None else stable_window
+    n = len(color_profile)
+    if n < stable_window * 3:
+        return []
+
+    def _repr_color(seg):
+        rs = sorted(c[0] for c in seg); gs = sorted(c[1] for c in seg); bs = sorted(c[2] for c in seg)
+        m = len(seg) // 2
+        return (rs[m], gs[m], bs[m])
+
+    top_repr = _repr_color(color_profile[:stable_window])
+    bottom_repr = _repr_color(color_profile[-stable_window:])
+    total_dist = _color_distance(top_repr, bottom_repr)
+    if total_dist < min_total_distance:
+        return []
+    half_target = total_dist / 2.0
+    for i in range(stable_window, n - stable_window):
+        d = _color_distance(color_profile[i], top_repr)
+        if d >= half_target:
+            return [i]
+    return []
+
+
+def _combined_boundaries(color_profile, position_profile, lum_profile, min_seg_width,
+                           include_gradual_color_transition=False):
     """รวม 3 สัญญาณ: dark-dip (เดิม) + color-step (ใหม่) + floor/edge-jump (ใหม่)
     แบบ union แล้ว dedupe/merge boundary ที่อยู่ใกล้กันเกินไป - ดู CHANGELOG หัวไฟล์
     (หัวข้อ v24) สำหรับเหตุผลที่ตัดสินใจคงทั้ง 3 สัญญาณไว้ในทั้ง 2 ทิศทาง (แนวนอน/
-    แนวตั้ง) แทนที่จะใช้แค่บางสัญญาณในบางทิศทาง"""
+    แนวตั้ง) แทนที่จะใช้แค่บางสัญญาณในบางทิศทาง
+
+    v24.37: เพิ่มสัญญาณที่ 4 (gradual color transition - ดู
+    _find_gradual_color_transition_boundary) แบบ OPT-IN เท่านั้น (include_gradual_color_
+    transition=True) - ใช้เฉพาะตอนแบ่งกล่องแนวตั้งใน detect_boxes_in_stack เท่านั้น ไม่ใช้
+    กับการแบ่งตั้งแนวนอนใน detect_stack_columns (ดู docstring ของฟังก์ชันนั้นสำหรับเหตุผล)
+    """
     smoothed_colors = _median_smooth_colors(color_profile)
     smoothed_position = _median_smooth_scalar(position_profile)
     color_b = _find_color_step_boundaries(smoothed_colors)
     jump_b = _find_jump_boundaries(smoothed_position)
     dark_b = _find_dark_boundary_lines_1d(lum_profile)
-    all_b = sorted(set(color_b) | set(jump_b) | set(dark_b))
+    gradual_b = _find_gradual_color_transition_boundary(smoothed_colors) if include_gradual_color_transition else []
+    all_b = sorted(set(color_b) | set(jump_b) | set(dark_b) | set(gradual_b))
     deduped = []
     for b in all_b:
         if not deduped or b - deduped[-1] > min_seg_width // 2:
@@ -2629,7 +2906,10 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
         lum_profile.append(sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in zip(rs, gs, bs)) / len(rs))
         width_profile.append(seed_right - seed_left)
 
-    deduped = _combined_boundaries(color_profile, width_profile, lum_profile, BOX_MIN_HEIGHT_PX * 3)
+    # v24.37: include_gradual_color_transition=True ONLY here (vertical box-splitting) - see
+    # _find_gradual_color_transition_boundary docstring for full root-cause writeup.
+    deduped = _combined_boundaries(color_profile, width_profile, lum_profile, BOX_MIN_HEIGHT_PX * 3,
+                                    include_gradual_color_transition=True)
     boundaries_abs = sorted(top_y + b for b in deduped)
     edges = [top_y] + boundaries_abs + [floor_y]
 
@@ -2669,7 +2949,21 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
         min_valid_samples = max(1, len(sample_ys) // 2)
         left = x0 if len(left_measurements) < min_valid_samples else _median_of(left_measurements)
         right = x1 if len(right_measurements) < min_valid_samples else _median_of(right_measurements)
-        boxes.append({"y_min": y0b, "y_max": y1b, "x_left": left, "x_right": right, "height_px": y1b - y0b})
+        # v24.37: store a representative color for this box (median of the SAME color_profile
+        # already computed above for boundary detection, sliced to this box's own y-range) -
+        # needed by detect_recessed_box_regions_from_stack_model to distinguish a genuine
+        # different-colored occluded/recessed box from an ordinary same-color tier boundary
+        # within a normally multi-tiered stack (see that function's docstring).
+        prof_lo = max(0, y0b - top_y); prof_hi = min(len(color_profile), y1b - top_y)
+        seg_colors = [c for c in color_profile[prof_lo:prof_hi] if c != (255, 255, 255)]
+        if seg_colors:
+            rs = sorted(c[0] for c in seg_colors); gs = sorted(c[1] for c in seg_colors); bs = sorted(c[2] for c in seg_colors)
+            m = len(seg_colors) // 2
+            repr_color = (rs[m], gs[m], bs[m])
+        else:
+            repr_color = None
+        boxes.append({"y_min": y0b, "y_max": y1b, "x_left": left, "x_right": right,
+                       "height_px": y1b - y0b, "repr_color": repr_color})
     return boxes
 
 
@@ -2738,7 +3032,7 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
                 abs_boxes.append({
                     "y_min": b["y_min"] + origin_y, "y_max": b["y_max"] + origin_y,
                     "x_left": b["x_left"] + origin_x, "x_right": b["x_right"] + origin_x,
-                    "height_px": b["height_px"],
+                    "height_px": b["height_px"], "repr_color": b.get("repr_color"),
                 })
             stacks_abs.append({
                 "x0": s["x0"] + origin_x, "x1": s["x1"] + origin_x,
@@ -4080,6 +4374,18 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
 
+        # v24.37 RecessedBoxDetector - see detect_recessed_box_regions_from_stack_model
+        # docstring for full root-cause writeup. Runs on the SAME stack_box_model (now with
+        # correctly-split boxes thanks to the companion HiddenRecessedBoxColorGradientFix),
+        # catching a genuinely shorter box hidden/recessed beneath a taller neighbor that
+        # every whole-stack-height comparison above was structurally unable to see.
+        if globals().get("V2437_RECESSED_BOX_ENABLED", True):
+            for _view in ("FRONT", "BACK"):
+                _recessed_regions = detect_recessed_box_regions_from_stack_model(stack_box_model.get(_view, []), view_label=_view)
+                if _recessed_regions:
+                    step_down_regions.setdefault(_view, [])
+                    step_down_regions[_view].extend(_recessed_regions)
+
         # v24.18-22: CROSS-VIEW PROFILE COLLISION - run before strongest-only so regions can
         # be tagged/exempted.
         if globals().get("V2418_CROSS_VIEW_COLLISION_ENABLED", True):
@@ -4862,8 +5168,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.36",
-            "benchmarkMode": "v24.36_stepdown_ai_claim_precision_fix"}, 200, headers)
+            "checkerVersion": "V24.37",
+            "benchmarkMode": "v24.37_hidden_recessed_box_color_gradient_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
