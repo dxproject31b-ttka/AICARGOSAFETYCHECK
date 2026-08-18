@@ -17,6 +17,70 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.34 - LocalFloorGapWiringFix + SegmentationOverSplitMergeGuard + RearLateralTraceFix:
+#          user reported a real case (EC04-01-05-Aug-26, execution_id hxxetkyhzh1b) where
+#          the rear area of the truck had a visibly tall stack sitting over empty floor
+#          space, yet the report came back completely SAFE with no marker at all. Full
+#          root-cause audit of the v24.33 code + this file's own log found THREE separate,
+#          independently-confirmed issues:
+#          (1) DEAD CODE (the actual root cause for THIS file): detect_local_depth_gap_per_view()
+#              (v24.3's "local depth-gap scan", designed specifically to catch localized
+#              floor gaps that whole-container-average LATERAL_GAP_RISK misses) was being
+#              called every run and its own log line proved it WORKED CORRECTLY and found a
+#              genuine gap - "Local depth-gap ACCEPTED: x=[583-713] width=130px max_gap=57px
+#              avg_gap=38px raw_coverage=0.89 roughness=0.12" (roughness=0.12, far below the
+#              0.35 noise threshold - a real, smooth, isometric-perspective floor gap, not a
+#              dimension-label artifact) - but the resulting `local_depth_gap_regions` variable
+#              was NEVER referenced anywhere else in the file after being assigned. It was
+#              computed, printed, and silently thrown away on every single run since v24.3 -
+#              a "sees but never says" bug. FIX: added a new risk type LOCAL_FLOOR_GAP_RISK
+#              (color=blue) that turns every accepted region into an actual marker + report
+#              entry, deduplicated against every other risk already collected in the same
+#              view (any type) so the same physical gap never gets two overlapping markers.
+#              Uses an absolute-pixel size gate (like STEP_DOWN's V2413 fix) instead of the
+#              generic 3%-of-crop ratio gate, and is explicitly excluded from the
+#              cargo-extent fallback (same principle as V2413 for STEP_DOWN_RISK) so a
+#              failed precise-box draw never substitutes an oversized, misleading box.
+#          (2) SEGMENTATION OVER-SPLIT (a contributing factor - this is why so many other
+#              detectors also went silent for the same file, not just LOCAL_FLOOR_GAP):
+#              FRONT view segmented into 11 "stacks", but 5 of them (idx 0,1,5,7,8) measured
+#              only 23-38px wide - narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX=40px -
+#              and v24.31's adjacency-propagation then also excluded their 4 immediate
+#              neighbors (idx 2,4,6,9), leaving 9 of 11 stacks unusable for
+#              STEP_DOWN/TALL_UNSTABLE/CROSS_VIEW/REAR_LATERAL comparisons on this file.
+#              ROOT CAUSE: this manifest's boxes are almost all the same yellow/tan color
+#              (SAME-COLOR-ADJACENT-STACKS, a known limitation since v24 - see CHANGELOG
+#              below), so a numeric distance label or SKU-sticker edge on an otherwise
+#              uniform-color box was enough to trigger a spurious floor-jump/color-step
+#              boundary, slicing ONE real physical box/stack into narrow fragments. The
+#              existing v24.24 WIDTH-SANITY gate correctly detected the SYMPTOM but only
+#              ever reacted by excluding the fragment (and its neighbors) - it never fixed
+#              the segmentation itself. FIX: added _merge_narrow_similar_stacks_in_cluster(),
+#              a bounded, deterministic, left-to-right merge pass run once per physical
+#              cargo cluster immediately after boundary detection (inside
+#              detect_stack_columns), BEFORE the width-sanity gate ever sees the data - any
+#              stack narrower than 40px whose near-floor average color is comfortably below
+#              the boundary-creation color-distance threshold (55, vs 60 used to CREATE
+#              boundaries) is merged into its neighbor as a same-physical-box artifact. A
+#              narrow stack with no similarly-colored neighbor is left alone (still flagged
+#              as a genuine width-outlier as before - v24.24's gate remains as
+#              defense-in-depth for whatever this merge pass does not catch).
+#          (3) UNCLEAR "CANNOT MEASURE" TRACE for REAR_LATERAL_IMBALANCE's FORCE detection
+#              path (detect_lateral_imbalance_regions_for_view): when every stack in the
+#              rear zone was a width-outlier (or fewer than 2 stacks overlapped the zone at
+#              all), the function silently returned an empty list with NO log line
+#              distinguishing "confirmed safe, measured every pair" from "could not measure
+#              anything at all" - the exact ambiguity v24.28 already fixed for the VETO gate
+#              (get_max_lateral_imbalance_ratio_in_zone returning None instead of a
+#              misleading 0.0), but never carried over to this FORCE/corroboration path.
+#              Note the AI zone-call (analyze_rear_zone_with_ai) is a fully INDEPENDENT
+#              detection path that already runs regardless of per-box segmentation health -
+#              this FORCE path silently going empty was never "the only way" a genuine
+#              REAR_LATERAL_IMBALANCE could be reported, but the log ambiguity made it hard
+#              to audit why a file came back SAFE. FIX: added explicit trace lines for both
+#              the "<2 comparable stacks" and "all-but-one-are-width-outliers" cases, making
+#              clear this always defers to the independent AI zone-call result rather than
+#              being treated as corroborating evidence of safety.
 # v24.33 - GeminiApiResilienceFix: user reported the model-fallback pool (3.7->3.6->3.5,
 #          added v24.10) was not actually reducing wall-clock latency as intended - the
 #          function still ran long enough to blow past GAS's own execution timeout. Real log
@@ -303,6 +367,8 @@ RISK_COLORS = {
     "FRONT_EMPTY_RISK": "yellow",
     "LATERAL_GAP_RISK": "cyan",
     "TALL_UNSTABLE_RISK": "magenta",
+    # v24.34 NEW - see LocalFloorGapWiringFix changelog entry near the top of this file.
+    "LOCAL_FLOOR_GAP_RISK": "blue",
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
@@ -316,7 +382,34 @@ BOX_BASED_RISK_TYPES = {
     "STEP_DOWN_RISK",
     "LATERAL_GAP_RISK",
     "TALL_UNSTABLE_RISK",
+    "LOCAL_FLOOR_GAP_RISK",
 }
+
+# v24.34 LocalFloorGapWiringFix controls - see detect_local_depth_gap_regions()/
+# detect_local_depth_gap_per_view() (v24.3) for the scan itself, and the changelog entry
+# near the top of this file for the full root-cause writeup of why this was previously
+# computed but never actually turned into a drawn risk/marker.
+V2434_LOCAL_FLOOR_GAP_RISK_ENABLED = True
+V2434_LOCAL_FLOOR_GAP_OVERLAP_MAX_RATIO = 0.20  # skip a local-floor-gap region if it
+                                    # overlaps ANY already-collected risk (of any type,
+                                    # in the same view) by more than this fraction of the
+                                    # smaller box's area - avoids drawing two markers for
+                                    # what is really the same physical spot (e.g. a
+                                    # STEP_DOWN marker already covering the same gap)
+V2434_TRACE = True
+
+# v24.34 SegmentationOverSplitMergeGuard controls - see _merge_narrow_similar_stacks_in_cluster()
+# for the full root-cause writeup and merge algorithm.
+V2434_SEGMENT_MERGE_ENABLED = True
+V2434_SEGMENT_MERGE_MIN_WIDTH_PX = 40   # matches V2424_PAIRWISE_MIN_STACK_WIDTH_PX - any
+                                    # stack narrower than this is a merge CANDIDATE (not
+                                    # automatically merged - still requires the color-
+                                    # similarity check below)
+V2434_SEGMENT_MERGE_COLOR_MAX_DIST = 55  # slightly BELOW COLOR_STEP_MIN_DISTANCE (60) so
+                                    # this only merges boundaries whose two sides are
+                                    # comfortably within "same physical box" color
+                                    # tolerance - a genuine near-threshold color change
+                                    # is deliberately left alone (not merged)
 
 HARDCODED_REAR_SIDE = {
     "FRONT": "LEFT",
@@ -452,6 +545,14 @@ def generate_action_report(case_type, description="", sku_list=""):
             f"  • นำไม้อัดกั้นค้ำยันด้านข้างของกองที่สูง\n"
             f"  • ตรวจสอบว่าฐานของกองสินค้ามั่นคงและไม่โยกคลอน\n"
             f"  • รัดด้วยสายเบลท์หรือเชือกในแนวขวางรอบกองที่สูง ป้องกันล้มตะแคง"
+        ),
+        # v24.34 NEW - see LocalFloorGapWiringFix changelog entry near the top of this file.
+        "LOCAL_FLOOR_GAP_RISK": (
+            f"แจ้งเตือน: พบพื้นที่ว่างเฉพาะจุดบนพื้นตู้ใต้/หลังกองสินค้า (หลุมพื้นเฉพาะจุด){sku_line}\n"
+            f"วิธีแก้ไข:\n"
+            f"  • ตรวจสอบพื้นตู้บริเวณจุดที่ระบุ ว่ามีพื้นที่ว่างใต้/หลังกองสินค้าจริงหรือไม่\n"
+            f"  • นำไม้อัดกั้นหรือวัสดุรองอุดช่องว่าง ป้องกันกองสินค้าทรุด/เคลื่อนลงหลุม\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกยึดกองสินค้าบริเวณนี้ให้มั่นคงเพิ่มเติม"
         ),
     }
     return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
@@ -2124,6 +2225,83 @@ def _merge_thin_edge_segments(edges, min_height):
     return edges
 
 
+def _merge_narrow_similar_stacks_in_cluster(ranges, color_profile, cluster_x0):
+    """v24.34 SegmentationOverSplitMergeGuard.
+
+    ROOT CAUSE (real log evidence, EC04-01-05-Aug-26, execution_id hxxetkyhzh1b): FRONT view
+    segmented into 11 "stacks", but 5 of them (idx 0,1,5,7,8) measured only 23-38px wide -
+    narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX=40px, and v24.31's adjacency-propagation
+    then also excluded their 4 immediate neighbors (idx 2,4,6,9) as "unreliable" too - leaving
+    9 of 11 stacks unusable for STEP_DOWN/TALL_UNSTABLE/CROSS_VIEW/REAR_LATERAL comparisons.
+    This is the SAME-COLOR-ADJACENT-STACKS limitation already known since v24 (see CHANGELOG
+    header): most of this manifest's boxes are the same yellow/tan color, so
+    _combined_boundaries() (color-step + floor-jump + dark-dip) has only weak, easily-confused
+    signal to split on. A numeric distance label or an SKU-sticker edge sitting on an otherwise
+    uniform-color box is enough to trigger a floor-jump or color-step boundary momentarily,
+    slicing ONE real physical box/stack into two narrow fragments. The existing v24.24
+    WIDTH-SANITY gate correctly detects the SYMPTOM (a suspiciously narrow stack) but only
+    reacts by EXCLUDING it (and its neighbors) from comparison - it never fixes the underlying
+    segmentation, so the same physical stack effectively goes "blind" for every detector that
+    depends on stack_box_model, in every subsequent run on this file.
+
+    FIX: a targeted merge pass, run once per physical cargo cluster right after boundary
+    detection, BEFORE the width-sanity gate ever sees the data. For each stack narrower than
+    V2434_SEGMENT_MERGE_MIN_WIDTH_PX (same 40px threshold as V2424, for consistency), compare
+    its average near-floor color (already computed via the SAME color_profile used for
+    boundary detection - no new pixel scan needed) against its immediate left neighbor. If the
+    color distance is comfortably BELOW the boundary-detection threshold itself
+    (V2434_SEGMENT_MERGE_COLOR_MAX_DIST=55, vs COLOR_STEP_MIN_DISTANCE=60 used to CREATE
+    boundaries) - i.e. the two sides are clearly within "same physical box" color tolerance,
+    not a genuine near-threshold color change - merge them into one stack. A single
+    left-to-right pass (not a full search) is used deliberately: it is bounded, deterministic,
+    and only ever WIDENS stacks (never re-introduces a previously-merged boundary), so it
+    cannot itself cause a new infinite loop or new segmentation regression - a narrow stack
+    with no similar neighbor simply stays flagged as a genuine width-outlier as before (the
+    v24.24 gate remains as defense-in-depth for whatever this merge pass does not catch).
+    """
+    if not globals().get("V2434_SEGMENT_MERGE_ENABLED", True) or len(ranges) < 2:
+        return ranges
+    min_merge_width_px = globals().get("V2434_SEGMENT_MERGE_MIN_WIDTH_PX", 40)
+    merge_color_max_dist = globals().get("V2434_SEGMENT_MERGE_COLOR_MAX_DIST", 55)
+    trace = globals().get("V2434_TRACE", True)
+
+    def _avg_color(x0, x1):
+        idx0 = max(0, x0 - cluster_x0)
+        idx1 = min(len(color_profile), x1 - cluster_x0)
+        if idx1 <= idx0:
+            return None
+        seg = color_profile[idx0:idx1]
+        rs = [c[0] for c in seg]; gs = [c[1] for c in seg]; bs = [c[2] for c in seg]
+        return (sum(rs) / len(rs), sum(gs) / len(gs), sum(bs) / len(bs))
+
+    merged = [list(ranges[0])]
+    for i in range(1, len(ranges)):
+        cur_x0, cur_x1 = ranges[i]
+        prev_x0, prev_x1 = merged[-1]
+        cur_w = cur_x1 - cur_x0
+        prev_w = prev_x1 - prev_x0
+        should_merge = False
+        dist = None
+        if cur_w < min_merge_width_px or prev_w < min_merge_width_px:
+            prev_color = _avg_color(prev_x0, prev_x1)
+            cur_color = _avg_color(cur_x0, cur_x1)
+            if prev_color is not None and cur_color is not None:
+                dist = _color_distance(prev_color, cur_color)
+                if dist < merge_color_max_dist:
+                    should_merge = True
+        if should_merge:
+            if trace:
+                print(f"v24.34 SEGMENTATION_MERGE: narrow stack x=[{cur_x0}-{cur_x1}] "
+                      f"(width={cur_w}px) merged into neighbor x=[{prev_x0}-{prev_x1}] "
+                      f"(width={prev_w}px) - color_dist={dist:.0f} < {merge_color_max_dist} "
+                      f"(likely a same-color segmentation artifact from an SKU label/number, "
+                      f"not a real stack/box boundary)")
+            merged[-1][1] = cur_x1
+        else:
+            merged.append([cur_x0, cur_x1])
+    return [tuple(r) for r in merged]
+
+
 def detect_stack_columns(view_img, cargo_xmin, cargo_xmax, y_search_top, y_search_bottom, sample_band_px=6):
     """แบ่งความกว้างของสินค้าออกเป็น "ตั้ง" (stack) ด้วย 2 ขั้นตอน: (1) แยกกลุ่มก้อน
     สินค้าจริงด้วยช่องว่างจริงก่อน (2) หาเส้นแบ่งภายในแต่ละกลุ่มด้วย 3 สัญญาณรวมกัน
@@ -2161,10 +2339,16 @@ def detect_stack_columns(view_img, cargo_xmin, cargo_xmax, y_search_top, y_searc
         boundaries_abs = sorted(cx0 + b for b in deduped)
         edges = [cx0] + boundaries_abs + [cx1]
         edges = _merge_thin_edge_segments(edges, STACK_MIN_WIDTH_PX)
+        cluster_stacks = []
         for i in range(len(edges) - 1):
             x0, x1 = edges[i], edges[i + 1]
             if x1 - x0 >= STACK_MIN_WIDTH_PX:
-                stacks.append((x0, x1))
+                cluster_stacks.append((x0, x1))
+        # v24.34 SegmentationOverSplitMergeGuard - merge narrow, same-color segmentation
+        # fragments back into their neighbor BEFORE they ever reach the width-sanity gate
+        # (see docstring of _merge_narrow_similar_stacks_in_cluster for full root cause)
+        cluster_stacks = _merge_narrow_similar_stacks_in_cluster(cluster_stacks, color_profile, cx0)
+        stacks.extend(cluster_stacks)
     if not stacks:
         stacks = [(cargo_xmin, cargo_xmax)]
     return stacks
@@ -2668,10 +2852,36 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
     """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
+    # v24.34 TRACE FIX: distinguish "zone unmeasurable" (insufficient/all-suspect stacks)
+    # from "measured, ratio below threshold -> safe" - see item 3 of the v24.34 changelog
+    # entry. This FORCE detector is only ONE of two independent paths that can raise
+    # REAR_LATERAL_IMBALANCE (the AI zone-call at analyze_rear_zone_with_ai() is the other,
+    # and runs completely independently of per-box segmentation) - but when this path goes
+    # silent, log readers had no way to tell whether that silence meant "confirmed safe" or
+    # "could not measure at all", which matters when auditing why a file came back SAFE.
+    if len(relevant) < 2:
+        if globals().get("V2405_REAR_LATERAL_TRACE", True):
+            print(f"v24.34 REAR_LATERAL (FORCE) {view_label}: only {len(relevant)} stack(s) "
+                  f"overlap the rear zone x=[{rear_x0}-{rear_x1}] - cannot form any comparison "
+                  f"pair (NOT evidence of safety; deferring entirely to the independent AI "
+                  f"zone-call result for this view)")
+        return []
     # v24.25: same width-sanity gate as pairwise STEP_DOWN/Valley/Cross-View (see
     # _flag_width_outlier_stacks docstring) - a segmentation fragment/merged-blob stack in
     # the rear zone makes the REAR_LATERAL_IMBALANCE comparison just as unreliable here.
     suspect_indices = _flag_width_outlier_stacks(relevant, view_label=view_label)
+    if len(suspect_indices) >= len(relevant) - 1 and len(relevant) >= 2:
+        # v24.34: every stack (or all-but-one, leaving no comparable pair) in the rear zone
+        # is flagged as a width-outlier - the FORCE path cannot measure ANYTHING here, which
+        # is a materially different situation from "measured every pair, all within
+        # tolerance". Make this explicit rather than letting it silently fall through the
+        # per-pair loop below and print nothing at all.
+        if globals().get("V2405_REAR_LATERAL_TRACE", True):
+            print(f"v24.34 REAR_LATERAL (FORCE) {view_label}: {len(relevant)} stack(s) in rear "
+                  f"zone x=[{rear_x0}-{rear_x1}] but {len(suspect_indices)} are width-outliers - "
+                  f"no reliable pair can be formed (NOT evidence of safety; deferring entirely "
+                  f"to the independent AI zone-call result for this view)")
+        return []
     regions = []
     for i in range(len(relevant) - 1):
         if i in suspect_indices or (i + 1) in suspect_indices:
@@ -4206,6 +4416,62 @@ def process_request(request):
                     "description": f"พบความต่างระดับระหว่างกองสินค้าประมาณ {region['ratio']*100:.0f}% ของความสูงตู้ (ตรวจจับจาก height-profile analysis)",
                 })
 
+        # v24.34 LocalFloorGapWiringFix (item 1 of the v24.34 changelog entry): the v24.3
+        # LOCAL DEPTH-GAP SCAN (detect_local_depth_gap_per_view, called above into
+        # local_depth_gap_regions) was fully implemented and already logging genuine
+        # ACCEPTED regions (real evidence, EC04-01-05-Aug-26: "Local depth-gap ACCEPTED:
+        # x=[583-713] width=130px max_gap=57px avg_gap=38px raw_coverage=0.89
+        # roughness=0.12" - a low-roughness, wide, well-corroborated real floor gap) but the
+        # result was NEVER connected to any risk_type/marker - it was computed, printed, and
+        # silently discarded every single run since v24.3. This is why a file with a
+        # visibly tall stack sitting over empty floor space could still come back
+        # completely SAFE with no rear-area marker at all, even when the scan itself had
+        # already found and accepted the gap. FIX: turn each accepted region into its own
+        # LOCAL_FLOOR_GAP_RISK, deduplicated against every risk already collected in the
+        # same view (any type, any source) so the same physical spot never gets two
+        # overlapping markers (e.g. a STEP_DOWN_RISK marker already covering the exact
+        # same gap - STEP_DOWN_RISK is excluded from the generic BOX_ZONE merge in
+        # _merge_same_area_risks, so without this explicit check it would draw twice).
+        if globals().get("V2434_LOCAL_FLOOR_GAP_RISK_ENABLED", True):
+            overlap_max = globals().get("V2434_LOCAL_FLOOR_GAP_OVERLAP_MAX_RATIO", 0.20)
+            for view_label in ("FRONT", "BACK"):
+                for region in local_depth_gap_regions.get(view_label, []):
+                    region_box = (region["x_min"], region["y_min"], region["x_max"], region["y_max"])
+                    already_covered = False
+                    for r in all_risks:
+                        if str(r.get("view", "")).upper().strip() != view_label:
+                            continue
+                        r_box = r.get("box_2d")
+                        if not r_box:
+                            continue
+                        r_abs = _ai_box_2d_to_absolute(r_box, crop_w, crop_h, crop_y_start)
+                        if not r_abs:
+                            continue
+                        if _box_iou_absolute(region_box, r_abs) >= overlap_max:
+                            already_covered = True
+                            if globals().get("V2434_TRACE", True):
+                                print(f"v24.34 LOCAL_FLOOR_GAP_RISK ({view_label}) skipped - "
+                                      f"x=[{region['x_min']:.0f}-{region['x_max']:.0f}] overlaps "
+                                      f"an already-collected {r.get('risk_type','')} marker "
+                                      f"(same physical spot, avoiding duplicate marker)")
+                            break
+                    if already_covered:
+                        continue
+                    ymin_norm = ((region["y_min"] - crop_y_start) / crop_h) * 1000
+                    ymax_norm = ((region["y_max"] - crop_y_start) / crop_h) * 1000
+                    xmin_norm = (region["x_min"] / crop_w) * 1000
+                    xmax_norm = (region["x_max"] / crop_w) * 1000
+                    print(f"FORCED LOCAL_FLOOR_GAP_RISK ({view_label}) from v24.3 local depth-gap "
+                          f"scan (width={region['width_px']:.0f}px, max_gap={region['max_gap_px']:.0f}px, "
+                          f"avg_gap={region['avg_gap_px']:.0f}px) - previously computed but never wired "
+                          f"into a marker until v24.34")
+                    all_risks.append({
+                        "view": view_label, "risk_type": "LOCAL_FLOOR_GAP_RISK",
+                        "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
+                        "reasoning": "FORCED_DETERMINISTIC_LOCAL_DEPTH_GAP",
+                        "description": f"พบพื้นที่ว่างเฉพาะจุดบนพื้นตู้ กว้างประมาณ {region['width_px']:.0f}px ลึกสูงสุดประมาณ {region['max_gap_px']:.0f}px (ตรวจจับจาก local depth-gap scan)",
+                    })
+
         all_risks = _merge_same_area_risks(all_risks)
 
         draw = PIL.ImageDraw.Draw(img)
@@ -4322,6 +4588,19 @@ def process_request(request):
                         risk_type == "STEP_DOWN_RISK"
                         and str(risk.get("reasoning", "")).upper() == "FORCED_DETERMINISTIC_HEIGHT_PROFILE_STEP"
                     )
+                    # v24.34: same reasoning as V2413 above - our own deterministic
+                    # LOCAL_FLOOR_GAP_RISK marker (FORCED_DETERMINISTIC_LOCAL_DEPTH_GAP) is a
+                    # precise, measured local-gap box, not an AI-guessed general region. Its
+                    # height in particular is often a genuinely thin sliver (the gap depth
+                    # itself, e.g. ~40-70px) which can fall under the 3% ratio floor on a
+                    # large/high-DPI page even though LOCAL_GAP_MIN_WIDTH_PX=60 already
+                    # guarantees a sane absolute width. Skip the ratio gate here too and use
+                    # an absolute-pixel sanity floor instead, so this marker cannot be lost
+                    # to the same class of bug V2413 already fixed for STEP_DOWN_RISK.
+                    is_forced_local_floor_gap_marker = (
+                        risk_type == "LOCAL_FLOOR_GAP_RISK"
+                        and str(risk.get("reasoning", "")).upper() == "FORCED_DETERMINISTIC_LOCAL_DEPTH_GAP"
+                    )
                     if is_forced_stepdown_marker and globals().get("V2413_STEPDOWN_SKIP_RATIO_SIZE_GATE_FOR_FORCED_MARKER", True):
                         min_w_px = globals().get("V2413_STEPDOWN_MIN_ABS_WIDTH_PX", 6)
                         min_h_px = globals().get("V2413_STEPDOWN_MIN_ABS_HEIGHT_PX", 6)
@@ -4329,6 +4608,14 @@ def process_request(request):
                         box_too_large = False
                         if globals().get("V2413_TRACE", True):
                             print(f"V2413 STEP_DOWN forced boundary marker - ratio size gate SKIPPED "
+                                  f"(w_px={abs_xmax - abs_xmin}, h_px={abs_ymax - abs_ymin})")
+                    elif is_forced_local_floor_gap_marker:
+                        min_w_px = globals().get("V2413_STEPDOWN_MIN_ABS_WIDTH_PX", 6)
+                        min_h_px = globals().get("V2413_STEPDOWN_MIN_ABS_HEIGHT_PX", 6)
+                        box_too_small = (abs_xmax - abs_xmin) < min_w_px or (abs_ymax - abs_ymin) < min_h_px
+                        box_too_large = False
+                        if globals().get("V2434_TRACE", True):
+                            print(f"v24.34 LOCAL_FLOOR_GAP_RISK forced marker - ratio size gate SKIPPED "
                                   f"(w_px={abs_xmax - abs_xmin}, h_px={abs_ymax - abs_ymin})")
                     else:
                         box_w_ratio = (abs_xmax - abs_xmin) / crop_w
@@ -4352,6 +4639,13 @@ def process_request(request):
             if not drawn and risk_type == "STEP_DOWN_RISK" and globals().get("V2413_STEPDOWN_DISABLE_CARGO_EXTENT_FALLBACK", True):
                 print(f"V2413 STEP_DOWN_RISK cargo-extent fallback DISABLED - no marker drawn for {resolved_view} "
                       f"(boundary marker unavailable/invalid, refusing to draw oversized cargo-extent box)")
+            elif not drawn and risk_type == "LOCAL_FLOOR_GAP_RISK":
+                # v24.34: same principle as V2413 for STEP_DOWN_RISK - a whole-cargo-extent
+                # box is never the correct marker for a precise, localized floor-gap region.
+                # If the precise box could not be drawn, skip entirely rather than
+                # substituting an oversized/misleading fallback box.
+                print(f"v24.34 LOCAL_FLOOR_GAP_RISK cargo-extent fallback DISABLED - no marker "
+                      f"drawn for {resolved_view} (precise box unavailable/invalid)")
             elif not drawn:
                 fallback = _get_fallback_box(fallback_risk_type, resolved_view, layout, crop_w, crop_y_start, crop_h,
                                               container_bounds=container_bounds, cargo_extent=cargo_extent)
@@ -4397,8 +4691,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.29",
-            "benchmarkMode": "v24.29_multi_candidate_step_down"}, 200, headers)
+            "checkerVersion": "V24.34",
+            "benchmarkMode": "v24.34_local_floor_gap_wiring_and_segmentation_merge"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
