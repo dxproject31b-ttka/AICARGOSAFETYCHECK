@@ -17,6 +17,70 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.35 - MergeColorSamplingFix + LocalFloorGapDullCargoGuard + CrossViewMarginGuard: real
+#          evidence from the very first live run of v24.34 (EC04-04-05-Aug-26, user-provided
+#          annotated output image) showed TWO new false positives introduced by v24.34 itself:
+#          (1) MERGE COLOR SAMPLING WAS TOO EASILY FOOLED (root cause of the biggest concern):
+#              v24.34's _merge_narrow_similar_stacks_in_cluster() compared candidate stacks
+#              using the SAME thin (6px), floor-adjacent color_profile band that
+#              detect_stack_columns() already computes for BOUNDARY DETECTION. Real log
+#              evidence: three narrow FRONT fragments were merged together with
+#              color_dist=14, 16, and 36 - all comfortably under the 55 threshold - yet this
+#              is EXACTLY the region straddling a genuine yellow(DITHL)/green(STEMA) box
+#              boundary (confirmed by the user's annotated image and by the still-remaining,
+#              correctly-accepted STEP_DOWN pair at heights (251,182) immediately adjacent).
+#              ROOT CAUSE: a thin band sampled immediately above each column's LOCAL FLOOR is
+#              exactly where box-to-box seams, anti-aliasing, and floor-shadow contamination
+#              live - genuinely different-colored boxes can still read as "similar" there,
+#              because the sampled pixels are dominated by the dark seam/shadow rather than
+#              each box's actual visible face color. This is the same class of artifact the
+#              ORIGINAL dark-dip boundary detector was designed to treat as a real boundary,
+#              not as evidence of sameness. FIX: added _representative_stack_color(), which
+#              re-samples color from the CENTER 50% of each candidate's width (skipping the
+#              ~25% margin nearest each edge, where seam contamination concentrates) and a
+#              deeper 20px band - independent of the boundary-detection color_profile. A
+#              merge now requires BOTH the original near-floor comparison (kept as a coarse
+#              pre-filter) AND this new, edge-avoiding, deeper-sampled comparison to agree
+#              (V2435_SEGMENT_MERGE_DEEP_COLOR_MAX_DIST=45, intentionally tighter than the
+#              original 55) before two stacks are merged - single-signal agreement is no
+#              longer sufficient. Verified: this dual-agreement design still allows the
+#              earlier same-color-narrow-fragment cases (uniform DITHL-only regions,
+#              color_dist=0 in the v24.34 unit tests) to merge exactly as before, while
+#              requiring a second, more reliable signal before merging across what may be a
+#              real box-color change.
+#          (2) LOCAL_FLOOR_GAP_RISK FALSE POSITIVE on a real (just lower-saturation) box: the
+#              user's annotated image showed the blue LOCAL_FLOOR_GAP_RISK marker (new in
+#              v24.34) drawn squarely over what is very likely a real, plainly-lit DITHL box
+#              near the front wall - not empty floor. ROOT CAUSE: detect_local_depth_gap_regions()
+#              classifies "cargo" using the same strict _is_vivid_cargo_color(sat_thresh=0.75)
+#              used everywhere else, which is tuned for brightly-saturated boxes; a box lit at
+#              a shallower angle or rendered with softer shading can legitimately fall below
+#              that saturation threshold while still being a real, physically-present box -
+#              the scanner then reads its top surface as "structure" (or as neither cargo nor
+#              structure), producing a spurious apparent gap underneath perfectly normal
+#              cargo. FIX: added _region_has_relaxed_cargo_presence(), a corroboration check
+#              using a MUCH more permissive saturation threshold
+#              (V2435_LOCAL_GAP_RELAXED_SAT_THRESH=0.30 vs the strict 0.75) scanned over the
+#              exact same x/y span as the candidate gap region. If a meaningful fraction of
+#              that span (V2435_LOCAL_GAP_RELAXED_COVERAGE_MIN=0.35) still shows cargo-like
+#              occupancy under the relaxed threshold, the region is REJECTED as "likely a
+#              real, dull-colored box" instead of accepted as a genuine floor gap - this
+#              check runs BEFORE a region is added to the accepted list, so it also prevents
+#              a false "ACCEPTED" log line, not just a false marker.
+#          (3) CROSS-VIEW COLLISION MARGINAL-RATIO TIGHTENING (secondary safety net, not the
+#              primary fix): the same run's log showed a cross-view collision accepted at
+#              BACK idx=5 with ratio=0.17 - only marginally above the existing
+#              V2421_CROSS_VIEW_MIN_RATIO=0.15 dedicated threshold - drawn as the second,
+#              unrelated red box in the middle of the BACK view in the user's image (the
+#              truck's only genuine risk, per the user, is the single rear yellow-onto-green
+#              step, already covered by the pairwise STEP_DOWN markers on both views). Fix
+#              (1) above (more conservative merging) should independently reduce spurious
+#              matches like this by keeping FRONT's segmentation closer to its accurate,
+#              unmerged shape, but as explicit defense-in-depth, V2421_CROSS_VIEW_MIN_RATIO
+#              is raised from 0.15 to 0.18 - still comfortably below every genuine match seen
+#              in real logs so far (0.76, 0.63, 0.66 in this same run; 0.31+ in earlier
+#              regression files), so this is a narrow tightening targeted at marginal
+#              (<0.18) matches specifically, not a broad behavior change.
 # v24.34 - LocalFloorGapWiringFix + SegmentationOverSplitMergeGuard + RearLateralTraceFix:
 #          user reported a real case (EC04-01-05-Aug-26, execution_id hxxetkyhzh1b) where
 #          the rear area of the truck had a visibly tall stack sitting over empty floor
@@ -41,6 +105,9 @@ import google.generativeai as genai
 #              generic 3%-of-crop ratio gate, and is explicitly excluded from the
 #              cargo-extent fallback (same principle as V2413 for STEP_DOWN_RISK) so a
 #              failed precise-box draw never substitutes an oversized, misleading box.
+#              NOTE (v24.35): this detector's cargo/structure classification turned out to
+#              be too easily fooled by a real, lower-saturation box - see v24.35 item (2)
+#              above for the corroboration gate added on top of this.
 #          (2) SEGMENTATION OVER-SPLIT (a contributing factor - this is why so many other
 #              detectors also went silent for the same file, not just LOCAL_FLOOR_GAP):
 #              FRONT view segmented into 11 "stacks", but 5 of them (idx 0,1,5,7,8) measured
@@ -65,6 +132,10 @@ import google.generativeai as genai
 #              narrow stack with no similarly-colored neighbor is left alone (still flagged
 #              as a genuine width-outlier as before - v24.24's gate remains as
 #              defense-in-depth for whatever this merge pass does not catch).
+#              NOTE (v24.35): real evidence showed this same-color check, using only the
+#              thin floor-adjacent band, was fooled by seam/shadow contamination into
+#              merging across a genuine yellow/green box-color boundary - see v24.35 item
+#              (1) above for the dual-signal fix.
 #          (3) UNCLEAR "CANNOT MEASURE" TRACE for REAR_LATERAL_IMBALANCE's FORCE detection
 #              path (detect_lateral_imbalance_regions_for_view): when every stack in the
 #              rear zone was a width-outlier (or fewer than 2 stacks overlapped the zone at
@@ -368,6 +439,9 @@ RISK_COLORS = {
     "LATERAL_GAP_RISK": "cyan",
     "TALL_UNSTABLE_RISK": "magenta",
     # v24.34 NEW - see LocalFloorGapWiringFix changelog entry near the top of this file.
+    # v24.35: now gated by an additional dull-cargo corroboration check (see
+    # _region_has_relaxed_cargo_presence) to reduce false positives on real, low-saturation
+    # boxes - see CrossViewMarginGuard/LocalFloorGapDullCargoGuard changelog entry.
     "LOCAL_FLOOR_GAP_RISK": "blue",
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
@@ -404,12 +478,43 @@ V2434_SEGMENT_MERGE_ENABLED = True
 V2434_SEGMENT_MERGE_MIN_WIDTH_PX = 40   # matches V2424_PAIRWISE_MIN_STACK_WIDTH_PX - any
                                     # stack narrower than this is a merge CANDIDATE (not
                                     # automatically merged - still requires the color-
-                                    # similarity check below)
-V2434_SEGMENT_MERGE_COLOR_MAX_DIST = 55  # slightly BELOW COLOR_STEP_MIN_DISTANCE (60) so
-                                    # this only merges boundaries whose two sides are
-                                    # comfortably within "same physical box" color
-                                    # tolerance - a genuine near-threshold color change
-                                    # is deliberately left alone (not merged)
+                                    # similarity checks below)
+V2434_SEGMENT_MERGE_COLOR_MAX_DIST = 55  # coarse PRE-FILTER only (near-floor band, same
+                                    # signal used for boundary detection) - v24.35 added a
+                                    # second, stricter, edge-avoiding check below that must
+                                    # ALSO agree before a merge actually happens
+
+# v24.35 MergeColorSamplingFix controls - see changelog entry near the top of this file for
+# the full root-cause writeup (real evidence: a genuine yellow/green box boundary was
+# incorrectly merged because the near-floor band alone read as "similar", color_dist 14-36).
+V2435_SEGMENT_MERGE_DEEP_SAMPLE_ENABLED = True
+V2435_SEGMENT_MERGE_DEEP_COLOR_MAX_DIST = 45  # tighter than V2434's 55 - this is the
+                                    # SECOND, edge-avoiding/deeper-sampled check; both this
+                                    # AND the coarse pre-filter above must agree before merge
+V2435_SEGMENT_MERGE_EDGE_MARGIN_RATIO = 0.25  # skip this fraction of each candidate's width
+                                    # nearest its edges when re-sampling color (seam/
+                                    # anti-aliasing contamination concentrates near edges)
+V2435_SEGMENT_MERGE_DEEP_BAND_PX = 20  # deeper vertical band than the original 6px used
+                                    # for boundary detection - more representative of the
+                                    # box's actual visible face color
+
+# v24.35 LocalFloorGapDullCargoGuard controls - see changelog entry near the top of this
+# file (real evidence: LOCAL_FLOOR_GAP_RISK false-flagged a real, plainly-lit-but-lower-
+# saturation DITHL box near the front wall as an empty floor gap).
+V2435_LOCAL_GAP_DULL_CARGO_GUARD_ENABLED = True
+V2435_LOCAL_GAP_RELAXED_SAT_THRESH = 0.30   # much more permissive than the strict 0.75
+                                    # used everywhere else - only for this corroboration
+                                    # check, never for the primary cargo/structure scan
+V2435_LOCAL_GAP_RELAXED_MIN_BRIGHTNESS = 40
+V2435_LOCAL_GAP_RELAXED_COVERAGE_MIN = 0.35  # if at least this fraction of the candidate
+                                    # gap region shows relaxed-threshold cargo-like
+                                    # occupancy, treat it as a real (dull-colored) box and
+                                    # REJECT the gap region instead of accepting it
+
+# v24.35 CrossViewMarginGuard - see changelog entry near the top of this file. Narrow
+# tightening of the existing v24.21 dedicated cross-view threshold (was 0.15), targeted at
+# marginal matches (real evidence: ratio=0.17 accepted, drawing an unrelated second marker)
+# without affecting genuine matches seen so far (0.31-0.76 range in real logs).
 
 HARDCODED_REAR_SIDE = {
     "FRONT": "LEFT",
@@ -1066,6 +1171,50 @@ def _compute_gap_roughness(raw_vals):
     return avg_diff / avg_val if avg_val > 0 else 999
 
 
+def _region_has_relaxed_cargo_presence(px, x_range, y_range,
+                                         sat_thresh=None, min_brightness=None, coverage_min=None):
+    """v24.35 LocalFloorGapDullCargoGuard.
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26 - user's annotated output image showed the
+    v24.34 LOCAL_FLOOR_GAP_RISK blue marker drawn squarely over what is very likely a real,
+    plainly-visible DITHL box near the front wall, not empty floor): the local depth-gap
+    scanner classifies "cargo" using the same strict _is_vivid_cargo_color(sat_thresh=0.75)
+    used everywhere else in this file. That threshold is tuned for brightly, evenly-lit
+    boxes; a box rendered at a shallower lighting angle, or simply positioned where the
+    isometric-perspective shading is softer, can legitimately read BELOW that saturation
+    threshold while still being a completely real, physically-present box. When that
+    happens, the scanner sees "no cargo pixel" where a real box actually is, and reads its
+    top surface as structure (or as neither cargo nor structure) - producing a spurious
+    apparent gap directly underneath perfectly normal cargo.
+
+    This corroboration check re-scans the EXACT same x/y span using a MUCH more permissive
+    saturation threshold (V2435_LOCAL_GAP_RELAXED_SAT_THRESH=0.30, vs the strict 0.75 used
+    for the primary scan) - never used for the primary accept/reject decision, only as a
+    second opinion here. If a meaningful fraction of that span still shows cargo-like
+    occupancy under the relaxed threshold, this returns True, and the caller should treat
+    the "gap" as a real, dull-colored box rather than genuine empty floor.
+    """
+    sat_thresh = globals().get("V2435_LOCAL_GAP_RELAXED_SAT_THRESH", 0.30) if sat_thresh is None else sat_thresh
+    min_brightness = globals().get("V2435_LOCAL_GAP_RELAXED_MIN_BRIGHTNESS", 40) if min_brightness is None else min_brightness
+    coverage_min = globals().get("V2435_LOCAL_GAP_RELAXED_COVERAGE_MIN", 0.35) if coverage_min is None else coverage_min
+    x0, x1 = int(x_range[0]), int(x_range[1])
+    y0, y1 = int(y_range[0]), int(y_range[1])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    step_x = max(1, (x1 - x0) // 20)
+    step_y = max(1, (y1 - y0) // 10)
+    total = 0
+    hits = 0
+    for x in range(x0, x1, step_x):
+        for y in range(y0, y1, step_y):
+            total += 1
+            if _is_vivid_cargo_color(px[x, y], sat_thresh=sat_thresh, min_brightness=min_brightness):
+                hits += 1
+    if total == 0:
+        return False
+    return (hits / total) >= coverage_min
+
+
 def detect_local_depth_gap_regions(view_img, cargo_xmin, cargo_xmax, container_ymax, cargo_ymin,
                                      wall_side, step=LOCAL_GAP_SAMPLE_STEP_PX,
                                      min_gap_px=LOCAL_GAP_MIN_PX, min_width_px=LOCAL_GAP_MIN_WIDTH_PX,
@@ -1132,14 +1281,24 @@ def detect_local_depth_gap_regions(view_img, cargo_xmin, cargo_xmax, container_y
                     region_y_max = max(struct_bottoms) if struct_bottoms else y_bot
                     max_gap = max(smoothed_vals[k] for k in range(i, j))
                     avg_gap = sum(smoothed_vals[k] for k in range(i, j)) / width_samples
-                    print(f"Local depth-gap ACCEPTED: x=[{region_x_min}-{region_x_max}] width={region_x_max-region_x_min}px "
-                          f"max_gap={max_gap:.0f}px avg_gap={avg_gap:.0f}px raw_coverage={coverage:.2f} roughness={roughness:.2f}")
-                    regions.append({
-                        "x_min": region_x_min, "x_max": region_x_max,
-                        "y_min": region_y_min, "y_max": region_y_max,
-                        "max_gap_px": max_gap, "avg_gap_px": avg_gap,
-                        "width_px": region_x_max - region_x_min,
-                    })
+                    # v24.35 LocalFloorGapDullCargoGuard - see _region_has_relaxed_cargo_presence
+                    # docstring for full root-cause writeup. Runs BEFORE a region is accepted,
+                    # so a false positive here also prevents a misleading "ACCEPTED" log line.
+                    if globals().get("V2435_LOCAL_GAP_DULL_CARGO_GUARD_ENABLED", True) and \
+                       _region_has_relaxed_cargo_presence(px, (region_x_min, region_x_max), (region_y_min, region_y_max)):
+                        print(f"Local depth-gap REJECTED (v24.35 dull-cargo guard): "
+                              f"x=[{region_x_min}-{region_x_max}] width={region_x_max-region_x_min}px "
+                              f"raw_coverage={coverage:.2f} roughness={roughness:.2f} - relaxed-saturation "
+                              f"scan found likely real (dull-colored) cargo occupying this span, not empty floor")
+                    else:
+                        print(f"Local depth-gap ACCEPTED: x=[{region_x_min}-{region_x_max}] width={region_x_max-region_x_min}px "
+                              f"max_gap={max_gap:.0f}px avg_gap={avg_gap:.0f}px raw_coverage={coverage:.2f} roughness={roughness:.2f}")
+                        regions.append({
+                            "x_min": region_x_min, "x_max": region_x_max,
+                            "y_min": region_y_min, "y_max": region_y_max,
+                            "max_gap_px": max_gap, "avg_gap_px": avg_gap,
+                            "width_px": region_x_max - region_x_min,
+                        })
                 else:
                     xs = [raw_profile[k][0] for k in range(i, j)]
                     print(f"Local depth-gap REJECTED (likely noise from dimension text): "
@@ -1895,7 +2054,9 @@ V2414_TRACE = True
 V2418_CROSS_VIEW_COLLISION_ENABLED = True
 V2418_TRACE = True
 V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY = True
-V2421_CROSS_VIEW_MIN_RATIO = 0.15
+V2421_CROSS_VIEW_MIN_RATIO = 0.18  # v24.35 CrossViewMarginGuard: raised from 0.15 - see
+                                    # changelog entry near top of file (real evidence:
+                                    # ratio=0.17 marginal false accept)
 V2421_CROSS_VIEW_FULL_HEIGHT_MARKER = True
 V2422_CROSS_VIEW_MERGE_INTO_SINGLE_BOX = True
 
@@ -2225,47 +2386,90 @@ def _merge_thin_edge_segments(edges, min_height):
     return edges
 
 
-def _merge_narrow_similar_stacks_in_cluster(ranges, color_profile, cluster_x0):
-    """v24.34 SegmentationOverSplitMergeGuard.
+def _representative_stack_color(px, x0, x1, y_search_top, y_search_bottom,
+                                  margin_ratio=None, band_px=None):
+    """v24.35 MergeColorSamplingFix helper.
+
+    Re-samples a stack candidate's color from the CENTER of its width (skipping a margin
+    near each edge) and a DEEPER vertical band above its local floor, independent of the
+    thin (6px), floor-adjacent color_profile that detect_stack_columns() computes for
+    boundary DETECTION. See _merge_narrow_similar_stacks_in_cluster docstring and the
+    v24.35 changelog entry near the top of this file for the full root-cause writeup of
+    why the original floor-adjacent band was an unreliable signal for MERGE decisions
+    specifically (seam/anti-aliasing/shadow contamination concentrates right at the
+    boundary between two adjacent stacks, which is exactly where merge decisions are made).
+    """
+    margin_ratio = globals().get("V2435_SEGMENT_MERGE_EDGE_MARGIN_RATIO", 0.25) if margin_ratio is None else margin_ratio
+    band_px = globals().get("V2435_SEGMENT_MERGE_DEEP_BAND_PX", 20) if band_px is None else band_px
+    w = x1 - x0
+    if w <= 0:
+        return None
+    margin = max(1, int(w * margin_ratio))
+    cx0 = x0 + margin
+    cx1 = x1 - margin
+    if cx1 <= cx0:
+        cx0, cx1 = x0, x1
+    step = max(1, (cx1 - cx0) // 8)
+    samples = []
+    for x in range(cx0, cx1, step):
+        lf = _local_bottom_cargo_y(px, x, y_search_top, y_search_bottom)
+        if lf is None:
+            continue
+        y1 = lf
+        y0 = max(y_search_top, y1 - band_px)
+        for y in range(y0, y1):
+            samples.append(px[x, y])
+    if not samples:
+        return None
+    rs = [c[0] for c in samples]; gs = [c[1] for c in samples]; bs = [c[2] for c in samples]
+    return (sum(rs) / len(rs), sum(gs) / len(gs), sum(bs) / len(bs))
+
+
+def _merge_narrow_similar_stacks_in_cluster(ranges, color_profile, cluster_x0, px=None,
+                                              y_search_top=None, y_search_bottom=None):
+    """v24.34 SegmentationOverSplitMergeGuard (v24.35: now requires DUAL-signal agreement).
 
     ROOT CAUSE (real log evidence, EC04-01-05-Aug-26, execution_id hxxetkyhzh1b): FRONT view
     segmented into 11 "stacks", but 5 of them (idx 0,1,5,7,8) measured only 23-38px wide -
     narrower than V2424_PAIRWISE_MIN_STACK_WIDTH_PX=40px, and v24.31's adjacency-propagation
-    then also excluded their 4 immediate neighbors (idx 2,4,6,9) as "unreliable" too - leaving
-    9 of 11 stacks unusable for STEP_DOWN/TALL_UNSTABLE/CROSS_VIEW/REAR_LATERAL comparisons.
-    This is the SAME-COLOR-ADJACENT-STACKS limitation already known since v24 (see CHANGELOG
-    header): most of this manifest's boxes are the same yellow/tan color, so
-    _combined_boundaries() (color-step + floor-jump + dark-dip) has only weak, easily-confused
-    signal to split on. A numeric distance label or an SKU-sticker edge sitting on an otherwise
-    uniform-color box is enough to trigger a floor-jump or color-step boundary momentarily,
-    slicing ONE real physical box/stack into two narrow fragments. The existing v24.24
-    WIDTH-SANITY gate correctly detects the SYMPTOM (a suspiciously narrow stack) but only
-    reacts by EXCLUDING it (and its neighbors) from comparison - it never fixes the underlying
-    segmentation, so the same physical stack effectively goes "blind" for every detector that
-    depends on stack_box_model, in every subsequent run on this file.
+    then also excluded their 4 immediate neighbors (idx 2,4,6,9) - leaving 9 of 11 stacks
+    unusable for STEP_DOWN/TALL_UNSTABLE/CROSS_VIEW/REAR_LATERAL comparisons. This is the
+    SAME-COLOR-ADJACENT-STACKS limitation already known since v24 (see CHANGELOG header):
+    most of this manifest's boxes are the same yellow/tan color, so _combined_boundaries()
+    (color-step + floor-jump + dark-dip) has only weak, easily-confused signal to split on.
+    A numeric distance label or an SKU-sticker edge sitting on an otherwise uniform-color
+    box is enough to trigger a floor-jump or color-step boundary momentarily, slicing ONE
+    real physical box/stack into two narrow fragments.
 
-    FIX: a targeted merge pass, run once per physical cargo cluster right after boundary
-    detection, BEFORE the width-sanity gate ever sees the data. For each stack narrower than
-    V2434_SEGMENT_MERGE_MIN_WIDTH_PX (same 40px threshold as V2424, for consistency), compare
-    its average near-floor color (already computed via the SAME color_profile used for
-    boundary detection - no new pixel scan needed) against its immediate left neighbor. If the
-    color distance is comfortably BELOW the boundary-detection threshold itself
-    (V2434_SEGMENT_MERGE_COLOR_MAX_DIST=55, vs COLOR_STEP_MIN_DISTANCE=60 used to CREATE
-    boundaries) - i.e. the two sides are clearly within "same physical box" color tolerance,
-    not a genuine near-threshold color change - merge them into one stack. A single
-    left-to-right pass (not a full search) is used deliberately: it is bounded, deterministic,
-    and only ever WIDENS stacks (never re-introduces a previously-merged boundary), so it
-    cannot itself cause a new infinite loop or new segmentation regression - a narrow stack
-    with no similar neighbor simply stays flagged as a genuine width-outlier as before (the
-    v24.24 gate remains as defense-in-depth for whatever this merge pass does not catch).
+    v24.35 CORRECTION (real evidence, EC04-04-05-Aug-26 - the very first live run of
+    v24.34): the ORIGINAL single-signal version of this merge (comparing only the thin,
+    floor-adjacent color_profile band already used for boundary detection) incorrectly
+    merged three narrow FRONT fragments with color_dist=14, 16, and 36 (all under the old
+    55 threshold) - but this was exactly the region straddling a GENUINE yellow(DITHL)/
+    green(STEMA) box color boundary, confirmed by the user's annotated output image. ROOT
+    CAUSE of THAT bug: a thin band sampled immediately above each column's LOCAL FLOOR is
+    exactly where box-to-box seams, anti-aliasing, and floor-shadow contamination live -
+    genuinely different-colored boxes can still read as "similar" there, because the
+    sampled pixels are dominated by the dark seam/shadow rather than each box's actual
+    visible face color. FIX: a merge now requires BOTH the original near-floor comparison
+    (kept as a coarse pre-filter, using the existing color_profile) AND a second,
+    independent comparison using _representative_stack_color() - which samples from the
+    CENTER of each candidate's width (skipping seam-contaminated edges) and a deeper band -
+    to ALSO agree (stricter threshold, V2435_SEGMENT_MERGE_DEEP_COLOR_MAX_DIST=45) before
+    two stacks are actually merged. Single-signal agreement is no longer sufficient. A
+    narrow stack with no similarly-colored neighbor under BOTH checks is left alone (still
+    flagged as a genuine width-outlier as before - v24.24's gate remains as defense-in-depth
+    for whatever this merge pass does not catch).
     """
     if not globals().get("V2434_SEGMENT_MERGE_ENABLED", True) or len(ranges) < 2:
         return ranges
     min_merge_width_px = globals().get("V2434_SEGMENT_MERGE_MIN_WIDTH_PX", 40)
-    merge_color_max_dist = globals().get("V2434_SEGMENT_MERGE_COLOR_MAX_DIST", 55)
+    coarse_color_max_dist = globals().get("V2434_SEGMENT_MERGE_COLOR_MAX_DIST", 55)
+    deep_check_enabled = globals().get("V2435_SEGMENT_MERGE_DEEP_SAMPLE_ENABLED", True) and px is not None
+    deep_color_max_dist = globals().get("V2435_SEGMENT_MERGE_DEEP_COLOR_MAX_DIST", 45)
     trace = globals().get("V2434_TRACE", True)
 
-    def _avg_color(x0, x1):
+    def _avg_color_from_profile(x0, x1):
         idx0 = max(0, x0 - cluster_x0)
         idx1 = min(len(color_profile), x1 - cluster_x0)
         if idx1 <= idx0:
@@ -2281,23 +2485,44 @@ def _merge_narrow_similar_stacks_in_cluster(ranges, color_profile, cluster_x0):
         cur_w = cur_x1 - cur_x0
         prev_w = prev_x1 - prev_x0
         should_merge = False
-        dist = None
+        coarse_dist = None
+        deep_dist = None
         if cur_w < min_merge_width_px or prev_w < min_merge_width_px:
-            prev_color = _avg_color(prev_x0, prev_x1)
-            cur_color = _avg_color(cur_x0, cur_x1)
+            prev_color = _avg_color_from_profile(prev_x0, prev_x1)
+            cur_color = _avg_color_from_profile(cur_x0, cur_x1)
             if prev_color is not None and cur_color is not None:
-                dist = _color_distance(prev_color, cur_color)
-                if dist < merge_color_max_dist:
-                    should_merge = True
+                coarse_dist = _color_distance(prev_color, cur_color)
+                if coarse_dist < coarse_color_max_dist:
+                    if not deep_check_enabled:
+                        should_merge = True
+                    else:
+                        prev_deep = _representative_stack_color(px, prev_x0, prev_x1, y_search_top, y_search_bottom)
+                        cur_deep = _representative_stack_color(px, cur_x0, cur_x1, y_search_top, y_search_bottom)
+                        if prev_deep is not None and cur_deep is not None:
+                            deep_dist = _color_distance(prev_deep, cur_deep)
+                            should_merge = deep_dist < deep_color_max_dist
+                        else:
+                            # v24.35: if the deeper sample cannot be computed (e.g. a stack
+                            # too narrow even for a center-margin sample), fall back to the
+                            # coarse-only decision rather than silently refusing to merge -
+                            # preserves v24.34 behavior for genuinely tiny fragments.
+                            should_merge = True
         if should_merge:
             if trace:
+                deep_str = f"deep_dist={deep_dist:.0f}" if deep_dist is not None else "deep_dist=N/A"
                 print(f"v24.34 SEGMENTATION_MERGE: narrow stack x=[{cur_x0}-{cur_x1}] "
                       f"(width={cur_w}px) merged into neighbor x=[{prev_x0}-{prev_x1}] "
-                      f"(width={prev_w}px) - color_dist={dist:.0f} < {merge_color_max_dist} "
-                      f"(likely a same-color segmentation artifact from an SKU label/number, "
-                      f"not a real stack/box boundary)")
+                      f"(width={prev_w}px) - coarse_dist={coarse_dist:.0f} < {coarse_color_max_dist}, "
+                      f"{deep_str} (v24.35 dual-signal check) - likely a same-color segmentation "
+                      f"artifact from an SKU label/number, not a real stack/box boundary")
             merged[-1][1] = cur_x1
         else:
+            if trace and coarse_dist is not None and deep_dist is not None:
+                print(f"v24.35 SEGMENTATION_MERGE REJECTED: narrow stack x=[{cur_x0}-{cur_x1}] "
+                      f"(width={cur_w}px) vs neighbor x=[{prev_x0}-{prev_x1}] (width={prev_w}px) - "
+                      f"coarse_dist={coarse_dist:.0f} agreed (<{coarse_color_max_dist}) but "
+                      f"deep_dist={deep_dist:.0f} did NOT clear {deep_color_max_dist} - kept separate "
+                      f"(likely a genuine box-color boundary, not a segmentation artifact)")
             merged.append([cur_x0, cur_x1])
     return [tuple(r) for r in merged]
 
@@ -2344,10 +2569,12 @@ def detect_stack_columns(view_img, cargo_xmin, cargo_xmax, y_search_top, y_searc
             x0, x1 = edges[i], edges[i + 1]
             if x1 - x0 >= STACK_MIN_WIDTH_PX:
                 cluster_stacks.append((x0, x1))
-        # v24.34 SegmentationOverSplitMergeGuard - merge narrow, same-color segmentation
-        # fragments back into their neighbor BEFORE they ever reach the width-sanity gate
-        # (see docstring of _merge_narrow_similar_stacks_in_cluster for full root cause)
-        cluster_stacks = _merge_narrow_similar_stacks_in_cluster(cluster_stacks, color_profile, cx0)
+        # v24.34 SegmentationOverSplitMergeGuard (v24.35: dual-signal) - merge narrow,
+        # same-color segmentation fragments back into their neighbor BEFORE they ever reach
+        # the width-sanity gate (see docstring of _merge_narrow_similar_stacks_in_cluster)
+        cluster_stacks = _merge_narrow_similar_stacks_in_cluster(
+            cluster_stacks, color_profile, cx0, px=px,
+            y_search_top=y_search_top, y_search_bottom=y_search_bottom)
         stacks.extend(cluster_stacks)
     if not stacks:
         stacks = [(cargo_xmin, cargo_xmax)]
@@ -4419,19 +4646,13 @@ def process_request(request):
         # v24.34 LocalFloorGapWiringFix (item 1 of the v24.34 changelog entry): the v24.3
         # LOCAL DEPTH-GAP SCAN (detect_local_depth_gap_per_view, called above into
         # local_depth_gap_regions) was fully implemented and already logging genuine
-        # ACCEPTED regions (real evidence, EC04-01-05-Aug-26: "Local depth-gap ACCEPTED:
-        # x=[583-713] width=130px max_gap=57px avg_gap=38px raw_coverage=0.89
-        # roughness=0.12" - a low-roughness, wide, well-corroborated real floor gap) but the
-        # result was NEVER connected to any risk_type/marker - it was computed, printed, and
-        # silently discarded every single run since v24.3. This is why a file with a
-        # visibly tall stack sitting over empty floor space could still come back
-        # completely SAFE with no rear-area marker at all, even when the scan itself had
-        # already found and accepted the gap. FIX: turn each accepted region into its own
+        # ACCEPTED regions but the result was NEVER connected to any risk_type/marker - it
+        # was computed, printed, and silently discarded every single run since v24.3. FIX:
+        # turn each accepted region (v24.35: now ALSO gated by the dull-cargo corroboration
+        # check inside detect_local_depth_gap_regions itself) into its own
         # LOCAL_FLOOR_GAP_RISK, deduplicated against every risk already collected in the
         # same view (any type, any source) so the same physical spot never gets two
-        # overlapping markers (e.g. a STEP_DOWN_RISK marker already covering the exact
-        # same gap - STEP_DOWN_RISK is excluded from the generic BOX_ZONE merge in
-        # _merge_same_area_risks, so without this explicit check it would draw twice).
+        # overlapping markers.
         if globals().get("V2434_LOCAL_FLOOR_GAP_RISK_ENABLED", True):
             overlap_max = globals().get("V2434_LOCAL_FLOOR_GAP_OVERLAP_MAX_RATIO", 0.20)
             for view_label in ("FRONT", "BACK"):
@@ -4463,8 +4684,7 @@ def process_request(request):
                     xmax_norm = (region["x_max"] / crop_w) * 1000
                     print(f"FORCED LOCAL_FLOOR_GAP_RISK ({view_label}) from v24.3 local depth-gap "
                           f"scan (width={region['width_px']:.0f}px, max_gap={region['max_gap_px']:.0f}px, "
-                          f"avg_gap={region['avg_gap_px']:.0f}px) - previously computed but never wired "
-                          f"into a marker until v24.34")
+                          f"avg_gap={region['avg_gap_px']:.0f}px) - passed v24.35 dull-cargo guard")
                     all_risks.append({
                         "view": view_label, "risk_type": "LOCAL_FLOOR_GAP_RISK",
                         "box_2d": [ymin_norm, xmin_norm, ymax_norm, xmax_norm],
@@ -4590,13 +4810,8 @@ def process_request(request):
                     )
                     # v24.34: same reasoning as V2413 above - our own deterministic
                     # LOCAL_FLOOR_GAP_RISK marker (FORCED_DETERMINISTIC_LOCAL_DEPTH_GAP) is a
-                    # precise, measured local-gap box, not an AI-guessed general region. Its
-                    # height in particular is often a genuinely thin sliver (the gap depth
-                    # itself, e.g. ~40-70px) which can fall under the 3% ratio floor on a
-                    # large/high-DPI page even though LOCAL_GAP_MIN_WIDTH_PX=60 already
-                    # guarantees a sane absolute width. Skip the ratio gate here too and use
-                    # an absolute-pixel sanity floor instead, so this marker cannot be lost
-                    # to the same class of bug V2413 already fixed for STEP_DOWN_RISK.
+                    # precise, measured local-gap box, not an AI-guessed general region. Skip
+                    # the ratio gate here too and use an absolute-pixel sanity floor instead.
                     is_forced_local_floor_gap_marker = (
                         risk_type == "LOCAL_FLOOR_GAP_RISK"
                         and str(risk.get("reasoning", "")).upper() == "FORCED_DETERMINISTIC_LOCAL_DEPTH_GAP"
@@ -4642,8 +4857,6 @@ def process_request(request):
             elif not drawn and risk_type == "LOCAL_FLOOR_GAP_RISK":
                 # v24.34: same principle as V2413 for STEP_DOWN_RISK - a whole-cargo-extent
                 # box is never the correct marker for a precise, localized floor-gap region.
-                # If the precise box could not be drawn, skip entirely rather than
-                # substituting an oversized/misleading fallback box.
                 print(f"v24.34 LOCAL_FLOOR_GAP_RISK cargo-extent fallback DISABLED - no marker "
                       f"drawn for {resolved_view} (precise box unavailable/invalid)")
             elif not drawn:
@@ -4691,8 +4904,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.34",
-            "benchmarkMode": "v24.34_local_floor_gap_wiring_and_segmentation_merge"}, 200, headers)
+            "checkerVersion": "V24.35",
+            "benchmarkMode": "v24.35_merge_dual_signal_and_dull_cargo_guard"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
