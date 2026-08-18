@@ -17,6 +17,50 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.35 - CrossViewEdgeCorroborationFix: real evidence across ALL 4 files in a single test
+# batch (EC04-01/02/03/04) showed an IDENTICAL false-positive red STEP_DOWN_RISK marker at
+# the FRONT view's head-wall end (x=[970-1035], pos_ratio~0.94, w_px=65 h_px=185 - the exact
+# same pixel box, across 4 different shipments with different SKUs/weights/quantities - a
+# strong signal this was a systemic code bug, not 4 coincidentally-identical real risks) -
+# the user confirmed by visual inspection with arrows that this box was drawn in the wrong
+# place (front of vehicle, no real risk there) while the genuine rear-zone risk sometimes
+# went unmarked. ROOT CAUSE (confirmed by reading _find_cross_view_profile_collision_regions
+# source directly): this detector mirrors a reference-view row-edge stack's height against
+# whichever secondary-view stack it overlaps, and is SUPPOSED to require independent
+# corroboration from the raw legacy pixel scanner before trusting a row-edge match (exactly
+# the kind of match most prone to segmentation/crop-boundary artifacts) - but the actual
+# v24.32 condition was:
+#     needs_corroboration = (r_idx in ref_row_edge_indices) AND (len(sec_sorted) < 3)
+# The AND-gate on "secondary view has fewer than 3 stacks" is essentially always False on
+# any real file (every file tested had 8-11 stacks per view) - so this safety gate, despite
+# being purpose-built for exactly this failure mode, effectively NEVER fired in practice.
+# It also never checked whether the MATCHED SECONDARY stack itself was a row-edge stack -
+# which is precisely where a spurious short/fragment reading is most likely to come from
+# (the very end of the cargo, subject to crop-boundary effects and partial occlusion). In
+# every one of the 4 test files, the FRONT reference stack at the head-wall end (a genuine,
+# correctly-measured 2-tier stack) was matched against the BACK view's OWN row-edge stack
+# (idx=0, a suspiciously short ~43px reading barely above the v24.24 width-outlier floor) -
+# both sides sat at a row-edge, but the broken AND-gate meant no corroboration was ever
+# required, so this artifact-prone match sailed straight through to become a FORCED marker.
+# Compare with the ordinary pairwise adjacent-stack detector
+# (detect_step_down_regions_from_stack_model), which independently found the SAME physical
+# position and correctly required + failed corroboration (log: "EDGE_CORROBORATION
+# REJECTED ... no independent legacy corroboration found") - proving the corroboration
+# MECHANISM itself works fine; only the cross-view detector's flag-computation was broken.
+# FIX: needs_corroboration for a cross-view match now fires if EITHER side of the match (the
+# reference stack OR the matched secondary stack) sits at a row-edge index in its own view -
+# independent of how many stacks exist elsewhere - since a row-edge match is inherently more
+# artifact-prone regardless of overall segmentation quality. The old "few total stacks"
+# condition is kept as an additional OR-trigger (not the sole AND-gate) for the rare
+# genuinely-degenerate case it was originally meant to catch. Verified: re-tracing all 4
+# test files' logged stack data confirms the new condition correctly flags the previously-
+# slipping-through match as needing corroboration in every case (both endpoints were row-edge
+# stacks: FRONT idx=len-1 and BACK idx=0), routing it through the existing (already-correct)
+# V2432_EDGE_CORROBORATION_ENABLED overlap check against the raw legacy scanner, where it is
+# now rejected exactly like its pairwise-detector counterpart - eliminating the duplicate,
+# unmarked-by-corroboration false positive at the head-wall end without touching any other
+# detector, threshold, or the genuinely-working parts of v24.34's mirror-interval-overlap fix.
+#
 # v24.34 - MirrorIntervalOverlapFix (built directly on the v24.33 baseline per explicit user
 #          request: "จาก version 24.33 ช่วยปรับปรุงฟังก์ชั่น mirror ให้ด้วยครับ" - a
 #          deliberate, minimal, single-purpose branch off v24.33 containing ONLY this one
@@ -2615,6 +2659,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
         ref_suspects = _flag_width_outlier_stacks(ref_sorted, view_label=reference_view)
         sec_suspects = _flag_width_outlier_stacks(sec_sorted, view_label=secondary_view)
     ref_row_edge_indices = {0, len(ref_sorted) - 1} if len(ref_sorted) >= 2 else set()
+    sec_row_edge_indices = {0, len(sec_sorted) - 1} if len(sec_sorted) >= 2 else set()
     min_stacks_for_reliable_match = globals().get("V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH", 3)
     accepted = []
 
@@ -2658,15 +2703,34 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                       f"(need diff>={min_abs_px}px and ratio>={min_ratio}, v24.21 dedicated threshold)")
             continue
 
+        # v24.35 CrossViewEdgeCorroborationFix - see changelog header for full root-cause
+        # writeup. The ORIGINAL v24.32 condition below only required corroboration when
+        # BOTH (a) the reference stack sat at a row-edge AND (b) the secondary view had
+        # fewer than 3 total stacks - an AND-gate that is essentially always False on real
+        # files (every tested file had 8-11 stacks per view), so this safety gate never
+        # actually fired despite being specifically designed to catch exactly this failure
+        # mode. It also never checked whether the MATCHED SECONDARY stack itself sat at a
+        # row-edge - which is precisely where segmentation is most likely to produce a
+        # spurious short/fragment reading (crop boundary, partial occlusion at the very
+        # end of the cargo). Now requires corroboration if EITHER side of the match (the
+        # reference stack OR the matched secondary stack) is a row-edge stack, independent
+        # of how many stacks exist elsewhere - a match involving any row-edge stack is
+        # inherently more likely to be a segmentation-boundary artifact and must be
+        # confirmed by the independent legacy pixel scanner before being trusted, exactly
+        # as the original V2432_EDGE_CORROBORATION_ENABLED gate was designed to do.
         needs_corroboration = bool(
-            (r_idx in ref_row_edge_indices) and (len(sec_sorted) < min_stacks_for_reliable_match)
+            (r_idx in ref_row_edge_indices)
+            or (best["sec_idx"] in sec_row_edge_indices)
+            or (len(sec_sorted) < min_stacks_for_reliable_match)
         )
         accepted.append({"stack": rs, "ratio": best["ratio"], "r_idx": r_idx, "needs_corroboration": needs_corroboration})
         if trace:
+            corrob_note = " [v24.35: needs legacy corroboration]" if needs_corroboration else ""
             print(f"v24.22 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
                   f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view}, "
                   f"{len(overlapping)} overlapping stack(s), worst-case match x=[{best['stack']['x0']}-{best['stack']['x1']}] "
-                  f"sec_h={best['sec_h']}px | diff={best['diff']}px ratio={best['ratio']:.2f} (queued for merge={merge_single_box})")
+                  f"sec_h={best['sec_h']}px | diff={best['diff']}px ratio={best['ratio']:.2f} "
+                  f"(queued for merge={merge_single_box}){corrob_note}")
 
     if not accepted:
         return regions_by_view
@@ -4603,3 +4667,8 @@ V2412_STEPDOWN_FORCE_BOUNDARY_MARKER=True  # historical - superseded by V2413_ST
 
 V2413_BUILD_MARKER = True  # v24.13 MarkerRoutingFix build tag (see V2413_* constants above near V2410 block for the real, wired-in fix)
 V2414_BUILD_MARKER = True  # v24.14 ValleyPatternFix build tag (see V2414_* constants above near V2407 block and _find_valley_regions())
+V2435_BUILD_MARKER = True  # v24.35 CrossViewEdgeCorroborationFix build tag - see changelog header
+                            # and _find_cross_view_profile_collision_regions() for the real fix
+                            # (fixes a broken needs_corroboration AND-gate that never fired on any
+                            # real file with >=3 stacks per view, letting a row-edge cross-view
+                            # match at the head-wall end slip through uncorroborated every time)
