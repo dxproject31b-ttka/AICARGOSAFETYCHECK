@@ -17,6 +17,36 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.32 - EdgeCandidateCorroborationGate: real log evidence (AB03-03) proved v24.31's
+#          RowEdgeTrendGuard has a fail-open gap of its own. FRONT: width-outlier suspicion
+#          (v24.24) + adjacency propagation (v24.31) consumed 5 of 7 stacks (idx 0,2,3 direct
+#          + 1,4 propagated), leaving ONLY row-edge pair 5-6 viable - with zero interior data
+#          left to establish a background trend, RowEdgeTrendGuard's designed fail-open
+#          behavior let ratio=28% straight through, even though the independent legacy pixel
+#          scanner found NOTHING for this view at all ("no discontinuity found for FRONT").
+#          BACK showed the same pattern in its most extreme form: per-box segmentation found
+#          only 2 stacks for the ENTIRE cargo width (severe under-segmentation) - with n=2,
+#          BOTH stacks are trivially "row-edge" by definition, so no interior pair can ever
+#          exist to sanity-check against; ratio=70% sailed through the plain threshold
+#          unchecked. The legacy scanner DID find a candidate for BACK, but at a completely
+#          different, non-overlapping x-position (853-878 vs the false marker's 578-635) -
+#          real independent evidence pointing elsewhere, not corroborating this marker at all.
+#          FIX: added EdgeCandidateCorroborationGate - any per-box-pairwise or cross-view
+#          candidate tagged "v2432_needs_legacy_corroboration" (edge-touching AND no interior
+#          background data available - see detect_step_down_regions_from_stack_model and
+#          _find_cross_view_profile_collision_regions docstrings) must now be independently
+#          confirmed by the RAW legacy pixel-scanner's own candidates for that view (captured
+#          BEFORE v24.30's crosscheck could remove them, avoiding circularity) at an
+#          overlapping x-position; if the legacy scanner found nothing there, the candidate is
+#          rejected as an unconfirmed segmentation artifact. This is a general "two
+#          independent detection methods must agree" principle - it does not special-case any
+#          manifest by name, and does not affect interior (non-edge) candidates or edge
+#          candidates that DO have valid interior background data to check against v24.31's
+#          RowEdgeTrendGuard (those remain governed by that mechanism, unchanged). Verified
+#          (standalone logic test using AB03-03's exact real numbers): both false markers
+#          (FRONT ratio=28%, BACK ratio=70%) now correctly rejected; genuine step-downs with
+#          either interior background data OR real legacy-scanner corroboration remain
+#          detected as before.
 # v24.31 - RowEdgeTrend + WidthOutlierAdjacency: v24.30's WallCornerArtifactGuard (below)
 #          targeted the WRONG detector for AB05-01 - fresh log evidence proved the legacy
 #          pixel scanner (_detect_step_down_regions) correctly found "no discontinuity" for
@@ -26,54 +56,23 @@ import google.generativeai as genai
 #          (detect_step_down_regions_from_stack_model) and the v24.18-22 cross-view collision
 #          detector (_find_cross_view_profile_collision_regions):
 #          (1) WidthOutlierAdjacencyPropagation: v24.24/25's width-sanity gate correctly
-#              flags a segmentation-fragment stack (e.g. BACK idx=0, width=29px < 40px min)
-#              and skips pairs that directly touch it, but never propagated that suspicion to
-#              the fragment's OTHER neighbor (BACK idx=1) - even though idx=1's own top_y/
-#              floor_y measurement was computed using the exact same mis-placed segmentation
-#              boundary. Log evidence: idx=1's height (92px, vs 182-268px everywhere else in
-#              that view) produced a false v24.10 pairwise ACCEPT (pair 1-2, ratio=66%) AND,
-#              via the same corrupted reading, a false v24.22 cross-view ACCEPT (FRONT idx=4
-#              matched to this exact BACK idx=1, ratio=60%). Fixed by adding
-#              _flag_stack_indices_adjacent_to_width_outliers() - propagates suspicion one
-#              hop to either neighbor of a flagged stack - used at both call sites.
-#          (2) RowEdgeTrendGuard: FRONT stack heights [171,201,236,274,229,173] show a smooth
-#              isometric-perspective ramp up then down; interior pairs (1-2/2-3/3-4) all
-#              measured ratio 14-16% (this view's own "background trend"), but the LAST pair
-#              (4-5, touching the row-edge stack idx=5 which sits directly against the head-
-#              wall panel, no cargo neighbor beyond it) measured ratio=24% - just over the
-#              plain 22% threshold, yet not meaningfully larger than the view's own 14-16%
-#              background (24% < 16%*1.6=25.6%) - i.e. simple continuation of the same smooth
-#              perspective drift, not a distinct genuine step. This is the exact class of bug
-#              v24.1 already found and fixed for the legacy pixel scanner ("EDGE-BASED
-#              comparison" fix, see its own changelog entry below) - but that fix was NEVER
-#              ported to this newer v24.10 per-box comparator, which compares whole-stack
-#              heights directly with zero perspective-trend compensation. Fixed by requiring
-#              any pair touching a row-edge stack (idx==0 or idx==len-1) to clear
-#              V2431_ROWEDGE_TREND_MULTIPLIER (1.6x) times the view's own interior-pair
-#              background ratio, not just the plain threshold; fails open (plain threshold
-#              only) when fewer than 2 interior pairs exist to establish a trend from.
-#          Verified (standalone logic test replicating AB05-01's exact numbers): all 3 false
-#          markers now correctly rejected; a genuine interior step-down and a genuine,
-#          dramatically-larger edge step-down both still pass through unaffected.
-# v24.30 - WallCornerArtifactGuard: real log evidence (AB05-01, user reported a fully uniform
-#          2-tier yellow load - same height everywhere, confirmed visually in both FRONT and
-#          BACK views - still got 3 false STEP_DOWN_RISK markers: 2 in FRONT (ratio=24.5%,
-#          59.8%) and 1 in BACK). Traced the source to _detect_step_down_regions() - the
-#          ORIGINAL legacy pixel-only height-profile scanner (unchanged in concept since
-#          v18/v19) - which is the ONE STEP_DOWN candidate source that never received any of
-#          the v24.24/25 width-sanity/stack-awareness fixes, because it predates the per-box
-#          stack_box_model entirely and has zero concept of a discrete "stack". NOTE (v24.31):
-#          fresh log evidence on a SECOND run of this same file proved this diagnosis was
-#          WRONG for AB05-01 specifically (the legacy scanner found no candidates at all on
-#          this file) - the real fix for AB05-01 is in v24.31 above. This guard is kept as
-#          defense-in-depth for OTHER files where the legacy scanner does produce candidates,
-#          since it genuinely has no width-sanity protection of its own and remains a latent
-#          risk for the same class of wall-corner optical artifact on some other manifest.
-#          FIX: added _legacy_step_down_candidate_confirmed_by_stack_model() - cross-validates
-#          every legacy-scanner candidate against the already-built, width-sanity-gated
-#          stack_box_model; a candidate is only kept if its x-range actually straddles a REAL
-#          boundary between two adjacent, non-suspect stacks with a corroborating height
-#          difference. Fails open when no stack model data exists for that view.
+#              flags a segmentation-fragment stack and skips pairs that directly touch it,
+#              but never propagated that suspicion to the fragment's OTHER neighbor - even
+#              though that neighbor's own height reading used the same mis-placed boundary.
+#              Fixed by adding _flag_stack_indices_adjacent_to_width_outliers().
+#          (2) RowEdgeTrendGuard: a pair touching a row-edge stack (idx==0 or idx==len-1) must
+#              clear V2431_ROWEDGE_TREND_MULTIPLIER (1.6x) times this view's own interior-pair
+#              background ratio, catching smooth isometric-perspective drift being mistaken
+#              for a genuine local step (same class of bug v24.1 already fixed for the legacy
+#              scanner, but never ported to this newer per-box comparator).
+#          NOTE (v24.32): real evidence on AB03-03 showed this guard's "fail open when no
+#          interior data exists" behavior has its own gap - see v24.32 above for the fix.
+# v24.30 - WallCornerArtifactGuard: cross-validates legacy pixel-scanner STEP_DOWN candidates
+#          against stack_box_model; kept as defense-in-depth for files where that scanner
+#          fires on a genuine isometric wall-corner optical artifact (originally written for
+#          AB05-01, though fresh evidence showed that file's actual false markers came from a
+#          different source - fixed in v24.31/v24.32 above; this guard remains valid/useful
+#          for OTHER files where the legacy scanner does produce artifact candidates).
 # v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
 #          VCS1A zone had no marker at all) exposed that "strongest-only" discarded every
 #          ordinary STEP_DOWN candidate except the single highest-ratio one PER VIEW, even
@@ -1355,22 +1354,9 @@ def _flag_width_outlier_stacks(ss, view_label=None):
 
 
 def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_label=None):
-    """v24.30 WallCornerArtifactGuard - protects against a DIFFERENT (but related) class of
-    false STEP_DOWN candidate than v24.31 below: one that could still come from the ORIGINAL
-    legacy pixel-only height-profile scanner (_detect_step_down_regions/detect_step_down_
-    regions_per_view, unchanged in concept since v18/v19) in files where that scanner DOES
-    find a discontinuity (unlike AB05-01, where it correctly found none - see v24.31's
-    changelog entry for the real root cause of THAT specific file's false markers). This
-    scanner has zero concept of a discrete "stack" and no width-sanity protection at all, so
-    it remains a latent risk for the same isometric wall-corner artifact class on OTHER files.
-    Kept as defense-in-depth; harmless/inert on any file where the legacy scanner already
-    finds no candidates (fails through immediately).
-
-    Cross-validates every legacy-scanner candidate (tagged "v2430_source" ==
-    "legacy_pixel_height_profile") against the already-built stack_box_model: a candidate is
-    only kept if its x-range actually straddles a REAL boundary between two adjacent,
-    non-suspect (sane-width) stacks that independently show at least some measurable height
-    difference. Fails OPEN when no stack model data exists for that view.
+    """v24.30 WallCornerArtifactGuard - cross-validates legacy pixel-height-profile STEP_DOWN
+    candidates against stack_box_model; kept as defense-in-depth for files where the legacy
+    scanner fires on a genuine wall-corner artifact (see full writeup in changelog header).
     """
     if not stacks or len(stacks) < 2:
         return True
@@ -1403,30 +1389,9 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
 
 
 def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
-    """v24.31 WidthOutlierAdjacencyPropagation - fixes a gap in v24.24/25's width-sanity gate
-    found from real log evidence (AB05-01, BACK view). v24.24 already correctly flags a
-    stack whose width is a segmentation-fragment sliver (e.g. BACK idx=0, width=29px < the
-    40px minimum) as "suspect" and skips any pairwise/cross-view comparison that directly
-    touches it. But it only ever protected THAT pair - it never propagated suspicion to the
-    fragment's OTHER neighbor (BACK idx=1 in this case), even though idx=1's own top_y/
-    floor_y measurement in detect_boxes_in_stack() was computed using the exact same
-    mis-placed segmentation boundary that produced the idx=0 fragment in the first place.
-    A boundary that is wrong is wrong for BOTH stacks that share it, not just the narrower
-    one - so idx=1's standalone height reading is equally unreliable, not just pairs that
-    directly include idx=0.
-
-    REAL LOG EVIDENCE (AB05-01, BACK): idx=0 flagged width=29px<40px (correctly skipped from
-    pair 0-1). idx=1's OWN measured height (92px) - drastically shorter than every other
-    stack in the view (182-268px) - then produced a false v24.10 pairwise ACCEPT (pair 1-2,
-    ratio=66%) AND, via the SAME corrupted idx=1 reading, a false v24.22 cross-view collision
-    ACCEPT (FRONT idx=4 matched to this exact BACK idx=1). Both false markers trace back to
-    the same single unpropagated suspicion.
-
-    FIX: any stack immediately adjacent (±1) to a width-outlier-flagged stack is now ALSO
-    added to the suspect set returned here (used at STEP_DOWN's own pairwise + cross-view
-    call sites only - does NOT modify the shared _flag_width_outlier_stacks() itself, so
-    Valley/REAR_LATERAL/LATERAL_GAP's existing behavior is completely unchanged, keeping the
-    blast radius of this fix scoped to STEP_DOWN as the user specifically reported).
+    """v24.31 WidthOutlierAdjacencyPropagation - a stack immediately adjacent to a flagged
+    width-outlier is ALSO excluded (its own height reading shares the same unreliable
+    segmentation boundary as the fragment). See changelog header for full writeup.
     """
     if len(ss) < 2:
         return set()
@@ -1445,6 +1410,23 @@ def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
                   f"idx(es) {sorted(base_suspects)}) - their own height reading shares the "
                   f"same unreliable segmentation boundary")
     return propagated
+
+
+def _region_x_overlaps_any(region, other_regions, min_overlap_ratio):
+    """v24.32 helper: does `region`'s x-range overlap ANY region in `other_regions` by at
+    least min_overlap_ratio of the smaller region's width? Used by
+    EdgeCandidateCorroborationGate to check independent-method corroboration.
+    """
+    rx0, rx1 = region.get("x_min", 0), region.get("x_max", 0)
+    r_w = max(1, rx1 - rx0)
+    for other in other_regions:
+        ox0, ox1 = other.get("x_min", 0), other.get("x_max", 0)
+        o_w = max(1, ox1 - ox0)
+        inter = max(0, min(rx1, ox1) - max(rx0, ox0))
+        smaller_w = min(r_w, o_w)
+        if smaller_w > 0 and (inter / smaller_w) >= min_overlap_ratio:
+            return True
+    return False
 
 
 def _select_non_overlapping_step_down_candidates(regions, view_label=None):
@@ -1513,29 +1495,28 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     root-cause writeup (real AA04-05 BACK case: a 63.2%-ratio pair turned out to be a narrow
     artifact vs a merged blob, not a genuine risk).
 
-    v24.31 ADDITION (two mechanisms, real log evidence AB05-01 - see each mechanism's own
-    docstring/constants for full detail):
-    (1) WidthOutlierAdjacencyPropagation - uses _flag_stack_indices_adjacent_to_width_outliers()
-        instead of the raw _flag_width_outlier_stacks(), so a stack immediately NEXT TO a
-        flagged fragment is now also excluded (its own height reading shares the same
-        unreliable segmentation boundary as the fragment).
-    (2) RowEdgeTrendGuard - a pair that touches either row-edge stack (idx==0 or idx==len-1,
-        i.e. the only stacks with no cargo neighbor on their outward side, adjacent instead
-        to the container's own head-wall panel / door-zone empty floor) must clear a HIGHER
-        bar than ordinary interior pairs: its ratio must exceed
-        V2431_ROWEDGE_TREND_MULTIPLIER times the largest ratio seen among this view's own
-        INTERIOR pairs (pairs touching neither row edge). Real log evidence (AB05-01 FRONT):
-        heights [171,201,236,274,229,173] show a smooth isometric-perspective ramp up then
-        down (interior pairs 1-2/2-3/3-4 all measured ratio 14-16%, a "background trend"), and
-        the LAST pair (4-5, touching edge idx=5 next to the head-wall) measured ratio=24% -
-        just over the plain 22% threshold, but not meaningfully larger than the view's own
-        14-16% background trend (24% < 16%*1.6=25.6%) - i.e. simple continuation of the same
-        smooth perspective drift, not a distinct genuine step. This is the exact same class of
-        bug v24.1 already found and fixed for the OLD legacy pixel scanner (see its "EDGE-BASED
-        comparison" changelog entry) - but that fix was NEVER ported to this newer, v24.10
-        per-box pairwise comparator, which compares whole-stack heights directly with no
-        perspective-trend compensation at all. Fails open (falls back to the plain threshold)
-        when there are fewer than 2 interior pairs to establish a background trend from.
+    v24.31 ADDITION: (1) WidthOutlierAdjacencyPropagation - uses
+    _flag_stack_indices_adjacent_to_width_outliers() instead of the raw
+    _flag_width_outlier_stacks(). (2) RowEdgeTrendGuard - a pair touching a row-edge stack
+    (idx==0 or idx==len-1) must clear V2431_ROWEDGE_TREND_MULTIPLIER times this view's own
+    interior-pair background ratio, not just the plain threshold.
+
+    v24.32 ADDITION: EdgeCandidateCorroborationGate preparation - tags each accepted region
+    with "v2432_needs_legacy_corroboration"=True whenever it is an edge pair AND no interior
+    background trend could be established at all (background_max_ratio is None - either too
+    few interior pairs existed, or they were all eliminated by width-outlier suspicion). Real
+    log evidence (AB03-03): FRONT had 7 stacks but width-outlier+adjacency suspicion consumed
+    5 of them, leaving ONLY the row-edge pair 5-6 viable - with zero interior data left to
+    sanity-check against, v24.31's RowEdgeTrendGuard "failed open" (its designed behavior when
+    there's insufficient background data) and let ratio=28% through unchecked, even though the
+    view's segmentation was clearly troubled (legacy scanner independently found NOTHING for
+    this view at all). BACK showed the same pattern in its most extreme form: only 2 stacks
+    detected for the entire cargo width (severe under-segmentation), so the single possible
+    pair (0-1) is trivially "edge" on both sides with zero possible interior data by
+    definition - ratio=70% sailed through the plain threshold with no sanity check possible at
+    all. The actual corroboration check (comparing against the independent legacy pixel
+    scanner) happens later in process_request, where both this view's raw legacy candidates
+    and this tag are available together.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1549,10 +1530,6 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     n_stacks = len(ss)
     row_edge_indices = {0, n_stacks - 1} if n_stacks >= 2 else set()
 
-    # v24.31 RowEdgeTrendGuard pass 1: compute every candidate pair's raw ratio first
-    # (before accept/reject decisions), so we can establish this view's own "background
-    # trend" ratio from INTERIOR pairs before deciding whether an edge-touching pair is a
-    # genuine local step or just a continuation of smooth isometric perspective drift.
     raw_pairs = []
     for idx in range(n_stacks - 1):
         if idx in suspect_indices or (idx + 1) in suspect_indices:
@@ -1594,6 +1571,7 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
                           f"({background_max_ratio:.2f} x {edge_trend_multiplier} = {required_ratio:.2f}) "
                           f"- likely continuation of smooth isometric drift, not a genuine local step")
                 continue
+        needs_corroboration = bool(p["is_edge_pair"] and background_max_ratio is None)
         lower = a if ha < hb else b
         higher = b if ha < hb else a
         # v24.23: FULL-STACK marker (full x0..x1, full top_y..floor_y) instead of a narrow
@@ -1619,9 +1597,11 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
             "v2410_source": "adjacent_stack_height_drop_boundary_only",
             "v2410_pair_index": (idx, idx + 1),
             "v2410_heights": (ha, hb),
+            "v2432_needs_legacy_corroboration": needs_corroboration,
         })
         if globals().get("V2407_TRACE", True):
-            print(f"v24.10 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]")
+            corrob_note = " [v24.32: needs legacy corroboration]" if needs_corroboration else ""
+            print(f"v24.10 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]{corrob_note}")
 
     if globals().get("V2414_VALLEY_PATTERN_ENABLED", True):
         valley_min_ratio = globals().get("V2414_VALLEY_MIN_RATIO", 0.15)
@@ -1842,20 +1822,30 @@ V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 # separate markers.
 V2429_STEPDOWN_OVERLAP_MAX_RATIO = 0.30
 
-# v24.30 WallCornerArtifactGuard - see _legacy_step_down_candidate_confirmed_by_stack_model()
-# docstring. Defense-in-depth for the OLD legacy pixel scanner on files where it DOES fire
-# (unlike AB05-01, where it correctly found nothing - see v24.31 for that file's real fix).
+# v24.30 WallCornerArtifactGuard
 V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED = True
 V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR = 0.5
 V2430_LEGACY_STEPDOWN_BOUNDARY_TOLERANCE_PX = 15
 
-# v24.31 WidthOutlierAdjacencyPropagation + RowEdgeTrendGuard - see
-# _flag_stack_indices_adjacent_to_width_outliers() and the v24.31 docstring block inside
-# detect_step_down_regions_from_stack_model() for the full root-cause writeup (real evidence:
-# AB05-01, both FRONT false markers and the BACK false marker).
+# v24.31 WidthOutlierAdjacencyPropagation + RowEdgeTrendGuard
 V2431_WIDTH_OUTLIER_ADJACENCY_PROPAGATION_ENABLED = True
 V2431_ROWEDGE_TREND_GUARD_ENABLED = True
 V2431_ROWEDGE_TREND_MULTIPLIER = 1.6
+
+# v24.32 EdgeCandidateCorroborationGate - see docstring in
+# detect_step_down_regions_from_stack_model() and the corroboration-check block in
+# process_request for the full root-cause writeup (real evidence: AB03-03, both FRONT and
+# BACK produced false STEP_DOWN markers from edge-touching per-box comparisons that had NO
+# interior background data to sanity-check against - v24.31's RowEdgeTrendGuard correctly
+# "fails open" in that situation (by design, since it has nothing to compare against), but
+# that same fail-open behavior is exactly what let these two false markers slip through
+# unchecked. Requires independent legacy-pixel-scanner corroboration for any edge-touching
+# per-box/cross-view candidate that lacks interior background data - if the legacy scanner
+# found nothing in that view at all, or found something at a non-overlapping x position, the
+# candidate is treated as unconfirmed and rejected.
+V2432_EDGE_CORROBORATION_ENABLED = True
+V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH = 3
+V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
@@ -2471,19 +2461,15 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     # _flag_width_outlier_stacks docstring) - a reference or matched-secondary stack that is
     # a segmentation fragment/merged-blob outlier makes the cross-view comparison unreliable
     # regardless of how confident the ratio looks.
-    # v24.31: use the adjacency-propagated suspect set (see
-    # _flag_stack_indices_adjacent_to_width_outliers() docstring) instead of the raw
-    # width-outlier flags - real log evidence (AB05-01) showed a FRONT stack falsely matched
-    # via cross-view collision to a BACK stack (idx=1) that was NOT itself width-flagged but
-    # sat immediately next to one that was (idx=0, a 29px segmentation fragment) - its own
-    # height reading (92px) was corrupted by the same mis-placed boundary, producing a false
-    # ACCEPT (diff=137px ratio=60%) that the plain width-outlier check alone did not catch.
+    # v24.31: use adjacency-propagated suspects instead of raw width-outlier flags.
     if globals().get("V2431_WIDTH_OUTLIER_ADJACENCY_PROPAGATION_ENABLED", True):
         ref_suspects = _flag_stack_indices_adjacent_to_width_outliers(ref_sorted, view_label=reference_view)
         sec_suspects = _flag_stack_indices_adjacent_to_width_outliers(sec_sorted, view_label=secondary_view)
     else:
         ref_suspects = _flag_width_outlier_stacks(ref_sorted, view_label=reference_view)
         sec_suspects = _flag_width_outlier_stacks(sec_sorted, view_label=secondary_view)
+    ref_row_edge_indices = {0, len(ref_sorted) - 1} if len(ref_sorted) >= 2 else set()
+    min_stacks_for_reliable_match = globals().get("V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH", 3)
     accepted = []
 
     for r_idx, rs in enumerate(ref_sorted):
@@ -2524,7 +2510,14 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                       f"(need diff>={min_abs_px}px and ratio>={min_ratio}, v24.21 dedicated threshold)")
             continue
 
-        accepted.append({"stack": rs, "ratio": ratio, "r_idx": r_idx})
+        # v24.32: flag as needing legacy corroboration when the reference stack sits at a
+        # row-edge index of the reference view AND the secondary view has too few stacks to
+        # be a reliable match target (real evidence: AB03-03, BACK had only 2 stacks total,
+        # making any cross-view match against it inherently low-confidence).
+        needs_corroboration = bool(
+            (r_idx in ref_row_edge_indices) and (len(sec_sorted) < min_stacks_for_reliable_match)
+        )
+        accepted.append({"stack": rs, "ratio": ratio, "r_idx": r_idx, "needs_corroboration": needs_corroboration})
         if trace:
             print(f"v24.22 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
                   f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
@@ -2555,6 +2548,8 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
             y0 = min(a["stack"]["top_y"] for a in cluster)
             y1 = max(a["stack"]["floor_y"] for a in cluster)
             best_ratio = max(a["ratio"] for a in cluster)
+            # v24.32: cluster needs corroboration if ANY member stack in it needed it.
+            cluster_needs_corroboration = any(a.get("needs_corroboration") for a in cluster)
             regions_by_view[reference_view].append({
                 "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
                 "ratio": best_ratio,
@@ -2562,6 +2557,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                 "v2419_reference_view": reference_view,
                 "v2422_merged_count": len(cluster),
                 "v2422_merged_indices": [a["r_idx"] for a in cluster],
+                "v2432_needs_legacy_corroboration": cluster_needs_corroboration,
             })
             if trace:
                 print(f"v24.25 CROSS_VIEW MERGE {reference_view}: combined {len(cluster)} adjacent accepted "
@@ -2575,6 +2571,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                 "ratio": a["ratio"],
                 "v2410_source": "cross_view_profile_collision",
                 "v2419_reference_view": reference_view,
+                "v2432_needs_legacy_corroboration": a.get("needs_corroboration", False),
             })
     return regions_by_view
 
@@ -3576,6 +3573,14 @@ def process_request(request):
 
         step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                                 container_bounds, cargo_extent)
+        # v24.32: preserve the RAW legacy pixel-scanner candidates (before v24.30's own
+        # crosscheck below potentially filters them out) - needed later by
+        # EdgeCandidateCorroborationGate to check independent-method corroboration for
+        # edge-touching per-box/cross-view candidates that lack interior background data.
+        _raw_legacy_step_down_regions_by_view = {
+            "FRONT": list(step_down_regions.get("FRONT", []) or []),
+            "BACK": list(step_down_regions.get("BACK", []) or []),
+        }
 
         # v22/v24: สร้าง per-box stack model (deterministic) สำหรับ
         # TALL_UNSTABLE_RISK, REAR_LATERAL_IMBALANCE - ดูหัวข้อ "PER-BOX SEGMENTATION"
@@ -3586,8 +3591,7 @@ def process_request(request):
 
         # v24.30 WallCornerArtifactGuard: cross-check every legacy pixel-height-profile
         # STEP_DOWN candidate against the just-built stack_box_model. Defense-in-depth for
-        # files where the legacy scanner DOES fire (see _legacy_step_down_candidate_confirmed_
-        # by_stack_model() docstring) - inert/no-op on files where it finds nothing.
+        # files where the legacy scanner fires on a genuine wall-corner optical artifact.
         if globals().get("V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED", True):
             for _view in ("FRONT", "BACK"):
                 _stacks_for_view = stack_box_model.get(_view, [])
@@ -3635,6 +3639,46 @@ def process_request(request):
                 if _cv_regions:
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_cv_regions)
+
+        # v24.32 EdgeCandidateCorroborationGate: any candidate tagged
+        # "v2432_needs_legacy_corroboration"=True (edge-touching pair/cross-view match with
+        # NO interior background data to sanity-check against - see docstrings in
+        # detect_step_down_regions_from_stack_model and _find_cross_view_profile_collision_
+        # regions) must be independently corroborated by the RAW legacy pixel-scanner output
+        # for that same view (captured BEFORE v24.30's own crosscheck above, since that
+        # crosscheck may have already removed the very legacy candidate we'd want to check
+        # against here - using the raw pre-filter list avoids this circularity). Real log
+        # evidence (AB03-03): FRONT's false pair-5-6 marker (ratio=28%) had zero interior data
+        # to sanity-check (5 of 7 stacks were width-outlier-suspect) and the legacy scanner
+        # independently found NOTHING for that view at all - no corroboration possible, so
+        # this candidate is now rejected. BACK's false pair-0-1 marker (ratio=70%, the view's
+        # ONLY possible pair since just 2 stacks were segmented) had a legacy candidate at a
+        # completely different x-position (853-878 vs the pairwise candidate's 578-635) - no
+        # overlap, so no corroboration, rejected.
+        if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
+            _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
+            for _view in ("FRONT", "BACK"):
+                _raw_legacy_for_view = _raw_legacy_step_down_regions_by_view.get(_view, [])
+                _kept = []
+                for _r in step_down_regions.get(_view, []):
+                    if not _r.get("v2432_needs_legacy_corroboration"):
+                        _kept.append(_r)
+                        continue
+                    if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
+                        print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"- independently corroborated by legacy pixel-scanner candidate "
+                              f"at an overlapping position")
+                        _kept.append(_r)
+                    else:
+                        print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"- edge-touching candidate with no interior background data to "
+                              f"sanity-check, AND no independent legacy pixel-scanner "
+                              f"corroboration found at this position (legacy found "
+                              f"{len(_raw_legacy_for_view)} candidate(s) elsewhere in this view) "
+                              f"- likely a segmentation artifact, not a genuine physical step-down")
+                step_down_regions[_view] = _kept
 
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
         # v24.20: cross-view collision regions exempt from this single-marker-per-view filter.
