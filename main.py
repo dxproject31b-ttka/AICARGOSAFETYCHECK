@@ -17,6 +17,35 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.36 - MultiBoxWidthExemption: user re-tested EC04-01 after v24.35 and it was STILL not
+#          detected. Traced it and found v24.35's own fix was never even exercised this
+#          time - Gemini's rear-zone AI call did NOT claim REAR_LATERAL_IMBALANCE at all on
+#          this particular run (AI is non-deterministic; a different call can yield a
+#          different finding for the exact same file). Instead, this run's Gemini
+#          diagram-level call claimed a genuine-sounding STEP_DOWN_RISK for BACK: "a sudden
+#          height drop of more than 50% between the 3-layer tall yellow stack and the
+#          adjacent 1-layer" - which got rejected by the deterministic gate ("no
+#          discontinuity found for BACK"). ROOT CAUSE: BACK's box-count-per-stack was
+#          [1, 3, 2, 2, 1, 1, 2, 1, 1, 1] - idx1 has 3 stacked boxes (a genuinely TALL
+#          stack, matching exactly what the AI described), but its measured width was only
+#          33px (and its immediate neighbors idx0=27px, idx2=23px, idx3=23px too) - all
+#          below the 40px minimum width-sanity threshold (v24.24), so idx0-1, idx1-2, and
+#          idx2-3 ALL got excluded from every pairwise height comparison, hiding the exact
+#          difference the AI independently and correctly described. The width-sanity rule's
+#          own root-cause writeup (AA04-05 BACK) was about a narrow SEGMENTATION-ARTIFACT
+#          SLIVER - an accidental mis-split fragment, which by its nature would show up as a
+#          degenerate SINGLE-box reading, not a consistent multi-box vertical structure. A
+#          stack with multiple (>=2) cleanly and independently detected boxes stacked at
+#          different heights within its own narrow width is strong structural evidence that
+#          real cargo genuinely exists there. FIX: a stack narrower than the minimum width
+#          is now exempted from "too narrow" suspicion specifically when it has >= 2
+#          detected boxes (V2436_MULTIBOX_EXEMPTION_MIN_BOXES) - the "too wide/merged-blob"
+#          rule (the actual AA04-05 root cause) is completely untouched by this change.
+#          Applied inside the single shared _flag_width_outlier_stacks() function, so it
+#          benefits every detector that already relies on it (STEP_DOWN pairwise, cross-view
+#          collision, REAR_LATERAL_IMBALANCE FORCE/VETO measurement, LATERAL_GAP_RISK) -
+#          consistent with the user's stated goal of covering both FRONT and BACK "สูงต่ำ"
+#          detection generally, not just one specific risk type or view.
 # v24.35 - EmptyFloorVetoGuard: real log evidence (EC04-01 FRONT view, user asked whether a
 #          "rear-zone height imbalance" claim would be correctly detected - traced it and
 #          found it was NOT: it got wrongly VETOed). The AI correctly saw "the left column
@@ -1347,6 +1376,17 @@ def _flag_width_outlier_stacks(ss, view_label=None):
         return set()
     min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
     max_ratio = globals().get("V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN", 2.5)
+    # v24.36 MultiBoxWidthExemption - see docstring above for full root-cause writeup (real
+    # evidence: EC04-01 BACK, idx1 had 3 genuinely stacked boxes at width=33px but got
+    # excluded from every comparison purely for being narrower than the 40px minimum,
+    # hiding the exact height difference Gemini's AI independently described). A stack with
+    # multiple (>=2) cleanly detected boxes at different heights within its own narrow width
+    # is strong structural evidence of genuine cargo, not a segmentation-artifact sliver
+    # (which would typically show up as a single degenerate box reading, not a consistent
+    # multi-box vertical structure) - so it is now exempted from the "too narrow" rule only
+    # (rule (b), too-wide/merged-blob, is completely untouched by this change).
+    multibox_exempt_enabled = globals().get("V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED", True)
+    multibox_min_boxes = globals().get("V2436_MULTIBOX_EXEMPTION_MIN_BOXES", 2)
     widths = [max(1, s["x1"] - s["x0"]) for s in ss]
     sorted_w = sorted(widths)
     median_w = sorted_w[len(sorted_w) // 2]
@@ -1354,6 +1394,15 @@ def _flag_width_outlier_stacks(ss, view_label=None):
     for i, w in enumerate(widths):
         ratio_vs_median = w / max(1, median_w)
         if w < min_w:
+            box_count = len(ss[i].get("boxes", []) or [])
+            if multibox_exempt_enabled and box_count >= multibox_min_boxes:
+                if globals().get("V2407_TRACE", True):
+                    print(f"v24.36 MULTIBOX_WIDTH_EXEMPTION {view_label} idx={i}: width={w}px "
+                          f"< min={min_w}px, but box_count={box_count} >= {multibox_min_boxes} "
+                          f"-> NOT flagged as suspect (multiple consistently-detected boxes at "
+                          f"different heights is strong evidence of genuine cargo, not a "
+                          f"segmentation-artifact sliver)")
+                continue
             suspects.add(i)
             if globals().get("V2407_TRACE", True):
                 print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px < min={min_w}px "
@@ -1873,6 +1922,14 @@ V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER = 1.3
 # safety for the whole zone).
 V2435_REAR_ZONE_EMPTY_GAP_MIN_PX = 30
 V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO = 0.15
+
+# v24.36 MultiBoxWidthExemption - see _flag_width_outlier_stacks() docstring for the full
+# root-cause writeup (real evidence: EC04-01 BACK, idx1 had 3 genuinely stacked boxes at
+# width=33px but got excluded from every pairwise comparison purely for being narrower
+# than the 40px minimum threshold, hiding the exact height difference Gemini's AI
+# independently and correctly described in its STEP_DOWN_RISK claim for that view).
+V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED = True
+V2436_MULTIBOX_EXEMPTION_MIN_BOXES = 2
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
