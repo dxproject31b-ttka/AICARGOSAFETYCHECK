@@ -17,101 +17,39 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.36 - MultiBoxWidthExemption: user re-tested EC04-01 after v24.35 and it was STILL not
-#          detected. Traced it and found v24.35's own fix was never even exercised this
-#          time - Gemini's rear-zone AI call did NOT claim REAR_LATERAL_IMBALANCE at all on
-#          this particular run (AI is non-deterministic; a different call can yield a
-#          different finding for the exact same file). Instead, this run's Gemini
-#          diagram-level call claimed a genuine-sounding STEP_DOWN_RISK for BACK: "a sudden
-#          height drop of more than 50% between the 3-layer tall yellow stack and the
-#          adjacent 1-layer" - which got rejected by the deterministic gate ("no
-#          discontinuity found for BACK"). ROOT CAUSE: BACK's box-count-per-stack was
-#          [1, 3, 2, 2, 1, 1, 2, 1, 1, 1] - idx1 has 3 stacked boxes (a genuinely TALL
-#          stack, matching exactly what the AI described), but its measured width was only
-#          33px (and its immediate neighbors idx0=27px, idx2=23px, idx3=23px too) - all
-#          below the 40px minimum width-sanity threshold (v24.24), so idx0-1, idx1-2, and
-#          idx2-3 ALL got excluded from every pairwise height comparison, hiding the exact
-#          difference the AI independently and correctly described. The width-sanity rule's
-#          own root-cause writeup (AA04-05 BACK) was about a narrow SEGMENTATION-ARTIFACT
-#          SLIVER - an accidental mis-split fragment, which by its nature would show up as a
-#          degenerate SINGLE-box reading, not a consistent multi-box vertical structure. A
-#          stack with multiple (>=2) cleanly and independently detected boxes stacked at
-#          different heights within its own narrow width is strong structural evidence that
-#          real cargo genuinely exists there. FIX: a stack narrower than the minimum width
-#          is now exempted from "too narrow" suspicion specifically when it has >= 2
-#          detected boxes (V2436_MULTIBOX_EXEMPTION_MIN_BOXES) - the "too wide/merged-blob"
-#          rule (the actual AA04-05 root cause) is completely untouched by this change.
-#          Applied inside the single shared _flag_width_outlier_stacks() function, so it
-#          benefits every detector that already relies on it (STEP_DOWN pairwise, cross-view
-#          collision, REAR_LATERAL_IMBALANCE FORCE/VETO measurement, LATERAL_GAP_RISK) -
-#          consistent with the user's stated goal of covering both FRONT and BACK "สูงต่ำ"
-#          detection generally, not just one specific risk type or view.
-# v24.35 - EmptyFloorVetoGuard: real log evidence (EC04-01 FRONT view, user asked whether a
-#          "rear-zone height imbalance" claim would be correctly detected - traced it and
-#          found it was NOT: it got wrongly VETOed). The AI correctly saw "the left column
-#          is stacked 2 tiers high, whereas the adjacent right position is completely empty
-#          (0 tiers)" - a genuine, severe REAR_LATERAL_IMBALANCE. But
-#          get_max_lateral_imbalance_ratio_in_zone() measured max_ratio=0.14 (well below the
-#          0.20 veto threshold) and _should_veto_lateral_imbalance() used that to VETO the
-#          AI's correct finding. ROOT CAUSE: a position with ZERO cargo has NO stack object
-#          in the per-box segmentation model at all (a "stack" is only ever created where
-#          cargo pixels were actually detected) - so "2 tiers vs 0 tiers" can never be one
-#          of the pairs the pairwise comparison loop iterates over BY CONSTRUCTION. The
-#          0.14 that got measured was a real, correctly-computed ratio - just between two
-#          OTHER, unrelated existing stacks sitting elsewhere in the same 45%-wide rear-zone
-#          slice, not the pair the AI was actually describing. This is the same class of
-#          "insufficient/wrong data treated as evidence of safety" bug v24.28 already fixed
-#          for the "fewer than 2 comparable stacks" case - but v24.28's fix only covers when
-#          NO pair exists to compare at all; it does not cover when a pair exists but is the
-#          WRONG pair because the real comparison (something vs. nothing) is structurally
-#          impossible to form. FIX: added _find_max_stack_coverage_gap_in_zone() - before
-#          trusting any pairwise max_ratio, separately checks whether the rear zone contains
-#          a significant CONTIGUOUS x-range with NO stack (cargo) at all
-#          (>= V2435_REAR_ZONE_EMPTY_GAP_MIN_PX=30px AND >= V2435_REAR_ZONE_EMPTY_GAP_MIN_
-#          RATIO=15% of the zone's width). If such a gap exists, the zone's own measured
-#          max_ratio (whatever it is) is not trusted as representative - VETO is skipped and
-#          the AI's finding is deferred to. Uses ALL stacks (not just non-width-outlier
-#          ones) to determine cargo presence, since even a narrow/flagged stack still
-#          represents real cargo pixels at that position - the suspect flag questions
-#          reliability of a HEIGHT reading, not whether cargo physically exists there.
-#          Applies equally to FRONT and BACK views (verified BACK's own rear-zone log in
-#          EC04-01 separately - AI did not claim any imbalance there at all in that
-#          particular file, so the VETO path was never exercised for BACK on this file, but
-#          the underlying gap-blind-spot this fixes is not view-specific and would recur on
-#          any future file where BACK triggers the same "existing stack vs. empty floor"
-#          pattern the FRONT view hit here).
-# v24.34 - BorderlineOnlyPropagation: real log evidence (EC04-01, user reported "no risk
-#          detected" on a file whose per-box segmentation shows a suspicious pattern: FRONT
-#          box-counts-per-stack = [1,1,1,1,2,2,1,1,2,1,1] - idx4/5/8 are genuinely 2-tier
-#          stacks sitting right next to 1-tier neighbors, the textbook STEP_DOWN signature).
-#          v24.31's WidthOutlierAdjacencyPropagation, combined with the pre-existing v24.24
-#          absolute 40px width-outlier threshold, over-fired here: this densely-packed
-#          22-item load naturally has several genuinely narrow SKU-box stacks (27-38px,
-#          NOT segmentation fragments), and blind propagation to ANY adjacent stack (even
-#          ones with perfectly normal width, like idx4) swept 9 of 11 FRONT stacks (82%)
-#          into "suspect", blocking pairs 3-4 and 5-6 - exactly the two 1-tier<->2-tier
-#          boundaries - from ever having their real height ratio computed at all. FIX: only
-#          propagate suspicion to a neighbor whose OWN width is ALSO borderline-narrow
-#          (< 1.3x the min-width threshold) - a neighbor that is comfortably, unambiguously
-#          wide (like idx4, absent from any WIDTH_SANITY suspect log) is trusted on its own
-#          merits instead of being swept in purely by association. Verified this does not
-#          reintroduce the original AB03-03 false positive (that fix's actual mechanism was
-#          v24.32's edge-corroboration gate, independent of which exact neighbors got
-#          propagated). NOTE: this re-enables MEASUREMENT of pairs 3-4/5-6 in EC04-01; it
-#          does not by itself guarantee a marker will be drawn - the actual measured ratio
-#          still has to clear MIN_STEP_DOWN_RATIO and (if edge-adjacent) RowEdgeTrendGuard,
-#          same as any other candidate. Recommend re-testing EC04-01 plus the full existing
-#          regression suite after deploying.
-# v24.33 - GeminiApiResilienceFix: expanded error classification (503/500/504/UNAVAILABLE/
-#          INTERNAL/TIMEOUT/OVERLOADED now trigger same-key model fallback instead of moving
-#          to the next key), added per-attempt request timeout (20s), per-(key,model)
-#          cooldown instead of global-per-model, per-call wall-clock time budget (75s), and
-#          a request-scoped known-bad-key cache shared across all 4 AI calls per file.
+# v24.37 - PropagationRespectsMultiboxExemption: user re-tested EC04-01 after v24.36 and
+#          reported "still not fixed, feels like back to v24.29". Traced it: v24.36's
+#          MultiBoxWidthExemption correctly stopped flagging idx1 (BACK, width=33px,
+#          box_count=3, the genuine "3-layer tall stack") as suspect DIRECTLY - but
+#          _flag_stack_indices_adjacent_to_width_outliers() (the adjacency-propagation
+#          function) was never updated to respect that same exemption; it only checked a
+#          neighbor's raw width against the borderline threshold, with zero awareness of
+#          box_count. So idx1 still got swept BACK into suspicion via propagation from real
+#          suspect idx0, completely defeating v24.36's fix - pairs 0-1 AND 1-2 both stayed
+#          skipped, hiding the real height difference. The pairwise detector fell back to a
+#          DIFFERENT pair (idx 3-4, using idx3's own 23px-wide stack) which produced a very
+#          narrow marker that visually resembled the exact "narrow-artifact false positive"
+#          class v24.24 was built to prevent - matching the user's "feels like v24.29" report.
+#          FIX: _flag_stack_indices_adjacent_to_width_outliers() now also checks the
+#          neighbor's own box_count before propagating suspicion onto it - a neighbor with
+#          >= V2436_MULTIBOX_EXEMPTION_MIN_BOXES detected boxes is never propagated into
+#          suspicion, fully honoring v24.36's exemption at every level of the shared
+#          suspect-determination pipeline (used by pairwise STEP_DOWN, cross-view collision,
+#          REAR_LATERAL_IMBALANCE, and LATERAL_GAP_RISK alike), not just the direct check.
+# v24.36 - MultiBoxWidthExemption: a stack narrower than the min-width threshold but with
+#          >= 2 consistently detected boxes is exempted from "too narrow" suspicion (strong
+#          structural evidence of genuine cargo, not a segmentation-artifact sliver). See
+#          v24.37 above for why this alone was incomplete.
+# v24.35 - EmptyFloorVetoGuard: added _find_max_stack_coverage_gap_in_zone() - a significant
+#          cargo-free gap in the rear zone now blocks REAR_LATERAL_IMBALANCE VETO, since a
+#          position with zero cargo has no stack object to compare against by construction.
+# v24.34 - BorderlineOnlyPropagation: adjacency propagation only sweeps in a neighbor whose
+#          own width is ALSO borderline-narrow, not any neighbor regardless of its own width.
+# v24.33 - GeminiApiResilienceFix: expanded error classification, per-attempt timeout,
+#          per-(key,model) cooldown, per-call time budget, request-scoped known-bad-key cache.
 # v24.32 - EdgeCandidateCorroborationGate: edge-touching STEP_DOWN candidates lacking
-#          interior background data must be independently corroborated by the legacy pixel
-#          scanner's own raw candidates, or rejected as unconfirmed segmentation artifacts.
-# v24.31 - RowEdgeTrend + WidthOutlierAdjacency (see v24.34 above for a refinement to the
-#          adjacency-propagation half of this fix).
+#          interior background data must be corroborated by the legacy scanner's raw output.
+# v24.31 - RowEdgeTrend + WidthOutlierAdjacency (initial, blind version - refined by v24.34).
 # v24.30 - WallCornerArtifactGuard: cross-validates legacy pixel-scanner STEP_DOWN
 #          candidates against stack_box_model; defense-in-depth.
 # v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
@@ -1376,15 +1314,9 @@ def _flag_width_outlier_stacks(ss, view_label=None):
         return set()
     min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
     max_ratio = globals().get("V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN", 2.5)
-    # v24.36 MultiBoxWidthExemption - see docstring above for full root-cause writeup (real
-    # evidence: EC04-01 BACK, idx1 had 3 genuinely stacked boxes at width=33px but got
-    # excluded from every comparison purely for being narrower than the 40px minimum,
-    # hiding the exact height difference Gemini's AI independently described). A stack with
-    # multiple (>=2) cleanly detected boxes at different heights within its own narrow width
-    # is strong structural evidence of genuine cargo, not a segmentation-artifact sliver
-    # (which would typically show up as a single degenerate box reading, not a consistent
-    # multi-box vertical structure) - so it is now exempted from the "too narrow" rule only
-    # (rule (b), too-wide/merged-blob, is completely untouched by this change).
+    # v24.36 MultiBoxWidthExemption - see docstring above. Real evidence: EC04-01 BACK, idx1
+    # had 3 genuinely stacked boxes at width=33px but got excluded purely for narrow width,
+    # hiding a genuine height difference. Exempts rule (a) only; rule (b) untouched.
     multibox_exempt_enabled = globals().get("V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED", True)
     multibox_min_boxes = globals().get("V2436_MULTIBOX_EXEMPTION_MIN_BOXES", 2)
     widths = [max(1, s["x1"] - s["x0"]) for s in ss]
@@ -1447,38 +1379,31 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
 
 
 def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
-    """v24.31 WidthOutlierAdjacencyPropagation.
+    """v24.31 WidthOutlierAdjacencyPropagation (v24.34 borderline-only refinement).
 
-    v24.34 FIX (real log evidence, EC04-01 - user reported no risk was found on a file that
-    appears, from per-box segmentation data, to have a genuine STEP_DOWN pattern): FRONT view
-    had box counts per stack = [1,1,1,1,2,2,1,1,2,1,1] - i.e. idx4/5/8 are genuinely TALLER
-    (2-tier) stacks sitting right next to genuinely SHORTER (1-tier) neighbors, the textbook
-    definition of a real STEP_DOWN. But v24.24's width-check flagged idx0,1,5,7,8 as narrow
-    (widths 27-38px, all naturally-occurring SKU widths in this densely-packed 22-item load,
-    NOT segmentation fragments), and v24.31's ORIGINAL blind propagation then ALSO swept in
-    idx2,4,6,9 as suspect purely for being adjacent to a flagged stack - regardless of whether
-    THAT NEIGHBOR's own width was perfectly normal. idx4 was never itself flagged as narrow
-    (absent from the WIDTH_SANITY log lines), meaning its own width was safely inside the
-    normal range - yet it got swept into suspicion anyway, along with idx6, blocking BOTH
-    pairs 3-4 and 5-6 (exactly the two boundaries where the real 1-tier<->2-tier transition
-    sits) from ever having their height ratio computed at all. Suspects ended up covering 9 of
-    11 stacks (82%) in this view - an unusually high fraction that should itself have been a
-    red flag that the propagation logic was over-firing.
+    v24.37 FIX (real log evidence, EC04-01 BACK - user re-tested after v24.36 and reported
+    "still not fixed, feels like back to v24.29"): v24.36's MultiBoxWidthExemption correctly
+    stopped flagging a narrow-but-genuinely-multi-box stack as suspect DIRECTLY (idx=1,
+    width=33px, box_count=3, the actual "3-layer tall yellow stack" the AI had described in
+    an earlier run) - but this propagation function was never updated to respect that same
+    exemption. It only checks a neighbor's raw WIDTH against the borderline threshold, with
+    no awareness of box_count at all - so idx=1, despite being explicitly exempted at the
+    direct-suspicion level by v24.36, still got swept BACK into suspicion here purely for
+    being narrower than borderline and sitting next to a real suspect (idx=0). This
+    completely defeated v24.36's fix for this exact stack: pair 0-1 AND pair 1-2 both still
+    got skipped, hiding the real height difference the AI had identified. The pairwise
+    STEP_DOWN detector then fell back to a DIFFERENT pair (idx 3-4, using idx3's own
+    23px-wide multibox-exempted stack) which passed and got force-drawn - producing a very
+    narrow (23px) marker that visually resembles the exact class of "narrow-artifact false
+    positive" v24.24 was originally built to prevent, even though in this specific case it
+    may or may not be a genuine difference (unverifiable without visual/manual confirmation,
+    but the marker's narrowness alone was enough to make the user suspect regression).
 
-    FIX: only propagate suspicion to a neighbor if that neighbor's OWN width is ALSO
-    borderline-narrow (< V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER x the minimum
-    width threshold, default 1.3x40px=52px) - i.e. corroborating evidence that the
-    fragmentation problem likely extends into that neighbor too. A neighbor that is
-    comfortably, unambiguously wide is trusted on its own merits: its own vertical box
-    detection (detect_boxes_in_stack) samples pixels primarily within its own x-range, and a
-    few px of horizontal boundary uncertainty from a narrow neighbor is very unlikely to
-    meaningfully corrupt a stack that is otherwise wide and cleanly segmented (confirmed by
-    its own multi-box detection, e.g. idx4's box_count=2 in EC04-01 - a fragment/artifact
-    would much more typically show up as a degenerate single/zero-box reading, not a clean
-    2-tier structure). This preserves the original AB03-03 fix intent (where the swept-in
-    neighbors were not the actual source of the false marker there - see v24.31/v24.32
-    changelog) while no longer over-suppressing genuinely narrow-but-valid SKU boxes sitting
-    next to genuinely wide ones.
+    FIX: this propagation function now ALSO checks the neighbor's box_count before deciding
+    to propagate suspicion onto it - a neighbor with >= V2436_MULTIBOX_EXEMPTION_MIN_BOXES
+    detected boxes is never propagated into suspicion, consistent with (and now fully
+    honoring) v24.36's own exemption rule at every level of this shared suspect-determination
+    pipeline, not just the direct base check.
     """
     if len(ss) < 2:
         return set()
@@ -1487,10 +1412,20 @@ def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
     min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
     borderline_multiplier = globals().get("V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER", 1.3)
     borderline_max_width = min_w * borderline_multiplier
+    multibox_exempt_enabled = globals().get("V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED", True)
+    multibox_min_boxes = globals().get("V2436_MULTIBOX_EXEMPTION_MIN_BOXES", 2)
     for i in base_suspects:
         for neighbor_idx in (i - 1, i + 1):
             if 0 <= neighbor_idx < len(ss) and neighbor_idx not in base_suspects:
                 neighbor_width = max(1, ss[neighbor_idx]["x1"] - ss[neighbor_idx]["x0"])
+                neighbor_box_count = len(ss[neighbor_idx].get("boxes", []) or [])
+                if multibox_exempt_enabled and neighbor_box_count >= multibox_min_boxes:
+                    if globals().get("V2407_TRACE", True):
+                        print(f"v24.37 WIDTH_OUTLIER_ADJACENCY {view_label}: idx={neighbor_idx} "
+                              f"NOT propagated despite being adjacent to suspect idx={i} - its "
+                              f"own box_count={neighbor_box_count} >= {multibox_min_boxes} "
+                              f"(same exemption as v24.36's direct check), trusted on its own merits")
+                    continue
                 if neighbor_width < borderline_max_width:
                     propagated.add(neighbor_idx)
                     if globals().get("V2407_TRACE", True):
@@ -1590,10 +1525,6 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     multi-stack blob) - see _flag_width_outlier_stacks() and V2424_* constants for the full
     root-cause writeup (real AA04-05 BACK case: a 63.2%-ratio pair turned out to be a narrow
     artifact vs a merged blob, not a genuine risk).
-
-    v24.31/v24.34 ADDITION: WidthOutlierAdjacencyPropagation (now borderline-only, see
-    _flag_stack_indices_adjacent_to_width_outliers docstring) + RowEdgeTrendGuard.
-    v24.32 ADDITION: tags accepted edge regions needing legacy corroboration.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1909,25 +1840,17 @@ V2432_EDGE_CORROBORATION_ENABLED = True
 V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH = 3
 V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
 
-# v24.34 BorderlineOnlyPropagation - see _flag_stack_indices_adjacent_to_width_outliers()
-# docstring for full root-cause writeup (real evidence: EC04-01, 9 of 11 FRONT stacks were
-# swept into suspicion, blocking measurement of a likely-genuine 1-tier<->2-tier STEP_DOWN).
 V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER = 1.3
 
-# v24.35 EmptyFloorVetoGuard - see _find_max_stack_coverage_gap_in_zone() docstring for the
-# full root-cause writeup (real evidence: EC04-01 FRONT, REAR_LATERAL_IMBALANCE claim
-# "2 tiers vs completely empty (0 tiers)" was wrongly VETOed because the deterministic
-# pairwise comparison structurally cannot compare an existing stack against "no stack at
-# all" - it measured an unrelated pair's ratio=0.14 instead and treated that as evidence of
-# safety for the whole zone).
 V2435_REAR_ZONE_EMPTY_GAP_MIN_PX = 30
 V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO = 0.15
 
-# v24.36 MultiBoxWidthExemption - see _flag_width_outlier_stacks() docstring for the full
-# root-cause writeup (real evidence: EC04-01 BACK, idx1 had 3 genuinely stacked boxes at
-# width=33px but got excluded from every pairwise comparison purely for being narrower
-# than the 40px minimum threshold, hiding the exact height difference Gemini's AI
-# independently and correctly described in its STEP_DOWN_RISK claim for that view).
+# v24.36 MultiBoxWidthExemption + v24.37 propagation-fix - see _flag_width_outlier_stacks()
+# and _flag_stack_indices_adjacent_to_width_outliers() docstrings for full root-cause
+# writeup (real evidence: EC04-01 BACK, idx1's genuine 3-box tall stack got excluded both
+# directly (fixed by v24.36) AND via adjacency propagation (fixed by v24.37) - v24.36 alone
+# was NOT sufficient because the propagation function had its own independent, unpatched
+# width-only check).
 V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED = True
 V2436_MULTIBOX_EXEMPTION_MIN_BOXES = 2
 
@@ -2904,40 +2827,16 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
 
 
 def _find_max_stack_coverage_gap_in_zone(stacks, rear_x0, rear_x1):
-    """v24.35 EmptyFloorVetoGuard - fixes a deeper variant of the same "insufficient data
-    treated as evidence of safety" bug that v24.28 already fixed for the "fewer than 2
-    stacks" case, but v24.28 did NOT cover: real log evidence (EC04-01 FRONT) showed a case
-    where the rear zone DID contain 2+ comparable stacks (so get_max_lateral_imbalance_ratio_
-    in_zone happily returned a real number, 0.14, well below the veto threshold), yet the
-    AI's claim was still correct and got wrongly VETOED: "the left column is stacked 2 tiers
-    high, whereas the adjacent right position is completely empty (0 tiers)".
-
-    ROOT CAUSE: a position with ZERO cargo has no stack object in the per-box segmentation
-    model at all (build_stack_box_model_for_view only creates a "stack" entry where cargo
-    pixels were actually detected - see _find_cargo_present_clusters). So "2 tiers vs 0
-    tiers" can NEVER be one of the (a, b) pairs compared inside get_max_lateral_imbalance_
-    ratio_in_zone - that loop can only ever compare stacks that DO exist, which in this file
-    were other, unrelated pairs sitting elsewhere in the same 45%-wide rear zone slice. The
-    max_ratio=0.14 that was measured was real and correctly computed - it was just comparing
-    the WRONG pair relative to what the AI was describing, because the right pair (some
-    existing stack vs. "nothing") is structurally impossible for this comparison loop to
-    ever see.
-
-    FIX: instead of only checking "does a comparable PAIR exist", separately check whether
-    there is a significant CONTIGUOUS x-range within the rear zone that has NO stack
-    (cargo) at all. If such a gap is wide enough to plausibly be the "empty side" the AI is
-    describing (a real, physical absence of cargo - not a segmentation/measurement
-    artifact), the existing pairwise max_ratio must NOT be trusted as representative of
-    the whole zone, regardless of how low it measured - it is blind to the empty region by
-    construction. Uses ALL stacks (not just non-suspect ones) to determine "cargo presence",
-    since even a narrow/width-outlier-flagged stack still represents real cargo pixels
-    existing at that x-position - the suspect flag only questions whether ITS HEIGHT
-    reading is reliable, not whether cargo is physically present there at all.
+    """v24.35 EmptyFloorVetoGuard - see full root-cause writeup in changelog header (real
+    evidence: EC04-01 FRONT, AI correctly saw "2 tiers vs completely empty (0 tiers)" but
+    the pairwise comparison structurally cannot compare an existing stack against "no stack
+    at all" - it measured an unrelated pair's ratio instead and wrongly vetoed the AI.
+    Checks for a significant CONTIGUOUS cargo-free x-range within the rear zone.
     """
     relevant = [s for s in (stacks or []) if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     zone_width = max(1, rear_x1 - rear_x0)
     if not relevant:
-        return zone_width, zone_width / zone_width  # entire zone has no cargo at all
+        return zone_width, zone_width / zone_width
     relevant.sort(key=lambda s: s["x0"])
     max_gap = 0
     cursor = rear_x0
@@ -3801,22 +3700,6 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_cv_regions)
 
-        if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
-            _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
-            for _view in ("FRONT", "BACK"):
-                _raw_legacy_for_view = _raw_legacy_step_down_regions_by_view.get(_view, [])
-                _kept = []
-                for _r in step_down_regions.get(_view, []):
-                    if not _r.get("v2432_needs_legacy_corroboration"):
-                        _kept.append(_r)
-                        continue
-                    if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
-                        print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
-                        _kept.append(_r)
-                    else:
-                        print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
-                step_down_regions[_view] = _kept
-
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
         # v24.20: cross-view collision regions exempt from this single-marker-per-view filter.
         #
@@ -3838,6 +3721,22 @@ def process_request(request):
         # the smaller region's width - a small overlap from measurement noise is tolerated,
         # a large overlap means they're really the same physical location and should still
         # collapse to one marker, preserving the original v24.10 intent for TRUE duplicates).
+        if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
+            _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
+            for _view in ("FRONT", "BACK"):
+                _raw_legacy_for_view = _raw_legacy_step_down_regions_by_view.get(_view, [])
+                _kept = []
+                for _r in step_down_regions.get(_view, []):
+                    if not _r.get("v2432_needs_legacy_corroboration"):
+                        _kept.append(_r)
+                        continue
+                    if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
+                        print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
+                        _kept.append(_r)
+                    else:
+                        print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
+                step_down_regions[_view] = _kept
+
         if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
             exempt_cross_view = globals().get("V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY", True)
             for _view in ("FRONT", "BACK"):
@@ -4101,12 +4000,7 @@ def process_request(request):
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
             # v24.35 EmptyFloorVetoGuard: check for a significant cargo-free gap in the rear
             # zone BEFORE trusting any pairwise max_ratio measurement - see
-            # _find_max_stack_coverage_gap_in_zone() docstring for the full root-cause
-            # writeup (real evidence: EC04-01 FRONT, AI correctly saw "2 tiers vs completely
-            # empty (0 tiers)" but the deterministic pairwise comparison could only ever see
-            # OTHER, unrelated existing-stack pairs, since "0 tiers" has no stack object to
-            # compare against by construction - it measured a real but irrelevant ratio=0.14
-            # and wrongly vetoed a correct AI finding).
+            # _find_max_stack_coverage_gap_in_zone() docstring for full root-cause writeup.
             max_gap_px, max_gap_ratio = _find_max_stack_coverage_gap_in_zone(
                 stack_box_model.get(view_label, []), rear_x0, rear_x1)
             min_gap_px = globals().get("V2435_REAR_ZONE_EMPTY_GAP_MIN_PX", 30)
@@ -4115,11 +4009,8 @@ def process_request(request):
                 print(f"REAR_LATERAL_IMBALANCE VETO skipped ({view_label}): detected a "
                       f"cargo-free gap of {max_gap_px:.0f}px ({max_gap_ratio*100:.0f}% of rear "
                       f"zone width) within the rear zone x=[{rear_x0}-{rear_x1}] - a position "
-                      f"with zero cargo has no stack object to compare against, so no pairwise "
-                      f"measurement can ever represent an 'existing stack vs. empty floor' "
-                      f"difference; the zone's own max_ratio (if any) reflects only OTHER, "
-                      f"unrelated stack pairs and must not be trusted as evidence of safety "
-                      f"here -> NOT vetoing, deferring to AI finding")
+                      f"with zero cargo has no stack object to compare against -> NOT vetoing, "
+                      f"deferring to AI finding")
                 return False
 
             max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
