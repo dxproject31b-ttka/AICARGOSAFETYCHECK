@@ -17,62 +17,68 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.32 - EdgeCandidateCorroborationGate: real log evidence (AB03-03) proved v24.31's
-#          RowEdgeTrendGuard has a fail-open gap of its own. FRONT: width-outlier suspicion
-#          (v24.24) + adjacency propagation (v24.31) consumed 5 of 7 stacks (idx 0,2,3 direct
-#          + 1,4 propagated), leaving ONLY row-edge pair 5-6 viable - with zero interior data
-#          left to establish a background trend, RowEdgeTrendGuard's designed fail-open
-#          behavior let ratio=28% straight through, even though the independent legacy pixel
-#          scanner found NOTHING for this view at all ("no discontinuity found for FRONT").
-#          BACK showed the same pattern in its most extreme form: per-box segmentation found
-#          only 2 stacks for the ENTIRE cargo width (severe under-segmentation) - with n=2,
-#          BOTH stacks are trivially "row-edge" by definition, so no interior pair can ever
-#          exist to sanity-check against; ratio=70% sailed through the plain threshold
-#          unchecked. The legacy scanner DID find a candidate for BACK, but at a completely
-#          different, non-overlapping x-position (853-878 vs the false marker's 578-635) -
-#          real independent evidence pointing elsewhere, not corroborating this marker at all.
-#          FIX: added EdgeCandidateCorroborationGate - any per-box-pairwise or cross-view
-#          candidate tagged "v2432_needs_legacy_corroboration" (edge-touching AND no interior
-#          background data available - see detect_step_down_regions_from_stack_model and
-#          _find_cross_view_profile_collision_regions docstrings) must now be independently
-#          confirmed by the RAW legacy pixel-scanner's own candidates for that view (captured
-#          BEFORE v24.30's crosscheck could remove them, avoiding circularity) at an
-#          overlapping x-position; if the legacy scanner found nothing there, the candidate is
-#          rejected as an unconfirmed segmentation artifact. This is a general "two
-#          independent detection methods must agree" principle - it does not special-case any
-#          manifest by name, and does not affect interior (non-edge) candidates or edge
-#          candidates that DO have valid interior background data to check against v24.31's
-#          RowEdgeTrendGuard (those remain governed by that mechanism, unchanged). Verified
-#          (standalone logic test using AB03-03's exact real numbers): both false markers
-#          (FRONT ratio=28%, BACK ratio=70%) now correctly rejected; genuine step-downs with
-#          either interior background data OR real legacy-scanner corroboration remain
-#          detected as before.
-# v24.31 - RowEdgeTrend + WidthOutlierAdjacency: v24.30's WallCornerArtifactGuard (below)
-#          targeted the WRONG detector for AB05-01 - fresh log evidence proved the legacy
-#          pixel scanner (_detect_step_down_regions) correctly found "no discontinuity" for
-#          BOTH views on this file, so it was never the source of the 3 false STEP_DOWN
-#          markers the user still saw after deploying v24.30. Traced the REAL source to TWO
-#          separate, never-fixed gaps in the v24.10 per-box pairwise comparator
-#          (detect_step_down_regions_from_stack_model) and the v24.18-22 cross-view collision
-#          detector (_find_cross_view_profile_collision_regions):
-#          (1) WidthOutlierAdjacencyPropagation: v24.24/25's width-sanity gate correctly
-#              flags a segmentation-fragment stack and skips pairs that directly touch it,
-#              but never propagated that suspicion to the fragment's OTHER neighbor - even
-#              though that neighbor's own height reading used the same mis-placed boundary.
-#              Fixed by adding _flag_stack_indices_adjacent_to_width_outliers().
-#          (2) RowEdgeTrendGuard: a pair touching a row-edge stack (idx==0 or idx==len-1) must
-#              clear V2431_ROWEDGE_TREND_MULTIPLIER (1.6x) times this view's own interior-pair
-#              background ratio, catching smooth isometric-perspective drift being mistaken
-#              for a genuine local step (same class of bug v24.1 already fixed for the legacy
-#              scanner, but never ported to this newer per-box comparator).
-#          NOTE (v24.32): real evidence on AB03-03 showed this guard's "fail open when no
-#          interior data exists" behavior has its own gap - see v24.32 above for the fix.
+# v24.33 - GeminiApiResilienceFix: user reported the model-fallback pool (3.7->3.6->3.5,
+#          added v24.10) was not actually reducing wall-clock latency as intended - the
+#          function still ran long enough to blow past GAS's own execution timeout. Real log
+#          evidence (AB03-03): the diagram-analysis AI call alone took over 5 MINUTES,
+#          working through 5+ different API keys one at a time, but EVERY attempt stayed on
+#          gemini-3.7-flash the whole time - it never once fell back to 3.6/3.5. ROOT CAUSE:
+#          every single failure in that stretch was "504 Deadline Exceeded" (each attempt
+#          silently blocking ~60-70 SECONDS before finally erroring out) - a transient
+#          overload/timeout condition completely unrelated to which API key was used, but
+#          _is_quota_error_message() only recognized 429/RESOURCE_EXHAUSTED/QUOTA/RATE_LIMIT
+#          as "try the next model instead", so 504 fell through to the outer per-key retry
+#          loop instead - moving to the NEXT KEY while staying on the SAME (slow/overloaded)
+#          MODEL, the exact opposite of the fallback behavior the user had already correctly
+#          reasoned should happen ("if 3.7 fails, try 3.6/3.5 on the SAME key first - it's
+#          faster than cycling through keys still on 3.7"). FIXED WITH FIVE COMBINED CHANGES:
+#          (1) _is_quota_error_message() expanded to also treat 503/500/504/UNAVAILABLE/
+#              INTERNAL/DEADLINE_EXCEEDED/TIMEOUT/OVERLOADED as fallback-worthy, so the
+#              existing per-key "try next model first" logic (which was ALREADY correctly
+#              structured, just gated behind too narrow a classifier) finally engages as
+#              originally intended.
+#          (2) Added explicit request_options={"timeout": GEMINI_REQUEST_TIMEOUT_SECONDS=20}
+#              to every generate_content() call - caps each individual attempt at 20s instead
+#              of the SDK's much longer default, so a bad attempt fails fast, leaving time
+#              budget to actually try several more keys/models instead of exhausting the
+#              whole window on one or two slow failures.
+#          (3) Per-(key, model) cooldown instead of global-per-model: previously, ONE key
+#              hitting a genuine 429 quota error on 3.7-flash disabled 3.7-flash for ALL 20
+#              keys for 30 minutes, even though each key has its own independent quota -
+#              wasting the fastest model unnecessarily for every other still-healthy key.
+#          (4) Added GEMINI_PER_CALL_TIME_BUDGET_SECONDS=75s wall-clock budget per individual
+#              AI call (of the 4 made per file) - bounds the absolute worst case instead of
+#              the old unbounded "try every key x every model x 2 passes" structure.
+#          (5) Added a request-scoped known_bad_keys set (see process_request) shared across
+#              all 4 AI calls per file - a key confirmed permanently invalid (API_KEY_INVALID/
+#              PERMISSION_DENIED/UNAUTHENTICATED/403) by any one of the 4 calls is skipped
+#              immediately by the remaining calls instead of being independently rediscovered
+#              as bad 4 separate times.
+#          NOTE ON PARALLELIZING THE 4 AI CALLS (considered, not implemented): the 4 calls
+#          (diagram, rear-zone FRONT/BACK, front-zone) are logically independent and could in
+#          principle run concurrently via threading for a further ~3-4x latency reduction in
+#          the success case. NOT implemented in this version because the google.generativeai
+#          SDK's genai.configure(api_key=...) sets a MODULE-GLOBAL API key - calling it from
+#          multiple threads concurrently would race, risking one thread's request silently
+#          using a DIFFERENT thread's key. Safe parallelization would require migrating to
+#          the newer google-genai SDK's per-instance genai.Client(api_key=...) objects (no
+#          global state) - a larger, separate migration, not bundled into this latency/
+#          resilience fix to avoid mixing concerns and regression risk.
+# v24.32 - EdgeCandidateCorroborationGate: real evidence (AB03-03) proved v24.31's
+#          RowEdgeTrendGuard fails open when NO interior background data exists at all
+#          (width-outlier suspicion consumed almost every stack, or segmentation was too
+#          coarse to produce more than 1-2 stacks total) - added a requirement that any
+#          edge-touching candidate lacking interior data must be independently corroborated
+#          by the legacy pixel scanner's own raw candidates at an overlapping position, or
+#          it is rejected as an unconfirmed segmentation artifact.
+# v24.31 - RowEdgeTrend + WidthOutlierAdjacency: fixed two never-ported gaps in the v24.10
+#          per-box pairwise comparator and v24.18-22 cross-view collision detector - (1)
+#          width-outlier suspicion now propagates to adjacent stacks (their height reading
+#          shares the same unreliable boundary), (2) pairs touching a row-edge stack must
+#          clear a stricter multiplier over the view's own interior background trend ratio,
+#          catching smooth isometric-perspective drift being mistaken for a genuine step.
 # v24.30 - WallCornerArtifactGuard: cross-validates legacy pixel-scanner STEP_DOWN candidates
-#          against stack_box_model; kept as defense-in-depth for files where that scanner
-#          fires on a genuine isometric wall-corner optical artifact (originally written for
-#          AB05-01, though fresh evidence showed that file's actual false markers came from a
-#          different source - fixed in v24.31/v24.32 above; this guard remains valid/useful
-#          for OTHER files where the legacy scanner does produce artifact candidates).
+#          against stack_box_model; defense-in-depth for wall-corner optical artifacts.
 # v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
 #          VCS1A zone had no marker at all) exposed that "strongest-only" discarded every
 #          ordinary STEP_DOWN candidate except the single highest-ratio one PER VIEW, even
@@ -273,8 +279,20 @@ GEMINI_MODEL_POOL = [
     "gemini-3.5-flash",
 ]
 LAST_WORKING_MODEL = None
-MODEL_DISABLED_UNTIL = {}
+MODEL_DISABLED_UNTIL = {}  # v24.33: now keyed by (api_key, model_name) tuple, not just model_name
 MODEL_COOLDOWN_SECONDS = 1800
+
+# v24.33 Gemini API resilience/latency fix - see full root-cause writeup in changelog header
+# and docstrings on _is_quota_error_message / _get_available_gemini_models /
+# _gemini_request_options. Real log evidence (AB03-03): a single diagram-analysis AI call
+# took over 5 minutes and burned through 5+ API keys, all still stuck on gemini-3.7-flash,
+# because "504 Deadline Exceeded" (a transient/overload error, unrelated to any specific key)
+# was not recognized as fallback-worthy, so it kept moving to the next KEY instead of trying
+# the next, lighter MODEL on the SAME key first - the opposite of the intended behavior.
+GEMINI_REQUEST_TIMEOUT_SECONDS = 20   # per single generate_content() attempt (was effectively
+                                        # ~60-70s via the SDK's own default before this fix)
+GEMINI_PER_CALL_TIME_BUDGET_SECONDS = 75  # max wall-clock time for ONE of the 4 AI calls made
+                                            # per file, across all keys/models combined
 
 RISK_COLORS = {
     "STEP_DOWN_RISK": "red",
@@ -1356,7 +1374,7 @@ def _flag_width_outlier_stacks(ss, view_label=None):
 def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_label=None):
     """v24.30 WallCornerArtifactGuard - cross-validates legacy pixel-height-profile STEP_DOWN
     candidates against stack_box_model; kept as defense-in-depth for files where the legacy
-    scanner fires on a genuine wall-corner artifact (see full writeup in changelog header).
+    scanner fires on a genuine wall-corner artifact (see changelog header for full writeup).
     """
     if not stacks or len(stacks) < 2:
         return True
@@ -1390,8 +1408,7 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
 
 def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
     """v24.31 WidthOutlierAdjacencyPropagation - a stack immediately adjacent to a flagged
-    width-outlier is ALSO excluded (its own height reading shares the same unreliable
-    segmentation boundary as the fragment). See changelog header for full writeup.
+    width-outlier is ALSO excluded. See changelog header for full writeup.
     """
     if len(ss) < 2:
         return set()
@@ -1414,8 +1431,7 @@ def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
 
 def _region_x_overlaps_any(region, other_regions, min_overlap_ratio):
     """v24.32 helper: does `region`'s x-range overlap ANY region in `other_regions` by at
-    least min_overlap_ratio of the smaller region's width? Used by
-    EdgeCandidateCorroborationGate to check independent-method corroboration.
+    least min_overlap_ratio of the smaller region's width?
     """
     rx0, rx1 = region.get("x_min", 0), region.get("x_max", 0)
     r_w = max(1, rx1 - rx0)
@@ -1495,28 +1511,9 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     root-cause writeup (real AA04-05 BACK case: a 63.2%-ratio pair turned out to be a narrow
     artifact vs a merged blob, not a genuine risk).
 
-    v24.31 ADDITION: (1) WidthOutlierAdjacencyPropagation - uses
-    _flag_stack_indices_adjacent_to_width_outliers() instead of the raw
-    _flag_width_outlier_stacks(). (2) RowEdgeTrendGuard - a pair touching a row-edge stack
-    (idx==0 or idx==len-1) must clear V2431_ROWEDGE_TREND_MULTIPLIER times this view's own
-    interior-pair background ratio, not just the plain threshold.
-
-    v24.32 ADDITION: EdgeCandidateCorroborationGate preparation - tags each accepted region
-    with "v2432_needs_legacy_corroboration"=True whenever it is an edge pair AND no interior
-    background trend could be established at all (background_max_ratio is None - either too
-    few interior pairs existed, or they were all eliminated by width-outlier suspicion). Real
-    log evidence (AB03-03): FRONT had 7 stacks but width-outlier+adjacency suspicion consumed
-    5 of them, leaving ONLY the row-edge pair 5-6 viable - with zero interior data left to
-    sanity-check against, v24.31's RowEdgeTrendGuard "failed open" (its designed behavior when
-    there's insufficient background data) and let ratio=28% through unchecked, even though the
-    view's segmentation was clearly troubled (legacy scanner independently found NOTHING for
-    this view at all). BACK showed the same pattern in its most extreme form: only 2 stacks
-    detected for the entire cargo width (severe under-segmentation), so the single possible
-    pair (0-1) is trivially "edge" on both sides with zero possible interior data by
-    definition - ratio=70% sailed through the plain threshold with no sanity check possible at
-    all. The actual corroboration check (comparing against the independent legacy pixel
-    scanner) happens later in process_request, where both this view's raw legacy candidates
-    and this tag are available together.
+    v24.31 ADDITION: WidthOutlierAdjacencyPropagation + RowEdgeTrendGuard (see changelog).
+    v24.32 ADDITION: tags each accepted region with "v2432_needs_legacy_corroboration"=True
+    whenever it is an edge pair AND no interior background trend could be established.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1822,27 +1819,14 @@ V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 # separate markers.
 V2429_STEPDOWN_OVERLAP_MAX_RATIO = 0.30
 
-# v24.30 WallCornerArtifactGuard
 V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED = True
 V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR = 0.5
 V2430_LEGACY_STEPDOWN_BOUNDARY_TOLERANCE_PX = 15
 
-# v24.31 WidthOutlierAdjacencyPropagation + RowEdgeTrendGuard
 V2431_WIDTH_OUTLIER_ADJACENCY_PROPAGATION_ENABLED = True
 V2431_ROWEDGE_TREND_GUARD_ENABLED = True
 V2431_ROWEDGE_TREND_MULTIPLIER = 1.6
 
-# v24.32 EdgeCandidateCorroborationGate - see docstring in
-# detect_step_down_regions_from_stack_model() and the corroboration-check block in
-# process_request for the full root-cause writeup (real evidence: AB03-03, both FRONT and
-# BACK produced false STEP_DOWN markers from edge-touching per-box comparisons that had NO
-# interior background data to sanity-check against - v24.31's RowEdgeTrendGuard correctly
-# "fails open" in that situation (by design, since it has nothing to compare against), but
-# that same fail-open behavior is exactly what let these two false markers slip through
-# unchecked. Requires independent legacy-pixel-scanner corroboration for any edge-touching
-# per-box/cross-view candidate that lacks interior background data - if the legacy scanner
-# found nothing in that view at all, or found something at a non-overlapping x position, the
-# candidate is treated as unconfirmed and rejected.
 V2432_EDGE_CORROBORATION_ENABLED = True
 V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH = 3
 V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
@@ -2461,7 +2445,6 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     # _flag_width_outlier_stacks docstring) - a reference or matched-secondary stack that is
     # a segmentation fragment/merged-blob outlier makes the cross-view comparison unreliable
     # regardless of how confident the ratio looks.
-    # v24.31: use adjacency-propagated suspects instead of raw width-outlier flags.
     if globals().get("V2431_WIDTH_OUTLIER_ADJACENCY_PROPAGATION_ENABLED", True):
         ref_suspects = _flag_stack_indices_adjacent_to_width_outliers(ref_sorted, view_label=reference_view)
         sec_suspects = _flag_stack_indices_adjacent_to_width_outliers(sec_sorted, view_label=secondary_view)
@@ -2510,10 +2493,6 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                       f"(need diff>={min_abs_px}px and ratio>={min_ratio}, v24.21 dedicated threshold)")
             continue
 
-        # v24.32: flag as needing legacy corroboration when the reference stack sits at a
-        # row-edge index of the reference view AND the secondary view has too few stacks to
-        # be a reliable match target (real evidence: AB03-03, BACK had only 2 stacks total,
-        # making any cross-view match against it inherently low-confidence).
         needs_corroboration = bool(
             (r_idx in ref_row_edge_indices) and (len(sec_sorted) < min_stacks_for_reliable_match)
         )
@@ -2548,7 +2527,6 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
             y0 = min(a["stack"]["top_y"] for a in cluster)
             y1 = max(a["stack"]["floor_y"] for a in cluster)
             best_ratio = max(a["ratio"] for a in cluster)
-            # v24.32: cluster needs corroboration if ANY member stack in it needed it.
             cluster_needs_corroboration = any(a.get("needs_corroboration") for a in cluster)
             regions_by_view[reference_view].append({
                 "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
@@ -2942,11 +2920,55 @@ def _reset_genai_client():
 
 
 def _is_quota_error_message(msg):
+    """v24.33 EXPANDED (see changelog for full root-cause writeup, real evidence: AB03-03
+    diagram-analysis call spent ~5+ minutes retrying 5+ API keys, one at a time, ALL still
+    stuck on gemini-3.7-flash, because every single failure was "504 Deadline Exceeded" -
+    a transient/overload error that this function did NOT recognize as fallback-worthy
+    (only 429/RESOURCE_EXHAUSTED/QUOTA/RATE_LIMIT were, so 504 fell through to the OUTER
+    except block, which moves to the NEXT KEY but keeps the SAME MODEL - the exact opposite
+    of the user's own correctly-diagnosed intent: "try 3.6/3.5 on the SAME key before
+    burning through every key on 3.7"). Now also treats 503/500/504/UNAVAILABLE/INTERNAL/
+    DEADLINE_EXCEEDED/TIMEOUT/OVERLOADED as fallback-worthy, since none of these are
+    key-specific - they are transient server/network conditions equally likely to recur on
+    ANY key, so there is no reason to burn through 20 keys before trying a lighter/faster
+    model on the SAME key first.
+    """
     msg = str(msg or "").upper()
-    return ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("QUOTA" in msg) or ("RATE_LIMIT" in msg)
+    return (
+        ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("QUOTA" in msg) or ("RATE_LIMIT" in msg)
+        or ("503" in msg) or ("UNAVAILABLE" in msg)
+        or ("500" in msg) or ("INTERNAL" in msg)
+        or ("504" in msg) or ("DEADLINE_EXCEEDED" in msg) or ("DEADLINE EXCEEDED" in msg)
+        or ("TIMEOUT" in msg) or ("TIMED OUT" in msg)
+        or ("OVERLOADED" in msg) or ("SERVICE UNAVAILABLE" in msg)
+    )
 
 
-def _get_available_gemini_models():
+def _is_permanently_bad_key_error(msg):
+    """v24.33 NEW: classifies errors that mean THIS SPECIFIC KEY is permanently unusable
+    (invalid/revoked/no-permission) as opposed to a transient model/server condition. Used
+    to populate a request-scoped "known bad keys" set (see process_request) so the SAME
+    dead key is not retried independently by each of the 4 separate AI calls made per file -
+    once confirmed bad by any one of the 4 calls, the rest skip it immediately.
+    """
+    msg = str(msg or "").upper()
+    return (
+        ("API_KEY_INVALID" in msg) or ("API KEY NOT VALID" in msg) or ("INVALID API KEY" in msg)
+        or ("PERMISSION_DENIED" in msg) or ("UNAUTHENTICATED" in msg) or ("403" in msg)
+    )
+
+
+def _get_available_gemini_models(current_key=None):
+    """v24.33 CHANGED: cooldown is now scoped per (key, model) pair instead of globally per
+    model. ROOT CAUSE this fixes: previously, if key #3 (out of 20) hit a genuine 429 quota
+    error on gemini-3.7-flash, _mark_gemini_model_disabled() disabled 3.7-flash for ALL 20
+    keys for 30 minutes - even though keys #1, #2, #4-20 likely still had untouched quota of
+    their own on 3.7 (each Gemini API key has its OWN independent quota). This wasted the
+    fastest model for the entire cooldown window on every future request, forcing every call
+    straight to the slower 3.6/3.5 fallback tier unnecessarily. Now checks
+    MODEL_DISABLED_UNTIL keyed by (current_key, model_name) - a key with its own confirmed
+    quota exhaustion is skipped for that model, but every other key keeps trying 3.7 first.
+    """
     global LAST_WORKING_MODEL
     now = time.time()
     ordered = []
@@ -2955,36 +2977,62 @@ def _get_available_gemini_models():
     for model_name in GEMINI_MODEL_POOL:
         if model_name not in ordered:
             ordered.append(model_name)
-    return [m for m in ordered if now >= MODEL_DISABLED_UNTIL.get(m, 0)]
+    return [m for m in ordered if now >= MODEL_DISABLED_UNTIL.get((current_key, m), 0)]
 
 
-def _mark_gemini_model_disabled(model_name, reason=""):
-    MODEL_DISABLED_UNTIL[model_name] = time.time() + MODEL_COOLDOWN_SECONDS
-    print(f"AI MODEL QUOTA COOLDOWN: {model_name} disabled for {MODEL_COOLDOWN_SECONDS}s reason={str(reason)[:120]}")
+def _mark_gemini_model_disabled(model_name, reason="", current_key=None):
+    MODEL_DISABLED_UNTIL[(current_key, model_name)] = time.time() + MODEL_COOLDOWN_SECONDS
+    print(f"AI MODEL QUOTA COOLDOWN: {model_name} (this key only) disabled for {MODEL_COOLDOWN_SECONDS}s reason={str(reason)[:120]}")
 
 
-def _call_gemini_json(prompt, image, api_keys):
+def _gemini_request_options():
+    """v24.33 NEW: explicit per-attempt request timeout, passed to generate_content(). ROOT
+    CAUSE this fixes: the google-generativeai SDK's default timeout is much longer than
+    ideal for a retry-heavy loop - real log evidence (AB03-03) showed each failing key/model
+    attempt silently blocking for ~60-70 SECONDS before finally raising "504 Deadline
+    Exceeded". With 20 keys in the pool, a run of bad luck could theoretically block for
+    20+ minutes on a single one of the 4 AI calls made per file, alone enough to blow past
+    any GCF/GAS timeout. Capping each individual attempt at
+    GEMINI_REQUEST_TIMEOUT_SECONDS means a bad attempt fails fast, leaving time budget to
+    actually try several more keys/models within the same overall wall-clock window instead
+    of exhausting it on one or two slow failures.
+    """
+    return {"timeout": GEMINI_REQUEST_TIMEOUT_SECONDS}
+
+
+def _call_gemini_json(prompt, image, api_keys, known_bad_keys=None):
     global GLOBAL_KEY_INDEX, LAST_WORKING_MODEL
+    if known_bad_keys is None:
+        known_bad_keys = set()
     last_err = ""
     total_keys = len(api_keys)
     if total_keys == 0:
         return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": "No API keys", "confidence": "LOW"}
+    start_time = time.time()
+    time_budget = globals().get("GEMINI_PER_CALL_TIME_BUDGET_SECONDS", 75)
     for i in range(total_keys):
+        if time.time() - start_time > time_budget:
+            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping retry loop early, "
+                  f"returning last known error instead of continuing to burn wall-clock time")
+            break
         current_index = (GLOBAL_KEY_INDEX + i) % total_keys
         current_key = api_keys[current_index]
+        if current_key in known_bad_keys:
+            print(f"API Key index {current_index} SKIPPED - already confirmed bad earlier in this request")
+            continue
         try:
             _reset_genai_client()
             genai.configure(api_key=current_key)
-            models = _get_available_gemini_models()
+            models = _get_available_gemini_models(current_key=current_key)
             if not models:
-                last_err = "All Gemini Flash models are temporarily disabled by quota cache"
-                print("AI DISABLED: all Gemini Flash models are in quota cooldown")
+                last_err = "All Gemini Flash models are temporarily disabled by quota cache for this key"
+                print(f"AI DISABLED: all Gemini Flash models are in quota cooldown for key_index={current_index}")
                 continue
             for model_name in models:
                 try:
                     print(f"AI MODEL ACTIVE: {model_name} key_index={current_index}")
                     model = genai.GenerativeModel(model_name=model_name)
-                    response = model.generate_content([prompt, image])
+                    response = model.generate_content([prompt, image], request_options=_gemini_request_options())
                     clean_text = clean_json_response(response.text if response.text else "{}")
                     result = json.loads(clean_text)
                     if isinstance(result, list):
@@ -2994,19 +3042,23 @@ def _call_gemini_json(prompt, image, api_keys):
                     return result
                 except Exception as model_err:
                     last_err = str(model_err)
+                    if _is_permanently_bad_key_error(last_err):
+                        print(f"AI KEY PERMANENTLY BAD: key_index={current_index} reason={last_err[:100]} "
+                              f"- marking as known-bad for the rest of this request")
+                        known_bad_keys.add(current_key)
+                        break
                     if _is_quota_error_message(last_err):
-                        print(f"AI FALLBACK: {model_name} -> next model reason={last_err[:100]}")
-                        _mark_gemini_model_disabled(model_name, last_err)
+                        print(f"AI FALLBACK: {model_name} -> next model (same key) reason={last_err[:100]}")
+                        _mark_gemini_model_disabled(model_name, last_err, current_key=current_key)
                         continue
                     raise
         except Exception as e:
             last_err = str(e)
             print(f"API Key index {current_index} failed: {last_err[:100]}")
-            time.sleep(1)
             continue
     return {"rear_zone_risk": "ERROR", "front_zone_risk": "ERROR", "reasoning": last_err[:120], "confidence": "LOW"}
 
-def analyze_rear_zone_with_ai(rear_crop, api_keys, view_label="UNKNOWN"):
+def analyze_rear_zone_with_ai(rear_crop, api_keys, view_label="UNKNOWN", known_bad_keys=None):
     """
     v24 IMPROVED PROMPT: เพิ่มคำเตือนเฉพาะเจาะจงเรื่อง "กล่องสีเข้ม/สีผิดปกติ" (เช่น
     สีน้ำตาลเข้ม, สีแดงเข้ม/maroon) อาจถูกมองข้ามไปว่าไม่ใช่คาร์โก้ (เข้าใจผิดว่าเป็น
@@ -3064,10 +3116,10 @@ Return ONLY this exact JSON:
 {{"rear_zone_risk":"REAR_EMPTY_RISK"|"REAR_LATERAL_IMBALANCE"|"BOTH"|"SAFE","reasoning":"describe what you see, including approximate height difference if any, and specifically note if any stack appears partially hidden/overlapped by a taller neighbor, and confirm you counted any dark-colored boxes as cargo","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever rear_zone_risk is not SAFE; omit or use null if SAFE)
 """
-    return _call_gemini_json(prompt, rear_crop, api_keys)
+    return _call_gemini_json(prompt, rear_crop, api_keys, known_bad_keys=known_bad_keys)
 
 
-def analyze_front_zone_with_ai(front_crop, api_keys, view_label="UNKNOWN"):
+def analyze_front_zone_with_ai(front_crop, api_keys, view_label="UNKNOWN", known_bad_keys=None):
     prompt = f"""
 You are a Cargo Safety Inspector. This image is a cropped zoom of the HEAD WALL (FRONT) zone of a container.
 This is the {view_label} view. The solid colored panel (yellow/tan/brown/cyan) is the container head
@@ -3090,10 +3142,10 @@ Return ONLY this exact JSON:
 {{"front_zone_risk":"FRONT_EMPTY_RISK"|"SAFE","reasoning":"describe the gap size you see, or why it's safe","confidence":"HIGH"|"MEDIUM"|"LOW","box_2d":[ymin,xmin,ymax,xmax]}}
 (box_2d is required whenever front_zone_risk is not SAFE; omit or use null if SAFE)
 """
-    return _call_gemini_json(prompt, front_crop, api_keys)
+    return _call_gemini_json(prompt, front_crop, api_keys, known_bad_keys=known_bad_keys)
 
 
-def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM"):
+def analyze_diagram_image_with_ai(diagram_image, layout="TOP_BOTTOM", known_bad_keys=None):
 
     global GLOBAL_KEY_INDEX, LAST_WORKING_MODEL
 
@@ -3169,49 +3221,68 @@ Return ONLY a JSON array (empty array if no genuine risks found):
   {{"risk_type":"STEP_DOWN_RISK"|"LATERAL_GAP_RISK"|"TALL_UNSTABLE_RISK","view":"FRONT"|"BACK","box_2d":[ymin,xmin,ymax,xmax],"description":"describe the height difference or gap you observed"}}
 ]
 """
+    if known_bad_keys is None:
+        known_bad_keys = set()
     last_error_msg = ""
-    for pass_round in range(2):
-        for i in range(len(api_keys)):
-            current_index = (GLOBAL_KEY_INDEX + i) % len(api_keys)
-            current_key = api_keys[current_index]
-            try:
-                _reset_genai_client()
-                genai.configure(api_key=current_key)
-                models = _get_available_gemini_models()
-                if not models:
-                    last_error_msg = "All Gemini Flash models are temporarily disabled by quota cache"
-                    print("AI DISABLED: all Gemini Flash models are in quota cooldown")
-                    continue
-                for model_name in models:
-                    try:
-                        print(f"AI MODEL ACTIVE: {model_name} key_index={current_index} diagram")
-                        model = genai.GenerativeModel(model_name=model_name)
-                        response = model.generate_content([prompt, diagram_image])
-                        clean_text = clean_json_response(response.text if response.text else "[]")
-                        if not clean_text or clean_text in ('""', "[]"):
-                            GLOBAL_KEY_INDEX = current_index
-                            LAST_WORKING_MODEL = model_name
-                            return []
-                        risks = json.loads(clean_text)
-                        if isinstance(risks, dict):
-                            risks = [risks]
+    start_time = time.time()
+    time_budget = globals().get("GEMINI_PER_CALL_TIME_BUDGET_SECONDS", 75)
+    # v24.33: removed the old fixed "2 full passes over every key" structure (which, combined
+    # with the un-expanded error classification, was the single biggest contributor to the
+    # multi-minute worst case seen in real logs - e.g. AB03-03's diagram call alone took over
+    # 5 minutes). Replaced with a single pass bounded by an explicit wall-clock time budget
+    # instead, since the per-attempt request timeout (_gemini_request_options) and per-
+    # (key,model) cooldown already make a single well-bounded pass far more effective than
+    # two unbounded passes ever were.
+    for i in range(len(api_keys)):
+        if time.time() - start_time > time_budget:
+            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping diagram-analysis retry "
+                  f"loop early, returning last known error instead of continuing to burn wall-clock time")
+            break
+        current_index = (GLOBAL_KEY_INDEX + i) % len(api_keys)
+        current_key = api_keys[current_index]
+        if current_key in known_bad_keys:
+            print(f"API Key index {current_index} SKIPPED (diagram) - already confirmed bad earlier in this request")
+            continue
+        try:
+            _reset_genai_client()
+            genai.configure(api_key=current_key)
+            models = _get_available_gemini_models(current_key=current_key)
+            if not models:
+                last_error_msg = "All Gemini Flash models are temporarily disabled by quota cache for this key"
+                print(f"AI DISABLED: all Gemini Flash models are in quota cooldown for key_index={current_index}")
+                continue
+            for model_name in models:
+                try:
+                    print(f"AI MODEL ACTIVE: {model_name} key_index={current_index} diagram")
+                    model = genai.GenerativeModel(model_name=model_name)
+                    response = model.generate_content([prompt, diagram_image], request_options=_gemini_request_options())
+                    clean_text = clean_json_response(response.text if response.text else "[]")
+                    if not clean_text or clean_text in ('""', "[]"):
                         GLOBAL_KEY_INDEX = current_index
                         LAST_WORKING_MODEL = model_name
-                        return risks
-                    except Exception as model_err:
-                        last_error_msg = str(model_err)
-                        if _is_quota_error_message(last_error_msg):
-                            print(f"AI FALLBACK: {model_name} -> next model reason={last_error_msg[:100]}")
-                            _mark_gemini_model_disabled(model_name, last_error_msg)
-                            continue
-                        raise
-            except Exception as e:
-                last_error_msg = str(e)
-                print(f"API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
-                time.sleep(1)
-                continue
-        if pass_round == 0:
-            time.sleep(2)
+                        return []
+                    risks = json.loads(clean_text)
+                    if isinstance(risks, dict):
+                        risks = [risks]
+                    GLOBAL_KEY_INDEX = current_index
+                    LAST_WORKING_MODEL = model_name
+                    return risks
+                except Exception as model_err:
+                    last_error_msg = str(model_err)
+                    if _is_permanently_bad_key_error(last_error_msg):
+                        print(f"AI KEY PERMANENTLY BAD (diagram): key_index={current_index} "
+                              f"reason={last_error_msg[:100]} - marking as known-bad for the rest of this request")
+                        known_bad_keys.add(current_key)
+                        break
+                    if _is_quota_error_message(last_error_msg):
+                        print(f"AI FALLBACK: {model_name} -> next model (same key) reason={last_error_msg[:100]}")
+                        _mark_gemini_model_disabled(model_name, last_error_msg, current_key=current_key)
+                        continue
+                    raise
+        except Exception as e:
+            last_error_msg = str(e)
+            print(f"API Key index {current_index} failed in diagram analysis: {last_error_msg[:100]}")
+            continue
     return [{"risk_type": "ERROR", "description": f"AI Error: {last_error_msg[:120]}"}]
 
 
@@ -3533,6 +3604,16 @@ def process_request(request):
         }
         return ("", 204, headers)
     headers = {"Access-Control-Allow-Origin": "*"}
+    # v24.33: request-scoped "known bad key" cache shared across all 4 separate Gemini AI
+    # calls made per file (diagram, rear-zone FRONT, rear-zone BACK, front-zone). Without
+    # this, a genuinely dead/invalid key would be independently re-discovered as bad by
+    # EACH of the 4 calls (paying the full retry cost 4 times over for the same key). A
+    # fresh set is created per HTTP request/invocation - it does not persist across separate
+    # requests even on a warm Cloud Function instance, since GLOBAL_API_KEYS/model cooldowns
+    # already carry state that legitimately SHOULD persist across requests (quota cooldowns),
+    # but "this key is permanently invalid" is cheap to rediscover once per cold start and
+    # not worth the complexity of a persistent cache.
+    known_bad_gemini_keys = set()
     try:
         data = request.get_json(silent=True)
         if data is None:
@@ -3573,10 +3654,6 @@ def process_request(request):
 
         step_down_regions = detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                                 container_bounds, cargo_extent)
-        # v24.32: preserve the RAW legacy pixel-scanner candidates (before v24.30's own
-        # crosscheck below potentially filters them out) - needed later by
-        # EdgeCandidateCorroborationGate to check independent-method corroboration for
-        # edge-touching per-box/cross-view candidates that lack interior background data.
         _raw_legacy_step_down_regions_by_view = {
             "FRONT": list(step_down_regions.get("FRONT", []) or []),
             "BACK": list(step_down_regions.get("BACK", []) or []),
@@ -3589,9 +3666,6 @@ def process_request(request):
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
 
-        # v24.30 WallCornerArtifactGuard: cross-check every legacy pixel-height-profile
-        # STEP_DOWN candidate against the just-built stack_box_model. Defense-in-depth for
-        # files where the legacy scanner fires on a genuine wall-corner optical artifact.
         if globals().get("V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED", True):
             for _view in ("FRONT", "BACK"):
                 _stacks_for_view = stack_box_model.get(_view, [])
@@ -3640,21 +3714,6 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_cv_regions)
 
-        # v24.32 EdgeCandidateCorroborationGate: any candidate tagged
-        # "v2432_needs_legacy_corroboration"=True (edge-touching pair/cross-view match with
-        # NO interior background data to sanity-check against - see docstrings in
-        # detect_step_down_regions_from_stack_model and _find_cross_view_profile_collision_
-        # regions) must be independently corroborated by the RAW legacy pixel-scanner output
-        # for that same view (captured BEFORE v24.30's own crosscheck above, since that
-        # crosscheck may have already removed the very legacy candidate we'd want to check
-        # against here - using the raw pre-filter list avoids this circularity). Real log
-        # evidence (AB03-03): FRONT's false pair-5-6 marker (ratio=28%) had zero interior data
-        # to sanity-check (5 of 7 stacks were width-outlier-suspect) and the legacy scanner
-        # independently found NOTHING for that view at all - no corroboration possible, so
-        # this candidate is now rejected. BACK's false pair-0-1 marker (ratio=70%, the view's
-        # ONLY possible pair since just 2 stacks were segmented) had a legacy candidate at a
-        # completely different x-position (853-878 vs the pairwise candidate's 578-635) - no
-        # overlap, so no corroboration, rejected.
         if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
             _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
             for _view in ("FRONT", "BACK"):
@@ -3666,18 +3725,12 @@ def process_request(request):
                         continue
                     if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
                         print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): "
-                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
-                              f"- independently corroborated by legacy pixel-scanner candidate "
-                              f"at an overlapping position")
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}%")
                         _kept.append(_r)
                     else:
                         print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): "
                               f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
-                              f"- edge-touching candidate with no interior background data to "
-                              f"sanity-check, AND no independent legacy pixel-scanner "
-                              f"corroboration found at this position (legacy found "
-                              f"{len(_raw_legacy_for_view)} candidate(s) elsewhere in this view) "
-                              f"- likely a segmentation artifact, not a genuine physical step-down")
+                              f"- no independent legacy corroboration found")
                 step_down_regions[_view] = _kept
 
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
@@ -3722,7 +3775,7 @@ def process_request(request):
             for _r in inter_stack_gap_regions[_v]:
                 print(f"v24.02 inter-stack LATERAL_GAP candidate ({_v}): x=[{_r['x_min']}-{_r['x_max']}] y=[{_r['y_min']}-{_r['y_max']}] gap={_r['gap_px']}px overlap={_r['vertical_overlap_ratio']:.2f}")
 
-        raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout)
+        raw_ai_risks = analyze_diagram_image_with_ai(diagram_crop, layout=layout, known_bad_keys=known_bad_gemini_keys)
         if not isinstance(raw_ai_risks, list):
             raw_ai_risks = []
 
@@ -3847,9 +3900,9 @@ def process_request(request):
             print(f"LEFT_RIGHT crop (HARDCODED) - FRONT rear={front_rear_side} ({fr_x0}-{fr_x1}) | BACK rear={back_rear_side} ({br_x0}-{br_x1})")
 
         api_keys_pool = get_api_keys_pool()
-        rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT")
-        rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK")
-        front_result_from_front_view = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT")
+        rear_result_front = analyze_rear_zone_with_ai(rear_crop_front, api_keys_pool, "FRONT", known_bad_keys=known_bad_gemini_keys)
+        rear_result_back = analyze_rear_zone_with_ai(rear_crop_back, api_keys_pool, "BACK", known_bad_keys=known_bad_gemini_keys)
+        front_result_from_front_view = analyze_front_zone_with_ai(front_crop_front, api_keys_pool, "FRONT", known_bad_keys=known_bad_gemini_keys)
 
         precise_boxes = {}
         for view_label, rear_result, key_prefix in (("FRONT", rear_result_front, "rear_FRONT"), ("BACK", rear_result_back, "rear_BACK")):
