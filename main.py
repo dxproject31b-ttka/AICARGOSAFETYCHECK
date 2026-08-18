@@ -17,6 +17,37 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.30 - WallCornerArtifactGuard: real log evidence (AB05-01, user reported a fully uniform
+#          2-tier yellow load - same height everywhere, confirmed visually in both FRONT and
+#          BACK views - still got 3 false STEP_DOWN_RISK markers: 2 in FRONT (ratio=24.5%,
+#          59.8%) and 1 in BACK). Traced the source to _detect_step_down_regions() - the
+#          ORIGINAL legacy pixel-only height-profile scanner (unchanged in concept since
+#          v18/v19) - which is the ONE STEP_DOWN candidate source that never received any of
+#          the v24.24/25 width-sanity/stack-awareness fixes, because it predates the per-box
+#          stack_box_model entirely and has zero concept of a discrete "stack". It just walks
+#          pixel columns looking for where the detected cargo top-height jumps, so at the
+#          isometric corner where the outermost cargo stack meets the head-wall/door-wall
+#          panel, the last stack's slanted top face optically blends into the wall panel's
+#          saturated color - the scanner misreads this as a second, shorter "segment" next to
+#          real cargo, producing a spurious height-jump that is a pure scanning artifact, not
+#          a genuine physical step-down between two stacks. Confirmed: every false marker in
+#          AB05-01 sat right at cargo_extent's own outer (wall-side) edge, never at an
+#          interior stack-to-stack boundary. FIX: added
+#          _legacy_step_down_candidate_confirmed_by_stack_model() - cross-validates every
+#          legacy-scanner candidate against the already-built, width-sanity-gated
+#          stack_box_model (the same reliable per-box segmentation every other STEP_DOWN
+#          source already relies on); a candidate is only kept if its x-range actually
+#          straddles a REAL boundary between two adjacent, non-suspect (sane-width) stacks
+#          that independently show at least some measurable height difference (relaxed
+#          corroboration threshold, V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR=0.5x
+#          MIN_STEP_DOWN_RATIO - not required to fully match, just to confirm SOME real
+#          difference exists at that location, not zero). Fails OPEN (passes candidate
+#          through unchanged) when no stack model data exists for that view at all -
+#          insufficient data is not evidence of "no risk", same convention as every other
+#          guard in this file (e.g. v24.28's REAR_LATERAL_IMBALANCE VETO fix). Does NOT touch
+#          detect_step_down_regions_from_stack_model, _find_valley_regions, or the cross-view
+#          collision detector - those already compare real, discretely-segmented stacks and
+#          were never the source of this bug.
 # v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
 #          VCS1A zone had no marker at all) exposed that "strongest-only" discarded every
 #          ordinary STEP_DOWN candidate except the single highest-ratio one PER VIEW, even
@@ -1297,6 +1328,69 @@ def _flag_width_outlier_stacks(ss, view_label=None):
     return suspects
 
 
+def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_label=None):
+    """v24.30 WallCornerArtifactGuard - fixes the ONE STEP_DOWN candidate source that never
+    received the v24.24/25 width-sanity/stack-awareness fixes: the original legacy pixel-only
+    height-profile scanner (_detect_step_down_regions / _detect_height_profile, unchanged in
+    concept since v18/v19). Unlike detect_step_down_regions_from_stack_model (v24.10, pairwise
+    stack comparison), _find_valley_regions (v24.14), and the cross-view collision detector
+    (v24.18-22) - all of which compare REAL, discretely-segmented stacks from stack_box_model
+    and are protected by _flag_width_outlier_stacks() - the legacy scanner has NO concept of a
+    discrete "stack" at all. It simply walks pixel columns looking for where the detected
+    cargo top-height jumps between consecutive sample points, with zero awareness of where one
+    physical stack ends and another begins, or where cargo ends and the container's own
+    wall/door structure begins.
+
+    REAL LOG EVIDENCE (AB05-01, reported by user): a fully uniform 2-tier yellow load (every
+    stack the same height, confirmed visually in both FRONT and BACK views) produced 3 false
+    STEP_DOWN_RISK markers, all sitting right where the outermost cargo stack meets the head
+    wall (FRONT: 2 candidates at ratio=24.5%/59.8%; BACK: 1 candidate) - narrow markers
+    (w_px=46-56) that do not correspond to any actual shorter/taller stack pair. ROOT CAUSE:
+    at that isometric corner, the last stack's slanted top face optically blends with the
+    adjacent head-wall/door-wall panel's saturated color, so _detect_height_profile misreads
+    the boundary as a second, shorter "segment" next to the real cargo - a pure artifact of
+    naive pixel scanning, not a genuine height difference between two stacks.
+
+    FIX: cross-validate every legacy candidate (tagged "v2430_source" ==
+    "legacy_pixel_height_profile") against stack_box_model - the same, far more reliable,
+    per-box segmentation already used (and already width-sanity-gated) by every other STEP_DOWN
+    source. A legacy candidate is only accepted if its x-range actually straddles a REAL
+    boundary between two adjacent, non-suspect (sane-width) stacks that independently show at
+    least some measurable height difference. If no stack model data is available at all for
+    this view (segmentation failed), fail OPEN (pass the candidate through unchanged) -
+    consistent with how every other guard in this file already behaves when deterministic data
+    is unavailable, since insufficient data is not evidence of "no risk" either way.
+    """
+    if not stacks or len(stacks) < 2:
+        return True
+    suspects = _flag_width_outlier_stacks(stacks, view_label=view_label)
+    x0, x1 = region.get("x_min", 0), region.get("x_max", 0)
+    corroboration_factor = globals().get("V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR", 0.5)
+    min_corroboration_ratio = MIN_STEP_DOWN_RATIO * corroboration_factor
+    boundary_tolerance_px = globals().get("V2430_LEGACY_STEPDOWN_BOUNDARY_TOLERANCE_PX", 15)
+
+    for i in range(len(stacks) - 1):
+        if i in suspects or (i + 1) in suspects:
+            continue
+        left_s, right_s = stacks[i], stacks[i + 1]
+        boundary_lo = left_s["x1"] - boundary_tolerance_px
+        boundary_hi = right_s["x0"] + boundary_tolerance_px
+        if x1 < boundary_lo or x0 > boundary_hi:
+            continue  # candidate does not overlap this inter-stack boundary at all
+        left_h = max(1, left_s["floor_y"] - left_s["top_y"])
+        right_h = max(1, right_s["floor_y"] - right_s["top_y"])
+        taller = max(left_h, right_h)
+        diff_ratio = abs(left_h - right_h) / taller if taller > 0 else 0
+        if diff_ratio >= min_corroboration_ratio:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.30 LEGACY STEP_DOWN CONFIRMED ({view_label}): x=[{x0:.0f}-{x1:.0f}] "
+                      f"corroborated by real stack boundary idx=({i},{i+1}) "
+                      f"heights=({left_h:.0f},{right_h:.0f}) diff_ratio={diff_ratio*100:.1f}% "
+                      f"(>= corroboration threshold {min_corroboration_ratio*100:.1f}%)")
+            return True
+    return False
+
+
 def _select_non_overlapping_step_down_candidates(regions, view_label=None):
     """v24.29 GREEDY NON-OVERLAPPING SELECTION - replaces the old "keep only the single
     strongest candidate" behavior. See the v24.29 comment above this function's call site
@@ -1467,6 +1561,11 @@ def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop
                 "x_min": origin_x + r["x_min"], "x_max": origin_x + r["x_max"],
                 "y_min": origin_y + r["y_min"], "y_max": origin_y + r["y_max"],
                 "ratio": r["ratio"],
+                # v24.30: tag so the stack-model cross-check (WallCornerArtifactGuard) can
+                # tell this candidate apart from stack-aware sources (pairwise stack model,
+                # valley pattern, cross-view collision) which already carry their own
+                # "v2410_source" tag and their own width-sanity protection (v24.24/25).
+                "v2430_source": "legacy_pixel_height_profile",
             }
             print(f"Deterministic STEP_DOWN_RISK candidate ({view}): "
                   f"x=[{abs_region['x_min']:.0f}-{abs_region['x_max']:.0f}] "
@@ -1633,6 +1732,13 @@ V2410_STEPDOWN_BOUNDARY_RATIO = 0.25
 # the original v24.10 intent for true duplicates); below this threshold, both are kept as
 # separate markers.
 V2429_STEPDOWN_OVERLAP_MAX_RATIO = 0.30
+
+# v24.30 WallCornerArtifactGuard - see _legacy_step_down_candidate_confirmed_by_stack_model()
+# docstring for the full root-cause writeup (real evidence: AB05-01, 3 false markers all
+# sitting at the cargo-to-head-wall isometric corner in a fully uniform load).
+V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED = True
+V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR = 0.5  # relaxed vs MIN_STEP_DOWN_RATIO (7.5%->3.75%)
+V2430_LEGACY_STEPDOWN_BOUNDARY_TOLERANCE_PX = 15
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
@@ -3349,6 +3455,33 @@ def process_request(request):
         # หลักที่พบจากการทดสอบไฟล์จริง 6 ไฟล์)
         stack_box_model = build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_start,
                                                           container_bounds, cargo_extent)
+
+        # v24.30 WallCornerArtifactGuard: cross-check every legacy pixel-height-profile
+        # STEP_DOWN candidate (tagged "v2430_source"=="legacy_pixel_height_profile" in
+        # detect_step_down_regions_per_view, the one detector that never received the
+        # v24.24/25 width-sanity/stack-awareness fixes) against the just-built stack_box_model.
+        # Reject any candidate with no corresponding real stack-to-stack boundary - see
+        # _legacy_step_down_candidate_confirmed_by_stack_model() docstring for full root-cause
+        # writeup and real log evidence (AB05-01: 3 false markers at the cargo/head-wall
+        # isometric corner in a fully uniform load).
+        if globals().get("V2430_LEGACY_STEPDOWN_CROSSCHECK_ENABLED", True):
+            for _view in ("FRONT", "BACK"):
+                _stacks_for_view = stack_box_model.get(_view, [])
+                _kept_candidates = []
+                for _r in step_down_regions.get(_view, []):
+                    if _r.get("v2430_source") != "legacy_pixel_height_profile":
+                        _kept_candidates.append(_r)
+                        continue
+                    if _legacy_step_down_candidate_confirmed_by_stack_model(_r, _stacks_for_view, view_label=_view):
+                        _kept_candidates.append(_r)
+                    else:
+                        print(f"v24.30 LEGACY STEP_DOWN REJECTED ({_view}): "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"- no corresponding real stack-to-stack boundary found in per-box "
+                              f"segmentation model (likely a wall/door-corner optical artifact where "
+                              f"cargo meets container structure, not a genuine physical step-down)")
+                step_down_regions[_view] = _kept_candidates
+
         tall_unstable_regions = {}
         for view_label in ("FRONT", "BACK"):
             stacks = stack_box_model.get(view_label, [])
