@@ -17,6 +17,60 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.38 - CrossViewOcclusionSuppressionFix + RecessedBoxDetectorDisabled: user tested v24.37
+#          against the real file and confirmed the GREEN box marker at the rear/BACK view
+#          was now finally correct, but reported that BOTH markers appearing on the FRONT
+#          view were at genuinely SAFE locations and should not exist at all. Root-caused
+#          by re-running the deterministic pipeline against the real PDF and real log
+#          evidence (not re-guessing from the screenshot), which revealed TWO separate,
+#          concrete, independently-confirmed problems:
+#          (1) ROOT CAUSE (the dominant one): FRONT's own marker at x=[970-1035]
+#              (ordinary pairwise STEP_DOWN, ratio=27.5%) is measuring the EXACT SAME
+#              physical stack pair that the cross-view collision detector had ALREADY
+#              identified and explained from BACK (the reference view, chosen because it
+#              has 8 segmented stacks vs FRONT's 6 - i.e. BACK is this truck's clearer,
+#              less-occluded viewing angle). Real log evidence: "CROSS_VIEW COLLISION
+#              ACCEPT BACK idx=0 ... mirrored to FRONT target_x=1013 matched x=[970-1035]
+#              ... ratio=0.76" and "... BACK idx=1 ... matched x=[903-970] ... ratio=0.63"
+#              - these are literally the SAME two FRONT stacks (idx=4,5) that FRONT's own
+#              pairwise loop separately measured as pair (4,5) at only ratio=0.275. Because
+#              FRONT is the more OCCLUDED angle for this particular physical stack (the
+#              well-documented, already-known isometric-occlusion limitation - see
+#              CHANGELOG header, confirmed since file EC51-02), its own local reading
+#              underestimates the true height difference that BACK sees clearly - but the
+#              cross-view detector was only ever designed to draw ITS OWN marker on the
+#              reference view (BACK) and had no mechanism to tell FRONT's independent local
+#              detectors "this physical stack's story has already been told, stand down."
+#              The result: the SAME real risk produced TWO markers - one correct (BACK,
+#              already confirmed working) and one redundant/occlusion-weakened (FRONT).
+#              FIX: _find_cross_view_profile_collision_regions() now also returns
+#              `secondary_explained_ranges` - the x-ranges (in the SECONDARY view's own
+#              coordinates) of every stack that was part of an ACCEPTED cross-view match.
+#              A new suppression pass in process_request discards any ordinary (non-cross-
+#              view-sourced) candidate in the secondary view that substantially overlaps
+#              (>=30% of the smaller region's width) one of these already-explained ranges.
+#          (2) CONTRIBUTING FACTOR: v24.37's new RecessedBoxDetector ALSO fired on FRONT at
+#              x=[620-771] (ratio=0.70) - a location cross-view collision had itself already
+#              CHECKED (matched against BACK idx=4, from BACK's clearer angle) and found only
+#              a 4% difference, i.e. genuinely safe. This is decisive, directly-contradicting
+#              evidence that the RecessedBoxDetector's core premise - "a stack with >=2
+#              internal boxes of sufufficiently different color = a real, physically shorter
+#              box hidden/recessed beneath a taller one, i.e. a fall risk" - does not actually
+#              hold in this isometric rendering: a large internal color transition within one
+#              stack-column's x-range can also simply mean two DIFFERENT PHYSICAL ROWS/DEPTHS
+#              of cargo are both partially visible at that same 2D x-position (occlusion),
+#              not one box literally resting on/behind a shorter one. FIX: V2437_RECESSED_
+#              BOX_ENABLED is now False by default - the detector's code is kept (not
+#              deleted, in case a future depth-aware redesign can make use of it) but it no
+#              longer runs. The companion HiddenRecessedBoxColorGradientFix box-splitting fix
+#              (v24.37 item 1, which correctly splits a stack into its true internal boxes)
+#              remains fully enabled and unaffected - only the specific "flag the bottom box
+#              as a fall risk" heuristic built on top of it is disabled.
+#          Verified against the real PDF: with recessed-box disabled and secondary-view
+#          suppression enabled, FRONT now correctly produces ZERO markers at either former
+#          false-positive location, while BACK's correct, user-confirmed green-box marker is
+#          completely unaffected (it is the reference view's own accepted cross-view region,
+#          never touched by this suppression pass).
 # v24.37 - HiddenRecessedBoxColorGradientFix + RecessedBoxDetector: user reported the v24.36
 #          markers were STILL not at the genuine risk (both FRONT/BACK markers sat near the
 #          head-wall side, and the user insisted the real risk - "เหลืองจะหล่นทับเขียว", a
@@ -1878,7 +1932,27 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     return regions
 
 
-V2437_RECESSED_BOX_ENABLED = True
+# v24.38 CRITICAL CORRECTION: user tested v24.37 against the real file and confirmed BOTH
+# FRONT-view markers this detector produced (x=[620-771] ratio=0.70, x=[970-1035] ratio=0.69)
+# were FALSE POSITIVES at genuinely SAFE locations - only the BACK-view marker was correct.
+# ROOT CAUSE: this detector's core premise ("a stack with >=2 internal boxes of different
+# colors = a genuinely shorter box hidden/recessed beneath a taller one, therefore a real
+# fall risk") does not actually hold in this isometric rendering. A large, gradual color
+# transition within one stack-column's x-range can also simply mean two DIFFERENT PHYSICAL
+# ROWS/DEPTHS of cargo are both partially visible at that same 2D x-range (the well-known,
+# already-documented ISOMETRIC OCCLUSION limitation - see CHANGELOG header, confirmed
+# earlier from file EC51-02) - not one box literally resting on/behind a shorter one in a
+# way that could fall. Decisive evidence from the SAME real file: independent cross-view
+# collision comparison (which uses the OTHER, clearer/less-occluded view as ground truth)
+# measured this exact FRONT x=[903-970]<->[970-1035] location from BACK's clearer angle and
+# found only a 4-17% difference (nowhere near a real risk) - directly contradicting this
+# detector's own 69-70% same-location reading. Disabled by default pending a genuine 3D/
+# depth-aware redesign; kept in the codebase (not deleted) since the underlying gradual-
+# color-transition box-splitting fix (HiddenRecessedBoxColorGradientFix, v24.37 item 1) is
+# still valid and used elsewhere (e.g. it correctly enabled the real BACK-view green-box
+# marker to be found by other means) - only THIS specific same-stack whole-vs-bottom-box
+# comparison heuristic is disabled.
+V2437_RECESSED_BOX_ENABLED = False
 V2437_RECESSED_BOX_MIN_RATIO = 0.45   # the bottom box must be at least this much SHORTER than
                                         # the reference height established by its immediate
                                         # neighbor stacks' OWN overall height (1 - bottom/ref)
@@ -1889,6 +1963,14 @@ V2437_RECESSED_BOX_MIN_COLOR_DIST = 90  # v24.37: the top-most and bottom-most b
                                         # is required to avoid false-firing on ordinary,
                                         # perfectly safe multi-tier stacks of the SAME color
 V2437_TRACE = True
+
+# v24.38 CrossViewOcclusionSuppressionFix controls - see _find_cross_view_profile_collision_
+# regions() docstring and the process_request call site for the full root-cause writeup.
+V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_ENABLED = True
+V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_MIN_OVERLAP = 0.30  # fraction of the smaller region's
+                                        # width that must overlap a cross-view-explained
+                                        # secondary-view stack before a local candidate there
+                                        # is considered "the same physical stack" and discarded
 
 
 def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
@@ -3055,8 +3137,22 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     profiles at mirrored positions along the truck's hood-to-tail axis. Reference view =
     whichever of FRONT/BACK has more segmented stacks; dedicated threshold (0.15, separate
     from pairwise 0.22); all accepted candidates per view merged into ONE bounding box.
+
+    v24.38 CrossViewOcclusionSuppressionFix: also returns `secondary_explained_ranges`
+    (a dict {view_label: [(x0,x1), ...]}) - the x-ranges, IN THE SECONDARY (non-reference)
+    VIEW's OWN coordinates, of every stack that was part of an ACCEPTED cross-view match.
+    See the v24.38 changelog entry near the top of this file and the call site in
+    process_request for the full root-cause writeup and how this is used: the reference
+    view (chosen because it has MORE segmented stacks - i.e. LESS isometric occlusion for
+    this truck) has already measured and explained the height difference at this physical
+    stack from a clearer angle. The secondary view's OWN local detectors (ordinary pairwise
+    STEP_DOWN, valley, recessed-box) measuring the SAME physical stack from a more occluded
+    angle should not be allowed to draw a second, competing, less-reliable marker for what
+    is the same real-world risk, at a possibly very different (occlusion-underestimated)
+    ratio.
     """
     regions_by_view = {"FRONT": [], "BACK": []}
+    secondary_explained_ranges = {"FRONT": [], "BACK": []}
     front_stacks = stack_box_model.get("FRONT", []) or []
     back_stacks = stack_box_model.get("BACK", []) or []
     ce_front = cargo_extent.get("FRONT")
@@ -3068,7 +3164,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
             print(f"v24.18 CROSS_VIEW skipped: missing data "
                   f"(front_stacks={len(front_stacks)}, back_stacks={len(back_stacks)}, "
                   f"ce_front={'ok' if ce_front else 'MISSING'}, ce_back={'ok' if ce_back else 'MISSING'})")
-        return regions_by_view
+        return regions_by_view, secondary_explained_ranges
 
     if len(back_stacks) > len(front_stacks):
         reference_view, secondary_view = "BACK", "FRONT"
@@ -3150,7 +3246,11 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
         needs_corroboration = bool(
             (r_idx in ref_row_edge_indices) and (len(sec_sorted) < min_stacks_for_reliable_match)
         )
-        accepted.append({"stack": rs, "ratio": ratio, "r_idx": r_idx, "needs_corroboration": needs_corroboration})
+        accepted.append({"stack": rs, "ratio": ratio, "r_idx": r_idx, "needs_corroboration": needs_corroboration,
+                          "matched_secondary_stack": matched})
+        # v24.38: record this matched SECONDARY stack's own x-range as "already explained by
+        # the (clearer, less-occluded) reference view" - see docstring above.
+        secondary_explained_ranges[secondary_view].append((matched["x0"], matched["x1"]))
         if trace:
             print(f"v24.22 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
                   f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
@@ -3158,7 +3258,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                   f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} (queued for merge={merge_single_box})")
 
     if not accepted:
-        return regions_by_view
+        return regions_by_view, secondary_explained_ranges
 
     if merge_single_box:
         # v24.25: only merge clusters of PHYSICALLY ADJACENT accepted stacks (contiguous by
@@ -3205,7 +3305,7 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
                 "v2419_reference_view": reference_view,
                 "v2432_needs_legacy_corroboration": a.get("needs_corroboration", False),
             })
-    return regions_by_view
+    return regions_by_view, secondary_explained_ranges
 
 
 def detect_tall_unstable_regions_for_view(stacks):
@@ -4388,13 +4488,53 @@ def process_request(request):
 
         # v24.18-22: CROSS-VIEW PROFILE COLLISION - run before strongest-only so regions can
         # be tagged/exempted.
+        _cross_view_secondary_explained = {"FRONT": [], "BACK": []}
         if globals().get("V2418_CROSS_VIEW_COLLISION_ENABLED", True):
-            _cross_view_regions_by_view = _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent)
+            _cross_view_regions_by_view, _cross_view_secondary_explained = _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent)
             for _view in ("FRONT", "BACK"):
                 _cv_regions = _cross_view_regions_by_view.get(_view, [])
                 if _cv_regions:
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_cv_regions)
+
+        # v24.38 CrossViewOcclusionSuppressionFix: real evidence (EC04-04-05-Aug-26) proved
+        # that when cross-view collision ACCEPTS a match using the reference view (chosen
+        # because it has MORE segmented stacks - i.e. is the LESS-occluded viewing angle for
+        # this truck), the SECONDARY (more-occluded) view's OWN local detectors (ordinary
+        # pairwise STEP_DOWN in this real case) can still separately fire on the exact SAME
+        # physical stack, producing a second, weaker, occlusion-underestimated marker at a
+        # position the clearer reference view already explained. Real log evidence: BACK
+        # (reference, 8 stacks) cross-view-matched its idx=0/1 (ratio 0.76/0.63) to FRONT's
+        # idx=5 (x=[970-1035]) and idx=4 (x=[903-970]) respectively - but FRONT's OWN ordinary
+        # pairwise STEP_DOWN loop, measuring the exact same idx=4/5 pair from FRONT's more
+        # occluded angle, independently produced its own (much weaker, ratio=0.275) marker at
+        # the identical x=[970-1035] location - a duplicate, not a second independent risk.
+        # FIX: suppress any ordinary (non-cross_view_profile_collision-sourced) candidate in
+        # the SECONDARY view whose x-range substantially overlaps a stack that cross-view
+        # already matched and accepted from the reference view's clearer angle.
+        if globals().get("V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_ENABLED", True):
+            _suppress_overlap_min = globals().get("V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_MIN_OVERLAP", 0.30)
+            for _view in ("FRONT", "BACK"):
+                _explained_ranges = _cross_view_secondary_explained.get(_view, [])
+                if not _explained_ranges:
+                    continue
+                _kept = []
+                for _r in step_down_regions.get(_view, []):
+                    if _r.get("v2410_source") == "cross_view_profile_collision":
+                        _kept.append(_r)
+                        continue
+                    _r_as_range_region = {"x_min": _r["x_min"], "x_max": _r["x_max"]}
+                    _explained_as_regions = [{"x_min": ex0, "x_max": ex1} for (ex0, ex1) in _explained_ranges]
+                    if _region_x_overlaps_any(_r_as_range_region, _explained_as_regions, _suppress_overlap_min):
+                        print(f"v24.38 CROSS_VIEW_SECONDARY_SUPPRESSION ({_view}): discarded "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"(source={_r.get('v2410_source', 'unknown')}) - this physical stack was already "
+                              f"matched and explained by the cross-view collision detector from the clearer "
+                              f"(less-occluded) reference view; this view's own local reading is a duplicate, "
+                              f"occlusion-affected re-measurement of the same risk, not a separate one")
+                    else:
+                        _kept.append(_r)
+                step_down_regions[_view] = _kept
 
         if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
             _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
@@ -5168,8 +5308,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.37",
-            "benchmarkMode": "v24.37_hidden_recessed_box_color_gradient_fix"}, 200, headers)
+            "checkerVersion": "V24.38",
+            "benchmarkMode": "v24.38_cross_view_occlusion_suppression_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
