@@ -17,65 +17,68 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
-# v24.38 - StrongRatioOverride + ClaimOverlapContainmentFix: user re-tested EC04-01 after
-#          v24.37 and reported wrong marker positions (front pink box, back two opposite
-#          sides high/empty). Traced TWO separate bugs:
-#          (1) _box_iou_absolute() only divided intersection by the CLAIM box's own area.
-#          Gemini's box_2d claims are frequently loose/imprecise (e.g. 207x306px here) vs
-#          our tight, pixel-precise computed markers (33x59px, 23x111px) - even when a
-#          computed region was 100% CONTAINED inside the AI's claim, this produced a tiny
-#          ratio (~3%) below the 10% threshold, wrongly rejecting a genuinely correct AI
-#          claim ("3-high stack vs adjacent 1-high stack" for BACK). FIX: also compute
-#          intersection / candidate-region's-own-area and take the max of both ratios -
-#          correctly recognizes "tight candidate fully inside a looser claim" as a match.
-#          (2) idx0 (BACK, width=27px, box_count=1) was the genuine "1-high" stack in the
-#          AI's own description, but never qualified for v24.36/37's box_count>=2 exemption
-#          - box_count alone cannot distinguish a real single tall SKU from a fragment
-#          sliver. This meant pair 0-1 (the exact comparison being described) was never
-#          measured at all. FIX: added StrongRatioOverride - a width-suspect pair is now
-#          measured anyway if BOTH stacks have a not-egregiously-tiny width (>=20px,
-#          excludes pure noise) AND the ratio clears 2x the normal threshold - a
-#          segmentation-artifact sliver is very unlikely to produce such an overwhelmingly
-#          large spurious difference, so an extreme ratio is itself strong evidence of a
-#          genuine physical difference regardless of box_count.
-#          NOTE: these are evidence-based hypotheses from a single file's log, not verified
-#          against the actual rendered image - please re-test and confirm markers now land
-#          on the intended "pink box" (FRONT) and correct "high vs empty" pair (BACK).
-# v24.37 - PropagationRespectsMultiboxExemption: user re-tested EC04-01 after v24.36 and
-#          reported "still not fixed, feels like back to v24.29". Traced it: v24.36's
-#          MultiBoxWidthExemption correctly stopped flagging idx1 (BACK, width=33px,
-#          box_count=3, the genuine "3-layer tall stack") as suspect DIRECTLY - but
-#          _flag_stack_indices_adjacent_to_width_outliers() (the adjacency-propagation
-#          function) was never updated to respect that same exemption; it only checked a
-#          neighbor's raw width against the borderline threshold, with zero awareness of
-#          box_count. So idx1 still got swept BACK into suspicion via propagation from real
-#          suspect idx0, completely defeating v24.36's fix - pairs 0-1 AND 1-2 both stayed
-#          skipped, hiding the real height difference. The pairwise detector fell back to a
-#          DIFFERENT pair (idx 3-4, using idx3's own 23px-wide stack) which produced a very
-#          narrow marker that visually resembled the exact "narrow-artifact false positive"
-#          class v24.24 was built to prevent - matching the user's "feels like v24.29" report.
-#          FIX: _flag_stack_indices_adjacent_to_width_outliers() now also checks the
-#          neighbor's own box_count before propagating suspicion onto it - a neighbor with
-#          >= V2436_MULTIBOX_EXEMPTION_MIN_BOXES detected boxes is never propagated into
-#          suspicion, fully honoring v24.36's exemption at every level of the shared
-#          suspect-determination pipeline (used by pairwise STEP_DOWN, cross-view collision,
-#          REAR_LATERAL_IMBALANCE, and LATERAL_GAP_RISK alike), not just the direct check.
-# v24.36 - MultiBoxWidthExemption: a stack narrower than the min-width threshold but with
-#          >= 2 consistently detected boxes is exempted from "too narrow" suspicion (strong
-#          structural evidence of genuine cargo, not a segmentation-artifact sliver). See
-#          v24.37 above for why this alone was incomplete.
-# v24.35 - EmptyFloorVetoGuard: added _find_max_stack_coverage_gap_in_zone() - a significant
-#          cargo-free gap in the rear zone now blocks REAR_LATERAL_IMBALANCE VETO, since a
-#          position with zero cargo has no stack object to compare against by construction.
-# v24.34 - BorderlineOnlyPropagation: adjacency propagation only sweeps in a neighbor whose
-#          own width is ALSO borderline-narrow, not any neighbor regardless of its own width.
-# v24.33 - GeminiApiResilienceFix: expanded error classification, per-attempt timeout,
-#          per-(key,model) cooldown, per-call time budget, request-scoped known-bad-key cache.
-# v24.32 - EdgeCandidateCorroborationGate: edge-touching STEP_DOWN candidates lacking
-#          interior background data must be corroborated by the legacy scanner's raw output.
-# v24.31 - RowEdgeTrend + WidthOutlierAdjacency (initial, blind version - refined by v24.34).
-# v24.30 - WallCornerArtifactGuard: cross-validates legacy pixel-scanner STEP_DOWN
-#          candidates against stack_box_model; defense-in-depth.
+# v24.33 - GeminiApiResilienceFix: user reported the model-fallback pool (3.7->3.6->3.5,
+#          added v24.10) was not actually reducing wall-clock latency as intended - the
+#          function still ran long enough to blow past GAS's own execution timeout. Real log
+#          evidence (AB03-03): the diagram-analysis AI call alone took over 5 MINUTES,
+#          working through 5+ different API keys one at a time, but EVERY attempt stayed on
+#          gemini-3.7-flash the whole time - it never once fell back to 3.6/3.5. ROOT CAUSE:
+#          every single failure in that stretch was "504 Deadline Exceeded" (each attempt
+#          silently blocking ~60-70 SECONDS before finally erroring out) - a transient
+#          overload/timeout condition completely unrelated to which API key was used, but
+#          _is_quota_error_message() only recognized 429/RESOURCE_EXHAUSTED/QUOTA/RATE_LIMIT
+#          as "try the next model instead", so 504 fell through to the outer per-key retry
+#          loop instead - moving to the NEXT KEY while staying on the SAME (slow/overloaded)
+#          MODEL, the exact opposite of the fallback behavior the user had already correctly
+#          reasoned should happen ("if 3.7 fails, try 3.6/3.5 on the SAME key first - it's
+#          faster than cycling through keys still on 3.7"). FIXED WITH FIVE COMBINED CHANGES:
+#          (1) _is_quota_error_message() expanded to also treat 503/500/504/UNAVAILABLE/
+#              INTERNAL/DEADLINE_EXCEEDED/TIMEOUT/OVERLOADED as fallback-worthy, so the
+#              existing per-key "try next model first" logic (which was ALREADY correctly
+#              structured, just gated behind too narrow a classifier) finally engages as
+#              originally intended.
+#          (2) Added explicit request_options={"timeout": GEMINI_REQUEST_TIMEOUT_SECONDS=20}
+#              to every generate_content() call - caps each individual attempt at 20s instead
+#              of the SDK's much longer default, so a bad attempt fails fast, leaving time
+#              budget to actually try several more keys/models instead of exhausting the
+#              whole window on one or two slow failures.
+#          (3) Per-(key, model) cooldown instead of global-per-model: previously, ONE key
+#              hitting a genuine 429 quota error on 3.7-flash disabled 3.7-flash for ALL 20
+#              keys for 30 minutes, even though each key has its own independent quota -
+#              wasting the fastest model unnecessarily for every other still-healthy key.
+#          (4) Added GEMINI_PER_CALL_TIME_BUDGET_SECONDS=75s wall-clock budget per individual
+#              AI call (of the 4 made per file) - bounds the absolute worst case instead of
+#              the old unbounded "try every key x every model x 2 passes" structure.
+#          (5) Added a request-scoped known_bad_keys set (see process_request) shared across
+#              all 4 AI calls per file - a key confirmed permanently invalid (API_KEY_INVALID/
+#              PERMISSION_DENIED/UNAUTHENTICATED/403) by any one of the 4 calls is skipped
+#              immediately by the remaining calls instead of being independently rediscovered
+#              as bad 4 separate times.
+#          NOTE ON PARALLELIZING THE 4 AI CALLS (considered, not implemented): the 4 calls
+#          (diagram, rear-zone FRONT/BACK, front-zone) are logically independent and could in
+#          principle run concurrently via threading for a further ~3-4x latency reduction in
+#          the success case. NOT implemented in this version because the google.generativeai
+#          SDK's genai.configure(api_key=...) sets a MODULE-GLOBAL API key - calling it from
+#          multiple threads concurrently would race, risking one thread's request silently
+#          using a DIFFERENT thread's key. Safe parallelization would require migrating to
+#          the newer google-genai SDK's per-instance genai.Client(api_key=...) objects (no
+#          global state) - a larger, separate migration, not bundled into this latency/
+#          resilience fix to avoid mixing concerns and regression risk.
+# v24.32 - EdgeCandidateCorroborationGate: real evidence (AB03-03) proved v24.31's
+#          RowEdgeTrendGuard fails open when NO interior background data exists at all
+#          (width-outlier suspicion consumed almost every stack, or segmentation was too
+#          coarse to produce more than 1-2 stacks total) - added a requirement that any
+#          edge-touching candidate lacking interior data must be independently corroborated
+#          by the legacy pixel scanner's own raw candidates at an overlapping position, or
+#          it is rejected as an unconfirmed segmentation artifact.
+# v24.31 - RowEdgeTrend + WidthOutlierAdjacency: fixed two never-ported gaps in the v24.10
+#          per-box pairwise comparator and v24.18-22 cross-view collision detector - (1)
+#          width-outlier suspicion now propagates to adjacent stacks (their height reading
+#          shares the same unreliable boundary), (2) pairs touching a row-edge stack must
+#          clear a stricter multiplier over the view's own interior background trend ratio,
+#          catching smooth isometric-perspective drift being mistaken for a genuine step.
+# v24.30 - WallCornerArtifactGuard: cross-validates legacy pixel-scanner STEP_DOWN candidates
+#          against stack_box_model; defense-in-depth for wall-corner optical artifacts.
 # v24.29 - MultiCandidateStepDown: real log evidence (AC09-02, user pointed out the green
 #          VCS1A zone had no marker at all) exposed that "strongest-only" discarded every
 #          ordinary STEP_DOWN candidate except the single highest-ratio one PER VIEW, even
@@ -276,10 +279,20 @@ GEMINI_MODEL_POOL = [
     "gemini-3.5-flash",
 ]
 LAST_WORKING_MODEL = None
-MODEL_DISABLED_UNTIL = {}  # v24.33: keyed by (api_key, model_name) tuple
+MODEL_DISABLED_UNTIL = {}  # v24.33: now keyed by (api_key, model_name) tuple, not just model_name
 MODEL_COOLDOWN_SECONDS = 1800
-GEMINI_REQUEST_TIMEOUT_SECONDS = 20
-GEMINI_PER_CALL_TIME_BUDGET_SECONDS = 75
+
+# v24.33 Gemini API resilience/latency fix - see full root-cause writeup in changelog header
+# and docstrings on _is_quota_error_message / _get_available_gemini_models /
+# _gemini_request_options. Real log evidence (AB03-03): a single diagram-analysis AI call
+# took over 5 minutes and burned through 5+ API keys, all still stuck on gemini-3.7-flash,
+# because "504 Deadline Exceeded" (a transient/overload error, unrelated to any specific key)
+# was not recognized as fallback-worthy, so it kept moving to the next KEY instead of trying
+# the next, lighter MODEL on the SAME key first - the opposite of the intended behavior.
+GEMINI_REQUEST_TIMEOUT_SECONDS = 20   # per single generate_content() attempt (was effectively
+                                        # ~60-70s via the SDK's own default before this fix)
+GEMINI_PER_CALL_TIME_BUDGET_SECONDS = 75  # max wall-clock time for ONE of the 4 AI calls made
+                                            # per file, across all keys/models combined
 
 RISK_COLORS = {
     "STEP_DOWN_RISK": "red",
@@ -1338,11 +1351,6 @@ def _flag_width_outlier_stacks(ss, view_label=None):
         return set()
     min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
     max_ratio = globals().get("V2424_PAIRWISE_MAX_WIDTH_RATIO_VS_MEDIAN", 2.5)
-    # v24.36 MultiBoxWidthExemption - see docstring above. Real evidence: EC04-01 BACK, idx1
-    # had 3 genuinely stacked boxes at width=33px but got excluded purely for narrow width,
-    # hiding a genuine height difference. Exempts rule (a) only; rule (b) untouched.
-    multibox_exempt_enabled = globals().get("V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED", True)
-    multibox_min_boxes = globals().get("V2436_MULTIBOX_EXEMPTION_MIN_BOXES", 2)
     widths = [max(1, s["x1"] - s["x0"]) for s in ss]
     sorted_w = sorted(widths)
     median_w = sorted_w[len(sorted_w) // 2]
@@ -1350,15 +1358,6 @@ def _flag_width_outlier_stacks(ss, view_label=None):
     for i, w in enumerate(widths):
         ratio_vs_median = w / max(1, median_w)
         if w < min_w:
-            box_count = len(ss[i].get("boxes", []) or [])
-            if multibox_exempt_enabled and box_count >= multibox_min_boxes:
-                if globals().get("V2407_TRACE", True):
-                    print(f"v24.36 MULTIBOX_WIDTH_EXEMPTION {view_label} idx={i}: width={w}px "
-                          f"< min={min_w}px, but box_count={box_count} >= {multibox_min_boxes} "
-                          f"-> NOT flagged as suspect (multiple consistently-detected boxes at "
-                          f"different heights is strong evidence of genuine cargo, not a "
-                          f"segmentation-artifact sliver)")
-                continue
             suspects.add(i)
             if globals().get("V2407_TRACE", True):
                 print(f"v24.24 WIDTH_SANITY {view_label} idx={i}: width={w}px < min={min_w}px "
@@ -1373,7 +1372,10 @@ def _flag_width_outlier_stacks(ss, view_label=None):
 
 
 def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_label=None):
-    """v24.30 WallCornerArtifactGuard."""
+    """v24.30 WallCornerArtifactGuard - cross-validates legacy pixel-height-profile STEP_DOWN
+    candidates against stack_box_model; kept as defense-in-depth for files where the legacy
+    scanner fires on a genuine wall-corner artifact (see changelog header for full writeup).
+    """
     if not stacks or len(stacks) < 2:
         return True
     suspects = _flag_width_outlier_stacks(stacks, view_label=view_label)
@@ -1381,6 +1383,7 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
     corroboration_factor = globals().get("V2430_LEGACY_STEPDOWN_CORROBORATION_RATIO_FACTOR", 0.5)
     min_corroboration_ratio = MIN_STEP_DOWN_RATIO * corroboration_factor
     boundary_tolerance_px = globals().get("V2430_LEGACY_STEPDOWN_BOUNDARY_TOLERANCE_PX", 15)
+
     for i in range(len(stacks) - 1):
         if i in suspects or (i + 1) in suspects:
             continue
@@ -1397,81 +1400,39 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
             if globals().get("V2407_TRACE", True):
                 print(f"v24.30 LEGACY STEP_DOWN CONFIRMED ({view_label}): x=[{x0:.0f}-{x1:.0f}] "
                       f"corroborated by real stack boundary idx=({i},{i+1}) "
-                      f"heights=({left_h:.0f},{right_h:.0f}) diff_ratio={diff_ratio*100:.1f}%")
+                      f"heights=({left_h:.0f},{right_h:.0f}) diff_ratio={diff_ratio*100:.1f}% "
+                      f"(>= corroboration threshold {min_corroboration_ratio*100:.1f}%)")
             return True
     return False
 
 
 def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
-    """v24.31 WidthOutlierAdjacencyPropagation (v24.34 borderline-only refinement).
-
-    v24.37 FIX (real log evidence, EC04-01 BACK - user re-tested after v24.36 and reported
-    "still not fixed, feels like back to v24.29"): v24.36's MultiBoxWidthExemption correctly
-    stopped flagging a narrow-but-genuinely-multi-box stack as suspect DIRECTLY (idx=1,
-    width=33px, box_count=3, the actual "3-layer tall yellow stack" the AI had described in
-    an earlier run) - but this propagation function was never updated to respect that same
-    exemption. It only checks a neighbor's raw WIDTH against the borderline threshold, with
-    no awareness of box_count at all - so idx=1, despite being explicitly exempted at the
-    direct-suspicion level by v24.36, still got swept BACK into suspicion here purely for
-    being narrower than borderline and sitting next to a real suspect (idx=0). This
-    completely defeated v24.36's fix for this exact stack: pair 0-1 AND pair 1-2 both still
-    got skipped, hiding the real height difference the AI had identified. The pairwise
-    STEP_DOWN detector then fell back to a DIFFERENT pair (idx 3-4, using idx3's own
-    23px-wide multibox-exempted stack) which passed and got force-drawn - producing a very
-    narrow (23px) marker that visually resembles the exact class of "narrow-artifact false
-    positive" v24.24 was originally built to prevent, even though in this specific case it
-    may or may not be a genuine difference (unverifiable without visual/manual confirmation,
-    but the marker's narrowness alone was enough to make the user suspect regression).
-
-    FIX: this propagation function now ALSO checks the neighbor's box_count before deciding
-    to propagate suspicion onto it - a neighbor with >= V2436_MULTIBOX_EXEMPTION_MIN_BOXES
-    detected boxes is never propagated into suspicion, consistent with (and now fully
-    honoring) v24.36's own exemption rule at every level of this shared suspect-determination
-    pipeline, not just the direct base check.
+    """v24.31 WidthOutlierAdjacencyPropagation - a stack immediately adjacent to a flagged
+    width-outlier is ALSO excluded. See changelog header for full writeup.
     """
     if len(ss) < 2:
         return set()
     base_suspects = _flag_width_outlier_stacks(ss, view_label=view_label)
     propagated = set(base_suspects)
-    min_w = globals().get("V2424_PAIRWISE_MIN_STACK_WIDTH_PX", 40)
-    borderline_multiplier = globals().get("V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER", 1.3)
-    borderline_max_width = min_w * borderline_multiplier
-    multibox_exempt_enabled = globals().get("V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED", True)
-    multibox_min_boxes = globals().get("V2436_MULTIBOX_EXEMPTION_MIN_BOXES", 2)
     for i in base_suspects:
-        for neighbor_idx in (i - 1, i + 1):
-            if 0 <= neighbor_idx < len(ss) and neighbor_idx not in base_suspects:
-                neighbor_width = max(1, ss[neighbor_idx]["x1"] - ss[neighbor_idx]["x0"])
-                neighbor_box_count = len(ss[neighbor_idx].get("boxes", []) or [])
-                if multibox_exempt_enabled and neighbor_box_count >= multibox_min_boxes:
-                    if globals().get("V2407_TRACE", True):
-                        print(f"v24.37 WIDTH_OUTLIER_ADJACENCY {view_label}: idx={neighbor_idx} "
-                              f"NOT propagated despite being adjacent to suspect idx={i} - its "
-                              f"own box_count={neighbor_box_count} >= {multibox_min_boxes} "
-                              f"(same exemption as v24.36's direct check), trusted on its own merits")
-                    continue
-                if neighbor_width < borderline_max_width:
-                    propagated.add(neighbor_idx)
-                    if globals().get("V2407_TRACE", True):
-                        print(f"v24.31 WIDTH_OUTLIER_ADJACENCY {view_label}: propagated to "
-                              f"idx={neighbor_idx} (width={neighbor_width}px < borderline "
-                              f"{borderline_max_width:.0f}px, adjacent to suspect idx={i})")
-                else:
-                    if globals().get("V2407_TRACE", True):
-                        print(f"v24.34 WIDTH_OUTLIER_ADJACENCY {view_label}: idx={neighbor_idx} "
-                              f"NOT propagated despite being adjacent to suspect idx={i} - its "
-                              f"own width={neighbor_width}px is comfortably wide (>= borderline "
-                              f"{borderline_max_width:.0f}px), trusted on its own merits")
-    newly_added = propagated - base_suspects
-    if newly_added and globals().get("V2407_TRACE", True):
-        print(f"v24.31 WIDTH_OUTLIER_ADJACENCY {view_label}: final propagated suspicion to "
-              f"neighbor idx(es) {sorted(newly_added)} (adjacent to width-outlier idx(es) "
-              f"{sorted(base_suspects)}) - their own height reading shares the same "
-              f"unreliable segmentation boundary")
+        if i - 1 >= 0:
+            propagated.add(i - 1)
+        if i + 1 < len(ss):
+            propagated.add(i + 1)
+    if globals().get("V2407_TRACE", True):
+        newly_added = propagated - base_suspects
+        if newly_added:
+            print(f"v24.31 WIDTH_OUTLIER_ADJACENCY {view_label}: propagated suspicion to "
+                  f"neighbor idx(es) {sorted(newly_added)} (adjacent to width-outlier "
+                  f"idx(es) {sorted(base_suspects)}) - their own height reading shares the "
+                  f"same unreliable segmentation boundary")
     return propagated
 
 
 def _region_x_overlaps_any(region, other_regions, min_overlap_ratio):
+    """v24.32 helper: does `region`'s x-range overlap ANY region in `other_regions` by at
+    least min_overlap_ratio of the smaller region's width?
+    """
     rx0, rx1 = region.get("x_min", 0), region.get("x_max", 0)
     r_w = max(1, rx1 - rx0)
     for other in other_regions:
@@ -1549,6 +1510,10 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     multi-stack blob) - see _flag_width_outlier_stacks() and V2424_* constants for the full
     root-cause writeup (real AA04-05 BACK case: a 63.2%-ratio pair turned out to be a narrow
     artifact vs a merged blob, not a genuine risk).
+
+    v24.31 ADDITION: WidthOutlierAdjacencyPropagation + RowEdgeTrendGuard (see changelog).
+    v24.32 ADDITION: tags each accepted region with "v2432_needs_legacy_corroboration"=True
+    whenever it is an edge pair AND no interior background trend could be established.
     """
     min_ratio = globals().get("V2407_STEP_DOWN_STACK_HEIGHT_RATIO", 0.22) if min_ratio is None else min_ratio
     min_abs_px = globals().get("V2407_STEP_DOWN_MIN_ABS_HEIGHT_PX", 18) if min_abs_px is None else min_abs_px
@@ -1562,30 +1527,14 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     n_stacks = len(ss)
     row_edge_indices = {0, n_stacks - 1} if n_stacks >= 2 else set()
 
-    # v24.38 StrongRatioOverride: real log evidence (EC04-01 BACK) - Gemini's own AI claim
-    # explicitly described "a 3-high stack vs adjacent 1-high stack" (idx1, box_count=3 vs
-    # idx0, box_count=1, width=27px). idx0 does NOT qualify for v24.36/37's multibox
-    # exemption (only 1 box), so it remained flagged as width-suspect, and pair 0-1 - the
-    # EXACT comparison the AI (and apparently the user, per "รถสูง2ด้านตรงข้ามพื้นที่ว่าง")
-    # was pointing at - was never even measured, let alone drawn. ROOT CAUSE: box_count is
-    # NOT a reliable proxy for "genuine cargo" height on its own - a single physically tall
-    # SKU box (1 tier) can be a completely legitimate, non-fragment stack; box_count alone
-    # cannot distinguish "1 real tall box" from "1 fragment sliver". However, a TRUE
-    # segmentation-fragment sliver essentially never produces an extremely large height
-    # difference against its neighbor in a way that ALSO clears a much stricter ratio bar -
-    # fragments are pixel-noise artifacts, typically producing small/moderate spurious
-    # differences, not consistently enormous ones. FIX: allow a pair through despite one
-    # side being width-suspect IF (a) the suspect stack's width is not egregiously tiny
-    # (>= V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX, avoiding pure single-pixel-column
-    # noise) AND (b) the measured ratio clears a substantially stricter bar
-    # (V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER x the normal threshold) - i.e., only trust a
-    # width-suspect pair when the physical difference is overwhelmingly large, not borderline.
-    strong_override_enabled = globals().get("V2438_STRONG_RATIO_OVERRIDE_ENABLED", True)
-    strong_override_multiplier = globals().get("V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER", 2.0)
-    strong_override_min_width = globals().get("V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX", 20)
-
     raw_pairs = []
     for idx in range(n_stacks - 1):
+        if idx in suspect_indices or (idx + 1) in suspect_indices:
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
+                      f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
+                      f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
+            continue
         a, b = ss[idx], ss[idx + 1]
         ha = max(1, a["floor_y"] - a["top_y"])
         hb = max(1, b["floor_y"] - b["top_y"])
@@ -1593,27 +1542,6 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         shorter_h = min(ha, hb)
         diff = taller_h - shorter_h
         ratio = diff / max(1, taller_h)
-        if idx in suspect_indices or (idx + 1) in suspect_indices:
-            a_w = max(1, a["x1"] - a["x0"])
-            b_w = max(1, b["x1"] - b["x0"])
-            strong_required_ratio = min_ratio * strong_override_multiplier
-            can_override = (
-                strong_override_enabled
-                and a_w >= strong_override_min_width and b_w >= strong_override_min_width
-                and ratio >= strong_required_ratio
-            )
-            if can_override:
-                if globals().get("V2407_TRACE", True):
-                    print(f"v24.38 STRONG_RATIO_OVERRIDE {view_label} pair={idx}-{idx+1}: "
-                          f"heights=({ha},{hb}) ratio={ratio:.2f} >= strong threshold "
-                          f"{strong_required_ratio:.2f} (2x normal) despite width-outlier flag "
-                          f"- physical difference too large to be a segmentation artifact")
-            else:
-                if globals().get("V2407_TRACE", True):
-                    print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
-                          f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
-                          f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
-                continue
         is_edge_pair = (idx in row_edge_indices) or ((idx + 1) in row_edge_indices)
         raw_pairs.append({"idx": idx, "a": a, "b": b, "ha": ha, "hb": hb, "diff": diff,
                            "ratio": ratio, "is_edge_pair": is_edge_pair})
@@ -1635,8 +1563,10 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
             if ratio < required_ratio:
                 if globals().get("V2407_TRACE", True):
                     print(f"v24.31 ROWEDGE_TREND reject {view_label} pair={idx}-{idx+1}: "
-                          f"heights=({ha},{hb}) ratio={ratio:.2f} touches row-edge stack, "
-                          f"required={required_ratio:.2f}")
+                          f"heights=({ha},{hb}) ratio={ratio:.2f} touches row-edge stack, but does "
+                          f"not clear this view's background perspective-trend ratio "
+                          f"({background_max_ratio:.2f} x {edge_trend_multiplier} = {required_ratio:.2f}) "
+                          f"- likely continuation of smooth isometric drift, not a genuine local step")
                 continue
         needs_corroboration = bool(p["is_edge_pair"] and background_max_ratio is None)
         lower = a if ha < hb else b
@@ -1734,22 +1664,6 @@ def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop
 
 
 def _box_iou_absolute(box_a, box_b):
-    """v24.38 FIX (real log evidence, EC04-01 BACK): the AI's STEP_DOWN_RISK claim
-    correctly described "a 3-high stack vs adjacent 1-high stack" - and its claim_box
-    actually FULLY CONTAINED both of our tiny, precisely-computed candidate regions
-    (33x59px and 23x111px) - yet got REJECTED. ROOT CAUSE: this function only ever
-    divided intersection by area_a (the CLAIM box's own area). Gemini's box_2d claims are
-    frequently loose/imprecise (covering a wide visual area around the risk, e.g. 207x306px
-    here) compared to our tight, pixel-precise computed markers - so even when a computed
-    region is 100% contained inside the AI's claim, dividing by the claim's much larger area
-    produces a tiny ratio (~3% in this case) that falls below the 10% acceptance threshold.
-    FIX: also compute intersection / area_b (the CANDIDATE region's own area) - i.e., "what
-    fraction of the tight candidate region is covered by the claim box" - and return the
-    MAX of both ratios. This correctly recognizes "candidate fully inside a looser claim" as
-    a strong match, while still using the stricter symmetric ratio when both boxes are
-    similarly sized (unaffected regression-wise for AA04-05-style checks where both boxes
-    were comparably sized).
-    """
     ax0, ay0, ax1, ay1 = box_a
     bx0, by0, bx1, by1 = box_b
     ix0 = max(ax0, bx0); ix1 = min(ax1, bx1)
@@ -1757,10 +1671,7 @@ def _box_iou_absolute(box_a, box_b):
     iw = max(0.0, ix1 - ix0); ih = max(0.0, iy1 - iy0)
     inter = iw * ih
     area_a = max(1.0, (ax1 - ax0) * (ay1 - ay0))
-    area_b = max(1.0, (bx1 - bx0) * (by1 - by0))
-    ratio_vs_a = inter / area_a
-    ratio_vs_b = inter / area_b
-    return max(ratio_vs_a, ratio_vs_b)
+    return inter / area_a
 
 
 def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
@@ -1919,30 +1830,6 @@ V2431_ROWEDGE_TREND_MULTIPLIER = 1.6
 V2432_EDGE_CORROBORATION_ENABLED = True
 V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH = 3
 V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
-
-V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER = 1.3
-
-V2435_REAR_ZONE_EMPTY_GAP_MIN_PX = 30
-V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO = 0.15
-
-# v24.36 MultiBoxWidthExemption + v24.37 propagation-fix - see _flag_width_outlier_stacks()
-# and _flag_stack_indices_adjacent_to_width_outliers() docstrings for full root-cause
-# writeup (real evidence: EC04-01 BACK, idx1's genuine 3-box tall stack got excluded both
-# directly (fixed by v24.36) AND via adjacency propagation (fixed by v24.37) - v24.36 alone
-# was NOT sufficient because the propagation function had its own independent, unpatched
-# width-only check).
-V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED = True
-V2436_MULTIBOX_EXEMPTION_MIN_BOXES = 2
-
-# v24.38 StrongRatioOverride - see detect_step_down_regions_from_stack_model() inline comment
-# for full root-cause writeup (real evidence: EC04-01 BACK, idx0 width=27px box_count=1 was
-# the genuine "1-high" stack the AI's own claim described, but never qualified for v24.36/37's
-# multibox exemption since it has only 1 box - box_count alone cannot tell a real single tall
-# SKU apart from a fragment sliver. Instead, trust an overwhelmingly large ratio as evidence
-# a fragment artifact could not plausibly produce).
-V2438_STRONG_RATIO_OVERRIDE_ENABLED = True
-V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER = 2.0
-V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX = 20
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
@@ -2916,31 +2803,6 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
     return max_ratio
 
 
-def _find_max_stack_coverage_gap_in_zone(stacks, rear_x0, rear_x1):
-    """v24.35 EmptyFloorVetoGuard - see full root-cause writeup in changelog header (real
-    evidence: EC04-01 FRONT, AI correctly saw "2 tiers vs completely empty (0 tiers)" but
-    the pairwise comparison structurally cannot compare an existing stack against "no stack
-    at all" - it measured an unrelated pair's ratio instead and wrongly vetoed the AI.
-    Checks for a significant CONTIGUOUS cargo-free x-range within the rear zone.
-    """
-    relevant = [s for s in (stacks or []) if s["x1"] > rear_x0 and s["x0"] < rear_x1]
-    zone_width = max(1, rear_x1 - rear_x0)
-    if not relevant:
-        return zone_width, zone_width / zone_width
-    relevant.sort(key=lambda s: s["x0"])
-    max_gap = 0
-    cursor = rear_x0
-    for s in relevant:
-        s_x0 = max(s["x0"], rear_x0)
-        s_x1 = min(s["x1"], rear_x1)
-        if s_x0 > cursor:
-            max_gap = max(max_gap, s_x0 - cursor)
-        cursor = max(cursor, s_x1)
-    if rear_x1 > cursor:
-        max_gap = max(max_gap, rear_x1 - cursor)
-    return max_gap, max_gap / zone_width
-
-
 def detect_inter_stack_lateral_gap_regions_for_view(stacks, min_gap_px=None, min_vertical_overlap_ratio=None):
     """v24.02 LATERAL_GAP: detect only real gaps between adjacent cargo stacks.
 
@@ -3058,6 +2920,19 @@ def _reset_genai_client():
 
 
 def _is_quota_error_message(msg):
+    """v24.33 EXPANDED (see changelog for full root-cause writeup, real evidence: AB03-03
+    diagram-analysis call spent ~5+ minutes retrying 5+ API keys, one at a time, ALL still
+    stuck on gemini-3.7-flash, because every single failure was "504 Deadline Exceeded" -
+    a transient/overload error that this function did NOT recognize as fallback-worthy
+    (only 429/RESOURCE_EXHAUSTED/QUOTA/RATE_LIMIT were, so 504 fell through to the OUTER
+    except block, which moves to the NEXT KEY but keeps the SAME MODEL - the exact opposite
+    of the user's own correctly-diagnosed intent: "try 3.6/3.5 on the SAME key before
+    burning through every key on 3.7"). Now also treats 503/500/504/UNAVAILABLE/INTERNAL/
+    DEADLINE_EXCEEDED/TIMEOUT/OVERLOADED as fallback-worthy, since none of these are
+    key-specific - they are transient server/network conditions equally likely to recur on
+    ANY key, so there is no reason to burn through 20 keys before trying a lighter/faster
+    model on the SAME key first.
+    """
     msg = str(msg or "").upper()
     return (
         ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("QUOTA" in msg) or ("RATE_LIMIT" in msg)
@@ -3070,6 +2945,12 @@ def _is_quota_error_message(msg):
 
 
 def _is_permanently_bad_key_error(msg):
+    """v24.33 NEW: classifies errors that mean THIS SPECIFIC KEY is permanently unusable
+    (invalid/revoked/no-permission) as opposed to a transient model/server condition. Used
+    to populate a request-scoped "known bad keys" set (see process_request) so the SAME
+    dead key is not retried independently by each of the 4 separate AI calls made per file -
+    once confirmed bad by any one of the 4 calls, the rest skip it immediately.
+    """
     msg = str(msg or "").upper()
     return (
         ("API_KEY_INVALID" in msg) or ("API KEY NOT VALID" in msg) or ("INVALID API KEY" in msg)
@@ -3078,6 +2959,16 @@ def _is_permanently_bad_key_error(msg):
 
 
 def _get_available_gemini_models(current_key=None):
+    """v24.33 CHANGED: cooldown is now scoped per (key, model) pair instead of globally per
+    model. ROOT CAUSE this fixes: previously, if key #3 (out of 20) hit a genuine 429 quota
+    error on gemini-3.7-flash, _mark_gemini_model_disabled() disabled 3.7-flash for ALL 20
+    keys for 30 minutes - even though keys #1, #2, #4-20 likely still had untouched quota of
+    their own on 3.7 (each Gemini API key has its OWN independent quota). This wasted the
+    fastest model for the entire cooldown window on every future request, forcing every call
+    straight to the slower 3.6/3.5 fallback tier unnecessarily. Now checks
+    MODEL_DISABLED_UNTIL keyed by (current_key, model_name) - a key with its own confirmed
+    quota exhaustion is skipped for that model, but every other key keeps trying 3.7 first.
+    """
     global LAST_WORKING_MODEL
     now = time.time()
     ordered = []
@@ -3095,6 +2986,17 @@ def _mark_gemini_model_disabled(model_name, reason="", current_key=None):
 
 
 def _gemini_request_options():
+    """v24.33 NEW: explicit per-attempt request timeout, passed to generate_content(). ROOT
+    CAUSE this fixes: the google-generativeai SDK's default timeout is much longer than
+    ideal for a retry-heavy loop - real log evidence (AB03-03) showed each failing key/model
+    attempt silently blocking for ~60-70 SECONDS before finally raising "504 Deadline
+    Exceeded". With 20 keys in the pool, a run of bad luck could theoretically block for
+    20+ minutes on a single one of the 4 AI calls made per file, alone enough to blow past
+    any GCF/GAS timeout. Capping each individual attempt at
+    GEMINI_REQUEST_TIMEOUT_SECONDS means a bad attempt fails fast, leaving time budget to
+    actually try several more keys/models within the same overall wall-clock window instead
+    of exhausting it on one or two slow failures.
+    """
     return {"timeout": GEMINI_REQUEST_TIMEOUT_SECONDS}
 
 
@@ -3110,7 +3012,8 @@ def _call_gemini_json(prompt, image, api_keys, known_bad_keys=None):
     time_budget = globals().get("GEMINI_PER_CALL_TIME_BUDGET_SECONDS", 75)
     for i in range(total_keys):
         if time.time() - start_time > time_budget:
-            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping retry loop early")
+            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping retry loop early, "
+                  f"returning last known error instead of continuing to burn wall-clock time")
             break
         current_index = (GLOBAL_KEY_INDEX + i) % total_keys
         current_key = api_keys[current_index]
@@ -3140,7 +3043,8 @@ def _call_gemini_json(prompt, image, api_keys, known_bad_keys=None):
                 except Exception as model_err:
                     last_err = str(model_err)
                     if _is_permanently_bad_key_error(last_err):
-                        print(f"AI KEY PERMANENTLY BAD: key_index={current_index} reason={last_err[:100]}")
+                        print(f"AI KEY PERMANENTLY BAD: key_index={current_index} reason={last_err[:100]} "
+                              f"- marking as known-bad for the rest of this request")
                         known_bad_keys.add(current_key)
                         break
                     if _is_quota_error_message(last_err):
@@ -3322,9 +3226,17 @@ Return ONLY a JSON array (empty array if no genuine risks found):
     last_error_msg = ""
     start_time = time.time()
     time_budget = globals().get("GEMINI_PER_CALL_TIME_BUDGET_SECONDS", 75)
+    # v24.33: removed the old fixed "2 full passes over every key" structure (which, combined
+    # with the un-expanded error classification, was the single biggest contributor to the
+    # multi-minute worst case seen in real logs - e.g. AB03-03's diagram call alone took over
+    # 5 minutes). Replaced with a single pass bounded by an explicit wall-clock time budget
+    # instead, since the per-attempt request timeout (_gemini_request_options) and per-
+    # (key,model) cooldown already make a single well-bounded pass far more effective than
+    # two unbounded passes ever were.
     for i in range(len(api_keys)):
         if time.time() - start_time > time_budget:
-            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping diagram-analysis retry loop early")
+            print(f"AI TIME BUDGET EXCEEDED ({time_budget}s) - stopping diagram-analysis retry "
+                  f"loop early, returning last known error instead of continuing to burn wall-clock time")
             break
         current_index = (GLOBAL_KEY_INDEX + i) % len(api_keys)
         current_key = api_keys[current_index]
@@ -3358,7 +3270,8 @@ Return ONLY a JSON array (empty array if no genuine risks found):
                 except Exception as model_err:
                     last_error_msg = str(model_err)
                     if _is_permanently_bad_key_error(last_error_msg):
-                        print(f"AI KEY PERMANENTLY BAD (diagram): key_index={current_index} reason={last_error_msg[:100]}")
+                        print(f"AI KEY PERMANENTLY BAD (diagram): key_index={current_index} "
+                              f"reason={last_error_msg[:100]} - marking as known-bad for the rest of this request")
                         known_bad_keys.add(current_key)
                         break
                     if _is_quota_error_message(last_error_msg):
@@ -3691,6 +3604,15 @@ def process_request(request):
         }
         return ("", 204, headers)
     headers = {"Access-Control-Allow-Origin": "*"}
+    # v24.33: request-scoped "known bad key" cache shared across all 4 separate Gemini AI
+    # calls made per file (diagram, rear-zone FRONT, rear-zone BACK, front-zone). Without
+    # this, a genuinely dead/invalid key would be independently re-discovered as bad by
+    # EACH of the 4 calls (paying the full retry cost 4 times over for the same key). A
+    # fresh set is created per HTTP request/invocation - it does not persist across separate
+    # requests even on a warm Cloud Function instance, since GLOBAL_API_KEYS/model cooldowns
+    # already carry state that legitimately SHOULD persist across requests (quota cooldowns),
+    # but "this key is permanently invalid" is cheap to rediscover once per cold start and
+    # not worth the complexity of a persistent cache.
     known_bad_gemini_keys = set()
     try:
         data = request.get_json(silent=True)
@@ -3756,7 +3678,9 @@ def process_request(request):
                         _kept_candidates.append(_r)
                     else:
                         print(f"v24.30 LEGACY STEP_DOWN REJECTED ({_view}): "
-                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}%")
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"- no corresponding real stack-to-stack boundary found in per-box "
+                              f"segmentation model")
                 step_down_regions[_view] = _kept_candidates
 
         tall_unstable_regions = {}
@@ -3790,6 +3714,25 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_cv_regions)
 
+        if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
+            _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
+            for _view in ("FRONT", "BACK"):
+                _raw_legacy_for_view = _raw_legacy_step_down_regions_by_view.get(_view, [])
+                _kept = []
+                for _r in step_down_regions.get(_view, []):
+                    if not _r.get("v2432_needs_legacy_corroboration"):
+                        _kept.append(_r)
+                        continue
+                    if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
+                        print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}%")
+                        _kept.append(_r)
+                    else:
+                        print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): "
+                              f"x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}] ratio={_r.get('ratio', 0)*100:.1f}% "
+                              f"- no independent legacy corroboration found")
+                step_down_regions[_view] = _kept
+
         # v24.10: keep only the strongest STEP_DOWN pair per view before AI and forced append.
         # v24.20: cross-view collision regions exempt from this single-marker-per-view filter.
         #
@@ -3811,22 +3754,6 @@ def process_request(request):
         # the smaller region's width - a small overlap from measurement noise is tolerated,
         # a large overlap means they're really the same physical location and should still
         # collapse to one marker, preserving the original v24.10 intent for TRUE duplicates).
-        if globals().get("V2432_EDGE_CORROBORATION_ENABLED", True):
-            _overlap_min = globals().get("V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO", 0.10)
-            for _view in ("FRONT", "BACK"):
-                _raw_legacy_for_view = _raw_legacy_step_down_regions_by_view.get(_view, [])
-                _kept = []
-                for _r in step_down_regions.get(_view, []):
-                    if not _r.get("v2432_needs_legacy_corroboration"):
-                        _kept.append(_r)
-                        continue
-                    if _region_x_overlaps_any(_r, _raw_legacy_for_view, _overlap_min):
-                        print(f"v24.32 EDGE_CORROBORATION CONFIRMED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
-                        _kept.append(_r)
-                    else:
-                        print(f"v24.32 EDGE_CORROBORATION REJECTED ({_view}): x=[{_r['x_min']:.0f}-{_r['x_max']:.0f}]")
-                step_down_regions[_view] = _kept
-
         if globals().get("V2410_STEPDOWN_STRONGEST_ONLY", True):
             exempt_cross_view = globals().get("V2420_CROSS_VIEW_EXEMPT_FROM_STRONGEST_ONLY", True)
             for _view in ("FRONT", "BACK"):
@@ -4088,21 +4015,6 @@ def process_request(request):
                 rear_x0, rear_x1 = cb["xmin"], cb["xmin"] + int(container_width * 0.45)
             else:
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
-            # v24.35 EmptyFloorVetoGuard: check for a significant cargo-free gap in the rear
-            # zone BEFORE trusting any pairwise max_ratio measurement - see
-            # _find_max_stack_coverage_gap_in_zone() docstring for full root-cause writeup.
-            max_gap_px, max_gap_ratio = _find_max_stack_coverage_gap_in_zone(
-                stack_box_model.get(view_label, []), rear_x0, rear_x1)
-            min_gap_px = globals().get("V2435_REAR_ZONE_EMPTY_GAP_MIN_PX", 30)
-            min_gap_ratio = globals().get("V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO", 0.15)
-            if max_gap_px >= min_gap_px and max_gap_ratio >= min_gap_ratio:
-                print(f"REAR_LATERAL_IMBALANCE VETO skipped ({view_label}): detected a "
-                      f"cargo-free gap of {max_gap_px:.0f}px ({max_gap_ratio*100:.0f}% of rear "
-                      f"zone width) within the rear zone x=[{rear_x0}-{rear_x1}] - a position "
-                      f"with zero cargo has no stack object to compare against -> NOT vetoing, "
-                      f"deferring to AI finding")
-                return False
-
             max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
             # v24.28 FIX: max_ratio can now be None ("could not measure any pair in the rear
             # zone"). None must NEVER be treated as "measured 0.0, no imbalance" - lack of
