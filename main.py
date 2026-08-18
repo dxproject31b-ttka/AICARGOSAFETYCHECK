@@ -17,6 +17,30 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.38 - StrongRatioOverride + ClaimOverlapContainmentFix: user re-tested EC04-01 after
+#          v24.37 and reported wrong marker positions (front pink box, back two opposite
+#          sides high/empty). Traced TWO separate bugs:
+#          (1) _box_iou_absolute() only divided intersection by the CLAIM box's own area.
+#          Gemini's box_2d claims are frequently loose/imprecise (e.g. 207x306px here) vs
+#          our tight, pixel-precise computed markers (33x59px, 23x111px) - even when a
+#          computed region was 100% CONTAINED inside the AI's claim, this produced a tiny
+#          ratio (~3%) below the 10% threshold, wrongly rejecting a genuinely correct AI
+#          claim ("3-high stack vs adjacent 1-high stack" for BACK). FIX: also compute
+#          intersection / candidate-region's-own-area and take the max of both ratios -
+#          correctly recognizes "tight candidate fully inside a looser claim" as a match.
+#          (2) idx0 (BACK, width=27px, box_count=1) was the genuine "1-high" stack in the
+#          AI's own description, but never qualified for v24.36/37's box_count>=2 exemption
+#          - box_count alone cannot distinguish a real single tall SKU from a fragment
+#          sliver. This meant pair 0-1 (the exact comparison being described) was never
+#          measured at all. FIX: added StrongRatioOverride - a width-suspect pair is now
+#          measured anyway if BOTH stacks have a not-egregiously-tiny width (>=20px,
+#          excludes pure noise) AND the ratio clears 2x the normal threshold - a
+#          segmentation-artifact sliver is very unlikely to produce such an overwhelmingly
+#          large spurious difference, so an extreme ratio is itself strong evidence of a
+#          genuine physical difference regardless of box_count.
+#          NOTE: these are evidence-based hypotheses from a single file's log, not verified
+#          against the actual rendered image - please re-test and confirm markers now land
+#          on the intended "pink box" (FRONT) and correct "high vs empty" pair (BACK).
 # v24.37 - PropagationRespectsMultiboxExemption: user re-tested EC04-01 after v24.36 and
 #          reported "still not fixed, feels like back to v24.29". Traced it: v24.36's
 #          MultiBoxWidthExemption correctly stopped flagging idx1 (BACK, width=33px,
@@ -1538,14 +1562,30 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     n_stacks = len(ss)
     row_edge_indices = {0, n_stacks - 1} if n_stacks >= 2 else set()
 
+    # v24.38 StrongRatioOverride: real log evidence (EC04-01 BACK) - Gemini's own AI claim
+    # explicitly described "a 3-high stack vs adjacent 1-high stack" (idx1, box_count=3 vs
+    # idx0, box_count=1, width=27px). idx0 does NOT qualify for v24.36/37's multibox
+    # exemption (only 1 box), so it remained flagged as width-suspect, and pair 0-1 - the
+    # EXACT comparison the AI (and apparently the user, per "รถสูง2ด้านตรงข้ามพื้นที่ว่าง")
+    # was pointing at - was never even measured, let alone drawn. ROOT CAUSE: box_count is
+    # NOT a reliable proxy for "genuine cargo" height on its own - a single physically tall
+    # SKU box (1 tier) can be a completely legitimate, non-fragment stack; box_count alone
+    # cannot distinguish "1 real tall box" from "1 fragment sliver". However, a TRUE
+    # segmentation-fragment sliver essentially never produces an extremely large height
+    # difference against its neighbor in a way that ALSO clears a much stricter ratio bar -
+    # fragments are pixel-noise artifacts, typically producing small/moderate spurious
+    # differences, not consistently enormous ones. FIX: allow a pair through despite one
+    # side being width-suspect IF (a) the suspect stack's width is not egregiously tiny
+    # (>= V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX, avoiding pure single-pixel-column
+    # noise) AND (b) the measured ratio clears a substantially stricter bar
+    # (V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER x the normal threshold) - i.e., only trust a
+    # width-suspect pair when the physical difference is overwhelmingly large, not borderline.
+    strong_override_enabled = globals().get("V2438_STRONG_RATIO_OVERRIDE_ENABLED", True)
+    strong_override_multiplier = globals().get("V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER", 2.0)
+    strong_override_min_width = globals().get("V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX", 20)
+
     raw_pairs = []
     for idx in range(n_stacks - 1):
-        if idx in suspect_indices or (idx + 1) in suspect_indices:
-            if globals().get("V2407_TRACE", True):
-                print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
-                      f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
-                      f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
-            continue
         a, b = ss[idx], ss[idx + 1]
         ha = max(1, a["floor_y"] - a["top_y"])
         hb = max(1, b["floor_y"] - b["top_y"])
@@ -1553,6 +1593,27 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         shorter_h = min(ha, hb)
         diff = taller_h - shorter_h
         ratio = diff / max(1, taller_h)
+        if idx in suspect_indices or (idx + 1) in suspect_indices:
+            a_w = max(1, a["x1"] - a["x0"])
+            b_w = max(1, b["x1"] - b["x0"])
+            strong_required_ratio = min_ratio * strong_override_multiplier
+            can_override = (
+                strong_override_enabled
+                and a_w >= strong_override_min_width and b_w >= strong_override_min_width
+                and ratio >= strong_required_ratio
+            )
+            if can_override:
+                if globals().get("V2407_TRACE", True):
+                    print(f"v24.38 STRONG_RATIO_OVERRIDE {view_label} pair={idx}-{idx+1}: "
+                          f"heights=({ha},{hb}) ratio={ratio:.2f} >= strong threshold "
+                          f"{strong_required_ratio:.2f} (2x normal) despite width-outlier flag "
+                          f"- physical difference too large to be a segmentation artifact")
+            else:
+                if globals().get("V2407_TRACE", True):
+                    print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
+                          f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
+                          f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
+                continue
         is_edge_pair = (idx in row_edge_indices) or ((idx + 1) in row_edge_indices)
         raw_pairs.append({"idx": idx, "a": a, "b": b, "ha": ha, "hb": hb, "diff": diff,
                            "ratio": ratio, "is_edge_pair": is_edge_pair})
@@ -1673,6 +1734,22 @@ def detect_step_down_regions_per_view(diagram_crop, layout, crop_w, crop_h, crop
 
 
 def _box_iou_absolute(box_a, box_b):
+    """v24.38 FIX (real log evidence, EC04-01 BACK): the AI's STEP_DOWN_RISK claim
+    correctly described "a 3-high stack vs adjacent 1-high stack" - and its claim_box
+    actually FULLY CONTAINED both of our tiny, precisely-computed candidate regions
+    (33x59px and 23x111px) - yet got REJECTED. ROOT CAUSE: this function only ever
+    divided intersection by area_a (the CLAIM box's own area). Gemini's box_2d claims are
+    frequently loose/imprecise (covering a wide visual area around the risk, e.g. 207x306px
+    here) compared to our tight, pixel-precise computed markers - so even when a computed
+    region is 100% contained inside the AI's claim, dividing by the claim's much larger area
+    produces a tiny ratio (~3% in this case) that falls below the 10% acceptance threshold.
+    FIX: also compute intersection / area_b (the CANDIDATE region's own area) - i.e., "what
+    fraction of the tight candidate region is covered by the claim box" - and return the
+    MAX of both ratios. This correctly recognizes "candidate fully inside a looser claim" as
+    a strong match, while still using the stricter symmetric ratio when both boxes are
+    similarly sized (unaffected regression-wise for AA04-05-style checks where both boxes
+    were comparably sized).
+    """
     ax0, ay0, ax1, ay1 = box_a
     bx0, by0, bx1, by1 = box_b
     ix0 = max(ax0, bx0); ix1 = min(ax1, bx1)
@@ -1680,7 +1757,10 @@ def _box_iou_absolute(box_a, box_b):
     iw = max(0.0, ix1 - ix0); ih = max(0.0, iy1 - iy0)
     inter = iw * ih
     area_a = max(1.0, (ax1 - ax0) * (ay1 - ay0))
-    return inter / area_a
+    area_b = max(1.0, (bx1 - bx0) * (by1 - by0))
+    ratio_vs_a = inter / area_a
+    ratio_vs_b = inter / area_b
+    return max(ratio_vs_a, ratio_vs_b)
 
 
 def _step_down_claim_overlaps_detection(box_2d, crop_w, crop_h, crop_y_start, regions_for_view,
@@ -1853,6 +1933,16 @@ V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO = 0.15
 # width-only check).
 V2436_MULTIBOX_WIDTH_EXEMPTION_ENABLED = True
 V2436_MULTIBOX_EXEMPTION_MIN_BOXES = 2
+
+# v24.38 StrongRatioOverride - see detect_step_down_regions_from_stack_model() inline comment
+# for full root-cause writeup (real evidence: EC04-01 BACK, idx0 width=27px box_count=1 was
+# the genuine "1-high" stack the AI's own claim described, but never qualified for v24.36/37's
+# multibox exemption since it has only 1 box - box_count alone cannot tell a real single tall
+# SKU apart from a fragment sliver. Instead, trust an overwhelmingly large ratio as evidence
+# a fragment artifact could not plausibly produce).
+V2438_STRONG_RATIO_OVERRIDE_ENABLED = True
+V2438_STRONG_RATIO_OVERRIDE_MULTIPLIER = 2.0
+V2438_STRONG_RATIO_OVERRIDE_MIN_SUSPECT_WIDTH_PX = 20
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
