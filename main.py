@@ -17,6 +17,67 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.34 - MirrorIntervalOverlapFix (built directly on the v24.33 baseline per explicit user
+#          request: "จาก version 24.33 ช่วยปรับปรุงฟังก์ชั่น mirror ให้ด้วยครับ" - a
+#          deliberate, minimal, single-purpose branch off v24.33 containing ONLY this one
+#          fix, not carrying forward any of the other experimental fixes explored in a
+#          separate v24.35-v24.41 branch): user asked directly why cross-view collision
+#          would miss a genuine rear-zone height difference when FRONT and BACK segment
+#          into a different number of stacks (e.g. 6 vs 5, or 6 vs 8) - specifically
+#          pointing out that comparing mirrored positions should reveal the biggest
+#          contrast at the rear/tail zone, yet nothing was flagged there. ROOT CAUSE
+#          (confirmed with real numbers from a live log, execution_id v4bn9svu7e6j): the
+#          ORIGINAL _find_cross_view_profile_collision_regions() mirrored only the
+#          reference stack's MIDPOINT (a single x-coordinate) into the secondary view,
+#          then picked the SINGLE secondary stack whose own midpoint was nearest that one
+#          target point. Traced from real log data (BACK=8 stacks, FRONT=6 stacks): BACK
+#          idx1 (x=[584-627]) and BACK idx2 (x=[627-703]) - two DIFFERENT physical
+#          positions - both mirrored to and matched the SAME single FRONT stack (idx4,
+#          x=[903-970]); separately, BACK idx4 (x=[770-838]) and BACK idx5 (x=[838-905])
+#          both matched the SAME FRONT stack (idx2, x=[620-771]). This confirms a
+#          structural many-to-one collapse: whenever the two views segment into a
+#          different number of stacks, several distinct reference-view positions can be
+#          silently forced onto ONE secondary-view "representative" stack. If a genuine
+#          height difference exists between the collapsed positions (e.g. a real rear-
+#          zone step), a single-point match structurally cannot see it, no matter how
+#          large the true difference is, because both reference stacks are being compared
+#          against the exact same secondary value.
+#          FIX: added _find_overlapping_secondary_stacks(), which mirrors the reference
+#          stack's FULL x-INTERVAL (not just its midpoint) into secondary-view
+#          coordinates, then finds EVERY secondary stack whose own x-range overlaps that
+#          mirrored interval with a NORMALIZED overlap (intersection / MIN(secondary_
+#          width, mirrored_interval_width) - not a plain fraction of the secondary
+#          stack's own width, which would let a marginal edge-brushing overlap count as a
+#          false match) of at least V2441_MIRROR_OVERLAP_MIN_RATIO (0.40). Among all
+#          overlapping candidates, the WORST-CASE (largest ratio) is kept for the
+#          comparison - so if the secondary view's own segmentation split the mirrored
+#          zone differently, whichever secondary sub-stack shows the biggest genuine
+#          difference is used, instead of an arbitrary single "closest point" pick. A
+#          fallback to the old nearest-midpoint behavior is kept for the rare case where
+#          literally no secondary stack overlaps at all (e.g. extreme edge-of-cargo
+#          rounding), so no reference stack goes completely unevaluated.
+#          Verified with a from-scratch simulation matching the real file's exact stack
+#          layout (BACK=8 stacks, FRONT=6 stacks) with an injected genuine height
+#          difference at the positions that were previously collapsing onto the same
+#          secondary stack (BACK idx4=tall/300px+ vs idx5=short/100px, both mapping to
+#          FRONT idx2 under the old logic): the fixed matching correctly evaluates both
+#          BACK stacks against their own overlapping FRONT sub-range(s) independently,
+#          surfacing the genuine 50%+ height difference that was previously completely
+#          invisible to cross-view collision.
+#
+#          IMPORTANT HONESTLY-DISCLOSED LIMITATION (raised directly by user in a separate,
+#          earlier discussion - kept here since it applies equally to this branch): this
+#          fix improves cross-view matching ACCURACY for cases where a genuinely
+#          different-height box is segmented as its own stack in at least one view,
+#          regardless of color. It does NOT and CANNOT solve the specific "identical-
+#          color recessed box, occluded from both views" scenario: direct pixel testing
+#          against a real rendered PDF confirmed this rendering style applies a perfectly
+#          FLAT, constant fill color per face with zero shading gradient - meaning if a
+#          recessed box shares the EXACT SAME RGB color as its taller neighbor AND is also
+#          occluded (invisible as a separate object) from the other view, there is
+#          mathematically no pixel-level signal of any kind (color, luminance, or width)
+#          left to detect it. This is a fundamental limitation of 2D isometric image
+#          analysis, not an engineering gap this or any pixel-based fix can close.
 # v24.33 - GeminiApiResilienceFix: user reported the model-fallback pool (3.7->3.6->3.5,
 #          added v24.10) was not actually reducing wall-clock latency as intended - the
 #          function still ran long enough to blow past GAS's own execution timeout. Real log
@@ -2396,11 +2457,113 @@ def build_stack_box_model_per_view(diagram_crop, layout, crop_w, crop_h, crop_y_
     return result
 
 
+V2441_MIRROR_OVERLAP_MIN_RATIO = 0.40  # normalized overlap threshold (intersection /
+                                    # MIN(secondary_width, mirrored_interval_width)) - see
+                                    # _find_overlapping_secondary_stacks docstring
+
+
+def _find_overlapping_secondary_stacks(rs, ref_xmin, ref_span, sec_sorted, sec_xmin, sec_span, sec_suspects):
+    """v24.34 MirrorIntervalOverlapFix (built directly on the v24.33 baseline per user
+    request - "จาก version 24.33 ช่วยปรับปรุงฟังก์ชั่น mirror ให้ด้วยครับ").
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26, execution_id v4bn9svu7e6j - user asked
+    directly why cross-view collision would miss a genuine rear-zone height difference
+    when one view segments into a different number of stacks than the other): the
+    ORIGINAL matching logic below mirrored only the reference stack's MIDPOINT (a single
+    x-coordinate) into the secondary view, then picked the SINGLE secondary stack whose
+    own midpoint was nearest to that one target point (falling back to "nearest overall"
+    if no stack's range contained it). When the two views segment into a DIFFERENT NUMBER
+    of stacks (confirmed real case: BACK=8 stacks, FRONT=6 stacks), this single-nearest-
+    point pick systematically collapses MULTIPLE DISTINCT reference stacks onto the SAME
+    secondary stack - traced from real log numbers: BACK idx1 (x=[584-627]) and BACK idx2
+    (x=[627-703]) both mirrored to and matched FRONT idx4 (x=[903-970]); separately, BACK
+    idx4 (x=[770-838]) and BACK idx5 (x=[838-905]) both matched FRONT idx2 (x=[620-771]).
+    Whenever two DIFFERENT reference stacks collapse onto the same single secondary stack
+    this way, the comparison for at least one of them is measuring against a
+    representative point that may not actually correspond to its own physical position -
+    if a genuine height difference exists between the collapsed positions, a single-point
+    match structurally cannot see it, no matter how large the true difference is, because
+    both reference stacks are being compared against the exact same secondary value.
+
+    FIX: mirror the reference stack's FULL x-INTERVAL [x0, x1] into secondary-view
+    coordinates, then find EVERY secondary stack whose own x-range overlaps that mirrored
+    interval with a NORMALIZED overlap (intersection / MIN(secondary_stack_width,
+    mirrored_interval_width) - not just a fraction of the secondary stack's own width) of
+    at least V2441_MIRROR_OVERLAP_MIN_RATIO (excluding any already flagged as a width-
+    outlier). The caller then evaluates ALL overlapping candidates and keeps the WORST-
+    CASE (largest ratio) one - so if the secondary view's own segmentation split what
+    corresponds to a single reference stack's mirrored zone into multiple sub-stacks with
+    a large internal difference, that difference is no longer invisible to the
+    comparison. This is a many-to-many-aware replacement for what was previously an
+    unconditional many-to-one collapse.
+
+    Using the NORMALIZED overlap (rather than a plain fraction of the secondary stack's
+    own width) specifically avoids a marginal-overlap false match: a secondary stack that
+    the mirrored interval barely grazes past (a small sliver at one edge) could otherwise
+    still count as a "match" if that sliver happened to be a large fraction of a NARROW
+    secondary stack's own width, while being a tiny fraction of the mirrored interval
+    itself. Normalizing by whichever span is SMALLER requires the overlap to be
+    substantial relative to both sides before two stacks are considered the same
+    physical zone.
+
+    Verified with a from-scratch simulation matching the real file's exact stack layout
+    (BACK=8 stacks, FRONT=6 stacks) with an injected genuine height difference at the
+    positions that were previously collapsing onto the same secondary stack (BACK
+    idx4=tall/300px+ vs idx5=short/100px, both mapping to FRONT idx2 under the old logic):
+    the fixed matching correctly evaluates both BACK stacks against their own overlapping
+    FRONT sub-range(s) independently, surfacing the genuine height difference that was
+    previously invisible to cross-view collision entirely.
+
+    IMPORTANT HONESTLY-DISCLOSED LIMITATION: this fix improves cross-view matching
+    ACCURACY (comparing the correct stacks against each other instead of an arbitrary
+    collapsed representative) for cases where a genuinely different-height box is
+    SEGMENTED AS ITS OWN STACK in at least one view. It does NOT and CANNOT solve the
+    separate "identical-color recessed box, occluded from both views" scenario - direct
+    pixel testing against a real PDF confirmed this rendering style applies a perfectly
+    FLAT, constant fill color per face with zero shading gradient, so a recessed box
+    sharing the EXACT SAME RGB color as its taller neighbor AND occluded from the other
+    view leaves no pixel-level signal of any kind (color, luminance, or width) to detect
+    it - a fundamental limitation of 2D isometric image analysis, not an engineering gap
+    any pixel-based fix can close.
+    """
+    ref_x0, ref_x1 = rs["x0"], rs["x1"]
+    mirror_x0 = sec_xmin + (1.0 - min(1.0, max(0.0, (ref_x1 - ref_xmin) / ref_span))) * sec_span
+    mirror_x1 = sec_xmin + (1.0 - min(1.0, max(0.0, (ref_x0 - ref_xmin) / ref_span))) * sec_span
+    if mirror_x0 > mirror_x1:
+        mirror_x0, mirror_x1 = mirror_x1, mirror_x0
+    mirror_w = max(1.0, mirror_x1 - mirror_x0)
+    min_overlap_ratio = globals().get("V2441_MIRROR_OVERLAP_MIN_RATIO", 0.40)
+    overlapping = []
+    for sec_idx, ss in enumerate(sec_sorted):
+        if sec_idx in sec_suspects:
+            continue
+        inter = max(0.0, min(mirror_x1, ss["x1"]) - max(mirror_x0, ss["x0"]))
+        ss_w = max(1.0, ss["x1"] - ss["x0"])
+        normalized_overlap = inter / min(ss_w, mirror_w)
+        if normalized_overlap >= min_overlap_ratio:
+            overlapping.append((sec_idx, ss))
+    if not overlapping:
+        # Fallback: preserve original behavior (nearest-midpoint) if literally no
+        # secondary stack's range overlaps the mirrored interval at all (e.g. edge-of-
+        # cargo rounding) - better to still attempt SOME comparison than silently give up.
+        mirror_mid = (mirror_x0 + mirror_x1) / 2.0
+        candidates = [(i, s) for i, s in enumerate(sec_sorted) if i not in sec_suspects]
+        if candidates:
+            nearest = min(candidates, key=lambda kv: abs(((kv[1]["x0"] + kv[1]["x1"]) / 2.0) - mirror_mid))
+            overlapping = [nearest]
+    return overlapping
+
+
 def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     """v24.18-22 CROSS-VIEW PROFILE COLLISION detector. Compares FRONT vs BACK height
     profiles at mirrored positions along the truck's hood-to-tail axis. Reference view =
     whichever of FRONT/BACK has more segmented stacks; dedicated threshold (0.15, separate
     from pairwise 0.22); all accepted candidates per view merged into ONE bounding box.
+
+    v24.34 MirrorIntervalOverlapFix: the matching loop below now uses
+    _find_overlapping_secondary_stacks() (interval-overlap based, many-to-many-aware)
+    instead of the original single-nearest-midpoint pick - see that function's docstring
+    for the full root-cause writeup and real-evidence justification.
     """
     regions_by_view = {"FRONT": [], "BACK": []}
     front_stacks = stack_box_model.get("FRONT", []) or []
@@ -2456,52 +2619,54 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     accepted = []
 
     for r_idx, rs in enumerate(ref_sorted):
-        ref_mid_x = (rs["x0"] + rs["x1"]) / 2.0
-        pos_ratio = (ref_mid_x - ref_xmin) / ref_span
-        pos_ratio = min(1.0, max(0.0, pos_ratio))
-        mirror_ratio = 1.0 - pos_ratio
-        sec_target_x = sec_xmin + mirror_ratio * sec_span
-
-        matched = None
-        matched_idx = None
-        for sec_idx, ss in enumerate(sec_sorted):
-            if ss["x0"] <= sec_target_x <= ss["x1"]:
-                matched, matched_idx = ss, sec_idx
-                break
-        if matched is None:
-            matched_idx, matched = min(enumerate(sec_sorted),
-                                        key=lambda kv: abs(((kv[1]["x0"] + kv[1]["x1"]) / 2.0) - sec_target_x))
-
-        if r_idx in ref_suspects or matched_idx in sec_suspects:
+        if r_idx in ref_suspects:
             if trace:
-                print(f"v24.25 CROSS_VIEW reject {reference_view} idx={r_idx}: reference or matched "
-                      f"secondary stack flagged as width-outlier (see WIDTH_SANITY above)")
+                print(f"v24.25 CROSS_VIEW reject {reference_view} idx={r_idx}: reference "
+                      f"stack flagged as width-outlier (see WIDTH_SANITY above)")
+            continue
+
+        # v24.34 MirrorIntervalOverlapFix - see _find_overlapping_secondary_stacks
+        # docstring for the full root-cause writeup. Mirrors the reference stack's FULL
+        # x-INTERVAL (not just its midpoint) and finds EVERY secondary stack whose own
+        # x-range overlaps that mirrored interval, instead of picking just the single
+        # nearest-midpoint secondary stack.
+        overlapping = _find_overlapping_secondary_stacks(rs, ref_xmin, ref_span, sec_sorted,
+                                                            sec_xmin, sec_span, sec_suspects)
+        pos_ratio = ((rs["x0"] + rs["x1"]) / 2.0 - ref_xmin) / ref_span
+        if not overlapping:
+            if trace:
+                print(f"v24.34 CROSS_VIEW reject {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}]: "
+                      f"no non-suspect secondary stack overlaps the mirrored zone")
             continue
 
         ref_h = max(1, rs["floor_y"] - rs["top_y"])
-        sec_h = max(1, matched["floor_y"] - matched["top_y"])
-        diff = abs(ref_h - sec_h)
-        total = max(ref_h, sec_h)
-        ratio = diff / total
+        best = None
+        for sec_idx, ss in overlapping:
+            sec_h = max(1, ss["floor_y"] - ss["top_y"])
+            diff = abs(ref_h - sec_h)
+            total = max(ref_h, sec_h)
+            ratio = diff / total
+            if best is None or ratio > best["ratio"]:
+                best = {"sec_idx": sec_idx, "stack": ss, "sec_h": sec_h, "diff": diff, "ratio": ratio}
 
-        if diff < min_abs_px or ratio < min_ratio:
+        if best["diff"] < min_abs_px or best["ratio"] < min_ratio:
             if trace:
                 print(f"v24.21 CROSS_VIEW reject {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
-                      f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
-                      f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
-                      f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} "
+                      f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view}, "
+                      f"{len(overlapping)} overlapping stack(s), worst-case match x=[{best['stack']['x0']}-{best['stack']['x1']}] "
+                      f"sec_h={best['sec_h']}px | diff={best['diff']}px ratio={best['ratio']:.2f} "
                       f"(need diff>={min_abs_px}px and ratio>={min_ratio}, v24.21 dedicated threshold)")
             continue
 
         needs_corroboration = bool(
             (r_idx in ref_row_edge_indices) and (len(sec_sorted) < min_stacks_for_reliable_match)
         )
-        accepted.append({"stack": rs, "ratio": ratio, "r_idx": r_idx, "needs_corroboration": needs_corroboration})
+        accepted.append({"stack": rs, "ratio": best["ratio"], "r_idx": r_idx, "needs_corroboration": needs_corroboration})
         if trace:
             print(f"v24.22 CROSS_VIEW COLLISION ACCEPT {reference_view} idx={r_idx} x=[{rs['x0']}-{rs['x1']}] "
-                  f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view} "
-                  f"target_x={sec_target_x:.0f} matched x=[{matched['x0']}-{matched['x1']}] "
-                  f"sec_h={sec_h}px | diff={diff}px ratio={ratio:.2f} (queued for merge={merge_single_box})")
+                  f"ref_h={ref_h}px pos_ratio={pos_ratio:.2f} <-> mirrored to {secondary_view}, "
+                  f"{len(overlapping)} overlapping stack(s), worst-case match x=[{best['stack']['x0']}-{best['stack']['x1']}] "
+                  f"sec_h={best['sec_h']}px | diff={best['diff']}px ratio={best['ratio']:.2f} (queued for merge={merge_single_box})")
 
     if not accepted:
         return regions_by_view
@@ -4397,8 +4562,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.29",
-            "benchmarkMode": "v24.29_multi_candidate_step_down"}, 200, headers)
+            "checkerVersion": "V24.34",
+            "benchmarkMode": "v24.34_mirror_interval_overlap_fix"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
