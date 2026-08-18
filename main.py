@@ -17,6 +17,40 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.35 - EmptyFloorVetoGuard: real log evidence (EC04-01 FRONT view, user asked whether a
+#          "rear-zone height imbalance" claim would be correctly detected - traced it and
+#          found it was NOT: it got wrongly VETOed). The AI correctly saw "the left column
+#          is stacked 2 tiers high, whereas the adjacent right position is completely empty
+#          (0 tiers)" - a genuine, severe REAR_LATERAL_IMBALANCE. But
+#          get_max_lateral_imbalance_ratio_in_zone() measured max_ratio=0.14 (well below the
+#          0.20 veto threshold) and _should_veto_lateral_imbalance() used that to VETO the
+#          AI's correct finding. ROOT CAUSE: a position with ZERO cargo has NO stack object
+#          in the per-box segmentation model at all (a "stack" is only ever created where
+#          cargo pixels were actually detected) - so "2 tiers vs 0 tiers" can never be one
+#          of the pairs the pairwise comparison loop iterates over BY CONSTRUCTION. The
+#          0.14 that got measured was a real, correctly-computed ratio - just between two
+#          OTHER, unrelated existing stacks sitting elsewhere in the same 45%-wide rear-zone
+#          slice, not the pair the AI was actually describing. This is the same class of
+#          "insufficient/wrong data treated as evidence of safety" bug v24.28 already fixed
+#          for the "fewer than 2 comparable stacks" case - but v24.28's fix only covers when
+#          NO pair exists to compare at all; it does not cover when a pair exists but is the
+#          WRONG pair because the real comparison (something vs. nothing) is structurally
+#          impossible to form. FIX: added _find_max_stack_coverage_gap_in_zone() - before
+#          trusting any pairwise max_ratio, separately checks whether the rear zone contains
+#          a significant CONTIGUOUS x-range with NO stack (cargo) at all
+#          (>= V2435_REAR_ZONE_EMPTY_GAP_MIN_PX=30px AND >= V2435_REAR_ZONE_EMPTY_GAP_MIN_
+#          RATIO=15% of the zone's width). If such a gap exists, the zone's own measured
+#          max_ratio (whatever it is) is not trusted as representative - VETO is skipped and
+#          the AI's finding is deferred to. Uses ALL stacks (not just non-width-outlier
+#          ones) to determine cargo presence, since even a narrow/flagged stack still
+#          represents real cargo pixels at that position - the suspect flag questions
+#          reliability of a HEIGHT reading, not whether cargo physically exists there.
+#          Applies equally to FRONT and BACK views (verified BACK's own rear-zone log in
+#          EC04-01 separately - AI did not claim any imbalance there at all in that
+#          particular file, so the VETO path was never exercised for BACK on this file, but
+#          the underlying gap-blind-spot this fixes is not view-specific and would recur on
+#          any future file where BACK triggers the same "existing stack vs. empty floor"
+#          pattern the FRONT view hit here).
 # v24.34 - BorderlineOnlyPropagation: real log evidence (EC04-01, user reported "no risk
 #          detected" on a file whose per-box segmentation shows a suspicious pattern: FRONT
 #          box-counts-per-stack = [1,1,1,1,2,2,1,1,2,1,1] - idx4/5/8 are genuinely 2-tier
@@ -1831,6 +1865,15 @@ V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
 # swept into suspicion, blocking measurement of a likely-genuine 1-tier<->2-tier STEP_DOWN).
 V2434_ADJACENCY_PROPAGATION_BORDERLINE_MULTIPLIER = 1.3
 
+# v24.35 EmptyFloorVetoGuard - see _find_max_stack_coverage_gap_in_zone() docstring for the
+# full root-cause writeup (real evidence: EC04-01 FRONT, REAR_LATERAL_IMBALANCE claim
+# "2 tiers vs completely empty (0 tiers)" was wrongly VETOed because the deterministic
+# pairwise comparison structurally cannot compare an existing stack against "no stack at
+# all" - it measured an unrelated pair's ratio=0.14 instead and treated that as evidence of
+# safety for the whole zone).
+V2435_REAR_ZONE_EMPTY_GAP_MIN_PX = 30
+V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO = 0.15
+
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
 # top_y..floor_y) instead of a narrow ~25%-width slice, for visual consistency with the
@@ -2801,6 +2844,55 @@ def get_max_lateral_imbalance_ratio_in_zone(stacks, rear_x0, rear_x1):
               f"clean (non-suspect) pair survived width-sanity filtering. Returning None "
               f"('cannot measure') instead of a misleading 0.0.")
     return max_ratio
+
+
+def _find_max_stack_coverage_gap_in_zone(stacks, rear_x0, rear_x1):
+    """v24.35 EmptyFloorVetoGuard - fixes a deeper variant of the same "insufficient data
+    treated as evidence of safety" bug that v24.28 already fixed for the "fewer than 2
+    stacks" case, but v24.28 did NOT cover: real log evidence (EC04-01 FRONT) showed a case
+    where the rear zone DID contain 2+ comparable stacks (so get_max_lateral_imbalance_ratio_
+    in_zone happily returned a real number, 0.14, well below the veto threshold), yet the
+    AI's claim was still correct and got wrongly VETOED: "the left column is stacked 2 tiers
+    high, whereas the adjacent right position is completely empty (0 tiers)".
+
+    ROOT CAUSE: a position with ZERO cargo has no stack object in the per-box segmentation
+    model at all (build_stack_box_model_for_view only creates a "stack" entry where cargo
+    pixels were actually detected - see _find_cargo_present_clusters). So "2 tiers vs 0
+    tiers" can NEVER be one of the (a, b) pairs compared inside get_max_lateral_imbalance_
+    ratio_in_zone - that loop can only ever compare stacks that DO exist, which in this file
+    were other, unrelated pairs sitting elsewhere in the same 45%-wide rear zone slice. The
+    max_ratio=0.14 that was measured was real and correctly computed - it was just comparing
+    the WRONG pair relative to what the AI was describing, because the right pair (some
+    existing stack vs. "nothing") is structurally impossible for this comparison loop to
+    ever see.
+
+    FIX: instead of only checking "does a comparable PAIR exist", separately check whether
+    there is a significant CONTIGUOUS x-range within the rear zone that has NO stack
+    (cargo) at all. If such a gap is wide enough to plausibly be the "empty side" the AI is
+    describing (a real, physical absence of cargo - not a segmentation/measurement
+    artifact), the existing pairwise max_ratio must NOT be trusted as representative of
+    the whole zone, regardless of how low it measured - it is blind to the empty region by
+    construction. Uses ALL stacks (not just non-suspect ones) to determine "cargo presence",
+    since even a narrow/width-outlier-flagged stack still represents real cargo pixels
+    existing at that x-position - the suspect flag only questions whether ITS HEIGHT
+    reading is reliable, not whether cargo is physically present there at all.
+    """
+    relevant = [s for s in (stacks or []) if s["x1"] > rear_x0 and s["x0"] < rear_x1]
+    zone_width = max(1, rear_x1 - rear_x0)
+    if not relevant:
+        return zone_width, zone_width / zone_width  # entire zone has no cargo at all
+    relevant.sort(key=lambda s: s["x0"])
+    max_gap = 0
+    cursor = rear_x0
+    for s in relevant:
+        s_x0 = max(s["x0"], rear_x0)
+        s_x1 = min(s["x1"], rear_x1)
+        if s_x0 > cursor:
+            max_gap = max(max_gap, s_x0 - cursor)
+        cursor = max(cursor, s_x1)
+    if rear_x1 > cursor:
+        max_gap = max(max_gap, rear_x1 - cursor)
+    return max_gap, max_gap / zone_width
 
 
 def detect_inter_stack_lateral_gap_regions_for_view(stacks, min_gap_px=None, min_vertical_overlap_ratio=None):
@@ -3950,6 +4042,29 @@ def process_request(request):
                 rear_x0, rear_x1 = cb["xmin"], cb["xmin"] + int(container_width * 0.45)
             else:
                 rear_x0, rear_x1 = cb["xmax"] - int(container_width * 0.45), cb["xmax"]
+            # v24.35 EmptyFloorVetoGuard: check for a significant cargo-free gap in the rear
+            # zone BEFORE trusting any pairwise max_ratio measurement - see
+            # _find_max_stack_coverage_gap_in_zone() docstring for the full root-cause
+            # writeup (real evidence: EC04-01 FRONT, AI correctly saw "2 tiers vs completely
+            # empty (0 tiers)" but the deterministic pairwise comparison could only ever see
+            # OTHER, unrelated existing-stack pairs, since "0 tiers" has no stack object to
+            # compare against by construction - it measured a real but irrelevant ratio=0.14
+            # and wrongly vetoed a correct AI finding).
+            max_gap_px, max_gap_ratio = _find_max_stack_coverage_gap_in_zone(
+                stack_box_model.get(view_label, []), rear_x0, rear_x1)
+            min_gap_px = globals().get("V2435_REAR_ZONE_EMPTY_GAP_MIN_PX", 30)
+            min_gap_ratio = globals().get("V2435_REAR_ZONE_EMPTY_GAP_MIN_RATIO", 0.15)
+            if max_gap_px >= min_gap_px and max_gap_ratio >= min_gap_ratio:
+                print(f"REAR_LATERAL_IMBALANCE VETO skipped ({view_label}): detected a "
+                      f"cargo-free gap of {max_gap_px:.0f}px ({max_gap_ratio*100:.0f}% of rear "
+                      f"zone width) within the rear zone x=[{rear_x0}-{rear_x1}] - a position "
+                      f"with zero cargo has no stack object to compare against, so no pairwise "
+                      f"measurement can ever represent an 'existing stack vs. empty floor' "
+                      f"difference; the zone's own max_ratio (if any) reflects only OTHER, "
+                      f"unrelated stack pairs and must not be trusted as evidence of safety "
+                      f"here -> NOT vetoing, deferring to AI finding")
+                return False
+
             max_ratio = get_max_lateral_imbalance_ratio_in_zone(stack_box_model.get(view_label, []), rear_x0, rear_x1)
             # v24.28 FIX: max_ratio can now be None ("could not measure any pair in the rear
             # zone"). None must NEVER be treated as "measured 0.0, no imbalance" - lack of
