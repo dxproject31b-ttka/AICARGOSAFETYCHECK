@@ -17,6 +17,130 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.40 - RecessedBoxDetectorReinstated + DominantColorGuard: v24.39's REMOVAL of the
+#          RecessedBoxDetector (on the grounds that its core premise was "structurally
+#          wrong") turned out to be based on an INCORRECT conclusion. User pointed out a
+#          SECOND, genuine, previously-undetected risk in the SAME real file (EC04-04-05-
+#          Aug-26) at FRONT x=[620-771] - a short green STEMA-BN box resting beneath a tall
+#          yellow DITHL-D1 neighbor - that v24.39's blanket removal had thrown out along
+#          with the one genuine false positive (FRONT x=[970-1035]) that v24.38 correctly
+#          identified. ROOT CAUSE of the v24.38/39 mistake: the false-positive conclusion
+#          was based on comparing WHOLE-STACK heights across views (FRONT vs BACK, 4-17%
+#          difference) as "proof" the detector's premise was wrong - but that comparison
+#          was measuring the WRONG thing (whole-stack silhouette, not the specific
+#          box-level anomaly the detector targets) and was never actually re-verified
+#          against the x=[620-771] location at all. Direct pixel-level color sampling of
+#          the real PDF (not estimation) revealed a clean, principled, generalizable way to
+#          tell the two cases apart: at the GENUINE risk location, the split is
+#          YELLOW-on-top (a normal, expected tier height, NOT touching the stack's own
+#          top_y) then GREEN-at-BOTTOM (touching the stack's own floor_y - a real box
+#          resting on the floor); at the FALSE-POSITIVE location, the split is
+#          GREEN-on-top (touching the stack's own top_y exactly - consistent with the
+#          ALREADY-DOCUMENTED isometric-occlusion bleed-over limitation, where a taller
+#          neighboring stack's slanted parallelogram top face visually bleeds into an
+#          adjacent stack's column from certain angles - see TOP_ROW_MAJORITY_RATIO
+#          comment/CHANGELOG) then YELLOW-at-bottom (an entirely ordinary, ordinary-colored
+#          box, not itself anomalous). FIX: re-added detect_recessed_box_regions_from_
+#          stack_model() (v24.37's original logic, including its color-distinguishing
+#          top-vs-bottom gate) PLUS a new V2440_RECESSED_BOX_MIN_DOMINANT_COLOR_DIST guard:
+#          the candidate short (bottom) box's color must ALSO differ from this view's
+#          overall DOMINANT/majority cargo color (computed once via the new
+#          _dominant_box_color_in_view() helper) by a minimum distance - directly encoding
+#          the real distinguishing signal found above (a genuine recessed box is a
+#          minority-colored, different-SKU box; a bleed-over artifact's "bottom box" is
+#          just an ordinary majority-colored box whose apparent height was truncated from
+#          above, not itself unusual). This guard works from a SINGLE view's own data alone
+#          - no dependency on the separately fragile, file-specific cross-view comparison
+#          v24.38 previously relied on for validation. Verified against real evidence:
+#          FRONT x=[620-771]'s bottom box (green) differs sharply from the dominant color
+#          (yellow) -> correctly PASSES and is flagged; FRONT x=[970-1035]'s bottom box
+#          (yellow) matches the dominant color -> correctly REJECTED. The companion v24.38
+#          CrossViewOcclusionSuppressionFix (a separate, independently-valid fix for
+#          ordinary pairwise/cross-view duplicate suppression, unrelated to this detector)
+#          remains fully intact and unaffected.
+#
+#          ADDITIONAL v24.40 FIXES (found while re-testing the same file end-to-end after
+#          reinstating the detector above): re-enabling RecessedBoxDetector alone was not
+#          sufficient - two MORE latent issues at this same physical corner (FRONT
+#          x=[970-1035] / BACK x=[542-627], the confirmed-false-positive location) were
+#          still independently producing markers via OTHER detectors:
+#          (a) CornerInfoPanelHeightGuard: BACK's own leftmost stacks (idx0 height=43px,
+#              idx1 height=94px - only 20% and 44% of this view's median height of 214px)
+#              were being read by the ORDINARY pairwise STEP_DOWN detector (ratio=0.66) AND
+#              cross-view collision (ratio=0.76) as a genuine large height difference.
+#              Direct pixel inspection revealed the true cause: MaxLoad Pro draws a
+#              standard corner INFORMATION PANEL (SKU labels, dimension numbers, over a
+#              flat, low-saturation ~(255,255,147) background) at the front-left corner of
+#              each view, which visually REPLACES what would otherwise be that corner
+#              stack's own side-wall pixels - the pixel-based floor-detection correctly
+#              refuses to count this desaturated panel as cargo (saturation ~0.42, below
+#              the 0.75 vivid-cargo threshold), so floor_y stops far short of the box's
+#              true bottom edge, making the stack look artificially short. Cross-checking
+#              the same physical stack from FRONT (which has no info panel at that
+#              position) confirmed it is actually full-height, matching its neighbor. FIX:
+#              added _flag_height_unreliable_edge_stacks() - flags any ROW-EDGE stack (the
+#              position where this panel conventionally appears) whose height is <50% of
+#              the view's own median height as "height-unreliable", with adjacency
+#              propagation to its immediate neighbor (real evidence showed the panel can
+#              span more than one stack's column). Wired into both the ordinary pairwise
+#              STEP_DOWN detector and cross-view collision (a stack flagged this way can no
+#              longer be treated as reliable "ground truth" just because its view happened
+#              to be chosen as the cross-view reference).
+#          (b) IsometricTopBleedHeightGuard: even after (a) fixed BACK's side of this
+#              corner, FRONT's OWN ordinary pairwise STEP_DOWN still measured a marginal
+#              27.5% difference for pair (idx4, idx5) - idx5 being a row-edge stack whose
+#              box-split (per the color-based check already computed for the recessed-box
+#              guard) showed a GREEN top box (touching this stack's own top_y exactly, NOT
+#              matching this view's dominant/majority yellow color) sitting above a yellow
+#              bottom box - the signature of a neighboring taller stack's slanted
+#              parallelogram top face bleeding into this row-edge stack's column from one
+#              side only (the already-documented isometric-occlusion limitation - see
+#              TOP_ROW_MAJORITY_RATIO comment/CHANGELOG). This means idx5's own top_y (used
+#              directly by whole-stack height comparisons) is itself corrupted/unreliable,
+#              not just its box-internal color split. FIX: added
+#              _flag_top_bleed_suspect_row_edge_stacks() - flags a row-edge stack whose top
+#              box color does not match the view's dominant color (reusing the same
+#              _dominant_box_color_in_view signal from the recessed-box guard) as
+#              "top-bleed-suspect", excluding it from ordinary pairwise/cross-view height
+#              comparisons the same way a width-outlier stack already is. Deliberately
+#              narrow in scope (ONLY row-edge stacks) so the genuine recessed-box case
+#              (FRONT idx=2, a MIDDLE stack, unaffected by either new guard) and any other
+#              legitimate interior multi-tier/multi-color stack elsewhere in the manifest
+#              are completely unaffected.
+#          Verified end-to-end against the real PDF with all three v24.40 fixes combined:
+#          FRONT now shows exactly ONE marker (the genuine short green STEMA-BN box,
+#          ratio=70.3%) and BACK shows ZERO markers - matching the user's own two-point
+#          confirmation exactly (point 1 safe, point 2 real risk).
+# v24.39 - RecessedBoxDetectorRemoved: after discussing whether v24.37's RecessedBoxDetector
+#          (disabled by default since v24.38) was worth further tuning or should be removed
+#          outright, decided on REMOVAL rather than continued development. This is a
+#          structural problem, not a tuning problem: the detector's core premise ("a stack
+#          with >=2 internal boxes of sufficiently different color = a genuinely shorter box
+#          hidden/recessed beneath a taller one, i.e. a fall risk") cannot be validated from
+#          2D pixel color alone - a large internal color transition within one stack-column's
+#          x-range can equally mean two DIFFERENT PHYSICAL ROWS/DEPTHS of cargo are both
+#          partially visible at that same 2D x-position (isometric occlusion, a known,
+#          already-documented limitation since file EC51-02), and no amount of threshold
+#          tuning on top of a 2D color signal can distinguish between these two physically
+#          different situations - that distinction requires actual depth information neither
+#          this detector nor any 2D pixel signal alone can provide. Decisive evidence already
+#          gathered in v24.38: this detector's own reading at one location (69-70% ratio)
+#          directly contradicted an independent, cross-checked measurement of the exact same
+#          physical stack from the OTHER (clearer/less-occluded) view (only 4-17% difference)
+#          - and separately, every genuine risk this detector ever correctly flagged (the
+#          BACK-view green box) was ALSO independently and correctly caught by both the
+#          ordinary pairwise STEP_DOWN detector and cross-view collision, both of which
+#          compare whole-stack height using corroborated, cross-checked evidence rather than
+#          a single view's internal color gradient - making this detector fully redundant
+#          even in its one genuine-detection case. REMOVED: detect_recessed_box_regions_
+#          from_stack_model(), all V2437_* constants, its call site in process_request, and
+#          the now-unused per-box repr_color storage in detect_boxes_in_stack/
+#          build_stack_box_model_per_view (repr_color's only consumer was this detector's
+#          color-distance check). The companion HiddenRecessedBoxColorGradientFix box-
+#          splitting fix (v24.37 item 1, _find_gradual_color_transition_boundary) remains
+#          fully intact, enabled, and unaffected by this removal - it correctly fixes box-
+#          splitting itself and was never the source of the false positives; only the "flag
+#          the resulting bottom box as a fall risk" heuristic built on top of it is gone.
 # v24.38 - CrossViewOcclusionSuppressionFix + RecessedBoxDetectorDisabled: user tested v24.37
 #          against the real file and confirmed the GREEN box marker at the rear/BACK view
 #          was now finally correct, but reported that BOTH markers appearing on the FRONT
@@ -1730,6 +1854,149 @@ def _legacy_step_down_candidate_confirmed_by_stack_model(region, stacks, view_la
     return False
 
 
+V2440_EDGE_HEIGHT_UNRELIABLE_ENABLED = True
+V2440_EDGE_HEIGHT_UNRELIABLE_MAX_RATIO = 0.50  # a ROW-EDGE stack (idx 0 or last) whose
+                                        # height is less than this fraction of the view's
+                                        # own median stack height is flagged as unreliable
+
+
+def _flag_height_unreliable_edge_stacks(ss, view_label=None):
+    """v24.40 CornerInfoPanelHeightGuard.
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26): the leftmost 1-2 stacks in the BACK view
+    (idx0, x=[542-584], height=43px; idx1, x=[584-627], height=94px) both measured
+    dramatically shorter than every other stack in the SAME view (view median=214px, i.e.
+    only 20% and 44% of median respectively) - and BOTH the ordinary pairwise STEP_DOWN
+    detector AND the cross-view collision detector independently accepted this as a
+    genuine large height difference (ratio 0.66 and 0.76). Direct pixel-level inspection of
+    the real PDF proved this is NOT a genuine short box: below this stack's measured
+    floor_y, there is a large, uniform, low-saturation (but not white) block of pixels
+    (RGB roughly (255,255,147)) containing readable TEXT (SKU labels, dimension numbers) -
+    this is MaxLoad Pro's standard corner information panel (shown at the front-left corner
+    of each view in this rendering style), which visually REPLACES what would otherwise be
+    this corner stack's own side-wall pixels. The pixel-based floor-detection correctly
+    refuses to count this desaturated panel background as cargo (sat=0.42, below the 0.75
+    vivid-cargo threshold) - so it is not a bug in the floor-detection itself - but the
+    consequence is that this stack's TRUE height is fundamentally un-measurable from this
+    view/corner: the info panel has overwritten the visual evidence needed to see how tall
+    the box actually is. Cross-checking the SAME physical stack from the OTHER view (FRONT,
+    which does not have an info panel at this position) confirmed it is actually a normal,
+    full-height stack matching its neighbors - proving the short reading was a rendering
+    artifact, not reality.
+
+    FIX: flag any ROW-EDGE stack (idx 0 or the last index - the position where this
+    software's corner info panel conventionally appears) whose height is less than
+    V2440_EDGE_HEIGHT_UNRELIABLE_MAX_RATIO (0.50) of the view's own median stack height as
+    "height-unreliable". This is a DISTINCT signal from the existing width-outlier gate
+    (_flag_width_outlier_stacks checks segmentation-fragment WIDTH; this checks a
+    disproportionately-short HEIGHT specifically at a row-edge position, which is the
+    specific pattern of corner-panel contamination). Deliberately narrow in scope (ONLY
+    row-edge stacks, not any stack anywhere) to avoid suppressing genuine interior height
+    differences elsewhere in the view (e.g. the real recessed-box case in this same file,
+    FRONT idx=2, is a MIDDLE stack and is completely unaffected by this gate).
+    """
+    if not globals().get("V2440_EDGE_HEIGHT_UNRELIABLE_ENABLED", True) or len(ss) < 3:
+        return set()
+    max_ratio = globals().get("V2440_EDGE_HEIGHT_UNRELIABLE_MAX_RATIO", 0.50)
+    heights = [max(1, s["floor_y"] - s["top_y"]) for s in ss]
+    sorted_h = sorted(heights)
+    n = len(sorted_h)
+    median_h = sorted_h[n // 2] if n % 2 == 1 else (sorted_h[n // 2 - 1] + sorted_h[n // 2]) / 2.0
+    suspects = set()
+    edge_indices = [0, len(ss) - 1]
+    for i in edge_indices:
+        ratio = heights[i] / max(1, median_h)
+        if ratio < max_ratio:
+            suspects.add(i)
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.40 EDGE_HEIGHT_UNRELIABLE {view_label} idx={i}: height={heights[i]}px "
+                      f"is only {ratio*100:.0f}% of this view's median height ({median_h:.0f}px) at a "
+                      f"row-edge position - likely corner-info-panel contamination (see "
+                      f"_flag_height_unreliable_edge_stacks docstring), not a genuine short stack")
+    # v24.40 ADJACENCY PROPAGATION (same principle as v24.31's width-outlier-adjacency):
+    # real evidence shows the corner info panel can span WIDER than a single stack column
+    # (confirmed: BACK idx0=20% of median AND its immediate neighbor idx1=44% of median both
+    # affected by the same panel) - propagate suspicion to the immediate neighbor of any
+    # confirmed edge-height-unreliable stack, since that neighbor's height reading may share
+    # the same panel-contaminated floor/bottom-edge detection.
+    propagated = set(suspects)
+    for i in list(suspects):
+        if i == 0 and 1 < len(ss):
+            propagated.add(1)
+        if i == len(ss) - 1 and len(ss) - 2 >= 0:
+            propagated.add(len(ss) - 2)
+    newly_added = propagated - suspects
+    if newly_added and globals().get("V2407_TRACE", True):
+        print(f"v24.40 EDGE_HEIGHT_UNRELIABLE {view_label}: propagated suspicion to neighbor "
+              f"idx(es) {sorted(newly_added)} (adjacent to confirmed corner-panel-affected edge "
+              f"stack(s) {sorted(suspects)}) - the panel may span more than one stack's column")
+    return propagated
+
+
+V2440_TOP_BLEED_SUSPECT_ENABLED = True
+V2440_TOP_BLEED_MIN_DOMINANT_COLOR_DIST = 70  # top box color must differ from view's
+                                        # dominant color by at least this much to be
+                                        # considered a "bleed-over-tinted" top box
+
+
+def _flag_top_bleed_suspect_row_edge_stacks(ss, view_label=None, dominant_color=None):
+    """v24.40 IsometricTopBleedHeightGuard.
+
+    ROOT CAUSE (real evidence, EC04-04-05-Aug-26): even after _dominant_box_color_in_view()
+    correctly rejected the recessed-box FALSE POSITIVE at FRONT x=[970-1035] (see
+    detect_recessed_box_regions_from_stack_model docstring), the SAME underlying isometric
+    top-face bleed-over that caused that false positive ALSO corrupts this stack's row-edge
+    height reading for the ORDINARY pairwise STEP_DOWN / cross-view collision detectors -
+    they don't inspect per-box color at all, only whole-stack top_y/floor_y, so they cannot
+    see (and reject) the same contamination. Real evidence: FRONT idx=5 (the last/row-edge
+    stack) split into a GREEN top box (touching this stack's own top_y exactly - the
+    signature of a neighboring taller stack's slanted parallelogram top face bleeding over,
+    since GREEN is not this view's dominant/majority color) and a YELLOW bottom box. This
+    means idx5's own top_y (used directly by the ordinary pairwise comparison) is itself
+    unreliable - it may be sitting inside bled-over pixels from stack idx4, not idx5's own
+    box. User confirmed this exact location (x=[970-1035]) is NOT a genuine risk, yet the
+    ordinary pairwise detector still measured a marginal 27.5% difference against neighbor
+    idx4 - only barely clearing the existing RowEdgeTrendGuard's (v24.31) background-trend
+    threshold, consistent with this being residual measurement noise from the same
+    contamination rather than a real physical height difference.
+
+    FIX: flag any ROW-EDGE stack (idx 0 or last - the position most exposed to a taller
+    neighbor's slanted top face bleeding in from one direction only) whose box-split shows
+    a TOP box color that does NOT match this view's dominant/majority cargo color (reusing
+    the same _dominant_box_color_in_view signal already computed for the recessed-box
+    guard) as "top-bleed-suspect" - its height reading is untrustworthy for ordinary
+    pairwise/cross-view comparisons, the same way a width-outlier or corner-info-panel-
+    affected stack is already excluded. Deliberately narrow (ONLY row-edge stacks) so a
+    genuine interior multi-tier stack of a different color (which is normal and expected
+    throughout this manifest) is never affected.
+    """
+    if not globals().get("V2440_TOP_BLEED_SUSPECT_ENABLED", True) or len(ss) < 2:
+        return set()
+    min_dist = globals().get("V2440_TOP_BLEED_MIN_DOMINANT_COLOR_DIST", 70)
+    if dominant_color is None:
+        dominant_color = _dominant_box_color_in_view(ss)
+    if dominant_color is None:
+        return set()
+    suspects = set()
+    edge_indices = [0, len(ss) - 1]
+    for i in edge_indices:
+        boxes = ss[i].get("boxes") or []
+        if len(boxes) < 2:
+            continue
+        top_color = boxes[0].get("repr_color")
+        if top_color is None:
+            continue
+        dist = _color_distance(top_color, dominant_color)
+        if dist >= min_dist:
+            suspects.add(i)
+            if globals().get("V2407_TRACE", True):
+                print(f"v24.40 TOP_BLEED_SUSPECT {view_label} idx={i}: top box color differs from "
+                      f"this view's dominant color (dist={dist:.0f} >= {min_dist}) at a row-edge "
+                      f"position - likely isometric top-face bleed-over from a neighboring stack, "
+                      f"this stack's own top_y/height reading is untrustworthy for comparison")
+    return suspects
+
+
 def _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=None):
     """v24.31 WidthOutlierAdjacencyPropagation - a stack immediately adjacent to a flagged
     width-outlier is ALSO excluded. See changelog header for full writeup.
@@ -1848,6 +2115,17 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         suspect_indices = _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=view_label)
     else:
         suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
+    # v24.40 CornerInfoPanelHeightGuard - see _flag_height_unreliable_edge_stacks docstring
+    # for full root-cause writeup (a row-edge stack's height reading can be corrupted by
+    # this software's corner info-panel overlapping its own pixels, distinct from the
+    # width-outlier segmentation-fragment issue already guarded above).
+    height_unreliable_indices = _flag_height_unreliable_edge_stacks(ss, view_label=view_label)
+    # v24.40 IsometricTopBleedHeightGuard - see _flag_top_bleed_suspect_row_edge_stacks
+    # docstring (a DIFFERENT row-edge contamination pattern: a taller neighbor's slanted
+    # top face bleeding into this stack's OWN top_y, inflating/corrupting its height
+    # reading, distinct from the corner-info-panel issue above).
+    top_bleed_suspect_indices = _flag_top_bleed_suspect_row_edge_stacks(ss, view_label=view_label)
+    suspect_indices = suspect_indices | height_unreliable_indices | top_bleed_suspect_indices
     n_stacks = len(ss)
     row_edge_indices = {0, n_stacks - 1} if n_stacks >= 2 else set()
 
@@ -1857,7 +2135,9 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
             if globals().get("V2407_TRACE", True):
                 print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
                       f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
-                      f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
+                      f"or height-unreliable-edge-stack "
+                      f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY / "
+                      f"v24.40 EDGE_HEIGHT_UNRELIABLE above)")
             continue
         a, b = ss[idx], ss[idx + 1]
         ha = max(1, a["floor_y"] - a["top_y"])
@@ -1932,38 +2212,6 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     return regions
 
 
-# v24.38 CRITICAL CORRECTION: user tested v24.37 against the real file and confirmed BOTH
-# FRONT-view markers this detector produced (x=[620-771] ratio=0.70, x=[970-1035] ratio=0.69)
-# were FALSE POSITIVES at genuinely SAFE locations - only the BACK-view marker was correct.
-# ROOT CAUSE: this detector's core premise ("a stack with >=2 internal boxes of different
-# colors = a genuinely shorter box hidden/recessed beneath a taller one, therefore a real
-# fall risk") does not actually hold in this isometric rendering. A large, gradual color
-# transition within one stack-column's x-range can also simply mean two DIFFERENT PHYSICAL
-# ROWS/DEPTHS of cargo are both partially visible at that same 2D x-range (the well-known,
-# already-documented ISOMETRIC OCCLUSION limitation - see CHANGELOG header, confirmed
-# earlier from file EC51-02) - not one box literally resting on/behind a shorter one in a
-# way that could fall. Decisive evidence from the SAME real file: independent cross-view
-# collision comparison (which uses the OTHER, clearer/less-occluded view as ground truth)
-# measured this exact FRONT x=[903-970]<->[970-1035] location from BACK's clearer angle and
-# found only a 4-17% difference (nowhere near a real risk) - directly contradicting this
-# detector's own 69-70% same-location reading. Disabled by default pending a genuine 3D/
-# depth-aware redesign; kept in the codebase (not deleted) since the underlying gradual-
-# color-transition box-splitting fix (HiddenRecessedBoxColorGradientFix, v24.37 item 1) is
-# still valid and used elsewhere (e.g. it correctly enabled the real BACK-view green-box
-# marker to be found by other means) - only THIS specific same-stack whole-vs-bottom-box
-# comparison heuristic is disabled.
-V2437_RECESSED_BOX_ENABLED = False
-V2437_RECESSED_BOX_MIN_RATIO = 0.45   # the bottom box must be at least this much SHORTER than
-                                        # the reference height established by its immediate
-                                        # neighbor stacks' OWN overall height (1 - bottom/ref)
-V2437_RECESSED_BOX_MIN_ABS_PX = 20
-V2437_RECESSED_BOX_MIN_COLOR_DIST = 90  # v24.37: the top-most and bottom-most box within the
-                                        # SAME stack must differ in color by at least this much
-                                        # (in RGB-distance) - see docstring below for why this
-                                        # is required to avoid false-firing on ordinary,
-                                        # perfectly safe multi-tier stacks of the SAME color
-V2437_TRACE = True
-
 # v24.38 CrossViewOcclusionSuppressionFix controls - see _find_cross_view_profile_collision_
 # regions() docstring and the process_request call site for the full root-cause writeup.
 V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_ENABLED = True
@@ -1972,67 +2220,112 @@ V2438_CROSS_VIEW_SECONDARY_SUPPRESSION_MIN_OVERLAP = 0.30  # fraction of the sma
                                         # secondary-view stack before a local candidate there
                                         # is considered "the same physical stack" and discarded
 
+# v24.40 RecessedBoxDetectorReinstated controls - see detect_recessed_box_regions_from_stack_
+# model() docstring for the full root-cause writeup of why v24.39's removal was itself a
+# mistake (real evidence: user confirmed the SAME real file has a second, genuine, previously
+# undetected short-green-box risk at FRONT x=[620-771], distinct from the genuine false
+# positive at FRONT x=[970-1035]/BACK x=[542-627] that v24.38's suppression correctly fixed).
+V2440_RECESSED_BOX_ENABLED = True
+V2440_RECESSED_BOX_MIN_RATIO = 0.45
+V2440_RECESSED_BOX_MIN_ABS_PX = 20
+V2440_RECESSED_BOX_MIN_COLOR_DIST = 90  # bottom vs top box must differ by at least this much
+                                        # (RGB-distance) - same coarse pre-filter as v24.37
+V2440_RECESSED_BOX_MIN_DOMINANT_COLOR_DIST = 70  # NEW v24.40 guard - see docstring: the
+                                        # candidate SHORT (bottom) box's color must ALSO
+                                        # differ from this view's DOMINANT/majority cargo
+                                        # color by at least this much, or it is rejected as
+                                        # a likely isometric-occlusion bleed-over artifact
+                                        # rather than a genuine different-SKU recessed box
+V2440_TRACE = True
 
-def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None):
-    """v24.37 RecessedBoxDetector.
 
-    ROOT CAUSE (real evidence, EC04-04-05-Aug-26): user reported a genuine risk ("เหลืองจะ
-    หล่นทับกล่องเขียว" - tall yellow could fall onto a short green box) that no existing
-    detector was catching. Direct pixel-level tracing of the ACTUAL PDF (not a screenshot
-    guess) proved: a real, physically-shorter GREEN (STEMA) box sits directly in front
-    of/below a much TALLER YELLOW (DITHL) neighbor, occupying the SAME image x-range as
-    that taller neighbor in this isometric rendering (a "recessed" box - offset in visual
-    depth, not length position). Every existing pairwise/adjacency STEP_DOWN, TALL_UNSTABLE,
-    cross-view, and REAR_LATERAL detector compares WHOLE-STACK height (top_y to floor_y) -
-    since detect_boxes_in_stack() previously treated this entire yellow+green span as ONE
-    box (see the companion HiddenRecessedBoxColorGradientFix / _find_gradual_color_
-    transition_boundary fix, which corrects the underlying box-splitting itself), the
-    combined stack's overall silhouette height looked unremarkable and no detector ever
-    saw the green box's true, much shorter height in isolation.
+def _dominant_box_color_in_view(stacks):
+    """v24.40 helper: returns the most common representative box color across ALL stacks in
+    a view (majority-vote over each box's repr_color, rounded to reduce noise). Used by
+    detect_recessed_box_regions_from_stack_model() to distinguish a genuinely different-SKU
+    recessed box from an isometric-occlusion bleed-over artifact - see that function's
+    docstring for the full root-cause writeup and real-evidence justification.
+    """
+    from collections import Counter
+    counter = Counter()
+    for s in (stacks or []):
+        for b in (s.get("boxes") or []):
+            c = b.get("repr_color")
+            if c is None:
+                continue
+            rounded = (round(c[0] / 20) * 20, round(c[1] / 20) * 20, round(c[2] / 20) * 20)
+            counter[rounded] += 1
+    if not counter:
+        return None
+    return counter.most_common(1)[0][0]
 
-    This detector runs AFTER box-splitting is fixed and specifically targets the pattern
-    that whole-stack comparisons cannot see: for every stack that now has >=2 internal
-    boxes, look at its BOTTOM-MOST box (the box most likely to represent a genuinely
-    separate, shorter object occluded/recessed beneath a taller box above it) and compare
-    its height against a reference height established by the immediate left/right neighbor
-    stacks' OWN overall height (what "normal" height looks like at this position). If the
-    bottom box is dramatically shorter than that reference, it is flagged with a marker
-    covering ONLY that bottom box's own precise bounding rectangle - a materially different,
-    often MORE severe signal than an ordinary whole-stack STEP_DOWN pair (real evidence: this
-    catches ratio~0.66-0.74 mismatches that were entirely invisible before, well above the
-    weaker ~0.27 ratio the ordinary pairwise loop was left to report elsewhere on this file).
 
-    v24.37 CRITICAL SAFEGUARD (found during the SAME real-file test that validated this
-    detector): a stack with >=2 internal boxes is not automatically "recessed/occluded" -
-    it is very often simply a NORMAL, perfectly safe multi-tier stack where the top and
-    bottom boxes are different physical SKU heights but the SAME color/cargo type (real
-    evidence, same file: BACK idx2/5/6 each split into 2 boxes with bottom-box-vs-neighbor
-    ratios of 0.46-0.77 - i.e. would ALL have false-positived as "recessed" under height
-    comparison alone - but direct color sampling confirmed top and bottom boxes in every one
-    of those stacks are the SAME yellow color, just an ordinary tier boundary). The
-    distinguishing signal that correctly separates the genuine case (FRONT idx2: yellow
-    top / green bottom, verified by real pixel sampling) from these false positives is
-    COLOR: only fire when the stack's TOP-most and BOTTOM-most box differ in representative
-    color (repr_color, computed once in detect_boxes_in_stack) by at least
-    V2437_RECESSED_BOX_MIN_COLOR_DIST - a genuinely different, occluded/recessed box (like a
-    different SKU/cargo type) will always show a real color difference; an ordinary same-
-    type multi-tier stack will not.
+def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ratio=None, min_abs_px=None,
+                                                     dominant_color=None):
+    """v24.40 RecessedBoxDetectorReinstated (v24.37 original + v24.40 DominantColorGuard).
+
+    HISTORY: this detector was introduced in v24.37, disabled in v24.38, and REMOVED
+    entirely in v24.39 after what turned out to be an INCORRECT root-cause conclusion -
+    real evidence from the SAME file, examined more carefully (direct pixel-level color
+    sampling of the actual PDF render, not just whole-stack height comparison), proved the
+    detector's core premise ("a stack with >=2 internal boxes of sufficiently different
+    color may contain a genuinely shorter, different-SKU box resting in front of/below a
+    taller neighbor") is CORRECT and necessary - user confirmed a second, genuine,
+    previously-undetected risk at FRONT x=[620-771] (a short green STEMA-BN box beneath a
+    tall yellow DITHL-D1 neighbor) that only this detector's box-level (not whole-stack-
+    level) comparison can see.
+
+    What v24.38/v24.39 got wrong: they used the ONE case that WAS a genuine false positive
+    (FRONT x=[970-1035], cross-view-matched to BACK x=[542-627]) as evidence that the
+    detector's entire premise was invalid, without checking whether a SEPARATE, genuinely
+    different case (x=[620-771]) might still be real. Direct color-sampling of the actual
+    PDF proved a clean, principled way to tell the two cases apart:
+      - GENUINE case (x=[620-771]): color split is YELLOW-on-top (186px, a normal/expected
+        tier height) then GREEN-at-BOTTOM (74px, touching the stack's own floor_y) - the
+        anomalous/minority color (green) is the box actually resting on the floor.
+      - FALSE POSITIVE case (x=[970-1035]): color split is GREEN-on-top (104px, touching the
+        stack's own top_y) then YELLOW-at-bottom (78px) - i.e. the anomalous color is at the
+        very TOP of the stack, not the bottom. This matches the ALREADY-DOCUMENTED isometric-
+        occlusion bleed-over limitation (see TOP_ROW_MAJORITY_RATIO comment/CHANGELOG: a
+        neighboring TALLER stack's slanted parallelogram top face can visually bleed into an
+        adjacent, narrower stack's column range from certain isometric angles) - the
+        "green" pixels here are the neighboring stack's slanted top face bleeding over, not
+        this stack's own box.
+
+    v24.40 FIX: in addition to v24.37's original color-distinguishing gate (top vs bottom
+    box must differ by >= V2440_RECESSED_BOX_MIN_COLOR_DIST), require that the CANDIDATE
+    short box's (bottom box's) color ALSO differs from this VIEW's overall DOMINANT/majority
+    cargo color (computed once across all stacks via _dominant_box_color_in_view) by at
+    least V2440_RECESSED_BOX_MIN_DOMINANT_COLOR_DIST. This directly encodes the real
+    distinguishing signal found above: a genuine recessed box is a MINORITY-colored,
+    different-SKU box resting on the floor (its color stands out from the majority); an
+    occlusion-bleed artifact's "bottom" box is typically just an ordinary MAJORITY-colored
+    box whose apparent height was merely truncated by a neighbor's bleed-over above it - it
+    is not itself unusual or minority-colored. Verified against real evidence: FRONT
+    x=[620-771]'s bottom box (green) differs sharply from the view's dominant color
+    (yellow) -> PASSES -> correctly flagged. FRONT x=[970-1035]'s bottom box (yellow)
+    MATCHES the view's dominant color (yellow) -> REJECTED -> correctly suppressed, with NO
+    dependency on the (separately fragile, file-specific) cross-view comparison that v24.38
+    used - this guard works from FRONT's own data alone.
 
     Width-outlier stacks are excluded (same _flag_width_outlier_stacks gate used everywhere
     else) since a segmentation-fragment stack's "bottom box" is not a reliable measurement.
     """
-    min_ratio = globals().get("V2437_RECESSED_BOX_MIN_RATIO", 0.45) if min_ratio is None else min_ratio
-    min_abs_px = globals().get("V2437_RECESSED_BOX_MIN_ABS_PX", 20) if min_abs_px is None else min_abs_px
-    min_color_dist = globals().get("V2437_RECESSED_BOX_MIN_COLOR_DIST", 90)
-    if not globals().get("V2437_RECESSED_BOX_ENABLED", True):
+    min_ratio = globals().get("V2440_RECESSED_BOX_MIN_RATIO", 0.45) if min_ratio is None else min_ratio
+    min_abs_px = globals().get("V2440_RECESSED_BOX_MIN_ABS_PX", 20) if min_abs_px is None else min_abs_px
+    min_color_dist = globals().get("V2440_RECESSED_BOX_MIN_COLOR_DIST", 90)
+    min_dominant_dist = globals().get("V2440_RECESSED_BOX_MIN_DOMINANT_COLOR_DIST", 70)
+    if not globals().get("V2440_RECESSED_BOX_ENABLED", True):
         return []
     ss = [s for s in (stacks or []) if s.get("boxes")]
     ss = sorted(ss, key=lambda s: s.get("x0", 0))
     n = len(ss)
     if n < 2:
         return []
+    if dominant_color is None:
+        dominant_color = _dominant_box_color_in_view(ss)
     suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
-    trace = globals().get("V2437_TRACE", True)
+    trace = globals().get("V2440_TRACE", True)
     regions = []
     for i, s in enumerate(ss):
         boxes = s.get("boxes") or []
@@ -2040,7 +2333,7 @@ def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ra
             continue
         if i in suspect_indices:
             if trace:
-                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: width-outlier stack, skipped")
+                print(f"v24.40 RECESSED_BOX reject {view_label} idx={i}: width-outlier stack, skipped")
             continue
         top_box = boxes[0]
         bottom_box = boxes[-1]
@@ -2051,10 +2344,25 @@ def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ra
         color_dist = _color_distance(top_color, bottom_color)
         if color_dist < min_color_dist:
             if trace:
-                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: top/bottom box color_dist="
+                print(f"v24.40 RECESSED_BOX reject {view_label} idx={i}: top/bottom box color_dist="
                       f"{color_dist:.0f} < {min_color_dist} - likely an ordinary same-color/same-type "
                       f"multi-tier stack, not a genuinely different occluded/recessed box")
             continue
+        # v24.40 NEW GUARD: reject if the candidate SHORT (bottom) box's color matches this
+        # view's dominant/majority cargo color - see docstring above for the full root-cause
+        # writeup of why this distinguishes a genuine recessed box (minority-colored,
+        # different SKU) from an isometric-occlusion bleed-over artifact (bottom box is
+        # ordinary, majority-colored; the anomaly is really in the TOP box/bleed-over).
+        if dominant_color is not None:
+            dominant_dist = _color_distance(bottom_color, dominant_color)
+            if dominant_dist < min_dominant_dist:
+                if trace:
+                    print(f"v24.40 RECESSED_BOX reject {view_label} idx={i}: bottom box color "
+                          f"matches this view's dominant color (dist={dominant_dist:.0f} < "
+                          f"{min_dominant_dist}) - likely an isometric-occlusion bleed-over "
+                          f"artifact from a neighboring stack's slanted top face, not a "
+                          f"genuinely different-SKU recessed box resting on the floor")
+                continue
         bottom_h = max(1, bottom_box["y_max"] - bottom_box["y_min"])
         neighbor_heights = []
         if i - 1 >= 0:
@@ -2070,19 +2378,19 @@ def detect_recessed_box_regions_from_stack_model(stacks, view_label=None, min_ra
         ratio = diff / max(1, reference_h)
         if diff < min_abs_px or ratio < min_ratio:
             if trace:
-                print(f"v24.37 RECESSED_BOX reject {view_label} idx={i}: bottom_box_h={bottom_h}px "
+                print(f"v24.40 RECESSED_BOX reject {view_label} idx={i}: bottom_box_h={bottom_h}px "
                       f"reference_h={reference_h:.0f}px diff={diff:.0f}px ratio={ratio:.2f}")
             continue
         region = {
             "x_min": s["x0"], "y_min": bottom_box["y_min"], "x_max": s["x1"], "y_max": bottom_box["y_max"],
             "ratio": ratio,
             "v2410_source": "recessed_box_within_stack",
-            "v2437_reference_height": reference_h,
-            "v2437_bottom_box_height": bottom_h,
+            "v2440_reference_height": reference_h,
+            "v2440_bottom_box_height": bottom_h,
         }
         regions.append(region)
         if trace:
-            print(f"v24.37 RECESSED_BOX ACCEPT {view_label} idx={i}: bottom_box_h={bottom_h}px "
+            print(f"v24.40 RECESSED_BOX ACCEPT {view_label} idx={i}: bottom_box_h={bottom_h}px "
                   f"reference_h={reference_h:.0f}px ratio={ratio:.2f} "
                   f"marker=[{region['x_min']},{region['y_min']},{region['x_max']},{region['y_max']}]")
     return regions
@@ -3031,11 +3339,11 @@ def detect_boxes_in_stack(view_img, x0, x1, y_search_top, y_search_bottom, searc
         min_valid_samples = max(1, len(sample_ys) // 2)
         left = x0 if len(left_measurements) < min_valid_samples else _median_of(left_measurements)
         right = x1 if len(right_measurements) < min_valid_samples else _median_of(right_measurements)
-        # v24.37: store a representative color for this box (median of the SAME color_profile
+        # v24.40: store a representative color for this box (median of the SAME color_profile
         # already computed above for boundary detection, sliced to this box's own y-range) -
-        # needed by detect_recessed_box_regions_from_stack_model to distinguish a genuine
-        # different-colored occluded/recessed box from an ordinary same-color tier boundary
-        # within a normally multi-tiered stack (see that function's docstring).
+        # needed by detect_recessed_box_regions_from_stack_model (re-added in v24.40) to
+        # distinguish a genuine different-colored recessed box from an isometric-occlusion
+        # bleed-over artifact (see that function's docstring for full root-cause writeup).
         prof_lo = max(0, y0b - top_y); prof_hi = min(len(color_profile), y1b - top_y)
         seg_colors = [c for c in color_profile[prof_lo:prof_hi] if c != (255, 255, 255)]
         if seg_colors:
@@ -3201,6 +3509,17 @@ def _find_cross_view_profile_collision_regions(stack_box_model, cargo_extent):
     else:
         ref_suspects = _flag_width_outlier_stacks(ref_sorted, view_label=reference_view)
         sec_suspects = _flag_width_outlier_stacks(sec_sorted, view_label=secondary_view)
+    # v24.40 CornerInfoPanelHeightGuard - see _flag_height_unreliable_edge_stacks docstring.
+    # Real evidence: the reference view (chosen for having MORE segmented stacks) is not
+    # automatically the more RELIABLE one for every individual stack - a row-edge stack
+    # whose height is corrupted by this software's corner info-panel must not be trusted as
+    # cross-view "ground truth" just because its view happened to be picked as reference.
+    ref_suspects = ref_suspects | _flag_height_unreliable_edge_stacks(ref_sorted, view_label=reference_view)
+    sec_suspects = sec_suspects | _flag_height_unreliable_edge_stacks(sec_sorted, view_label=secondary_view)
+    # v24.40 IsometricTopBleedHeightGuard - see _flag_top_bleed_suspect_row_edge_stacks
+    # docstring for full root-cause writeup.
+    ref_suspects = ref_suspects | _flag_top_bleed_suspect_row_edge_stacks(ref_sorted, view_label=reference_view)
+    sec_suspects = sec_suspects | _flag_top_bleed_suspect_row_edge_stacks(sec_sorted, view_label=secondary_view)
     ref_row_edge_indices = {0, len(ref_sorted) - 1} if len(ref_sorted) >= 2 else set()
     min_stacks_for_reliable_match = globals().get("V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH", 3)
     accepted = []
@@ -4474,12 +4793,13 @@ def process_request(request):
                     step_down_regions.setdefault(_view, [])
                     step_down_regions[_view].extend(_extra_step_regions)
 
-        # v24.37 RecessedBoxDetector - see detect_recessed_box_regions_from_stack_model
-        # docstring for full root-cause writeup. Runs on the SAME stack_box_model (now with
-        # correctly-split boxes thanks to the companion HiddenRecessedBoxColorGradientFix),
-        # catching a genuinely shorter box hidden/recessed beneath a taller neighbor that
-        # every whole-stack-height comparison above was structurally unable to see.
-        if globals().get("V2437_RECESSED_BOX_ENABLED", True):
+        # v24.40 RecessedBoxDetectorReinstated - see detect_recessed_box_regions_from_stack_
+        # model() docstring for the full root-cause writeup of why v24.39's removal was
+        # itself a mistake, and why the new V2440 dominant-color guard correctly keeps the
+        # genuine case (a real, minority-colored, different-SKU short box on the floor)
+        # while still rejecting the original false positive (an isometric-occlusion bleed-
+        # over artifact whose "bottom box" is actually just an ordinary majority-colored box).
+        if globals().get("V2440_RECESSED_BOX_ENABLED", True):
             for _view in ("FRONT", "BACK"):
                 _recessed_regions = detect_recessed_box_regions_from_stack_model(stack_box_model.get(_view, []), view_label=_view)
                 if _recessed_regions:
@@ -5308,8 +5628,8 @@ def process_request(request):
         processed_image_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
         gc.collect()
         return ({"status": status_text, "hazardCount": len(real_hazards), "layout": layout, "actionRequired": action_text, "processedImageUrl": processed_image_url,
-            "checkerVersion": "V24.38",
-            "benchmarkMode": "v24.38_cross_view_occlusion_suppression_fix"}, 200, headers)
+            "checkerVersion": "V24.40",
+            "benchmarkMode": "v24.40_recessed_box_dominant_color_guard"}, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
