@@ -17,6 +17,74 @@ import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # AI Cargo Safety Checker - High Precision v24.10
+# v24.36 - WidthOutlierAdjacencyCorroborationFix + RearLateralRowEdgeGuard: user requested a
+# visual/manual re-inspection of the same 4-file batch (EC04-01..04) using their own
+# analysis framework (paired-position comparison across FRONT/BACK, explicit per-file
+# safe/risk judgment) instead of running v24.35 code directly. Two NEW, previously
+# unidentified bugs surfaced from this cross-check against direct pixel measurement:
+#
+# BUG 1 (False Negative - EC04-02, FRONT rear zone): user identified a genuine, large
+# (~40%+ by direct pixel measurement) height-drop between the rear-most stack (TEM1A-B2/
+# 1PRTA-D1, a genuinely correctly-segmented stack) and its immediate neighbor - but the
+# system produced ZERO marker anywhere in that file. ROOT CAUSE (confirmed by reading
+# detect_step_down_regions_from_stack_model source directly): the neighbor stack (idx+1)
+# was a v24.24 DIRECT width-outlier (33px wide segmentation fragment, genuinely
+# unreliable on its own terms) - but v24.31's WidthOutlierAdjacencyPropagation then ALSO
+# flagged the genuinely-fine neighboring stack (idx) as "suspect" purely because it sat
+# next to the unreliable one, causing the ENTIRE PAIR to be hard-skipped in the main loop
+# with NO ratio ever computed and NO chance of corroboration whatsoever - the pair simply
+# vanished from consideration. This is a real, previously-undetected regression class:
+# v24.31 correctly identified that "a stack's OWN unreliable width means its own height
+# reading can't be trusted", but over-applied this to ALSO exclude a perfectly reliable
+# neighboring stack's measurement, discarding it before it could even be evaluated,
+# let alone corroborated. FIX: detect_step_down_regions_from_stack_model now distinguishes
+# DIRECT width-outlier suspects (a stack's own segmented width is itself unreliable - hard
+# -skip unchanged) from PROPAGATED-ONLY suspects (only a NEIGHBOR is unreliable - the
+# stack itself measures fine). Pairs touching only a propagated-only suspect are now
+# measured normally, then routed through the SAME already-proven
+# V2432_EDGE_CORROBORATION_ENABLED raw-pixel-scanner cross-check used for uncorroborated
+# row-edge candidates - a genuine large risk gets a chance to be independently confirmed
+# and surfaced, while a truly artifact-driven inflated ratio (the exact scenario v24.31
+# was built to prevent) still has to clear that same strict corroboration bar before being
+# trusted, just later in the pipeline instead of being silently discarded up front.
+#
+# BUG 2 (False Positive - EC04-03, REAR_LATERAL_IMBALANCE): user confirmed this file is
+# fully and evenly loaded with every matched stack pair within tolerance (independently
+# verified by direct pixel measurement: ~8-12% max difference across all FRONT<->BACK
+# matched positions, well under every threshold in the system) - yet the system produced
+# a REAR_LATERAL_IMBALANCE (pink/deeppink) marker overlapping the same row-edge position
+# already identified as segmentation-unreliable by the v24.31 (ordinary STEP_DOWN) and
+# v24.35 (cross-view collision) fixes. ROOT CAUSE: unlike those two detectors,
+# detect_lateral_imbalance_regions_for_view never received an equivalent "edge pair needs
+# a stricter bar" protection - since v24.25 it only ever applied the DIRECT width-outlier
+# gate (_flag_width_outlier_stacks alone, never the _adjacent_to_ propagated version, and
+# critically never a comparison against the rear-zone's own interior background trend the
+# way STEP_DOWN's ROWEDGE_TREND_GUARD does). This was a genuine gap left over from the
+# v24.25 full-code-audit, which added width-sanity checks broadly but did not carry the
+# row-edge-vs-interior-trend comparison to this specific detector. FIX: mirrors the same
+# is_edge_pair + interior-background-ratio-comparison design already proven in STEP_DOWN's
+# ROWEDGE_TREND_GUARD (v24.31) - a pair sitting at the very edge of the analyzed rear-zone
+# stack list must now either (a) clear a stricter multiplier (V2436_REAR_LATERAL_ROWEDGE_
+# TREND_MULTIPLIER, default 1.6x, matching STEP_DOWN's own multiplier) over the zone's own
+# interior (non-edge) pairs' background ratio when such interior data exists, or (b) clear
+# a raised absolute minimum ratio (V2436_REAR_LATERAL_ROWEDGE_NO_INTERIOR_MIN_RATIO_
+# MULTIPLIER, default 1.5x the normal FORCE threshold) when the rear zone contains too few
+# stacks to have any interior pair to sanity-check against at all. Both new constants
+# default to values already trusted elsewhere in the codebase rather than newly-invented
+# numbers, minimizing regression risk against previously-correct REAR_LATERAL_IMBALANCE
+# detections in the existing 85/103-file regression suites.
+#
+# SCOPE NOTE: both fixes in this version are deliberately narrow and evidence-driven -
+# only the two specific functions where real evidence pinpointed the bug were touched
+# (detect_step_down_regions_from_stack_model for BUG 1, detect_lateral_imbalance_regions_
+# for_view for BUG 2). The cross-view collision detector
+# (_find_cross_view_profile_collision_regions) uses the same
+# _flag_stack_indices_adjacent_to_width_outliers() propagation helper as BUG 1's location
+# and could in principle suffer an analogous over-propagation issue, but no real evidence
+# of that specific failure mode has been observed there yet - left unchanged this version
+# to avoid unverified scope creep, flagged here as a candidate for future investigation if
+# a similar missed-risk pattern is ever observed in cross-view output.
+#
 # v24.35 - CrossViewEdgeCorroborationFix: real evidence across ALL 4 files in a single test
 # batch (EC04-01/02/03/04) showed an IDENTICAL false-positive red STEP_DOWN_RISK marker at
 # the FRONT view's head-wall end (x=[970-1035], pos_ratio~0.94, w_px=65 h_px=185 - the exact
@@ -1625,21 +1693,51 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
     boundary_ratio = globals().get("V2410_STEPDOWN_BOUNDARY_RATIO", 0.25)
     ss = [s for s in (stacks or []) if s.get("boxes")]
     ss = sorted(ss, key=lambda s: s.get("x0", 0))
+    # v24.36 WidthOutlierAdjacencyCorroborationFix - see changelog header for full
+    # root-cause writeup. Real evidence (EC04-02) showed a genuine ~40%+ height-drop
+    # STEP_DOWN risk at the FRONT rear zone was silently discarded with ZERO
+    # measurement and ZERO chance of corroboration, because the pair's neighbor
+    # (idx+1, a 33px-wide segmentation fragment) was a DIRECT width-outlier, and
+    # v24.31's propagation logic then also marked idx (a completely genuine, correctly
+    # -segmented stack with no width problem of its own) as "suspect", causing the
+    # entire pair to be hard-skipped in the loop below with no ratio ever computed.
+    # FIX: distinguish DIRECT suspects (a stack whose OWN width is itself unreliable -
+    # too narrow/too wide vs the view's median; see _flag_width_outlier_stacks) from
+    # PROPAGATED-ONLY suspects (a stack whose own width is fine, but a NEIGHBOR's is
+    # not). Pairs touching a DIRECT suspect are still hard-skipped exactly as before
+    # (that stack's own height reading truly cannot be trusted). Pairs touching only a
+    # PROPAGATED-ONLY suspect are now measured normally, but flagged with
+    # "v2432_needs_legacy_corroboration"=True so they must be independently confirmed
+    # by the existing V2432_EDGE_CORROBORATION_ENABLED raw-pixel-scanner cross-check
+    # (already wired into process_request) before being trusted - reusing the exact
+    # same proven safety net already in place for uncorroborated row-edge candidates,
+    # instead of inventing a new one. This means a genuine, large, real risk now gets a
+    # chance to be measured and confirmed, while a truly artifact-driven inflated ratio
+    # (the scenario v24.31 was originally built to prevent) will still very likely fail
+    # independent corroboration and be rejected, just later in the pipeline instead of
+    # being blindly discarded before it could even be evaluated.
+    direct_suspects = _flag_width_outlier_stacks(ss, view_label=view_label)
     if globals().get("V2431_WIDTH_OUTLIER_ADJACENCY_PROPAGATION_ENABLED", True):
-        suspect_indices = _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=view_label)
+        propagated_suspects = _flag_stack_indices_adjacent_to_width_outliers(ss, view_label=view_label)
     else:
-        suspect_indices = _flag_width_outlier_stacks(ss, view_label=view_label)
+        propagated_suspects = set(direct_suspects)
+    propagated_only_suspects = propagated_suspects - direct_suspects
     n_stacks = len(ss)
     row_edge_indices = {0, n_stacks - 1} if n_stacks >= 2 else set()
 
     raw_pairs = []
     for idx in range(n_stacks - 1):
-        if idx in suspect_indices or (idx + 1) in suspect_indices:
+        if idx in direct_suspects or (idx + 1) in direct_suspects:
             if globals().get("V2407_TRACE", True):
                 print(f"v24.24 STEP_DOWN reject {view_label} pair={idx}-{idx+1}: "
-                      f"skipped - one or both stacks flagged as width-outlier/adjacent-to-outlier "
-                      f"(see v24.24 WIDTH_SANITY / v24.31 WIDTH_OUTLIER_ADJACENCY above)")
+                      f"skipped - one or both stacks flagged as a DIRECT width-outlier "
+                      f"(see v24.24 WIDTH_SANITY above) - own segmentation is unreliable, "
+                      f"no measurement possible (v24.36: propagated-only neighbors no "
+                      f"longer cause a hard-skip here, see WIDTH_OUTLIER_ADJACENCY_MEASURED)")
             continue
+        pair_needs_corrob_from_propagation = bool(
+            idx in propagated_only_suspects or (idx + 1) in propagated_only_suspects
+        )
         a, b = ss[idx], ss[idx + 1]
         ha = max(1, a["floor_y"] - a["top_y"])
         hb = max(1, b["floor_y"] - b["top_y"])
@@ -1649,7 +1747,14 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
         ratio = diff / max(1, taller_h)
         is_edge_pair = (idx in row_edge_indices) or ((idx + 1) in row_edge_indices)
         raw_pairs.append({"idx": idx, "a": a, "b": b, "ha": ha, "hb": hb, "diff": diff,
-                           "ratio": ratio, "is_edge_pair": is_edge_pair})
+                           "ratio": ratio, "is_edge_pair": is_edge_pair,
+                           "needs_corrob_from_propagation": pair_needs_corrob_from_propagation})
+        if pair_needs_corrob_from_propagation and globals().get("V2407_TRACE", True):
+            print(f"v24.36 WIDTH_OUTLIER_ADJACENCY_MEASURED {view_label} pair={idx}-{idx+1}: "
+                  f"heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} - only PROPAGATED-suspect "
+                  f"(a neighbor's width is unreliable, not this pair's own stacks) - measured "
+                  f"instead of hard-skipped; will require independent legacy corroboration "
+                  f"before being trusted (was unconditionally discarded pre-v24.36)")
 
     interior_ratios = [p["ratio"] for p in raw_pairs if not p["is_edge_pair"]]
     edge_trend_enabled = globals().get("V2431_ROWEDGE_TREND_GUARD_ENABLED", True)
@@ -1673,7 +1778,13 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
                           f"({background_max_ratio:.2f} x {edge_trend_multiplier} = {required_ratio:.2f}) "
                           f"- likely continuation of smooth isometric drift, not a genuine local step")
                 continue
-        needs_corroboration = bool(p["is_edge_pair"] and background_max_ratio is None)
+        # v24.36: a pair that only survived because it was propagated-only-suspect (not
+        # a direct outlier) must also require independent legacy corroboration, in
+        # addition to the pre-existing edge-pair-with-no-interior-data case.
+        needs_corroboration = bool(
+            (p["is_edge_pair"] and background_max_ratio is None)
+            or p.get("needs_corrob_from_propagation", False)
+        )
         lower = a if ha < hb else b
         higher = b if ha < hb else a
         # v24.23: FULL-STACK marker (full x0..x1, full top_y..floor_y) instead of a narrow
@@ -1702,7 +1813,12 @@ def detect_step_down_regions_from_stack_model(stacks, view_label=None, min_ratio
             "v2432_needs_legacy_corroboration": needs_corroboration,
         })
         if globals().get("V2407_TRACE", True):
-            corrob_note = " [v24.32: needs legacy corroboration]" if needs_corroboration else ""
+            if p.get("needs_corrob_from_propagation", False):
+                corrob_note = " [v24.36: needs legacy corroboration - propagated width-outlier neighbor]"
+            elif needs_corroboration:
+                corrob_note = " [v24.32: needs legacy corroboration]"
+            else:
+                corrob_note = ""
             print(f"v24.10 STEP_DOWN ACCEPT {view_label} pair={idx}-{idx+1}: heights=({ha},{hb}) diff={diff}px ratio={ratio:.2f} boundary_marker=[{x0},{y0},{x1},{y1}]{corrob_note}")
 
     if globals().get("V2414_VALLEY_PATTERN_ENABLED", True):
@@ -1935,6 +2051,12 @@ V2431_ROWEDGE_TREND_MULTIPLIER = 1.6
 V2432_EDGE_CORROBORATION_ENABLED = True
 V2432_MIN_STACKS_FOR_RELIABLE_CROSSVIEW_MATCH = 3
 V2432_LEGACY_CORROBORATION_OVERLAP_MIN_RATIO = 0.10
+
+# v24.36 constants - see changelog header (BUG 2 writeup) and
+# detect_lateral_imbalance_regions_for_view() docstring for full detail.
+V2436_REAR_LATERAL_ROWEDGE_GUARD_ENABLED = True
+V2436_REAR_LATERAL_ROWEDGE_TREND_MULTIPLIER = 1.6  # matches V2431_ROWEDGE_TREND_MULTIPLIER
+V2436_REAR_LATERAL_ROWEDGE_NO_INTERIOR_MIN_RATIO_MULTIPLIER = 1.5
 
 # v24.23 PAIRWISE FULL-WIDTH MARKER (per user request applied to the ordinary pairwise
 # STEP_DOWN mechanism): draws the lower stack's ENTIRE silhouette (full x0..x1, full
@@ -2894,6 +3016,23 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
     Compare adjacent rear-zone stack heights and return a marker box that covers the visible cargo
     pair causing the height imbalance. For BACK view, marker is shifted upward so it lands on the
     green/blue/red cargo block area rather than the lower floor region.
+
+    v24.36 RowEdgeArtifactGuard ADDITION - see changelog header for full root-cause writeup.
+    Real evidence (EC04-03 - a fully, evenly-loaded shipment confirmed genuinely SAFE by
+    direct pixel measurement of every FRONT/BACK matched stack pair, all within ~8-12% of
+    each other) showed a spurious REAR_LATERAL_IMBALANCE marker landing at the same row-edge
+    position already identified as segmentation-unreliable by the v24.31 (STEP_DOWN) and
+    v24.35 (cross-view) fixes. Unlike those two detectors, this one never received the
+    equivalent "edge pair needs a stricter bar" protection - it only ever applied the DIRECT
+    width-outlier gate (excluding a pair only when a stack's own segmented width is clearly
+    wrong), never a comparison against the rear-zone's own interior background trend. FIX:
+    mirrors the same is_edge_pair + interior-trend-comparison design already proven in
+    STEP_DOWN's ROWEDGE_TREND_GUARD - a pair sitting at the very edge of the analyzed
+    rear-zone stack list must now either (a) clear a stricter multiplier over the zone's own
+    interior (non-edge) pairs' background ratio, when such interior data exists, or (b) clear
+    a raised absolute minimum ratio when there is no interior pair at all to sanity-check
+    against (the rear zone only contains 2 stacks total) - closing the one gap the v24.25
+    full-code-audit left in this specific detector.
     """
     relevant = [s for s in stacks if s["x1"] > rear_x0 and s["x0"] < rear_x1]
     relevant.sort(key=lambda s: s["x0"])
@@ -2901,8 +3040,11 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
     # _flag_width_outlier_stacks docstring) - a segmentation fragment/merged-blob stack in
     # the rear zone makes the REAR_LATERAL_IMBALANCE comparison just as unreliable here.
     suspect_indices = _flag_width_outlier_stacks(relevant, view_label=view_label)
-    regions = []
-    for i in range(len(relevant) - 1):
+    n_relevant = len(relevant)
+    edge_indices = {0, n_relevant - 1} if n_relevant >= 2 else set()
+
+    raw_pairs = []
+    for i in range(n_relevant - 1):
         if i in suspect_indices or (i + 1) in suspect_indices:
             if globals().get("V2405_REAR_LATERAL_TRACE", False):
                 print(f"v24.25 REAR_LATERAL reject {view_label}: pair=({i},{i+1}) skipped - "
@@ -2916,32 +3058,67 @@ def detect_lateral_imbalance_regions_for_view(stacks, rear_x0, rear_x1, view_lab
         taller_stack, shorter_stack = (a, b) if ha >= hb else (b, a)
         taller, shorter = (ha, hb) if ha >= hb else (hb, ha)
         ratio = 1 - (shorter / taller)
-        if ratio >= LATERAL_IMBALANCE_MIN_RATIO:
-            # Use visible cargo pair area, with top anchored to visible upper cargo and bottom kept
-            # around the cargo body, not the floor. This makes AA04-05 BACK marker cover the blue/
-            # green/red cargo stacks instead of the lower white/floor area.
-            x_min = min(a["x0"], b["x0"])
-            x_max = max(a["x1"], b["x1"])
-            y_top_pair = min(a["top_y"], b["top_y"])
-            y_floor_pair = max(a["floor_y"], b["floor_y"])
-            pair_h = max(1, y_floor_pair - y_top_pair)
-            # Cropping bottom by 18% reduces low/floor overreach while keeping visible box body.
-            y_min = y_top_pair
-            y_max = y_floor_pair - int(pair_h * 0.18) if globals().get("V2405_REAR_LATERAL_MARK_VISIBLE_PAIR_ONLY", True) else y_floor_pair
-            if y_max <= y_min:
-                y_max = y_floor_pair
-            if str(view_label or "").upper() == "BACK":
-                x_min, y_min, x_max, y_max = _v2405_shift_abs_box_up_for_back((x_min, y_min, x_max, y_max), view_label)
-            regions.append({
-                "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
-                "ratio": ratio,
-                "v2405_back_shift_up": str(view_label or "").upper() == "BACK",
-                "v2405_source": "adjacent_rear_stack_height_pair",
-                "v2405_taller_height": taller,
-                "v2405_shorter_height": shorter,
-            })
-            if globals().get("V2405_REAR_LATERAL_TRACE", False):
-                print(f"v24.05 REAR_LATERAL accept {view_label}: pair=({i},{i+1}) ratio={ratio:.2f} box=[{x_min},{y_min},{x_max},{y_max}]")
+        is_edge_pair = (i in edge_indices) or ((i + 1) in edge_indices)
+        raw_pairs.append({"i": i, "a": a, "b": b, "taller": taller, "shorter": shorter,
+                           "ratio": ratio, "is_edge_pair": is_edge_pair})
+
+    interior_ratios = [p["ratio"] for p in raw_pairs if not p["is_edge_pair"]]
+    edge_guard_enabled = globals().get("V2436_REAR_LATERAL_ROWEDGE_GUARD_ENABLED", True)
+    edge_trend_multiplier = globals().get("V2436_REAR_LATERAL_ROWEDGE_TREND_MULTIPLIER", 1.6)
+    edge_no_interior_multiplier = globals().get("V2436_REAR_LATERAL_ROWEDGE_NO_INTERIOR_MIN_RATIO_MULTIPLIER", 1.5)
+    background_max_ratio = max(interior_ratios) if len(interior_ratios) >= 2 else None
+
+    regions = []
+    for p in raw_pairs:
+        i, a, b, ratio, taller, shorter = p["i"], p["a"], p["b"], p["ratio"], p["taller"], p["shorter"]
+        if ratio < LATERAL_IMBALANCE_MIN_RATIO:
+            continue
+        if edge_guard_enabled and p["is_edge_pair"]:
+            if background_max_ratio is not None:
+                required_ratio = max(LATERAL_IMBALANCE_MIN_RATIO, background_max_ratio * edge_trend_multiplier)
+                if ratio < required_ratio:
+                    if globals().get("V2405_REAR_LATERAL_TRACE", False):
+                        print(f"v24.36 REAR_LATERAL ROWEDGE_TREND reject {view_label}: pair=({i},{i+1}) "
+                              f"ratio={ratio:.2f} touches edge of analyzed rear-zone, but does not clear "
+                              f"this zone's own interior background trend ratio ({background_max_ratio:.2f} "
+                              f"x {edge_trend_multiplier} = {required_ratio:.2f}) - likely a segmentation "
+                              f"artifact at the analysis-zone boundary, not a genuine imbalance")
+                    continue
+            else:
+                required_ratio = LATERAL_IMBALANCE_MIN_RATIO * edge_no_interior_multiplier
+                if ratio < required_ratio:
+                    if globals().get("V2405_REAR_LATERAL_TRACE", False):
+                        print(f"v24.36 REAR_LATERAL ROWEDGE_NO_INTERIOR reject {view_label}: pair=({i},{i+1}) "
+                              f"ratio={ratio:.2f} touches edge of analyzed rear-zone with no interior pair "
+                              f"available to sanity-check against - requires raised threshold "
+                              f"{required_ratio:.2f} (= {LATERAL_IMBALANCE_MIN_RATIO} x "
+                              f"{edge_no_interior_multiplier}), not met")
+                    continue
+        # Use visible cargo pair area, with top anchored to visible upper cargo and bottom kept
+        # around the cargo body, not the floor. This makes AA04-05 BACK marker cover the blue/
+        # green/red cargo stacks instead of the lower white/floor area.
+        x_min = min(a["x0"], b["x0"])
+        x_max = max(a["x1"], b["x1"])
+        y_top_pair = min(a["top_y"], b["top_y"])
+        y_floor_pair = max(a["floor_y"], b["floor_y"])
+        pair_h = max(1, y_floor_pair - y_top_pair)
+        # Cropping bottom by 18% reduces low/floor overreach while keeping visible box body.
+        y_min = y_top_pair
+        y_max = y_floor_pair - int(pair_h * 0.18) if globals().get("V2405_REAR_LATERAL_MARK_VISIBLE_PAIR_ONLY", True) else y_floor_pair
+        if y_max <= y_min:
+            y_max = y_floor_pair
+        if str(view_label or "").upper() == "BACK":
+            x_min, y_min, x_max, y_max = _v2405_shift_abs_box_up_for_back((x_min, y_min, x_max, y_max), view_label)
+        regions.append({
+            "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
+            "ratio": ratio,
+            "v2405_back_shift_up": str(view_label or "").upper() == "BACK",
+            "v2405_source": "adjacent_rear_stack_height_pair",
+            "v2405_taller_height": taller,
+            "v2405_shorter_height": shorter,
+        })
+        if globals().get("V2405_REAR_LATERAL_TRACE", False):
+            print(f"v24.05 REAR_LATERAL accept {view_label}: pair=({i},{i+1}) ratio={ratio:.2f} box=[{x_min},{y_min},{x_max},{y_max}]")
     return regions
 
 def _v2405_region_to_box_2d(region, crop_w, crop_h, crop_y_start):
@@ -4672,3 +4849,8 @@ V2435_BUILD_MARKER = True  # v24.35 CrossViewEdgeCorroborationFix build tag - se
                             # (fixes a broken needs_corroboration AND-gate that never fired on any
                             # real file with >=3 stacks per view, letting a row-edge cross-view
                             # match at the head-wall end slip through uncorroborated every time)
+V2436_BUILD_MARKER = True  # v24.36 WidthOutlierAdjacencyCorroborationFix + RearLateralRowEdgeGuard
+                            # build tag - see changelog header, detect_step_down_regions_from_
+                            # stack_model() (BUG 1: direct-vs-propagated width-outlier split), and
+                            # detect_lateral_imbalance_regions_for_view() (BUG 2: row-edge trend
+                            # guard) for the real, wired-in fixes
