@@ -1,5 +1,5 @@
 functions-framework==3.4.0
 Pillow==10.1.0
-numpy==1.26.4
-cipy==1.11.4
 PyMuPDF==1.23.8
+numpy>=1.26,<3
+scipy>=1.11,<2
