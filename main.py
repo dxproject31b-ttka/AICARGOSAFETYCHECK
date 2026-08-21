@@ -81,8 +81,25 @@ VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
 STEP_DOWN_HEIGHT_DROP_RATIO = 0.125     # 12.5% - เกณฑ์หลักสำหรับ STEP_DOWN_RISK ทั้ง 2 subtype
 EDGE_PAIR_STRICTER_DROP_RATIO = 0.30    # 30% - เกณฑ์เข้มขึ้นสำหรับคู่ cross-view ที่เป็นขอบสุดพร้อมกัน
-REAR_EMPTY_LENGTH_RATIO = 0.07          # 7% - โซนสุดท้ายก่อนประตูท้ายตู้ สำหรับ REAR_EMPTY_RISK
+REAR_EMPTY_LENGTH_RATIO = 0.07          # 7% - โซนสุดท้ายก่อนประตูท้ายตู้ สำหรับ REAR_EMPTY_RISK (เก็บไว้อ้างอิง/ไม่ใช้แล้ว)
 CROSSVIEW_MIN_OVERLAP_RATIO = 0.5       # ต้องทับซ้อนตำแหน่งจริงอย่างน้อย 50% จึงถือเป็นคู่เดียวกัน
+
+# --- REAR_EMPTY_RISK v2 (แก้บั๊ก v25.0: pos_range เดิม self-normalize ทำให้ตั้งสุดท้าย
+#     ของทุก view ได้ pos=1.0 เสมอ ทำให้ position-overlap matching ผิดพลาดเป็นระบบ) ---
+# กลไก A: เทียบ length_px (Phase 2, ค่าจริงหน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK
+#   ถ้าต่างกันเกินทั้ง px ขั้นต่ำ และสัดส่วนขั้นต่ำ -> ฝั่งที่ "สั้นกว่า" มีพื้นที่ว่างจริงก่อนประตูท้ายตู้
+#   ค่า threshold คาลิเบรตจากไฟล์ตัวอย่าง 3 ไฟล์ (ground truth): EC01-01 gap=72px(12.6%),
+#   AC03-01 gap=46px(8.6%) ต้อง flag / EC04-02 gap=17px(3.4%) ต้องไม่ flag (คนละกลไกกับ B)
+REAR_GAP_MIN_PX = 35
+REAR_GAP_MIN_RATIO = 0.06
+
+# กลไก B: ตรวจ "ตั้งสุดท้ายจริง" (real pos_range ใกล้ 1.0 ที่สุด) ของแต่ละ view ว่ามีสี SKU
+#   ปะปนกันผิดปกติหรือไม่ (เช่น SKU แปลกปลอมโผล่ที่ตำแหน่งท้ายสุด มักพบคู่กับพื้นที่ว่าง/สินค้า
+#   วางไม่เป็นระเบียบใกล้ประตูท้ายตู้) คาลิเบรตจาก EC04-02 BACK idx5 (TEM1A, 4 สีเด่น) ที่ต้อง
+#   flag ในขณะที่ตั้งท้ายสุดของอีก 5 view (สีเดียวล้วน) ต้องไม่ flag
+REAR_COLOR_ANOMALY_MIN_COLORS = 3
+REAR_COLOR_MIN_FRACTION = 0.03
+REAR_COLOR_MIN_PIXELS = 80
 
 
 def generate_action_report(case_type, description="", sku_list=""):
@@ -770,45 +787,95 @@ def detect_step_down_crossview(records_front, records_back):
     return list(merged.values())
 
 
-def detect_rear_empty_risk(records_front, records_back):
+def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
+                              min_fraction=REAR_COLOR_MIN_FRACTION,
+                              min_pixels=REAR_COLOR_MIN_PIXELS):
+    """หาชุดสีเด่น (quantized 32-level) ภายในช่วง x_range ของ 1 ตั้ง - ใช้ตรวจว่ามี SKU
+    ปะปนกันผิดปกติหรือไม่ (กลไก B ของ REAR_EMPTY_RISK) คืนค่า list[(color, count)]"""
+    x0, x1 = x_range
+    x0 = max(0, x0 + margin)
+    x1 = max(x0, x1 - margin)
+    if x1 <= x0:
+        return []
+    sub_mask = cargo_mask[:, x0:x1]
+    sub_region = region[:, x0:x1]
+    pixels = sub_region[sub_mask]
+    if len(pixels) < 50:
+        return []
+    quant = (pixels // 32 * 32).astype(np.int32)
+    uniq, counts = np.unique(quant.reshape(-1, 3), axis=0, return_counts=True)
+    total = len(pixels)
+    order = np.argsort(-counts)
+    clusters = []
+    for i in order:
+        if counts[i] >= min_pixels and (counts[i] / total) >= min_fraction:
+            clusters.append((tuple(int(v) for v in uniq[i]), int(counts[i])))
+    return clusters
+
+
+def _rearmost_record(records):
+    """ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด) ของ view นั้น"""
+    if not records:
+        return None
+    return max(records, key=lambda r: r["pos_range"][1])
+
+
+def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
+    """REAR_EMPTY_RISK v2 - แก้บั๊ก v25.0 เดิมที่ pos_range เป็น self-normalized ทำให้
+    ตั้งสุดท้ายของทุก view ได้ pos=1.0 เสมอ (position-overlap matching จึงจับคู่ผิดเป็นระบบ
+    เพราะขอบท้ายสุดของทั้ง 2 view ชนกันที่ pos=1.0 โดยนิยาม ไม่ได้สะท้อนตำแหน่งจริง)
+
+    ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth คนละไฟล์):
+      A) เทียบ length_px จริง (Phase 2, หน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK
+         ถ้าต่างกันเกิน threshold -> ฝั่งที่สั้นกว่ามีพื้นที่ว่างจริงก่อนประตูท้ายตู้
+      B) ตรวจสีของ "ตั้งท้ายสุดจริง" ของแต่ละ view - ถ้ามี SKU ปะปนกันผิดปกติ (>=3 สีเด่น)
+         มักบ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างรอบข้างใกล้ประตูท้ายตู้
+    """
     risks = []
-    threshold_pos = 1.0 - REAR_EMPTY_LENGTH_RATIO
 
-    def _max_pos(records):
-        if not records:
-            return 0.0
-        return max(r["pos_range"][1] for r in records)
+    # --- กลไก A: cross-view length mismatch ---
+    front_len = front_result.get("length_px") or 0
+    back_len = back_result.get("length_px") or 0
+    longer_len = max(front_len, back_len)
+    if longer_len > 0:
+        gap_px = abs(front_len - back_len)
+        gap_ratio = gap_px / longer_len
+        if gap_px >= REAR_GAP_MIN_PX and gap_ratio >= REAR_GAP_MIN_RATIO:
+            if front_len < back_len:
+                shorter_records, shorter_label = records_front, "FRONT"
+            else:
+                shorter_records, shorter_label = records_back, "BACK"
+            rear_rec = _rearmost_record(shorter_records)
+            if rear_rec is not None:
+                risks.append({
+                    "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
+                    "mark_view": shorter_label,
+                    "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
+                    "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
+                    "reason": (f"ความยาวสินค้าที่วัดได้จากฝั่ง {shorter_label} สั้นกว่าอีกฝั่ง "
+                               f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ว่ามีพื้นที่ว่างก่อนถึงประตูท้ายตู้"),
+                })
 
-    front_max = _max_pos(records_front)
-    back_max = _max_pos(records_back)
-
-    if front_max <= back_max:
-        longer_records, longer_label = records_back, "BACK"
-        shorter_records, shorter_label = records_front, "FRONT"
-        longer_max = back_max
-    else:
-        longer_records, longer_label = records_front, "FRONT"
-        shorter_records, shorter_label = records_back, "BACK"
-        longer_max = front_max
-
-    if longer_max < threshold_pos:
-        return risks
-
-    zone_stacks = [r for r in longer_records if r["pos_range"][1] > threshold_pos]
-    if not zone_stacks:
-        return risks
-
-    zone_start = min(r["pos_range"][0] for r in zone_stacks)
-    opposite_matches = _overlapping_records((zone_start, 1.0), shorter_records, min_overlap_ratio=0.05)
-
-    if not opposite_matches:
-        for rec in zone_stacks:
+    # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view ---
+    for records, result, label in [(records_front, front_result, "FRONT"),
+                                    (records_back, back_result, "BACK")]:
+        rear_rec = _rearmost_record(records)
+        if rear_rec is None:
+            continue
+        # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
+        if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
+            continue
+        clusters = _dominant_color_clusters(result["region"], result["cargo_mask"], rear_rec["x_range"])
+        if len(clusters) >= REAR_COLOR_ANOMALY_MIN_COLORS:
             risks.append({
-                "risk_type": "REAR_EMPTY_RISK", "mark_view": longer_label,
-                "mark_stack_idx": rec["idx"], "mark_x_range": rec["x_range"],
-                "pos_range": rec["pos_range"], "opposite_view": shorter_label,
-                "reason": f"ฝั่ง {shorter_label} ไม่มีตั้งกล่องในช่วงตำแหน่งเดียวกัน (โซน 7% สุดท้ายก่อนประตูท้ายตู้)",
+                "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
+                "mark_view": label,
+                "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
+                "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
+                "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกัน {len(clusters)} สี "
+                           f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
             })
+
     return risks
 
 
@@ -822,7 +889,7 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1):
     risks += detect_step_down_pairwise(records_front, "FRONT")
     risks += detect_step_down_pairwise(records_back, "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
-    risks += detect_rear_empty_risk(records_front, records_back)
+    risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
         "front": front, "back": back,
