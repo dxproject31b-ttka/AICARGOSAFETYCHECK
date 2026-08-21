@@ -1,7 +1,26 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.10 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.11 ZERO-AI EDITION
 ================================================================================
+v25.11 FIX (สำคัญ): แทนที่ PHASE 1 (seam-based counting) ด้วย PHASE 1B (front-face
+color-blob clustering) เป็นวิธีนับหลัก เพราะพบว่า seam-based เดิมมีบั๊ก undercount จริงที่
+ไม่เกี่ยวกับ corner-duplicate เลย (เช่น EC04-01 FRONT นับได้แค่ 5 ตั้ง ทั้งที่ควรเป็น 6 ตรงกับ
+BACK - เกิดเพราะกล่องข้างเคียงสี/SKU เดียวกันทำให้ไม่มีรอยต่อสีให้ seam-detector จับ)
+
+PHASE 1B ผ่าน regression-test ครบทั้ง 6 ไฟล์ตัวอย่างจริง (12 views): AC03-01, EC01-01,
+EC04-01/02/03/04 - นับจำนวนตั้งถูกต้องตรงกับ BACK view/เรขาคณิตของตู้ทุกกรณี รวมถึงจัดการ
+กรณี "มุมกล้องใกล้สุดเห็นหน้า front+ขอบลาดซ้าย+ขอบลาดขวาพร้อมกัน จนแตกเป็นหลาย fragment ปลอม
+ต่อ 1 ตั้งจริง" (พบใน EC04-01/02/04 FRONT - บางเคสแตกถึง 3 fragment ปลอมต่อ 1 ตั้งจริง ไม่ใช่
+แค่ 2) ด้วยกติกาที่วัดผลได้จริง (merge_corner_artifact_columns): ใช้ 'side' fragment (มุมข้าง)
+ที่ซ้อนทับเป็นหลักฐาน พร้อม guard กัน false-positive จากไฟล์ที่เห็นด้านข้างของทุกกล่องตลอดทั้ง
+แถว ไม่ใช่แค่มุมกล้องใกล้สุด (ยืนยันจาก AC03-01 ซึ่งมี side fragment กระจายทั่วทั้งแถว - cluster
+ที่ไม่แตะขอบนอกสุดของ view จะถูกยกเลิกการ merge เสมอ)
+
+เทียบผลลัพธ์กับ calibration เดิม (v25.10): AC03-01/EC01-01/EC04-02 ยังคง flag ตำแหน่งเดียวกัน
+เป๊ะ (BACK idx6/idx5/idx5 ตามลำดับ) ยืนยันว่า Phase 2/3/Rule Engine ไม่ได้รับผลกระทบจากการ
+เปลี่ยน Phase 1 นี้เลย - seam-based เดิมยังคงเก็บไว้เป็น fallback อัตโนมัติ (ถ้า PHASE 1B ล้มเหลว
+เช่น หา front-face สีเด่นไม่เจอ) ดูรายละเอียดที่ compute_phase1b_columns
+
 v25.10 FIX (จาก v25.9 ที่เสียหาย): v25.9 มีบั๊กร้ายแรง - ระหว่างแก้ไข reconcile_heights_
 cross_view ทำให้ฟังก์ชัน detect_rear_empty_risk เสียหาย 2 จุด:
   1. ลบฟังก์ชัน _dominant_color_clusters() ทิ้งไปทั้งหมด (กลไก B ของ REAR_EMPTY_RISK)
@@ -80,6 +99,7 @@ import PIL.ImageDraw
 import fitz  # PyMuPDF
 import functions_framework
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 
 
 # ============================================================================
@@ -728,7 +748,7 @@ def render_full_page(pdf_bytes, page_idx=1, matrix_scale=3):
     return np.ascontiguousarray(img), doc, page
 
 
-def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30):
+def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30, override_cols=None):
     img = full_img
     H, W, _ = img.shape
     y0, y1 = int(H * y0_frac), int(H * y1_frac)
@@ -740,25 +760,64 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
     cargo_mask = vivid_cargo_mask(region) & (~arrow_m)
     floor_y, cargo_bottom_y, grounded = compute_floor_profile(
         region, struct_mask_raw & (~arrow_m), cargo_mask, gap_thresh=gap_thresh)
-    n_stacks, seams, xrange_ = seam_based_count(region, grounded, cargo_bottom_y, cargo_mask, struct_mask_raw)
 
-    # v25.11 - ตรวจ 'corner artifact' (idx0 ที่เป็นภาพซ้ำ/หน้าด้านข้างของกล่องมุม หรือผนังหัวตู้
-    # ที่โผล่มาก่อนเส้นขอบฐานตู้จริงเริ่มต้น) ด้วยเส้น rail ทางเรขาคณิต (ไม่ hardcode ชื่อ view)
-    # หลักการ: ถ้า 'จุดเริ่มต้นเส้น rail จริง (corner_x)' อยู่ห่างจาก x_min อย่างมีนัยสำคัญ
-    # เทียบกับความกว้างตั้งทั่วไปในภาพเดียวกัน แปลว่า segment แรกมีส่วนหนึ่ง (หรือทั้งหมด) อยู่
-    # ก่อนเส้น rail จริง -> เป็น corner artifact ควรตัดออกจากการนับ/เปรียบเทียบ
-    # ยืนยันด้วยข้อมูลจริง 3 ไฟล์: AC03-01 FRONT (diff=54, exclude, ตรงกับ 7 จริง),
-    # AC03-01 BACK (diff=17, keep, ตรงกับ 7 จริง), EC01-01/EC04-02 ทั้งคู่ pattern สอดคล้องกัน
+    xs_grounded_all = np.nonzero(grounded)[0]
+    fallback_xrange = (int(xs_grounded_all.min()), int(xs_grounded_all.max())) if len(xs_grounded_all) else None
+
     idx0_is_corner_duplicate = False
-    if xrange_ is not None and seams:
-        x_min_, x_max_ = xrange_
-        rail_for_corner = detect_container_floor_rail(region, cargo_bottom_y, grounded)
-        if rail_for_corner is not None:
-            first_seam = sorted(seams)[0]
-            seg0_width = first_seam - x_min_
-            diff = rail_for_corner["corner_x"] - x_min_
-            if seg0_width > 0 and diff > 0.3 * seg0_width and diff > 15:
-                idx0_is_corner_duplicate = True
+
+    if override_cols:
+        # v25.11: ใช้ผลจาก PHASE 1B (front-face color-blob clustering + corner-cluster merge +
+        # cross-view reconciliation, ดูรายละเอียดที่ compute_phase1b_columns) แทน seam-based
+        # counting เดิม - แก้บั๊ก undercount ที่พบจริง (เช่น EC04-01 FRONT นับได้แค่ 5 จาก
+        # seam-based ทั้งที่ควรเป็น 6) และแก้ปัญหา corner-artifact แบบหลาย fragment ได้แม่นยำกว่า
+        # เดิม (ที่รองรับแค่ idx0 ตัวเดียว) - เพราะ merge เอา fragment ปลอมออกไปตั้งแต่ต้นเลย จึง
+        # ไม่มี phantom record เหลือให้ต้อง flag is_corner_duplicate อีกต่อไป
+        cols_sorted = sorted(override_cols, key=lambda c: c["cx"])
+        n_stacks = len(cols_sorted)
+        if fallback_xrange is not None:
+            x_min_, x_max_ = fallback_xrange
+        else:
+            x_min_ = cols_sorted[0]["x"]
+            x_max_ = cols_sorted[-1]["x"] + cols_sorted[-1]["w"]
+
+        # v25.11 GUARD: กล่องมุมกล้องใกล้สุด (corner-perspective) บางครั้งมี front-face จริงที่
+        # ตรวจพบ (PHASE 1B) อยู่ "นอกช่วง grounded" ของระบบพื้น/floor-profile เดิม (พบจริงใน
+        # EC04-01 FRONT - พื้นตู้บริเวณมุมกล้องใกล้สุดมีระยะห่างจาก cargo_bottom_y เกิน gap_thresh
+        # เพราะมุมมอง isometric ที่มุมตู้บิดเบือนไปจากปกติ ไม่ใช่บั๊กของ PHASE 1B) การปล่อยให้ seam
+        # midpoint คำนวณตรงๆ อาจตกอยู่นอกช่วง [x_min_,x_max_] ทำให้เกิด segment แรกที่แคบผิดปกติ
+        # (แม้แต่ติดลบ/เกือบ 0px) เมื่อ clip เข้ามาตรงๆ - แก้โดย clip แบบ "sequential" ทีละ seam
+        # พร้อมบังคับ min_seg_width ขั้นต่ำ กัน segment แคบผิดปกติ/ไม่เรียงลำดับ โดยยังคงจำนวนตั้ง
+        # (n_stacks) ไว้ถูกต้องเสมอ (Phase 2/3 มีกลไก cross_view_filled/carried_forward รองรับ
+        # อยู่แล้วสำหรับ segment ที่ข้อมูลพื้น/ความสูงไม่น่าเชื่อถือ ณ จุดนี้)
+        min_seg_width = 20
+        seams = []
+        prev_boundary = x_min_
+        for i in range(len(cols_sorted) - 1):
+            gap_mid = (cols_sorted[i]["x"] + cols_sorted[i]["w"] + cols_sorted[i + 1]["x"]) // 2
+            seam = int(np.clip(gap_mid, prev_boundary + min_seg_width, x_max_ - min_seg_width))
+            if seams and seam <= seams[-1]:
+                seam = seams[-1] + min_seg_width
+            seams.append(seam)
+            prev_boundary = seam
+        xrange_ = (x_min_, x_max_)
+    else:
+        # fallback: PHASE 1B ไม่สำเร็จ (เช่น หา front-face สีเด่นไม่เจอ) - ใช้ seam-based เดิม
+        n_stacks, seams, xrange_ = seam_based_count(region, grounded, cargo_bottom_y, cargo_mask, struct_mask_raw)
+
+        # v25.10 - ตรวจ 'corner artifact' (idx0 ที่เป็นภาพซ้ำ/หน้าด้านข้างของกล่องมุม หรือผนังหัวตู้
+        # ที่โผล่มาก่อนเส้นขอบฐานตู้จริงเริ่มต้น) ด้วยเส้น rail ทางเรขาคณิต (ไม่ hardcode ชื่อ view)
+        # ยืนยันด้วยข้อมูลจริง 3 ไฟล์: AC03-01 FRONT (diff=54, exclude, ตรงกับ 7 จริง),
+        # AC03-01 BACK (diff=17, keep, ตรงกับ 7 จริง), EC01-01/EC04-02 ทั้งคู่ pattern สอดคล้องกัน
+        if xrange_ is not None and seams:
+            x_min_, x_max_ = xrange_
+            rail_for_corner = detect_container_floor_rail(region, cargo_bottom_y, grounded)
+            if rail_for_corner is not None:
+                first_seam = sorted(seams)[0]
+                seg0_width = first_seam - x_min_
+                diff = rail_for_corner["corner_x"] - x_min_
+                if seg0_width > 0 and diff > 0.3 * seg0_width and diff > 15:
+                    idx0_is_corner_duplicate = True
 
     return {
         "n_stacks": n_stacks, "seams": seams, "xrange": xrange_,
@@ -768,6 +827,462 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         "full_page_width": W, "full_page_height": H,
         "idx0_is_corner_duplicate": idx0_is_corner_duplicate,
     }
+
+
+# ============================================================================
+# PHASE 1B (v25.11): จำนวนตั้ง+ตำแหน่ง ด้วยวิธี "front-face color-blob clustering"
+# ============================================================================
+# แทนที่ seam-based counting (PHASE 1 ด้านบน) ด้วยวิธีใหม่ที่พอร์ตมาจากโมดูลทดลองซึ่งผ่าน
+# regression-test กับไฟล์ตัวอย่างจริงครบทั้ง 6 ไฟล์ (12 views): AC03-01, EC01-01, EC04-01/02/03/04
+# เหตุผลที่ต้องแทนที่ (ไม่ใช่แค่ปรับปรุง idx0_is_corner_duplicate เดิม):
+#   - seam-based เดิมมีบั๊ก undercount จริงที่ไม่เกี่ยวกับ corner-duplicate เลย เช่น EC04-01
+#     FRONT นับได้แค่ 5 ตั้ง (ทั้งที่ควรเป็น 6 ตรงกับ BACK) เพราะกล่องข้างเคียงสี/SKU เดียวกัน
+#     ทำให้ไม่มีรอยต่อสีให้ seam-detector จับ
+#   - PHASE 1B ตรวจสอบแล้วว่านับถูกต้องครบ 100% ทั้ง 6 ไฟล์ (ตรงกับจำนวนจาก BACK view/เรขาคณิต
+#     ของตู้ทุกกรณี) รวมถึงกรณี "มุมกล้องใกล้สุดเห็นหน้า front+ขอบลาดซ้าย+ขอบลาดขวาพร้อมกัน จน
+#     แตกเป็น 3 fragment ปลอมต่อ 1 ตั้งจริง" (ยืนยันจาก EC04-01/02/04 FRONT) โดยใช้ 'side'
+#     fragment (มุมข้าง) ที่ซ้อนทับเป็นหลักฐานวัดผลได้ (merge_corner_artifact_columns) พร้อม
+#     guard กัน false-positive จากไฟล์ที่เห็นด้านข้างของ "ทุกกล่องตลอดทั้งแถว" ไม่ใช่แค่มุมกล้อง
+#     ใกล้สุด (ยืนยันจาก AC03-01 ที่ side fragment กระจายทั่วทั้งแถว - cluster ที่ไม่แตะขอบนอก
+#     สุดของ view จะถูกยกเลิกการ merge เสมอ)
+#
+# กลไกการทำงาน (เทียบ ground-truth ระหว่าง 2 view เหมือน PHASE 1 เดิม):
+#   1. BACK = ground-truth ตำแหน่งจริง (หา front-face color-blob -> รวมเป็นคอลัมน์ -> merge
+#      corner-artifact -> ตัด sidewall-contamination ที่ทราบสาเหตุแล้ว)
+#   2. FRONT = candidate (อาจมี fragment ปลอมเกินจาก BACK) -> merge corner-artifact ก่อน ->
+#      จับคู่ตำแหน่งกับ BACK ด้วย Hungarian algorithm (linear_sum_assignment) -> ตัดตัวที่ไม่ถูก
+#      จับคู่ทิ้ง (ของซ้ำจากมุมกล้อง)
+#   3. คืนค่าเป็นรายการคอลัมน์สุดท้ายของแต่ละ view (x,w,cx ในพิกัด region local ของ view นั้น)
+#      ให้ process_view_on_image ใช้แทนผลจาก seam_based_count โดยตรง (ดู override_cols)
+#
+# หมายเหตุ scale: threshold ต่างๆ (area_min, tol, gap ฯลฯ) ถูก calibrate ไว้ที่ render PDF
+# ตรงๆ ที่ matrix_scale=4 (ไม่ใช่ upscale จากภาพที่ resolution ต่ำกว่ามาที่หลัง) - ทดสอบแล้วว่า
+# การ NEAREST-upscale จากภาพที่ render ที่ matrix_scale=3 (ค่าเริ่มต้นของไฟล์นี้) มาเป็นสัดส่วน
+# เทียบเท่า 4 ทำให้รายละเอียดขอบ/สี ที่สูญเสียไปตอน render ที่ 3 (โดยเฉพาะไฟล์ที่กล่องเรียงถี่
+# อย่าง AC03-01) ไม่สามารถกู้คืนได้ ทำให้ blob-detection ผิดเพี้ยน (ยืนยันจากข้อมูลจริง: AC03-01
+# ด้วยวิธี upscale-from-3 ได้ front=5/back=7 ผิด แต่ render ตรงที่ scale=4 ได้ front=7/back=7
+# ถูกต้อง) จึงเปลี่ยนมาเป็น "render หน้าเต็มแยกต่างหากที่ matrix_scale=4 เฉพาะสำหรับ PHASE 1B"
+# (ใช้ pdf_bytes ตรงๆ ไม่พึ่ง full_img/region ที่ render มาที่ scale อื่นแล้ว) แล้วค่อยแปลงพิกัด
+# ผลลัพธ์คอลัมน์สุดท้ายกลับเป็น scale ของ region จริง (matrix_scale ของไฟล์นี้) ก่อนส่งคืน
+#
+# Fail-safe: ถ้าขั้นตอนใดล้มเหลว (หา 'front-face' สีเด่นไม่เจอ ฯลฯ) จะคืนค่า None ทั้งคู่ และ
+# process_view_on_image จะ fallback ไปใช้ seam-based เดิมโดยอัตโนมัติ (ไม่ทำให้ทั้งระบบล้มเหลว)
+
+PHASE1B_RENDER_SCALE = 4.0  # scale ที่ calibrate threshold ต่างๆ ไว้ (render ตรงจาก PDF เสมอ)
+
+
+def _p1b_sat_val(crop):
+    """คำนวณ Saturation/Value โดยตรงจาก RGB (แทน cv2.cvtColor(...,COLOR_RGB2HSV) เพื่อไม่ต้อง
+    พึ่ง opencv ซึ่งไม่ได้อยู่ใน dependency ของ Cloud Function นี้ - สูตรมาตรฐาน HSV เดียวกัน)"""
+    r = crop[:, :, 0].astype(np.float32)
+    g = crop[:, :, 1].astype(np.float32)
+    b = crop[:, :, 2].astype(np.float32)
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    V = mx / 255.0
+    S = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0)
+    return S, V
+
+
+def _p1b_dominant_colors(crop, max_colors=25, min_frac=0.002):
+    S, V = _p1b_sat_val(crop)
+    colorful = (S > 0.25) & (V > 0.05)
+    pixels = crop[colorful]
+    if len(pixels) == 0:
+        return []
+    colors, counts = np.unique(pixels.reshape(-1, 3), axis=0, return_counts=True)
+    total = counts.sum()
+    order = np.argsort(-counts)
+    picked = []
+    for idx in order:
+        c = colors[idx]
+        frac = counts[idx] / total
+        if frac < min_frac:
+            continue
+        if any(np.abs(c.astype(int) - p.astype(int)).sum() < 40 for p in picked):
+            continue
+        picked.append(c)
+        if len(picked) >= max_colors:
+            break
+    return picked
+
+
+def _p1b_cells_for_color(crop, color, tol=12, area_min=1200):
+    """หา connected-components ของสี color บน crop - ใช้ scipy.ndimage แทน
+    cv2.connectedComponentsWithStats (ผลลัพธ์เทียบเท่ากัน, ไม่ต้องพึ่ง opencv)"""
+    diff = np.abs(crop.astype(int) - np.array(color, dtype=int))
+    m = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
+    structure = np.ones((3, 3), dtype=int)  # 8-connectivity เหมือน cv2 connectivity=8
+    labeled, num = ndimage.label(m, structure=structure)
+    comps = []
+    if num == 0:
+        return comps
+    objects = ndimage.find_objects(labeled)
+    for i, sl in enumerate(objects, start=1):
+        if sl is None:
+            continue
+        y_slice, x_slice = sl
+        sub = (labeled[sl] == i)
+        area = int(sub.sum())
+        if area < area_min:
+            continue
+        y0, y1 = y_slice.start, y_slice.stop
+        x0, x1 = x_slice.start, x_slice.stop
+        cy_local, cx_local = ndimage.center_of_mass(sub)
+        comps.append(dict(x=int(x0), y=int(y0), w=int(x1 - x0), h=int(y1 - y0), area=area,
+                           cx=float(x0 + cx_local), cy=float(y0 + cy_local)))
+    return comps
+
+
+def _p1b_merge_text_split_fragments(comps, x_tol=12, w_tol=25, gap_max=40):
+    comps = sorted(comps, key=lambda c: (round(c['x'] / 10), c['y']))
+    used = [False] * len(comps)
+    merged = []
+    for i, c in enumerate(comps):
+        if used[i]:
+            continue
+        group = [c]
+        used[i] = True
+        changed = True
+        while changed:
+            changed = False
+            for j, c2 in enumerate(comps):
+                if used[j]:
+                    continue
+                for g in group:
+                    same_col = abs(g['x'] - c2['x']) <= x_tol and abs(g['w'] - c2['w']) <= w_tol
+                    vert_close = (c2['y'] >= g['y'] - gap_max and c2['y'] <= g['y'] + g['h'] + gap_max)
+                    if same_col and vert_close:
+                        group.append(c2)
+                        used[j] = True
+                        changed = True
+                        break
+        x0 = min(g['x'] for g in group); y0 = min(g['y'] for g in group)
+        x1 = max(g['x'] + g['w'] for g in group); y1 = max(g['y'] + g['h'] for g in group)
+        area = sum(g['area'] for g in group)
+        merged.append(dict(x=x0, y=y0, w=x1 - x0, h=y1 - y0, area=area,
+                            cx=(x0 + x1) / 2, cy=(y0 + y1) / 2))
+    return merged
+
+
+def _p1b_classify_view(crop, area_min=1200):
+    S, _ = _p1b_sat_val(crop)
+    colors = _p1b_dominant_colors(crop)
+    all_cells = []
+    for color in colors:
+        comps = _p1b_cells_for_color(crop, color, area_min=area_min)
+        for c in comps:
+            aspect = c['h'] / c['w'] if c['w'] else 0
+            sub_s = S[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
+            mean_sat = float(np.mean(sub_s[sub_s > 0.1])) if np.any(sub_s > 0.1) else 0
+            c['mean_sat'] = mean_sat
+            c['color'] = tuple(int(v) for v in color)
+            if mean_sat < 0.75:
+                c['kind0'] = 'side'
+            elif aspect < 0.85:
+                c['kind0'] = 'roof'
+            else:
+                c['kind0'] = 'front'
+        for kind0 in ('front', 'roof', 'side'):
+            subset = [c for c in comps if c['kind0'] == kind0]
+            merged = _p1b_merge_text_split_fragments(subset)
+            for c in merged:
+                c['aspect'] = c['h'] / c['w'] if c['w'] else 0
+                c['color'] = tuple(int(v) for v in color)
+                c['kind'] = kind0
+                sub_s = S[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
+                c['mean_sat'] = float(np.mean(sub_s[sub_s > 0.1])) if np.any(sub_s > 0.1) else 0
+                all_cells.append(c)
+    return all_cells
+
+
+def _p1b_front_faces(crop, area_min=1200):
+    cells = _p1b_classify_view(crop, area_min=area_min)
+    fronts = [c for c in cells if c['kind'] == 'front']
+    fronts.sort(key=lambda c: -c['area'])
+    kept = []
+    for c in fronts:
+        dup = False
+        for k in kept:
+            ox0 = max(c['x'], k['x']); oy0 = max(c['y'], k['y'])
+            ox1 = min(c['x'] + c['w'], k['x'] + k['w']); oy1 = min(c['y'] + c['h'], k['y'] + k['h'])
+            inter = max(0, ox1 - ox0) * max(0, oy1 - oy0)
+            if inter > 0.6 * min(c['area'], k['area']):
+                dup = True
+                break
+        if not dup:
+            kept.append(c)
+    kept.sort(key=lambda c: c['cx'])
+    return kept, cells
+
+
+def _p1b_cluster_columns(fronts, cx_tol=45):
+    fronts = sorted(fronts, key=lambda c: c['cx'])
+    cols = []
+    for c in fronts:
+        placed = False
+        for col in cols:
+            if abs(col['cx'] - c['cx']) <= cx_tol:
+                col['members'].append(c)
+                xs0 = min(col['x'], c['x']); ys0 = min(col['y'], c['y'])
+                xs1 = max(col['x'] + col['w'], c['x'] + c['w']); ys1 = max(col['y'] + col['h'], c['y'] + c['h'])
+                col['x'], col['y'] = xs0, ys0
+                col['w'], col['h'] = xs1 - xs0, ys1 - ys0
+                col['cx'] = (xs0 + xs1) / 2
+                col['cy'] = (ys0 + ys1) / 2
+                placed = True
+                break
+        if not placed:
+            cols.append(dict(x=c['x'], y=c['y'], w=c['w'], h=c['h'],
+                              cx=c['cx'], cy=c['cy'], members=[c]))
+    cols.sort(key=lambda c: c['cx'])
+    return cols
+
+
+def _p1b_x_overlap_frac(a0, a1, b0, b1):
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    wa = max(1e-6, a1 - a0)
+    return inter / wa
+
+
+def _p1b_merge_corner_artifact_columns(cols, all_cells, side_overlap_ratio=0.5, edge_gap_max=15):
+    """รวมคอลัมน์ (front-face) หลายอัน (ไม่จำกัดแค่ 2) ที่แท้จริงเป็น "มุมกล้องใกล้สุด" ของกล่อง
+    ใบเดียวกัน ให้เหลือคอลัมน์เดียว โดยใช้ 'side' fragment ที่ซ้อนทับเป็นหลักฐานวัดผลได้ พร้อม
+    guard: ยอมรับเฉพาะ cluster ที่แตะขอบนอกสุดจริงของ view (index 0 หรือ n-1) เท่านั้น กัน
+    false-positive จากไฟล์ที่เห็นด้านข้างของทุกกล่องตลอดทั้งแถว (ดู docstring เต็มในโมดูล
+    phase1_detect.py ต้นทาง สำหรับคำอธิบายละเอียด + ตัวอย่างข้อมูลจริงที่ยืนยันแล้ว)"""
+    n = len(cols)
+    if n < 2:
+        return list(cols), []
+    cols = sorted(cols, key=lambda c: c['cx'])
+    sides = [c for c in all_cells if c['kind'] == 'side']
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    if sides:
+        for i in range(n - 1):
+            a, b = cols[i], cols[i + 1]
+            a0, a1 = a['x'], a['x'] + a['w']
+            b0, b1 = b['x'], b['x'] + b['w']
+            for s in sides:
+                s0, s1 = s['x'], s['x'] + s['w']
+                fa = _p1b_x_overlap_frac(a0, a1, s0, s1)
+                fb = _p1b_x_overlap_frac(b0, b1, s0, s1)
+                if fa >= side_overlap_ratio and fb >= side_overlap_ratio:
+                    union(i, i + 1)
+                    break
+
+    def groups_now():
+        g = {}
+        for i in range(n):
+            r = find(i)
+            g.setdefault(r, []).append(i)
+        for r in g:
+            g[r].sort()
+        return g
+
+    g = groups_now()
+    group_of = {i: r for r, idxs in g.items() for i in idxs}
+    if len(g.get(group_of[0], [])) == 1:
+        g1 = group_of.get(1)
+        if g1 is not None and len(g[g1]) > 1 and g[g1][0] == 1:
+            gap = cols[1]['x'] - (cols[0]['x'] + cols[0]['w'])
+            if gap <= edge_gap_max:
+                union(0, 1)
+
+    g = groups_now()
+    group_of = {i: r for r, idxs in g.items() for i in idxs}
+    last = n - 1
+    if len(g.get(group_of[last], [])) == 1:
+        g2 = group_of.get(last - 1)
+        if g2 is not None and len(g[g2]) > 1 and g[g2][-1] == last - 1:
+            gap = cols[last]['x'] - (cols[last - 1]['x'] + cols[last - 1]['w'])
+            if gap <= edge_gap_max:
+                union(last - 1, last)
+
+    final_groups = groups_now()
+    kept, dropped = [], []
+    for r, idxs in final_groups.items():
+        touches_edge = (0 in idxs) or ((n - 1) in idxs)
+        if len(idxs) == 1 or not touches_edge:
+            for i in idxs:
+                kept.append(cols[i])
+            continue
+        x0 = min(cols[i]['x'] for i in idxs)
+        x1 = max(cols[i]['x'] + cols[i]['w'] for i in idxs)
+        center = (x0 + x1) / 2
+        rep_idx = min(idxs, key=lambda i: abs(cols[i]['cx'] - center))
+        for i in idxs:
+            if i == rep_idx:
+                kept.append(cols[i])
+            else:
+                dropped.append(cols[i])
+    kept.sort(key=lambda c: c['cx'])
+    return kept, dropped
+
+
+def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
+    """แก้ปัญหา 'หลงมองด้านข้างกล่อง ทำให้นับเกิน' เฉพาะกรณีที่วัดผลได้จริง (ยืนยันจาก EC04-04
+    BACK: roof สีแปลกปลอมในโซนแผงข้างที่ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ)"""
+    sides = [c for c in all_cells if c['kind'] == 'side']
+    if not sides:
+        return cols, []
+    side_x1 = max(c['x'] + c['w'] for c in sides)
+    roofs = [c for c in all_cells if c['kind'] == 'roof']
+    if not roofs:
+        return cols, []
+    from collections import Counter
+    roof_color_counts = Counter(c['color'] for c in roofs)
+    dominant_color = roof_color_counts.most_common(1)[0][0]
+    foreign_roofs_in_zone = [c for c in roofs if c['color'] != dominant_color and c['x'] < side_x1]
+    if not foreign_roofs_in_zone:
+        return cols, []
+    all_fronts = [c for c in all_cells if c['kind'] == 'front']
+    kept, dropped = list(cols), []
+    for fr in foreign_roofs_in_zone:
+        has_matching_front_anywhere = any(f['color'] == fr['color'] for f in all_fronts)
+        if has_matching_front_anywhere:
+            continue
+        if not kept:
+            continue
+        nearest_col = min(kept, key=lambda c: abs(c['cx'] - fr['cx']))
+        kept.remove(nearest_col)
+        dropped.append(nearest_col)
+    return kept, dropped
+
+
+def _p1b_roof_extent(cells):
+    roofs = [c for c in cells if c['kind'] == 'roof']
+    if not roofs:
+        return None
+    x0 = min(c['x'] for c in roofs)
+    x1 = max(c['x'] + c['w'] for c in roofs)
+    return x0, x1
+
+
+def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None):
+    """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
+    (candidate M >= N ตำแหน่ง) ด้วย Hungarian algorithm - ตัด FRONT candidate ที่ไม่ถูกจับคู่ทิ้ง
+    (ของซ้ำใกล้มุมกล้อง)"""
+    N = len(back_cols)
+    M = len(front_cols)
+    if M <= N:
+        cols = sorted(front_cols, key=lambda c: c['cx'])
+        return cols, []
+
+    def frac(cols, extent):
+        if extent is None:
+            xs = [c['cx'] for c in cols]
+            x0, x1 = min(xs), max(xs)
+        else:
+            x0, x1 = extent
+        span = (x1 - x0) if x1 != x0 else 1.0
+        return [(c['cx'] - x0) / span for c in cols]
+
+    back_sorted = sorted(back_cols, key=lambda c: c['cx'])
+    front_sorted = sorted(front_cols, key=lambda c: c['cx'])
+    back_frac = frac(back_sorted, back_extent)
+    front_frac = frac(front_sorted, front_extent)
+
+    cost = np.zeros((N, M))
+    for i, bf in enumerate(back_frac):
+        for j, ff in enumerate(front_frac):
+            cost[i, j] = abs(bf - ff)
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+    matched_idx = set(col_ind)
+    kept = [front_sorted[j] for j in sorted(matched_idx)]
+    dropped = [front_sorted[j] for j in range(M) if j not in matched_idx]
+    kept.sort(key=lambda c: c['cx'])
+    return kept, dropped
+
+
+def get_safe_region(full_img, doc, view_name, page_idx=1):
+    """คำนวณ crop 'region' ของ view นี้ ด้วยวิธีเดียวกันเป๊ะกับที่ process_view_on_image ใช้
+    ภายใน (fraction จาก label text-layer + ensure_safe_crop margin=30) เพื่อรับประกันว่าพิกัด
+    x/w ที่ PHASE 1B คำนวณได้ จะตรงกับพิกัด region ที่ process_view_on_image ใช้จริง 100%"""
+    page = doc[page_idx]
+    pw, ph = page.rect.width, page.rect.height
+    front_bb = _word_bbox_rotated(page, "Front")
+    back_bb = _word_bbox_rotated(page, "Back")
+    load_bb = _word_bbox_rotated(page, "Load")
+    cust_bb = _word_bbox_rotated(page, "Customer")
+    if front_bb is None or back_bb is None:
+        raise ValueError(f"ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า {page_idx}")
+    y0_frac, y1_frac, x0_frac, x1_frac = _view_fracs_from_bboxes(
+        front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name)
+    H, W, _ = full_img.shape
+    y0, y1 = int(H * y0_frac), int(H * y1_frac)
+    x0, x1 = int(W * x0_frac), int(W * x1_frac)
+    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30)
+    region = full_img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
+    return region, (safe_x0, safe_y0, safe_x1, safe_y1)
+
+
+def _p1b_scale_col(c, factor):
+    return dict(c, x=int(round(c['x'] * factor)), y=int(round(c['y'] * factor)),
+                w=int(round(c['w'] * factor)), h=int(round(c['h'] * factor)),
+                cx=c['cx'] * factor, cy=c['cy'] * factor)
+
+
+def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
+    """คืนค่า dict {'front': [cols...] หรือ None, 'back': [cols...] หรือ None} ในพิกัด region
+    local ของแต่ละ view ที่ scale=target_matrix_scale (ตรงกับที่ process_view_on_image ใช้จริง)
+    None = ตรวจไม่สำเร็จ (fallback อัตโนมัติไปที่ seam-based เดิมใน process_view_on_image)
+
+    v25.11 FIX: render หน้าเต็มแยกต่างหากที่ PHASE1B_RENDER_SCALE (=4) ตรงจาก pdf_bytes เสมอ
+    (ไม่ใช่ upscale ภาพที่ render มาที่ scale อื่นแล้ว) เพราะรายละเอียดขอบ/สีที่สูญเสียไปตอน
+    render ที่ scale ต่ำกว่าจะกู้คืนด้วยการ upscale ไม่ได้ - กระทบไฟล์ที่กล่องเรียงถี่ (เช่น
+    AC03-01) ทำให้ blob-detection ผิดเพี้ยน (ยืนยันจากข้อมูลจริง)
+    """
+    try:
+        hd_img, hd_doc, _ = render_full_page(pdf_bytes, page_idx=page_idx, matrix_scale=PHASE1B_RENDER_SCALE)
+        down_factor = target_matrix_scale / PHASE1B_RENDER_SCALE
+
+        back_region, _ = get_safe_region(hd_img, hd_doc, "back", page_idx)
+        front_region, _ = get_safe_region(hd_img, hd_doc, "front", page_idx)
+
+        back_all = _p1b_classify_view(back_region)
+        back_fronts, _ = _p1b_front_faces(back_region)
+        back_cols_pre = _p1b_cluster_columns(back_fronts)
+        if not back_cols_pre:
+            return {"front": None, "back": None}
+        back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
+        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        back_extent = _p1b_roof_extent(back_all)
+        if not back_cols:
+            return {"front": None, "back": None}
+
+        front_all = _p1b_classify_view(front_region)
+        front_fronts, _ = _p1b_front_faces(front_region)
+        front_cols_pre = _p1b_cluster_columns(front_fronts)
+        if not front_cols_pre:
+            return {"front": None, "back": None}
+        front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
+        front_extent = _p1b_roof_extent(front_all)
+
+        front_cols, _ = _p1b_reconcile_with_back(
+            back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent)
+        if not front_cols:
+            return {"front": None, "back": None}
+
+        return {
+            "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
+            "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+        }
+    except Exception as e:
+        print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
+        return {"front": None, "back": None}
 
 
 # ============================================================================
@@ -819,7 +1334,7 @@ def measure_stack_lengths(seams, start_x, end_x):
     return lengths, boundaries
 
 
-def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1):
+def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, override_cols=None):
     page = doc[page_idx]
     pw, ph = page.rect.width, page.rect.height
     front_bb = _word_bbox_rotated(page, "Front")
@@ -830,7 +1345,7 @@ def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1):
         raise ValueError(f"ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า {page_idx}")
     y0_frac, y1_frac, x0_frac, x1_frac = _view_fracs_from_bboxes(
         front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name)
-    r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac)
+    r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, override_cols=override_cols)
     start_x, end_x, length_px = measure_cargo_extent_via_white_bg(r["region"], r["cargo_bottom_y"], r["grounded"])
     stack_lengths, boundaries = measure_stack_lengths(r["seams"], start_x, end_x)
     return {
@@ -996,8 +1511,8 @@ def fill_missing_heights(records):
     return records
 
 
-def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, margin=6):
-    r = process_view_with_length_on_image(full_img, doc, view_name, page_idx=page_idx)
+def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, margin=6, override_cols=None):
+    r = process_view_with_length_on_image(full_img, doc, view_name, page_idx=page_idx, override_cols=override_cols)
     cargo_top_y = compute_cargo_top_profile(r["cargo_mask"])
     local_floor_y = compute_local_floor_y(r["floor_y"], r["grounded"])
     stack_heights = compute_stack_heights_px(
@@ -1298,9 +1813,20 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     return risks
 
 
-def run_full_analysis_on_image(full_img, doc, page_idx=1):
-    front = process_view_with_height_on_image(full_img, doc, "front", page_idx=page_idx)
-    back = process_view_with_height_on_image(full_img, doc, "back", page_idx=page_idx)
+def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
+    # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
+    # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
+    # process_view_with_height_on_image ต่อ view ตามปกติ - ถ้าล้มเหลว (None) จะ fallback ไป
+    # seam-based เดิมโดยอัตโนมัติ (ดู process_view_on_image) ต้องการ pdf_bytes เพื่อ render
+    # หน้าเต็มแยกต่างหากที่ scale ที่ calibrate ไว้ (ดู compute_phase1b_columns)
+    if pdf_bytes is not None:
+        phase1b = compute_phase1b_columns(pdf_bytes, target_matrix_scale=matrix_scale, page_idx=page_idx)
+    else:
+        phase1b = {"front": None, "back": None}
+    front = process_view_with_height_on_image(
+        full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"))
+    back = process_view_with_height_on_image(
+        full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"))
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -1389,7 +1915,7 @@ def process_request(request):
         else:
             layout = "TOP_BOTTOM"
 
-        result = run_full_analysis_on_image(full_img, doc, page_idx=1)
+        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=3)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -1432,8 +1958,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.0",
-            "benchmarkMode": "v25_0_zero_ai_rule_engine",
+            "checkerVersion": "V25.11",
+            "benchmarkMode": "v25_11_zero_ai_rule_engine",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
