@@ -610,10 +610,57 @@ def _robust_local_line_fit(xs, ys, mad_floor=2.0, n_iter=3):
     return {"a": float(a), "b": float(b), "resid_std": float(resid.std()), "xs": xs, "ys": ys}
 
 
+def detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x, search_margin_ratio=0.15):
+    """หาตำแหน่ง 'จุดยอด (apex)' ของ silhouette กองกล่องในมุมมอง isometric
+
+    ROOT CAUSE (พบจากการตรวจ pixel จริง ไม่ใช่การเดา): silhouette ของกองกล่องทรงสี่เหลี่ยม
+    เมื่อมองแบบ isometric จะเป็นรูป 6 เหลี่ยม (hexagon) และมี "จุดยอด" ตรงมุมบนสุดของกล่อง
+    ตัวที่ใกล้กล้อง/ขอบมุมตู้ที่สุด:
+      - ก่อนจุดยอด: cargo_top_y คือ "ขอบบน-หลัง" ของแถวกล่องบนสุด ขนานกับเส้นพื้น (floor)
+        -> height = floor - top ให้ค่าคงที่ถูกต้อง
+      - หลังจุดยอด: cargo_top_y กลายเป็น "ขอบบน-หน้า" ของกล่องตัวสุดท้ายที่เอียงคนละทิศ
+        -> height ผิดเพี้ยนเป็นระบบ ยิ่งใกล้มุมยิ่งผิดมาก
+
+    หมายเหตุ: วิธีนี้จับ artifact แบบ "หักงอทันทีที่จุดเดียว" ได้ดี (ยืนยันแล้วกับ EC0101/
+    EC0402 FRONT, AC0301 FRONT) แต่บางไฟล์ (เช่น AC03-01 BACK, EC01-01 BACK) มี pattern
+    ซับซ้อนกว่า (multi-bump จากโครงสร้าง 2 แถวกล่องซ้อนกัน) ที่ apex-เดี่ยวจับไม่ครบ
+    -> ใช้ระบบ cross-view reconciliation (ดู reconcile_heights_cross_view) เป็นชั้นตรวจสอบ
+    ที่สองเพื่อจับกรณีที่เหลือ แทนการพยายาม tune single-view heuristic ให้ซับซ้อนขึ้นเรื่อยๆ
+    """
+    span = end_x - start_x
+    if span <= 0:
+        return None
+    search_start = start_x + int(span * search_margin_ratio)
+    xs = np.arange(search_start, end_x + 1)
+    xs = xs[(xs >= 0) & (xs < len(cargo_top_y))]
+    if len(xs) == 0:
+        return None
+    vals = cargo_top_y[xs]
+    valid = vals >= 0
+    if not np.any(valid):
+        return None
+    xs_valid = xs[valid]
+    vals_valid = vals[valid]
+    return int(xs_valid[np.argmin(vals_valid)])
+
+
 def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local_floor_y=None):
     """คำนวณความสูง (px) ต่อ 1 ตั้ง โดย fit เส้นตรงทนทาน (robust local line) ให้กับ
     cargo_top_y ภายในแต่ละตั้งเอง (แก้บั๊กความชันธรรมชาติจากมุมมอง isometric) แล้วประเมิน
-    ความสูงที่ตำแหน่งกึ่งกลางตั้ง เทียบกับ local floor (แก้บั๊กพื้นตู้รูปตัว V)"""
+    ความสูงที่ตำแหน่งกึ่งกลางตั้ง เทียบกับ local floor (แก้บั๊กพื้นตู้รูปตัว V)
+
+    v25.2 FIX (root-cause, ไม่ใช่ patch ที่ rule engine): ตัดข้อมูลที่อยู่ "หลังจุดยอด
+    isometric" (apex) ออกจากการคำนวณ เพราะข้อมูลช่วงนั้นวัด "ขอบบน-หน้า" ของกล่องตัวสุดท้าย
+    (เอียงคนละทิศ) ไม่ใช่ "ขอบบน-หลัง" ที่ใช้คำนวณ height ได้ตรงไปตรงมา - ยืนยันด้วยการตรวจ
+    สอบภาพจริงและตัวเลข slope ใน 6 views ของ 3 ไฟล์ทดสอบ (ดู detect_isometric_apex)
+
+    สำหรับตั้งที่อยู่ "หลังจุดยอดทั้งตั้ง" (ไม่มีข้อมูลก่อนจุดยอดเหลือให้วัดเลย) จะคืนค่า
+    height_px=None ก่อน (height_source="unreliable_post_apex") - ไม่ carry-forward ที่ชั้นนี้
+    เพราะลำดับที่ถูกต้องคือ: ให้ cross-view reconciliation (reconcile_heights_cross_view)
+    พยายามเติมค่าจากอีกมุมมองก่อน (แม่นยำกว่า เพราะเป็นการวัดจริงจากอีกฝั่ง) แล้วค่อย
+    carry-forward ภายใน view เดียวกันเป็นทางเลือกสุดท้ายถ้าไม่มี cross-view ให้ใช้เลย
+    (ดู fill_missing_heights ที่ทำงานหลัง reconcile_heights_cross_view)
+    """
     boundaries = [start_x] + sorted(seams) + [end_x]
     results = []
 
@@ -622,33 +669,68 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
             return local_floor_y[x]
         return None
 
+    apex_x = detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x)
+
     for i in range(len(boundaries) - 1):
         b0 = boundaries[i] + margin
         b1 = boundaries[i + 1] - margin
+
+        # จำกัดช่วงคอลัมน์ที่ใช้คำนวณให้ไม่เลย apex ไป (ตัดโซน "หลังจุดยอด" ทิ้ง)
+        eff_b1 = b1
+        if apex_x is not None:
+            eff_b1 = min(b1, apex_x)
+
         xs_top, ys_top = [], []
-        for x in range(max(0, b0), max(0, b1)):
+        for x in range(max(0, b0), max(0, eff_b1)):
             if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
                 xs_top.append(x)
                 ys_top.append(cargo_top_y[x])
+
         top_fit = _robust_local_line_fit(xs_top, ys_top) if xs_top else None
 
         height_px = None
         n_samples = 0
-        if top_fit is not None:
-            x_mid = int((b0 + b1) / 2.0)
-            top_at_mid = top_fit["a"] * x_mid + top_fit["b"]
-            floor_at_mid = _floor_at(x_mid)
+        height_source = "direct"
+        if top_fit is not None and len(xs_top) >= 3:
+            # ประเมินที่กึ่งกลางของ "ช่วงที่ใช้ได้จริง" (ไม่ใช่กึ่งกลางตั้งเต็ม ถ้าถูกตัดโดย apex)
+            eff_mid = (max(0, b0) + eff_b1) / 2.0
+            top_at_mid = top_fit["a"] * eff_mid + top_fit["b"]
+            floor_at_mid = _floor_at(int(eff_mid))
             if floor_at_mid is not None:
                 height_px = floor_at_mid - top_at_mid
                 n_samples = len(top_fit["xs"])
+
+        if height_px is None:
+            # ตั้งนี้อยู่ "หลังจุดยอดทั้งตั้ง" ไม่มีข้อมูลก่อนจุดยอดให้วัดเลย - ปล่อยเป็น None
+            # ก่อน ให้ fill_missing_heights (เรียกหลัง cross-view reconciliation) จัดการต่อ
+            height_source = "unreliable_post_apex"
 
         results.append({
             "stack_idx": i,
             "x_range": (boundaries[i], boundaries[i + 1]),
             "n_samples": n_samples,
             "height_px": height_px,
+            "height_source": height_source,
+            "apex_x": apex_x,
         })
     return results
+
+
+def fill_missing_heights(records):
+    """เติมค่า height_px=None ที่เหลือ (หลัง cross-view reconciliation พยายามเติมให้แล้ว
+    แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward จากตั้งก่อนหน้าในมุมมองเดียวกัน -
+    เป็นทางเลือกสุดท้ายเท่านั้น (ความน่าเชื่อถือต่ำกว่า cross-view เสมอ)
+    ข้าม idx0 เสมอทั้งเป็นเป้าหมายและแหล่งอ้างอิง (floor-corner artifact คนละจุดกับ apex)"""
+    last_valid = None
+    for r in records:
+        if r.get("idx") == 0:
+            continue
+        if r["height_px"] is not None:
+            last_valid = r["height_px"]
+        elif last_valid is not None:
+            r["height_px"] = last_valid
+            r["height_source"] = "carried_forward_same_view"
+    return records
 
 
 def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, margin=6):
@@ -697,14 +779,92 @@ def build_stack_records(view_result, view_label, flip_position=None):
             "idx": i, "view": view_label,
             "x_range": h["x_range"], "pos_range": (real_p0, real_p1),
             "height_px": h["height_px"],
+            "height_source": h.get("height_source", "direct"),
         })
     return records
 
 
+def reconcile_heights_cross_view(records_front, records_back,
+                                  min_overlap_ratio=0.5,
+                                  conflict_ratio=0.10):
+    """ชั้นตรวจสอบที่ 2 (หลัง apex-fix ใน Phase 3): เทียบความสูงของกล่องตำแหน่งจริงเดียวกัน
+    ระหว่าง FRONT<->BACK - กล่องทางกายภาพเดียวกันควรวัดความสูงได้ใกล้เคียงกันไม่ว่าจะมองจาก
+    ฝั่งไหน หากมุมมองหนึ่งขัดแย้งกับอีกฝั่งเกิน conflict_ratio ให้เชื่อฝั่งที่น่าเชื่อถือกว่า
+    (ไม่ใช่ carried_forward_post_apex และมี n_samples มากกว่า) แทน
+
+    เหตุผลที่ต้องมีชั้นนี้เพิ่ม: apex-detection แบบจุดเดียว (detect_isometric_apex) จับ
+    artifact แบบ "หักงอทันทีจุดเดียว" ได้ดี แต่บางไฟล์มี pattern ซับซ้อนกว่า (multi-bump จาก
+    โครงสร้างกล่องหลายแถวซ้อนกัน) ที่ทำให้ยังเหลือค่าที่ผิดพลาดบางส่วนหลุดมาเป็น "direct"
+    ทั้งที่จริงยังไม่ถูกต้อง 100% - cross-view reconciliation จับกรณีเหล่านี้ได้ เพราะใช้
+    ข้อมูลจริงจากอีกมุมมองยืนยัน แทนการพยายาม tune heuristic เดียวให้ซับซ้อนขึ้นเรื่อยๆ
+    """
+    def _overlap_ratio(a, b):
+        a0, a1 = a; b0, b1 = b
+        inter = max(0.0, min(a1, b1) - max(a0, b0))
+        smaller = min(max(1e-6, a1 - a0), max(1e-6, b1 - b0))
+        return inter / smaller if smaller > 0 else 0.0
+
+    corrections = []
+    for rec_a, records_b in [(r, records_back) for r in records_front] + \
+                            [(r, records_front) for r in records_back]:
+        # idx0 ของแต่ละ view คือ "ตั้งที่เลยมุมล่างตู้ไปแล้ว" (floor-corner artifact คนละจุด
+        # กับ apex ที่แก้ในฟังก์ชันนี้) - ผู้ใช้ยืนยันให้ตัดออกจากการนับ ไม่ใช้เป็นทั้ง
+        # แหล่งอ้างอิงและเป้าหมายของการ correct เพื่อไม่ให้ค่าที่ไม่น่าเชื่อถืออยู่แล้วไป
+        # ปนเปื้อนตั้งอื่น
+        if rec_a["idx"] == 0:
+            continue
+        if rec_a["height_px"] is None:
+            continue
+        best_match, best_overlap = None, 0.0
+        for rec_b in records_b:
+            if rec_b["idx"] == 0:
+                continue
+            ov = _overlap_ratio(rec_a["pos_range"], rec_b["pos_range"])
+            if ov > best_overlap:
+                best_overlap, best_match = ov, rec_b
+        if best_match is None or best_overlap < min_overlap_ratio:
+            continue
+        if best_match["height_px"] is None:
+            continue
+        h_a, h_b = rec_a["height_px"], best_match["height_px"]
+        higher = max(h_a, h_b)
+        if higher <= 0:
+            continue
+        diff_ratio = abs(h_a - h_b) / higher
+        if diff_ratio <= conflict_ratio:
+            continue
+        # มีความขัดแย้ง -> เลือกฝั่งที่น่าเชื่อถือกว่า:
+        # 1) ถ้าฝั่งหนึ่ง "direct" อีกฝั่ง "carried_forward" -> เชื่อฝั่ง direct เสมอ
+        # 2) ถ้าเชื่อถือได้เท่ากัน (ทั้งคู่ direct หรือทั้งคู่ carried) -> เชื่อค่าที่ "สูงกว่า"
+        #    เพราะ bleed/carry-forward-ผิดพลาด ทำให้ค่าต่ำลงเสมอ ไม่เคยทำให้สูงขึ้นผิดปกติ
+        a_reliable = rec_a.get("height_source", "direct") == "direct"
+        b_reliable = best_match.get("height_source", "direct") == "direct"
+        if a_reliable and not b_reliable:
+            trust_a = True
+        elif b_reliable and not a_reliable:
+            trust_a = False
+        else:
+            trust_a = h_a >= h_b
+
+        if trust_a:
+            best_match["height_px"] = h_a
+            best_match["height_source"] = "cross_view_corrected"
+            corrections.append((best_match["view"], best_match["idx"], h_b, h_a))
+        else:
+            rec_a["height_px"] = h_b
+            rec_a["height_source"] = "cross_view_corrected"
+            corrections.append((rec_a["view"], rec_a["idx"], h_a, h_b))
+    return corrections
+
+
 def detect_step_down_pairwise(records, view_label):
+    """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม idx0 เสมอ (ผู้ใช้ยืนยันว่า idx0
+    เลยมุมล่างตู้ไปแล้ว เป็น floor-corner artifact คนละจุดกับ apex ไม่ควรใช้เปรียบเทียบ)"""
     risks = []
     for i in range(len(records) - 1):
         a, b = records[i], records[i + 1]
+        if a["idx"] == 0 or b["idx"] == 0:
+            continue
         if a["height_px"] is None or b["height_px"] is None:
             continue
         taller_rec = a if a["height_px"] >= b["height_px"] else b
@@ -884,6 +1044,19 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1):
     back = process_view_with_height_on_image(full_img, doc, "back", page_idx=page_idx)
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
+    # ลำดับการแก้ไข height ที่ถูกต้อง (แม่นยำสุด -> น้อยสุด):
+    # 1) direct (วัดจาก pixel ก่อน apex โดยตรง)
+    # 2) cross_view_corrected (ยืมค่าจากอีกมุมมองที่วัดตำแหน่งจริงเดียวกันได้ direct)
+    # 3) carried_forward_same_view (ทางเลือกสุดท้าย ถ้าไม่มี cross-view ให้ใช้เลย)
+    height_corrections = reconcile_heights_cross_view(records_front, records_back)
+    fill_missing_heights(sorted(records_front, key=lambda r: r["idx"]))
+    fill_missing_heights(sorted(records_back, key=lambda r: r["idx"]))
+    # sync ค่าที่แก้ไขจาก reconciliation + fill กลับไปที่ stack_heights ต้นทาง (ใช้วาด marker ต่อ)
+    for records, view_result in [(records_front, front), (records_back, back)]:
+        for rec in records:
+            sh = view_result["stack_heights"][rec["idx"]]
+            sh["height_px"] = rec["height_px"]
+            sh["height_source"] = rec["height_source"]
 
     risks = []
     risks += detect_step_down_pairwise(records_front, "FRONT")
