@@ -6,12 +6,18 @@ AI Cargo Safety Checker - v25.0 ZERO-AI EDITION
 (Phase 1 + Phase 2 + Phase 3) ตามที่ตกลงกันไว้ - เหลือเพียง 3 risk types ที่ครอบคลุม
 ประเด็นความปลอดภัยหลักและสามารถคำนวณได้ 100% จาก geometry ของภาพโดยไม่ต้องพึ่ง AI เลย
 
-RISK TYPES (3 ประเภทเท่านั้น - ตัดที่เหลือทั้งหมดตามที่ตกลงกัน):
-1. STEP_DOWN_RISK (pairwise)   - ตั้งข้างเคียงในview เดียวกันสูงต่างกันเกิน 12.5%
-2. STEP_DOWN_RISK (cross_view) - ตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK สูงต่างกันเกิน 12.5%
-   (มี edge-pair guard: คู่ที่เป็นขอบสุดพร้อมกันทั้ง 2 view ใช้เกณฑ์เข้มขึ้นเป็น 30%
-   เพราะพบว่าการวัดยังมีความไม่แน่นอนตกค้างในโซนขอบภาพ)
-3. REAR_EMPTY_RISK             - ไม่มีตั้งกล่องในอีก view หนึ่งที่โซน 7% สุดท้ายก่อนประตูท้ายตู้
+RISK TYPES (3 ประเภทเท่านั้น - v25.3 กฎชัดเจน เกณฑ์เดียวต่อกฎ ปรับตัวเลขได้ที่ค่าคงที่
+ด้านบนของไฟล์ (STEP_DOWN_CROSSVIEW_DROP_RATIO / STEP_DOWN_PAIRWISE_DROP_RATIO /
+REAR_EMPTY_LENGTH_RATIO)):
+1. STEP_DOWN_RISK (cross_view) - gap > 20% ระหว่างตำแหน่งคู่ตรงข้าม FRONT<->BACK
+                                  -> วาดกรอบที่ตัว "สูงกว่า"
+2. STEP_DOWN_RISK (pairwise)   - gap > 20% ระหว่างตั้งติดกัน แนวระนาบ ของ view เดียวกัน
+                                  -> วาดกรอบที่ตัว "สูงกว่า"
+3. REAR_EMPTY_RISK             - gap > 7% ระหว่างความยาวรวม (length_px) ของแต่ละ view
+                                  -> วาดกรอบที่ตำแหน่งท้ายสุดของ view ที่ "ยาวกว่า"
+(v25.3 ตัด edge-pair guard 30% เดิม และ color-anomaly mechanism เดิมออก เพื่อให้เหลือ
+เกณฑ์เดียวชัดเจนต่อกฎตามที่ผู้ใช้ยืนยัน - Phase 3 แก้ isometric-apex bug ที่ต้นเหตุแล้ว
+ทำให้ค่าที่ขอบภาพแม่นยำพอจะใช้เกณฑ์เดียวกันได้โดยไม่ต้องมี guard พิเศษอีกต่อไป)
 
 ตัดออกทั้งหมด (ตามที่ตกลงกัน): FRONT_EMPTY_RISK, REAR_LATERAL_IMBALANCE,
 LATERAL_GAP_RISK, TALL_UNSTABLE_RISK, REAR_COMBINED_RISK, COMBINED_AREA_RISK
@@ -79,27 +85,21 @@ RISK_COLORS = {
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
-STEP_DOWN_HEIGHT_DROP_RATIO = 0.125     # 12.5% - เกณฑ์หลักสำหรับ STEP_DOWN_RISK ทั้ง 2 subtype
-EDGE_PAIR_STRICTER_DROP_RATIO = 0.30    # 30% - เกณฑ์เข้มขึ้นสำหรับคู่ cross-view ที่เป็นขอบสุดพร้อมกัน
-REAR_EMPTY_LENGTH_RATIO = 0.07          # 7% - โซนสุดท้ายก่อนประตูท้ายตู้ สำหรับ REAR_EMPTY_RISK (เก็บไว้อ้างอิง/ไม่ใช้แล้ว)
+# ============================================================================
+# RULE ENGINE v25.3 - กฎ 3 ข้อ ชัดเจน เกณฑ์เดียวต่อกฎ (ปรับตัวเลขได้ที่นี่จุดเดียว)
+# ============================================================================
+# 1) STEP_DOWN_RISK (cross_view) : gap > 20% ระหว่างตำแหน่งคู่ตรงข้าม FRONT<->BACK
+#                                   -> วาดกรอบที่ตัว "สูงกว่า"
+# 2) STEP_DOWN_RISK (pairwise)   : gap > 20% ระหว่างตั้งติดกัน แนวระนาบ ของ view เดียวกัน
+#                                   -> วาดกรอบที่ตัว "สูงกว่า"
+# 3) REAR_EMPTY_RISK             : gap > 7% ระหว่างความยาวรวม (length_px) ของแต่ละ view
+#                                   -> วาดกรอบที่ตำแหน่งท้ายสุดของ view ที่ "ยาวกว่า"
+STEP_DOWN_CROSSVIEW_DROP_RATIO = 0.20   # 20% - เกณฑ์เดียวสำหรับ cross_view (ตัด edge-pair
+                                         # guard 30% เดิมออก ตามที่ผู้ใช้ยืนยันให้ใช้เกณฑ์เดียว)
+STEP_DOWN_PAIRWISE_DROP_RATIO = 0.20    # 20% - เกณฑ์เดียวสำหรับ pairwise
+REAR_EMPTY_LENGTH_RATIO = 0.07          # 7% - เกณฑ์ gap ความยาวรวมระหว่าง 2 view
 CROSSVIEW_MIN_OVERLAP_RATIO = 0.5       # ต้องทับซ้อนตำแหน่งจริงอย่างน้อย 50% จึงถือเป็นคู่เดียวกัน
-
-# --- REAR_EMPTY_RISK v2 (แก้บั๊ก v25.0: pos_range เดิม self-normalize ทำให้ตั้งสุดท้าย
-#     ของทุก view ได้ pos=1.0 เสมอ ทำให้ position-overlap matching ผิดพลาดเป็นระบบ) ---
-# กลไก A: เทียบ length_px (Phase 2, ค่าจริงหน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK
-#   ถ้าต่างกันเกินทั้ง px ขั้นต่ำ และสัดส่วนขั้นต่ำ -> ฝั่งที่ "สั้นกว่า" มีพื้นที่ว่างจริงก่อนประตูท้ายตู้
-#   ค่า threshold คาลิเบรตจากไฟล์ตัวอย่าง 3 ไฟล์ (ground truth): EC01-01 gap=72px(12.6%),
-#   AC03-01 gap=46px(8.6%) ต้อง flag / EC04-02 gap=17px(3.4%) ต้องไม่ flag (คนละกลไกกับ B)
-REAR_GAP_MIN_PX = 35
-REAR_GAP_MIN_RATIO = 0.06
-
-# กลไก B: ตรวจ "ตั้งสุดท้ายจริง" (real pos_range ใกล้ 1.0 ที่สุด) ของแต่ละ view ว่ามีสี SKU
-#   ปะปนกันผิดปกติหรือไม่ (เช่น SKU แปลกปลอมโผล่ที่ตำแหน่งท้ายสุด มักพบคู่กับพื้นที่ว่าง/สินค้า
-#   วางไม่เป็นระเบียบใกล้ประตูท้ายตู้) คาลิเบรตจาก EC04-02 BACK idx5 (TEM1A, 4 สีเด่น) ที่ต้อง
-#   flag ในขณะที่ตั้งท้ายสุดของอีก 5 view (สีเดียวล้วน) ต้องไม่ flag
-REAR_COLOR_ANOMALY_MIN_COLORS = 3
-REAR_COLOR_MIN_FRACTION = 0.03
-REAR_COLOR_MIN_PIXELS = 80
+                                         # (ใช้จับคู่ตำแหน่งเท่านั้น ไม่ใช่เกณฑ์ตัดสินความเสี่ยง)
 
 
 def generate_action_report(case_type, description="", sku_list=""):
@@ -871,7 +871,7 @@ def detect_step_down_pairwise(records, view_label):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
-        threshold = taller_h * (1 - STEP_DOWN_HEIGHT_DROP_RATIO)
+        threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             risks.append({
@@ -899,14 +899,11 @@ def _overlapping_records(target_pos_range, other_records, min_overlap_ratio=CROS
 
 
 def detect_step_down_crossview(records_front, records_back):
+    """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%)
+    ไม่มี edge-pair guard พิเศษอีกต่อไป (ตัดออกตามที่ผู้ใช้ยืนยันให้ใช้เกณฑ์เดียวทุกตำแหน่ง
+    เพราะ Phase 3 แก้ apex-bug ที่ต้นเหตุแล้ว ค่าที่ขอบภาพจึงแม่นยำพอที่จะใช้เกณฑ์เดียวกันได้)"""
     risks = []
     seen_pairs = set()
-    front_last_idx = len(records_front) - 1
-    back_last_idx = len(records_back) - 1
-
-    def _is_edge(rec, view_label):
-        last_idx = front_last_idx if view_label == "FRONT" else back_last_idx
-        return rec["idx"] == 0 or rec["idx"] == last_idx
 
     def _compare(rec_a, records_b_all, view_a_label, view_b_label):
         matches = _overlapping_records(rec_a["pos_range"], records_b_all)
@@ -921,9 +918,7 @@ def detect_step_down_crossview(records_front, records_back):
             shorter_rec = rec_b if taller_rec is rec_a else rec_a
             taller_h = taller_rec["height_px"]
             shorter_h = shorter_rec["height_px"]
-            both_edge = _is_edge(rec_a, view_a_label) and _is_edge(rec_b, view_b_label)
-            active_ratio = EDGE_PAIR_STRICTER_DROP_RATIO if both_edge else STEP_DOWN_HEIGHT_DROP_RATIO
-            threshold = taller_h * (1 - active_ratio)
+            threshold = taller_h * (1 - STEP_DOWN_CROSSVIEW_DROP_RATIO)
             if shorter_h < threshold:
                 drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
                 risks.append({
@@ -931,7 +926,7 @@ def detect_step_down_crossview(records_front, records_back):
                     "mark_view": taller_rec["view"],
                     "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
                     "taller_height_px": taller_h, "shorter_height_px": shorter_h,
-                    "drop_ratio": drop_ratio, "pos_range": taller_rec["pos_range"], "edge_pair": both_edge,
+                    "drop_ratio": drop_ratio, "pos_range": taller_rec["pos_range"],
                 })
 
     for rec_a in records_front:
@@ -947,95 +942,54 @@ def detect_step_down_crossview(records_front, records_back):
     return list(merged.values())
 
 
-def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
-                              min_fraction=REAR_COLOR_MIN_FRACTION,
-                              min_pixels=REAR_COLOR_MIN_PIXELS):
-    """หาชุดสีเด่น (quantized 32-level) ภายในช่วง x_range ของ 1 ตั้ง - ใช้ตรวจว่ามี SKU
-    ปะปนกันผิดปกติหรือไม่ (กลไก B ของ REAR_EMPTY_RISK) คืนค่า list[(color, count)]"""
-    x0, x1 = x_range
-    x0 = max(0, x0 + margin)
-    x1 = max(x0, x1 - margin)
-    if x1 <= x0:
-        return []
-    sub_mask = cargo_mask[:, x0:x1]
-    sub_region = region[:, x0:x1]
-    pixels = sub_region[sub_mask]
-    if len(pixels) < 50:
-        return []
-    quant = (pixels // 32 * 32).astype(np.int32)
-    uniq, counts = np.unique(quant.reshape(-1, 3), axis=0, return_counts=True)
-    total = len(pixels)
-    order = np.argsort(-counts)
-    clusters = []
-    for i in order:
-        if counts[i] >= min_pixels and (counts[i] / total) >= min_fraction:
-            clusters.append((tuple(int(v) for v in uniq[i]), int(counts[i])))
-    return clusters
-
-
 def _rearmost_record(records):
-    """ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด) ของ view นั้น"""
-    if not records:
+    """ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด) ของ view นั้น
+    ข้าม idx0 เสมอ (floor-corner artifact ที่ผู้ใช้ยืนยันให้ตัดออกจากการนับทุกกฎ -
+    ไม่เช่นนั้นตำแหน่งนี้จะถูกเลือกเป็น "ท้ายสุด" ผิดๆ เพราะ flip_position ของ FRONT
+    ทำให้ idx0 (คอลัมน์ซ้ายสุดของภาพ) มี pos_range ใกล้ 1.0 หลัง flip)"""
+    candidates = [r for r in records if r.get("idx") != 0]
+    if not candidates:
         return None
-    return max(records, key=lambda r: r["pos_range"][1])
+    return max(candidates, key=lambda r: r["pos_range"][1])
 
 
 def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
-    """REAR_EMPTY_RISK v2 - แก้บั๊ก v25.0 เดิมที่ pos_range เป็น self-normalized ทำให้
-    ตั้งสุดท้ายของทุก view ได้ pos=1.0 เสมอ (position-overlap matching จึงจับคู่ผิดเป็นระบบ
-    เพราะขอบท้ายสุดของทั้ง 2 view ชนกันที่ pos=1.0 โดยนิยาม ไม่ได้สะท้อนตำแหน่งจริง)
+    """REAR_EMPTY_RISK - เทียบ length_px จริง (Phase 2, หน่วย px ไม่ normalize) ระหว่าง
+    FRONT<->BACK ถ้าต่างกันเกิน REAR_EMPTY_LENGTH_RATIO (7%) ให้วาดกรอบที่ตั้งท้ายสุด
+    ของ view ที่ "ยาวกว่า" (ฝั่งที่วัดคาร์โก้ได้ยาวกว่าคือฝั่งที่เห็นสินค้ายื่นออกไปไกลกว่าที่
+    อีกฝั่งมองเห็น จึงเป็นตำแหน่งที่ต้องตรวจสอบว่าวางชิดจริงหรือมีช่องว่างซ่อนอยู่)
 
-    ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth คนละไฟล์):
-      A) เทียบ length_px จริง (Phase 2, หน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK
-         ถ้าต่างกันเกิน threshold -> ฝั่งที่สั้นกว่ามีพื้นที่ว่างจริงก่อนประตูท้ายตู้
-      B) ตรวจสีของ "ตั้งท้ายสุดจริง" ของแต่ละ view - ถ้ามี SKU ปะปนกันผิดปกติ (>=3 สีเด่น)
-         มักบ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างรอบข้างใกล้ประตูท้ายตู้
+    v25.3: ตัดกลไก B (color-anomaly) ออก ให้เหลือกฎเดียวตามที่ผู้ใช้ยืนยัน (เกณฑ์เดียว
+    ชัดเจน ปรับตัวเลขได้ที่ REAR_EMPTY_LENGTH_RATIO ด้านบน)
     """
     risks = []
-
-    # --- กลไก A: cross-view length mismatch ---
     front_len = front_result.get("length_px") or 0
     back_len = back_result.get("length_px") or 0
     longer_len = max(front_len, back_len)
-    if longer_len > 0:
-        gap_px = abs(front_len - back_len)
-        gap_ratio = gap_px / longer_len
-        if gap_px >= REAR_GAP_MIN_PX and gap_ratio >= REAR_GAP_MIN_RATIO:
-            if front_len < back_len:
-                shorter_records, shorter_label = records_front, "FRONT"
-            else:
-                shorter_records, shorter_label = records_back, "BACK"
-            rear_rec = _rearmost_record(shorter_records)
-            if rear_rec is not None:
-                risks.append({
-                    "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
-                    "mark_view": shorter_label,
-                    "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                    "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
-                    "reason": (f"ความยาวสินค้าที่วัดได้จากฝั่ง {shorter_label} สั้นกว่าอีกฝั่ง "
-                               f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ว่ามีพื้นที่ว่างก่อนถึงประตูท้ายตู้"),
-                })
+    if longer_len <= 0:
+        return risks
 
-    # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view ---
-    for records, result, label in [(records_front, front_result, "FRONT"),
-                                    (records_back, back_result, "BACK")]:
-        rear_rec = _rearmost_record(records)
-        if rear_rec is None:
-            continue
-        # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
-        if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
-            continue
-        clusters = _dominant_color_clusters(result["region"], result["cargo_mask"], rear_rec["x_range"])
-        if len(clusters) >= REAR_COLOR_ANOMALY_MIN_COLORS:
-            risks.append({
-                "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
-                "mark_view": label,
-                "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
-                "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกัน {len(clusters)} สี "
-                           f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
-            })
+    gap_px = abs(front_len - back_len)
+    gap_ratio = gap_px / longer_len
+    if gap_ratio <= REAR_EMPTY_LENGTH_RATIO:
+        return risks
 
+    if front_len >= back_len:
+        longer_records, longer_label = records_front, "FRONT"
+    else:
+        longer_records, longer_label = records_back, "BACK"
+
+    rear_rec = _rearmost_record(longer_records)
+    if rear_rec is not None:
+        risks.append({
+            "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
+            "mark_view": longer_label,
+            "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
+            "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
+            "reason": (f"ความยาวสินค้าที่วัดได้จากฝั่ง {longer_label} ยาวกว่าอีกฝั่ง "
+                       f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ตำแหน่งท้ายสุดของฝั่งนี้ "
+                       f"อาจมีพื้นที่ว่างหรือวางไม่ชิดประตูท้ายตู้จริง"),
+        })
     return risks
 
 
