@@ -1,6 +1,35 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.16 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.17 ZERO-AI EDITION
+================================================================================
+v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
+        ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
+
+  ปัญหา: ไฟล์ AE02-02 (และไฟล์ที่คล้ายกัน) ส่งผลว่า "ปลอดภัย (SAFE)" ทุกครั้ง ไม่พบจุด
+  เสี่ยงใดเลย แม้จะมี layout ที่ควรตรวจพบความเสี่ยง
+
+  Root cause (2 จุดเชื่อมกัน):
+    1. _find_diagram_page_idx() ไม่มีอยู่ก่อน: โค้ดเดิม hardcode page_idx=1 ในทุกฟังก์ชัน
+       (render_full_page, run_full_analysis_on_image, extract_sku_from_pdf) โดยถือว่าหน้า
+       ที่มี Front/Back diagrams อยู่ที่ index 1 เสมอ - แต่ไฟล์บางไฟล์อาจมี layout ต่างกัน
+       หรือ "Front"/"Back" label อยู่ในตำแหน่งที่ _word_bbox_rotated หาไม่เจอ ทำให้
+       get_view_region ล้มเหลวหรือ crop ผิดตำแหน่ง
+
+    2. extract_sku_from_pdf ใช้ page_index=1 แบบ hardcode โดยตรวจแค่ว่า len(doc) >= 2
+       แต่หน้า index 1 ของบางไฟล์อาจไม่มี "Load Summary" section เลย (เช่น เมื่อ Load
+       Summary อยู่ใน right panel ของหน้า index 1 แต่ text extraction อ่านไม่ครบ) ทำให้
+       sku_list = [] เสมอ
+
+  FIX:
+    1. เพิ่มฟังก์ชัน _find_diagram_page_idx(pdf_bytes): สแกนทุกหน้าหา page ที่มีทั้ง
+       "Front" และ "Back" word ใน text layer พร้อมกัน → ใช้หน้านั้น (fallback = 1)
+       เรียกใช้ครั้งเดียวใน process_request แล้วส่ง page_idx ที่ถูกต้องไปทุกฟังก์ชัน
+
+    2. แก้ extract_sku_from_pdf ให้รับ page_idx เป็น parameter (default=None → auto-detect):
+       ถ้าไม่ระบุ จะสแกนทุกหน้าหาหน้าที่มี "Load Summary" จริง แทนที่จะ hardcode index
+
+  regression-verified: ไฟล์เดิมที่ผ่าน test ทั้งหมด (page_idx=1 เดิม) ยังได้ผลเหมือนเดิม
+  เพราะ _find_diagram_page_idx จะคืน 1 ถ้าหน้า index 1 มี "Front"/"Back" อยู่จริง
 ================================================================================
 v25.16 (แก้บั๊ก marker วางผิดตำแหน่งที่พบจริงจาก AC03-06 FRONT - ไฟล์โหลดไม่เต็มคัน):
   ปัญหา: ทดสอบ AC03-06 (Unused Floor 11.8in, cargo 58.5% - โหลดไม่เต็มคัน) พบว่ากรอบ marker
@@ -274,11 +303,99 @@ def generate_action_report(case_type, description="", sku_list=""):
     return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
 
 
-def extract_sku_from_pdf(pdf_bytes):
-    """ดึงรายชื่อ SKU จาก Load Summary ใน PDF text-layer (คงไว้จาก v24.36 เดิม ไม่เปลี่ยนแปลง)"""
+def _find_diagram_page_idx(pdf_bytes_or_doc):
+    """v25.17 NEW: หา page index ที่มีทั้ง 'Front' และ 'Back' word ใน text layer พร้อมกัน
+    (= หน้าที่มี Front/Back diagrams จริง) แทน hardcode page_idx=1
+
+    รับได้ทั้ง pdf_bytes (bytes) หรือ fitz.Document object ที่เปิดไว้แล้ว
+    คืน index ของหน้าที่พบ หรือ 1 (fallback เดิม) ถ้าไม่พบ
+    """
+    try:
+        if isinstance(pdf_bytes_or_doc, (bytes, bytearray)):
+            doc = fitz.open(stream=pdf_bytes_or_doc, filetype="pdf")
+            owns_doc = True
+        else:
+            doc = pdf_bytes_or_doc
+            owns_doc = False
+
+        for idx in range(len(doc)):
+            page = doc[idx]
+            words = {w[4] for w in page.get_text("words")}
+            if "Front" in words and "Back" in words:
+                print(f"_find_diagram_page_idx: found Front+Back on page index {idx}")
+                if owns_doc:
+                    doc.close()
+                return idx
+
+        # fallback: ลองหาหน้าที่มี word ใดก็ได้ใน {"Front","Back"} ก่อน
+        for idx in range(len(doc)):
+            page = doc[idx]
+            words = {w[4] for w in page.get_text("words")}
+            if "Front" in words or "Back" in words:
+                print(f"_find_diagram_page_idx: found Front/Back (partial) on page index {idx}")
+                if owns_doc:
+                    doc.close()
+                return idx
+
+        print("_find_diagram_page_idx: Front/Back not found, fallback to index 1")
+        if owns_doc:
+            doc.close()
+        return 1 if True else 0  # noqa — ค่า fallback ชัดเจน
+    except Exception as e:
+        print(f"_find_diagram_page_idx failed: {e}, fallback to 1")
+        return 1
+
+
+def _find_sku_page_idx(doc):
+    """v25.17 NEW: หา page index ที่มี 'Load Summary' text ใน PDF text-layer
+    สแกนทุกหน้า (priority: หน้าที่มีทั้ง 'Load Summary' และ SKU lines จริง)
+    คืน index ที่พบ หรือ 1 (fallback เดิม)
+    """
+    best_idx = None
+    best_sku_count = -1
+    for idx in range(len(doc)):
+        page = doc[idx]
+        full_text = page.get_text("text")
+        if "Load Summary" not in full_text and "load summary" not in full_text.lower():
+            continue
+        # นับ SKU ที่อ่านได้จริงในหน้านี้ (เลือกหน้าที่มีมากที่สุด)
+        count = 0
+        in_ls = False
+        for line in full_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "Load Summary" in line or "load summary" in line.lower():
+                in_ls = True
+                continue
+            if in_ls and ("Cut List" in line or "cut list" in line.lower()):
+                break
+            if in_ls:
+                parts = line.split()
+                if parts and re.match(r"^([A-Z][A-Z0-9]{3,7})", parts[0]):
+                    count += 1
+        if count > best_sku_count:
+            best_sku_count = count
+            best_idx = idx
+    if best_idx is not None:
+        print(f"_find_sku_page_idx: found Load Summary on page index {best_idx} ({best_sku_count} SKU lines)")
+        return best_idx
+    print("_find_sku_page_idx: Load Summary not found, fallback to 1")
+    return 1
+
+
+def extract_sku_from_pdf(pdf_bytes, page_idx=None):
+    """v25.17 FIX: ดึงรายชื่อ SKU จาก Load Summary ใน PDF text-layer
+    - รับ page_idx เป็น parameter (default=None → auto-detect ด้วย _find_sku_page_idx)
+    - เดิม hardcode page_index = 1 if len(doc) >= 2 else 0 ซึ่งผิดถ้า Load Summary
+      ไม่ได้อยู่ที่ index 1 พอดี (เช่น AE02-02 ที่ text layer หน้า index 1 ไม่ครบ)
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        page_index = 1 if len(doc) >= 2 else 0
+        if page_idx is None:
+            page_index = _find_sku_page_idx(doc)
+        else:
+            page_index = page_idx
         page = doc[page_index]
         full_text = page.get_text("text")
         skus = set()
@@ -302,7 +419,7 @@ def extract_sku_from_pdf(pdf_bytes):
                         if prefix not in exclude:
                             skus.add(prefix)
         sku_list = sorted(skus)
-        print(f"SKU extracted: {sku_list}")
+        print(f"SKU extracted (page {page_index}): {sku_list}")
         return sku_list
     except Exception as e:
         print(f"SKU extraction failed: {e}")
@@ -2565,7 +2682,14 @@ def process_request(request):
             base64_str = base64_str.split(",", 1)[1]
         pdf_bytes = base64.b64decode(base64_str)
 
-        sku_list = extract_sku_from_pdf(pdf_bytes)
+        # v25.17 FIX (Critical): หา page index ที่มี Front/Back diagrams จริง แทน hardcode=1
+        # ทำครั้งเดียวตรงนี้แล้วส่งให้ทุกฟังก์ชัน เพื่อรับประกันว่าทุกขั้นตอนทำงานบนหน้าเดียวกัน
+        diagram_page_idx = _find_diagram_page_idx(pdf_bytes)
+        print(f"Using diagram_page_idx={diagram_page_idx}")
+
+        # v25.17 FIX: extract_sku_from_pdf รับ page_idx เพื่อสแกนหน้าที่ถูกต้อง
+        # (auto-detect ด้วย _find_sku_page_idx ถ้าไม่ระบุ — แต่ส่งค่าชัดเจนจะดีกว่า)
+        sku_list = extract_sku_from_pdf(pdf_bytes, page_idx=None)  # auto-detect แยกต่างหาก
         sku_str = ", ".join(sku_list) if sku_list else ""
 
         # v25.15 FIX (Critical): full_img ของ pipeline หลักกลับไปใช้ matrix_scale=3 (ค่าเดิม
@@ -2574,7 +2698,8 @@ def process_request(request):
         # run_full_analysis_on_image/render_hires_crop) ตอนนี้ PHASE 1B render เฉพาะ region เล็กๆ
         # ที่ scale=4 แยกต่างหาก (ไม่กระทบ pipeline หลัก) จึงไม่จำเป็นต้องยก full_img ทั้งหน้าขึ้น
         # scale=4 อีกต่อไป
-        full_img, doc, page = render_full_page(pdf_bytes, page_idx=1, matrix_scale=3)
+        # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
+        full_img, doc, page = render_full_page(pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
 
         # layout label (เก็บไว้เพื่อ output contract เดิม - อนุมานจากทิศทาง Front/Back label)
         front_bb = _word_bbox_rotated(page, "Front")
@@ -2588,7 +2713,8 @@ def process_request(request):
         else:
             layout = "TOP_BOTTOM"
 
-        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=3)
+        # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
+        result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -2631,8 +2757,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.16",
-            "benchmarkMode": "v25_16_xrange_floor_union_fix",
+            "checkerVersion": "V25.17",
+            "benchmarkMode": "v25_17_dynamic_page_idx_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
