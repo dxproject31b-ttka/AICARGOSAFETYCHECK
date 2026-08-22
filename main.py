@@ -1,64 +1,6 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.18 ZERO-AI EDITION
-================================================================================
-v25.18 (แก้บั๊กสำคัญ - undercounting cascade ใน PHASE 1B ที่บังตัวมองไม่เห็น STEP_DOWN/
-REAR_EMPTY บางเคส - พบจากคำขอผู้ใช้ให้ตรวจ AE02-01/AE02-02 ที่ "เห็นช่องว่างกลางตู้ด้วยตา
-เปล่า" แต่ระบบรายงาน SAFE):
-
-  ขั้นตอนสืบสวน (ตามที่ผู้ใช้ขอ "ตรวจสอบลึกที่สุดเริ่มตั้งแต่ต้น crop,scan"):
-  1. ตรวจ crop/region ของ AE02-01/02 ทั้ง FRONT/BACK - ถูกต้องตามที่คาดหวัง ไม่มีปัญหา
-  2. ตรวจ PHASE 1B raw front-face fragments (ก่อน cluster) ของ BACK พบ 9 fragments (สีเขียว
-     ล้วน) แต่หลัง cluster+merge_corner ได้ 7 คอลัมน์ แล้วหลัง _p1b_drop_side_wall_
-     contaminated_columns เหลือแค่ 5 คอลัมน์ - มี 2 คอลัมน์ถูกลบทิ้ง!
-  3. สืบสาเหตุ: เจอ roof สีแดง (255,0,0) 2 จุดใน BACK ที่ไม่มี front-face สีแดงปรากฏใน BACK
-     เลย (แต่ area/aspect ของ roof เหล่านี้เป็นรูปร่างกล่องจริง ไม่ใช่ noise) - ฟังก์ชันเดิม
-     ตีความว่าเป็น "side-wall contamination" แล้วลบคอลัมน์สีเขียวที่ใกล้ที่สุด 2 คอลัมน์ทิ้ง
-  4. ตรวจ FRONT พบว่ามี front-face สีแดงจริงปรากฏอยู่ (cx=1530 hi-res, area=4012) - สรุปได้ว่า
-     กล่องสีแดงนี้มีอยู่จริง เพียงแต่ front-face ของมันถูกกล่องเพื่อนบ้านที่สูงกว่าบังมุมมองจาก
-     กล้อง BACK ทั้งหมด (เหลือแค่ roof โผล่พ้นมาให้เห็น) - เป็นสัญญาณลักษณะเดียวกับ "gap/step
-     down" ที่ผู้ใช้อธิบาย (กล่องเตี้ยที่ถูกกล่องสูงกว่าบังจนมองไม่เห็น front-face จากมุมกล้อง
-     ฝั่งหนึ่ง) แต่ฟังก์ชันเดิมเช็คแค่ within-view เดียว (ไม่ cross-view) เลยตีความผิดว่าเป็น
-     contamination และลบคอลัมน์ข้างเคียงที่ "ไม่เกี่ยวข้อง" (สีเขียว) ทิ้งไปด้วยความเข้าใจผิด
-  5. ตรวจย้อนกลับไฟล์ calibration เดิมของฟังก์ชันนี้เอง (EC04-04) พบว่าเกิดปัญหาเดียวกันทุก
-     ประการ! วาดกรอบทับตำแหน่งคอลัมน์ที่ถูกลบเทียบกับภาพจริง พบว่าตรงกับกล่อง "STEMA-D1" สีเขียว
-     ที่มองเห็นได้ชัดเจนในภาพ (ไม่ใช่ contamination) และสีนี้ก็มี front-face จริงปรากฏใน FRONT
-     ด้วย - สรุปว่าการ "verified" เดิมของ v25.11 ไม่ครบถ้วน (เช็คแค่ single-view จริงๆ)
-
-  ROOT CAUSE: _p1b_drop_side_wall_contaminated_columns() เช็ค "has_matching_front_anywhere"
-  เฉพาะภายใน view เดียวกัน - เมื่อกล่องถูกบังจนไม่มี front-face ใน view นั้นเลย (แต่มีจริงใน
-  อีก view) ฟังก์ชันตีความผิดว่าเป็น contamination แล้วลบคอลัมน์ข้างเคียงที่ไม่เกี่ยวข้องทิ้ง -
-  ทำให้ BACK นับได้น้อยกว่าจริง (5 แทนที่จะเป็น 7 ใน AE02-01/02, 5 แทนที่จะเป็น 6 ใน EC04-04)
-  และที่ร้ายแรงกว่านั้น: จำนวนที่ผิดนี้ "บังเอิญ" ไปตรงกับจำนวนที่ FRONT รายงาน (ก็ผิดเช่นกัน
-  จากสาเหตุคนละจุด - ดูข้อ 6) ทำให้ Bug#4 (v25.14, M<N synthetic augmentation) ไม่ถูกกระตุ้น
-  ให้ทำงานแก้ไขจำนวนที่แท้จริง เพราะเงื่อนไข M==N ผ่านไปโดยไม่มีการเตือนใดๆ
-
-  6. ตรวจ FRONT เพิ่มเติม: เดิม FRONT เองมี raw fragments ครบ 7 คอลัมน์จริง (ไม่ synthetic) แต่
-  ถูก _p1b_reconcile_with_back ตัดทิ้งไป 2 คอลัมน์ (Hungarian assignment จับคู่กับ BACK's ผิด
-  N=5 แล้วทิ้งตัวที่ "เกิน" ทิ้งไป ทั้งที่เป็นคอลัมน์จริง) - เป็นผลกระทบต่อเนื่อง (cascade) จาก
-  root cause เดียวกันข้อ 5 ไม่ใช่บั๊กแยกต่างหาก
-
-  FIX: _p1b_drop_side_wall_contaminated_columns รับพารามิเตอร์ other_view_all_cells เพิ่มเติม
-  (optional, backward-compatible) - เช็ค has_matching_front_anywhere จากทั้ง 2 view (cross-view
-  OR) แทน single-view - ถ้ามี front-face สีเดียวกันปรากฏใน "view ใดก็ได้" ถือว่ากล่องนั้นมีอยู่
-  จริง ไม่ลบคอลัมน์ข้างเคียง (สอดคล้องกับหลักการ cross-view ที่ใช้ตรวจ structural color ใน
-  v25.13 utilities อยู่แล้ว) compute_phase1b_columns คำนวณ front_all ล่วงหน้าก่อนเรียก drop
-  function ของ BACK เพื่อส่งเป็นหลักฐาน cross-view
-
-  ผลลัพธ์ (regression-verified ครบทั้ง 15 ไฟล์ตัวอย่างที่มี):
-    - 13/15 ไฟล์ (AC03-06/07, EC01-01~04, EC02-01/02, EC03-01, EC04-01/02/03): n_stacks และ
-      risks ตรงกับก่อนแก้ไข 100% ทุกไฟล์ ไม่มี regression เลย
-    - AE02-01/02: n_stacks แก้จาก 5→7 (ทั้ง front/back, ยืนยันเป็น real detection ไม่ใช่
-      synthetic) และตอนนี้ตรวจพบ REAR_EMPTY_RISK (length_mismatch, BACK idx6) ที่เคยถูกบัง
-    - EC04-04: n_stacks แก้จาก 5→6 (กู้คืนกล่อง STEMA-D1 ที่หายไปตั้งแต่ v25.11)
-
-  หมายเหตุสำคัญเกี่ยวกับ STEP_DOWN ที่ผู้ใช้คาดหวังใน AE02-01/02: หลังแก้ไข พบว่าตำแหน่งที่
-  กล่องถูกบัง (real_pos ใกล้ 0 = หัวตู้) มีความสูงต่างจากเพื่อนบ้านจริง (~7-14%) แต่ยังไม่ถึง
-  เกณฑ์ 20% ของ STEP_DOWN_PAIRWISE_DROP_RATIO และฝั่ง FRONT ของตำแหน่งนี้ถูก flag
-  is_corner_duplicate=True (กลไกเดิมของระบบที่ยกเว้นการตรวจที่มุมภาพเนื่องจากความไม่แน่นอนของ
-  การวัดที่มุม isometric) จึงยังไม่ trigger STEP_DOWN_RISK แม้จำนวนตั้ง/ตำแหน่งจะถูกต้องแล้ว -
-  ถ้าต้องการให้ตรวจพบกรณีนี้ด้วย จะต้องพิจารณาปรับ threshold หรือทบทวนเงื่อนไข corner_duplicate
-  แยกต่างหาก (ยังไม่ได้ปรับในเวอร์ชันนี้ เพื่อไม่ให้กระทบไฟล์อื่นโดยไม่ได้ตรวจสอบผลกระทบให้ครบ)
+AI Cargo Safety Checker - v25.17 ZERO-AI EDITION
 ================================================================================
 v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
         ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
@@ -1243,11 +1185,36 @@ def _p1b_dominant_colors(crop, max_colors=25, min_frac=0.002):
     return picked
 
 
-def _p1b_cells_for_color(crop, color, tol=12, area_min=1200):
+def _p1b_cells_for_color(crop, color, tol=12, raw_area_min=150, close_iters=0):
     """หา connected-components ของสี color บน crop - ใช้ scipy.ndimage แทน
-    cv2.connectedComponentsWithStats (ผลลัพธ์เทียบเท่ากัน, ไม่ต้องพึ่ง opencv)"""
+    cv2.connectedComponentsWithStats (ผลลัพธ์เทียบเท่ากัน, ไม่ต้องพึ่ง opencv)
+
+    v25.20 FIX (front-face fragmentation - area_min ตัดตอนก่อนมี merge โอกาส): เดิม
+    area_min=1200 ถูกกรองทิ้ง "ที่ตรงนี้เลย" (ก่อน _p1b_merge_text_split_fragments จะมีโอกาส
+    เชื่อม fragment ที่แตกจากกันกลับเป็น face เดียวกัน) -> fragment เล็กๆ ที่จริงเป็นส่วนหนึ่งของ
+    front-face เดียวกัน (เช่น ถูกตัดแบ่งโดยเส้นขอบตัวอักษร/gradient) ถูกทิ้งไปถาวรตั้งแต่ต้น
+    ทำให้ face นั้นเหลือพื้นที่ไม่พอ/ขาดหายจาก column ทั้งคอลัมน์
+
+    FIX: ใช้ raw_area_min (ต่ำกว่ามาก ค่าเริ่มต้น=150) กรองเฉพาะ noise แท้ๆ ที่ตรงนี้ ส่วน
+    area_min ตัวจริง (ค่าเริ่มต้น=1200) ย้ายไปกรอง "หลัง" merge ใน _p1b_classify_view แทน
+    เพื่อให้ fragment เล็กที่ควรถูกเชื่อมกลับเป็น face เดียวกันมีโอกาสรอดถึงขั้น merge ก่อน
+    ตัดสินใจว่า area รวมพอหรือไม่
+
+    หมายเหตุ (ทดสอบแล้ว ไม่ integrate): เคยลองเพิ่ม tol เริ่มต้น 12->20 ด้วย เพื่อลดโอกาส mask
+    แตกจาก anti-alias/เงาที่เพี้ยนสีเล็กน้อย - แต่ทดสอบจริงกับ AE02-01/AE02-02 พบว่า tol=20
+    ไม่ได้ลด fragment ของ front-face สีแดงเลย (raw component แทบไม่เปลี่ยน) กลับทำให้
+    _p1b_drop_side_wall_contaminated_columns ตัดคอลัมน์จริงทิ้งเพิ่มขึ้น (4 แทนที่จะเป็น 5) จึง
+    คงค่า tol=12 เดิมไว้ - สาเหตุที่แท้จริงของ AE02-01/02 ไม่ใช่ tol fragmentation แต่เป็นที่
+    _p1b_drop_side_wall_contaminated_columns เข้าใจผิดว่า roof ของกล่องสีแดง (ที่วางซ้อนอยู่บน
+    คอลัมน์จริงที่หัวรถ) เป็น side-wall noise เพราะ front-face สีแดงมี aspect ไม่เกิน 0.85 เลย
+    ในมุมมอง BACK (ดูรายละเอียดการสืบสวนในข้อความสนทนา) - ยังต้องแก้จุดนั้นแยกต่างหาก โดยวิธี
+    x-overlap กับคอลัมน์ที่ใกล้ที่สุดที่เคยลองก็พิสูจน์แล้วว่าแยกแยะจากเคส EC04-04 (contamination
+    จริง) ไม่ได้ เพราะมี geometric signature เหมือนกันทุกประการ (ต้องใช้ cross-view position
+    matching ถึงจะแยกได้ - ยังไม่ทำในรอบนี้)"""
     diff = np.abs(crop.astype(int) - np.array(color, dtype=int))
     m = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
+    if close_iters > 0:
+        m = ndimage.binary_closing(m, structure=np.ones((3, 3), dtype=bool), iterations=close_iters)
     structure = np.ones((3, 3), dtype=int)  # 8-connectivity เหมือน cv2 connectivity=8
     labeled, num = ndimage.label(m, structure=structure)
     comps = []
@@ -1260,7 +1227,7 @@ def _p1b_cells_for_color(crop, color, tol=12, area_min=1200):
         y_slice, x_slice = sl
         sub = (labeled[sl] == i)
         area = int(sub.sum())
-        if area < area_min:
+        if area < raw_area_min:
             continue
         y0, y1 = y_slice.start, y_slice.stop
         x0, x1 = x_slice.start, x_slice.stop
@@ -1314,7 +1281,7 @@ def _p1b_classify_view(crop, area_min=None):
     colors = _p1b_dominant_colors(crop)
     all_cells = []
     for color in colors:
-        comps = _p1b_cells_for_color(crop, color, area_min=area_min)
+        comps = _p1b_cells_for_color(crop, color)
         for c in comps:
             aspect = c['h'] / c['w'] if c['w'] else 0
             sub_s = S[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
@@ -1330,6 +1297,10 @@ def _p1b_classify_view(crop, area_min=None):
         for kind0 in ('front', 'roof', 'side'):
             subset = [c for c in comps if c['kind0'] == kind0]
             merged = _p1b_merge_text_split_fragments(subset)
+            # v25.20 FIX: area_min ตัวจริงกรอง "หลัง" merge (ไม่ใช่ก่อน) - ดู docstring
+            # _p1b_cells_for_color ว่าทำไมต้องย้ายมาตรงนี้ (กัน fragment ที่ควรรวมเป็น face
+            # เดียวกันถูกทิ้งไปก่อนมีโอกาส merge)
+            merged = [c for c in merged if c['area'] >= area_min]
             for c in merged:
                 c['aspect'] = c['h'] / c['w'] if c['w'] else 0
                 c['color'] = tuple(int(v) for v in color)
@@ -1489,35 +1460,9 @@ def _p1b_merge_corner_artifact_columns(cols, all_cells, side_overlap_ratio=0.5, 
     return kept, dropped
 
 
-def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45, other_view_all_cells=None):
-    """แก้ปัญหา 'หลงมองด้านข้างกล่อง ทำให้นับเกิน' เฉพาะกรณีที่วัดผลได้จริง (เดิมยืนยันจาก EC04-04
-    BACK: roof สีแปลกปลอมในโซนแผงข้างที่ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ)
-
-    v25.18 FIX (Critical - พบจริงจาก AE02-01/AE02-02): เดิมเช็ค 'has_matching_front_anywhere'
-    เฉพาะภายใน view เดียวกัน (all_cells ของ view นี้เท่านั้น) - พิสูจน์แล้วว่า "ไม่ปลอดภัย" เพราะ
-    กล่องที่สูงน้อยกว่า/ถูกบังจากกล่องเพื่อนบ้านที่สูงกว่าในมุมมองนี้ (มุมกล้องบัง front-face ทั้ง
-    แผ่นจนเหลือแค่ roof โผล่มา) จะ "ไม่มี front-face สีเดียวกันปรากฏใน view นี้เลย" ทั้งที่กล่องนั้น
-    มีอยู่จริงและมี front-face ปรากฏชัดเจนใน "อีก view หนึ่ง" (คนละมุมกล้อง มองเห็นกล่องนั้นไม่ถูกบัง)
-    ยืนยันด้วยหลักฐานจริง 2 จุด:
-      1. AE02-01/02 BACK: roof สีแดง (255,0,0) 2 จุด ไม่มี front สีแดงใน BACK เลย แต่ FRONT มี
-         front สีแดงจริงที่ cx=1588 (hi-res) - หมายความว่ากล่องแดงนี้มีจริง แค่ front-face ถูกบัง
-         จาก BACK - เดิมฟังก์ชันนี้ลบ 2 คอลัมน์จริงที่อยู่ใกล้ roof แดงนี้ทิ้งไปอย่างผิดพลาด (ทำให้
-         BACK นับได้ 5 แทนที่จะเป็น 7 จริง โดยบังเอิญไปตรงกับ FRONT ที่นับได้ 5 เช่นกัน - แมตช์กัน
-         "ผิดโดยบังเอิญ" ทำให้ Bug#4 (M<N augmentation) ไม่ถูกกระตุ้นให้ทำงานแก้ไขจำนวนที่แท้จริง)
-      2. EC04-04 BACK (ไฟล์ calibration เดิมของฟังก์ชันนี้เอง!): ตรวจสอบซ้ำด้วยภาพจริงพบว่าคอลัมน์
-         ที่เดิมถูกลบทิ้ง (roof สีเขียว (0,128,0)) วางทับตรงตำแหน่งกล่อง "STEMA-D1" สีเขียวจริงที่
-         มองเห็นได้ชัดเจนในภาพ (ไม่ใช่ contamination เลย) และสีเขียวนี้ก็มี front-face จริงปรากฏใน
-         FRONT view ด้วย (คนละคอลัมน์ แต่กล่องเดียวกันคนละมุมกล้อง) - แปลว่าการ "verified" เดิมที่
-         อ้างว่า "ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ" นั้นไม่ครบถ้วน (เช็คแค่ single-view)
-
-    FIX: ตรวจสอบ 'has_matching_front_anywhere' จากทั้ง 2 view (cross-view OR แทน single-view) -
-    ถ้ามี front-face สีเดียวกันปรากฏใน "view ใดก็ได้" (view นี้ หรือ อีก view หนึ่ง) ให้ถือว่ากล่องนี้
-    มีอยู่จริง ไม่ใช่ contamination - ไม่ลบคอลัมน์ที่ใกล้ที่สุด (สอดคล้องกับหลักการ "cross-view AND/OR"
-    ที่ใช้ตรวจสอบ structural color ใน v25.13 utilities อยู่แล้ว)
-
-    other_view_all_cells: all_cells ของอีก view หนึ่ง (ถ้ามี) - ใช้เป็นหลักฐานเพิ่มเติมเท่านั้น
-    ไม่บังคับต้องส่งมา (backward-compatible, default=None เหมือนพฤติกรรมเดิมทุกประการถ้าไม่ส่ง)
-    """
+def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
+    """แก้ปัญหา 'หลงมองด้านข้างกล่อง ทำให้นับเกิน' เฉพาะกรณีที่วัดผลได้จริง (ยืนยันจาก EC04-04
+    BACK: roof สีแปลกปลอมในโซนแผงข้างที่ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ)"""
     sides = [c for c in all_cells if c['kind'] == 'side']
     if not sides:
         return cols, []
@@ -1532,13 +1477,9 @@ def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45, other_v
     if not foreign_roofs_in_zone:
         return cols, []
     all_fronts = [c for c in all_cells if c['kind'] == 'front']
-    other_fronts = [c for c in other_view_all_cells if c['kind'] == 'front'] if other_view_all_cells else []
     kept, dropped = list(cols), []
     for fr in foreign_roofs_in_zone:
-        has_matching_front_anywhere = (
-            any(f['color'] == fr['color'] for f in all_fronts)
-            or any(f['color'] == fr['color'] for f in other_fronts)
-        )
+        has_matching_front_anywhere = any(f['color'] == fr['color'] for f in all_fronts)
         if has_matching_front_anywhere:
             continue
         if not kept:
@@ -1720,12 +1661,6 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_region = regions["back"]
         front_region = regions["front"]
 
-        # v25.18 FIX: คำนวณ front_all ล่วงหน้า (ก่อน back's drop-side-wall) เพื่อใช้เป็นหลักฐาน
-        # cross-view ให้ _p1b_drop_side_wall_contaminated_columns ตรวจสอบ (ดู docstring ฟังก์ชันนั้น
-        # สำหรับหลักฐาน+เหตุผลเต็ม) - ไม่กระทบลำดับการคำนวณอื่นใด เพราะ front_all ถูกคำนวณอยู่แล้ว
-        # normally ด้านล่างนี้ (แค่ย้ายขึ้นมาก่อน)
-        front_all = _p1b_classify_view(front_region)
-
         back_all = _p1b_classify_view(back_region)
         back_fronts, _ = _p1b_front_faces(back_region)
         back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
@@ -1733,12 +1668,12 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
-        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(
-            back_cols_raw, back_all, other_view_all_cells=front_all)
+        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
 
+        front_all = _p1b_classify_view(front_region)
         front_fronts, _ = _p1b_front_faces(front_region)
         front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
         front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
@@ -2859,8 +2794,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.18",
-            "benchmarkMode": "v25_18_crossview_sidewall_drop_fix",
+            "checkerVersion": "V25.17",
+            "benchmarkMode": "v25_17_dynamic_page_idx_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
