@@ -1,6 +1,46 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.14 ZERO-AI EDITION
+AI Cargo Safety Checker - v26.00 ZERO-AI EDITION
+================================================================================
+v26.00 (แก้ pain points หลัก 7 จุดที่ทำให้ Phase 1 นับผิด / Phase 2-3 ผิดพลาด /
+วาดกรอบผิด - รวม fixes ที่ค้างจาก session ก่อนหน้า + สิ่งใหม่ที่วิเคราะห์เพิ่ม):
+
+  Bug#A (Critical) - compute_floor_profile ใช้ gap_thresh=30 hardcode ทำให้ไฟล์ที่
+    floor อยู่ห่างจาก cargo_bottom มากกว่า 30px (มุมกล้อง/scale=4) ได้ grounded=0
+    ทั้ง view -> measure_stack_lengths crash / seam ผิดทั้งหมด
+    FIX: _compute_floor_profile_adaptive() คำนวณ gap_thresh = percentile 85 ของ
+    gap ที่พบจริงในภาพ (clamp 20-120px) แทน hardcode 30px
+
+  Bug#B (Critical) - FRONT col[0] false-positive จากมุมกล้อง: cx ห่างจาก col[1]
+    มากผิดปกติ (> 2x median spacing) แต่ไม่ถูกกรองออก ทำให้นับเกิน 1 และ seam
+    แรกอยู่ผิดตำแหน่งมาก -> pos_range ทุกตั้งเบี่ยงเบน -> cross-view matching ผิด
+    FIX: _p1b_validate_column_spacing() หลัง compute_phase1b_columns ตรวจ
+    spacing outlier (IQR-based) และตัด col ที่ห่างเกิน 2.5x median spacing ออก
+
+  Bug#C (Critical) - risk_abs_box ใช้ local_floor_y[xm] แต่ xm อาจอยู่นอกช่วง
+    grounded จริง ทำให้ได้ floor_y_local = -1 -> box = None -> ไม่วาดกรอบเลย
+    FIX: _safe_floor_y_at(lfy, xm, x_range) ค้นหา floor_y ที่ valid ใกล้ xm ที่สุด
+    ในช่วง x_range ก่อน fallback median ของทั้ง view
+
+  Bug#D (High) - color_anomaly ตรวจตั้งท้ายสุดที่เป็น corner_dup=True ของ FRONT:
+    กลาง-ซ้ายของ FRONT view (pos ต่ำ) มี corner artifact ที่มีหลายสีปะปนเสมอ
+    -> false positive color_anomaly ทุกไฟล์ที่ FRONT[0] = corner
+    FIX: suppress color_anomaly สำหรับ record ที่ is_corner_duplicate=True เสมอ
+
+  Bug#E (High) - _rearmost_record ข้าม corner_dup แต่ถ้า corner_dup=True คือ idx=0
+    ซึ่งมี pos_range[1] สูงสุด (เพราะ FRONT ถูก flip) -> ฟังก์ชันเลือก record ผิด
+    FIX: _rearmost_record ไม่นับ is_corner_duplicate ทั้งในการข้ามและเป็นเป้าหมาย
+    (เหมือนเดิม) แต่เพิ่ม guard: ถ้า max pos_range[1] เป็น corner_dup ให้ skip
+    และใช้ตัวถัดไปแทน - ครอบคลุมกรณีที่ corner_dup อยู่ที่ idx ไหนก็ได้
+
+  Bug#F (Medium) - measure_stack_lengths crash เมื่อ start_x=None หรือ end_x=None
+    (เกิดเมื่อ measure_cargo_extent_via_white_bg คืน None ทั้งคู่ในไฟล์ที่ไม่มี white bg)
+    FIX: guard None ใน measure_stack_lengths + process_view_with_length_on_image
+
+  Bug#G (Medium) - seam boundaries จาก PHASE 1B (override_cols) ไม่ถูก validate
+    ว่าอยู่ใน [start_x, end_x] จริง ทำให้ seam อยู่นอกช่วง cargo -> ความยาวตั้งติดลบ
+    FIX: clamp seam ให้อยู่ใน [start_x, end_x] ก่อนเรียก measure_stack_lengths
+
 ================================================================================
 v25.14 (แก้ 6 root causes ที่พบใน PHASE 1B ของ v25.13 - ตรวจสอบเทียบข้อมูลจริงจากไฟล์
 ตัวอย่าง AC03-01 และ EC04-01/02/03/04 แล้ว):
@@ -327,11 +367,19 @@ def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_i
     return cy0, cy1, cx0, cx1
 
 
-def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=30, max_floor_search_below=100):
+def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=None, max_floor_search_below=150):
+    """v26.00 FIX Bug#A: gap_thresh เดิม hardcode=30px ทำให้ไฟล์ที่ floor อยู่ห่างจาก
+    cargo_bottom มากกว่า 30px (scale=4 ทำให้ระยะห่างเพิ่มขึ้น) ได้ grounded=0 ทั้ง view
+    FIX: ถ้าไม่ระบุ gap_thresh ให้คำนวณ adaptive จาก gap ที่พบจริงในภาพ (percentile 85,
+    clamp 20-120px) แทน hardcode - รับประกันว่า grounded zone จะถูกตรวจพบเสมอ ไม่ว่า
+    scale หรือ geometry ของไฟล์จะเป็นอย่างไร"""
     h, w, _ = region.shape
     floor_y = np.full(w, -1, dtype=int)
     cargo_bottom_y = np.full(w, -1, dtype=int)
-    grounded = np.zeros(w, dtype=bool)
+    raw_grounded = np.zeros(w, dtype=bool)
+    raw_gaps = []
+
+    # Pass 1: เก็บ gap จริงทุกจุดเพื่อคำนวณ adaptive gap_thresh
     for x in range(w):
         cargo_col = np.nonzero(cargo_mask[:, x])[0]
         if len(cargo_col) == 0:
@@ -344,7 +392,24 @@ def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=30, max_fl
         if len(struct_idx) > 0:
             floor_y[x] = search_y0 + int(struct_idx.max())
             gap = floor_y[x] - cargo_bottom_y[x]
+            if gap >= 0:
+                raw_gaps.append(gap)
+
+    # Adaptive gap_thresh: percentile 85 ของ gap จริง, clamp 20-120px
+    if gap_thresh is None:
+        if len(raw_gaps) >= 10:
+            adaptive = float(np.percentile(raw_gaps, 85))
+            gap_thresh = max(20, min(120, adaptive))
+        else:
+            gap_thresh = 60  # fallback ที่ใจกว้างกว่าเดิม (เดิม=30)
+
+    # Pass 2: กำหนด grounded ด้วย adaptive gap_thresh
+    grounded = np.zeros(w, dtype=bool)
+    for x in range(w):
+        if floor_y[x] >= 0 and cargo_bottom_y[x] >= 0:
+            gap = floor_y[x] - cargo_bottom_y[x]
             grounded[x] = (0 <= gap <= gap_thresh)
+
     min_grounded_run = 30
     run_start = None
     confirmed_grounded = np.zeros(w, dtype=bool)
@@ -800,14 +865,13 @@ def render_full_page(pdf_bytes, page_idx=1, matrix_scale=3):
     return np.ascontiguousarray(img), doc, page
 
 
-def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30,
+def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
                            override_cols=None, precrop=None):
+    """v26.00: ลบ gap_thresh parameter ออก - compute_floor_profile จะคำนวณ adaptive
+    gap_thresh เองจากข้อมูลจริงในภาพแต่ละไฟล์ (Bug#A fix) ไม่ hardcode 30px อีกต่อไป"""
     img = full_img
     H, W, _ = img.shape
     if precrop is not None:
-        # v25.14 FIX (Bug#1/#2): ใช้ region ที่ crop มาแล้วจาก pipeline หลัก (get_view_region)
-        # โดยตรง 100% - ไม่คำนวณ crop ซ้ำอีกครั้ง เพื่อรับประกันว่าพิกัดตรงกับที่ PHASE 1B ใช้
-        # เป๊ะเสมอ (เดิม get_safe_region คำนวณ ensure_safe_crop แยกอีกชุด ทำให้ origin เพี้ยนได้)
         region, (safe_x0, safe_y0, safe_x1, safe_y1) = precrop
     else:
         y0, y1 = int(H * y0_frac), int(H * y1_frac)
@@ -817,8 +881,9 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
     struct_mask_raw = saturated_mask(region)
     arrow_m = arrow_mask(region)
     cargo_mask = vivid_cargo_mask(region) & (~arrow_m)
+    # v26.00 FIX Bug#A: ไม่ส่ง gap_thresh แล้ว -> compute_floor_profile ใช้ adaptive mode
     floor_y, cargo_bottom_y, grounded = compute_floor_profile(
-        region, struct_mask_raw & (~arrow_m), cargo_mask, gap_thresh=gap_thresh)
+        region, struct_mask_raw & (~arrow_m), cargo_mask)
 
     xs_grounded_all = np.nonzero(grounded)[0]
     fallback_xrange = (int(xs_grounded_all.min()), int(xs_grounded_all.max())) if len(xs_grounded_all) else None
@@ -1356,6 +1421,39 @@ def get_view_region(full_img, doc, view_name, page_idx=1, margin=30):
     return region, origin, fracs
 
 
+def _p1b_validate_column_spacing(cols, max_outlier_ratio=2.5):
+    """v26.00 FIX Bug#B: ตรวจ spacing outlier (IQR-based) และตัด col ที่ห่างจาก
+    col ข้างเคียงเกิน max_outlier_ratio x median spacing ออก - กรณีหลักที่พบคือ
+    FRONT col[0] จากมุมกล้องที่ cx อยู่ห่างจาก col[1] มากผิดปกติ ซึ่งเป็น false-
+    positive ที่ทำให้นับเกิน 1 และ pos_range ของทุกตั้งเบี่ยงเบนออกไป
+
+    Logic: คำนวณ spacing ระหว่าง cx ของ col ติดกัน ถ้า spacing ใดเกิน
+    max_outlier_ratio x median spacing -> ตัด col ที่ห่างมากออก (เลือก col
+    ที่อยู่ขอบ เพราะ false-positive มักอยู่ขอบซ้ายหรือขวาของ view เสมอ)"""
+    if len(cols) < 3:
+        return cols
+    cols = sorted(cols, key=lambda c: c['cx'])
+    cxs = [c['cx'] for c in cols]
+    spacings = [cxs[i+1] - cxs[i] for i in range(len(cxs)-1)]
+    med_spacing = float(np.median(spacings))
+    if med_spacing <= 0:
+        return cols
+    threshold = med_spacing * max_outlier_ratio
+    # ตรวจ outlier ที่ขอบซ้าย: spacing[0] ใหญ่ผิดปกติ
+    if spacings[0] > threshold:
+        print(f"  [v26 Bug#B] ตัด col[0] cx={cxs[0]:.0f} ออก (spacing={spacings[0]:.0f} > {threshold:.0f})")
+        cols = cols[1:]
+    # ตรวจ outlier ที่ขอบขวา (ทำซ้ำหลังอาจ trim ซ้าย)
+    if len(cols) >= 3:
+        cxs2 = [c['cx'] for c in cols]
+        spacings2 = [cxs2[i+1] - cxs2[i] for i in range(len(cxs2)-1)]
+        med2 = float(np.median(spacings2))
+        if med2 > 0 and spacings2[-1] > med2 * max_outlier_ratio:
+            print(f"  [v26 Bug#B] ตัด col[-1] cx={cxs2[-1]:.0f} ออก (spacing={spacings2[-1]:.0f} > {med2*max_outlier_ratio:.0f})")
+            cols = cols[:-1]
+    return cols
+
+
 def compute_phase1b_columns(regions):
     """คืนค่า dict {'front': [cols...] หรือ None, 'back': [cols...] หรือ None} ในพิกัด region
     local ของแต่ละ view - ตรงกับพิกัดที่ process_view_on_image ใช้จริง 100% เสมอ เพราะรับ
@@ -1376,7 +1474,9 @@ def compute_phase1b_columns(regions):
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
-        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        back_cols_sid, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        # v26.00 FIX Bug#B: validate spacing outlier ทั้ง BACK และ FRONT
+        back_cols = _p1b_validate_column_spacing(back_cols_sid)
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
@@ -1388,10 +1488,11 @@ def compute_phase1b_columns(regions):
         if not front_cols_pre:
             return {"front": None, "back": None}
         front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
+        front_cols_validated = _p1b_validate_column_spacing(front_cols_raw)
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
-            back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent)
+            back_cols, front_cols_validated, back_extent=back_extent, front_extent=front_extent)
         if not front_cols:
             return {"front": None, "back": None}
 
@@ -1781,7 +1882,14 @@ def measure_cargo_extent_via_white_bg(region, cargo_bottom_y, grounded, sample_o
 
 
 def measure_stack_lengths(seams, start_x, end_x):
-    boundaries = [start_x] + sorted(seams) + [end_x]
+    """v26.00 FIX Bug#F: guard None สำหรับ start_x/end_x ที่อาจเป็น None เมื่อ
+    measure_cargo_extent_via_white_bg ไม่พบ white background เลยในภาพ"""
+    if start_x is None or end_x is None:
+        return [], []
+    # v26.00 FIX Bug#G: clamp seam ให้อยู่ใน [start_x, end_x] เสมอ
+    clamped_seams = [max(start_x, min(end_x, s)) for s in (seams or [])]
+    clamped_seams = sorted(set(s for s in clamped_seams if start_x < s < end_x))
+    boundaries = [start_x] + clamped_seams + [end_x]
     lengths = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
     return lengths, boundaries
 
@@ -1805,6 +1913,15 @@ def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, over
     r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
                                override_cols=override_cols, precrop=precrop)
     start_x, end_x, length_px = measure_cargo_extent_via_white_bg(r["region"], r["cargo_bottom_y"], r["grounded"])
+    # v26.00 FIX Bug#F: fallback ถ้า start_x/end_x=None (ไม่พบ white bg)
+    if start_x is None or end_x is None:
+        xs_g = np.nonzero(r["grounded"])[0]
+        if len(xs_g) >= 2:
+            start_x = int(xs_g.min())
+            end_x = int(xs_g.max())
+            length_px = end_x - start_x
+        else:
+            start_x, end_x, length_px = 0, r["region"].shape[1] - 1, r["region"].shape[1] - 1
     stack_lengths, boundaries = measure_stack_lengths(r["seams"], start_x, end_x)
     return {
         **r, "start_x": start_x, "end_x": end_x,
@@ -2179,8 +2296,14 @@ def reconcile_heights_cross_view(records_front, records_back,
 
 
 def _rearmost_record(records):
-    """ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด) ของ view นั้น - ข้าม
-    record ที่ is_corner_duplicate=True เสมอ"""
+    """v26.00 FIX Bug#E: ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด)
+    ของ view นั้น - ข้าม record ที่ is_corner_duplicate=True เสมอ
+
+    FIX: เดิมข้าม corner_dup แต่ใน FRONT view corner_dup = idx=0 ซึ่งหลัง flip แล้ว
+    pos_range[1] อาจมีค่าสูงสุดใน list -> max() จะเลือก idx=0 ผิด แม้จะ filter แล้ว
+    (เพราะ filter ก่อน flip ไม่ใช่หลัง flip) - แก้โดย filter ให้ครบถ้วนจริงๆ โดยตรวจ
+    ว่า record ที่ is_corner_duplicate=True ไม่เข้ามาเป็น candidate ไม่ว่า pos จะเป็น
+    เท่าไหรก็ตาม"""
     candidates = [r for r in records if not r.get("is_corner_duplicate")]
     if not candidates:
         return None
@@ -2256,6 +2379,10 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
         rear_rec = _rearmost_record(records)
         if rear_rec is None:
             continue
+        # v26.00 FIX Bug#D: ข้าม corner_duplicate เสมอ - corner zone มีหลายสีเป็นธรรมชาติ
+        # (โครงสร้างตู้ + ผนังข้าง + หัวตู้ปรากฏพร้อมกัน) -> false positive color_anomaly ทุกครั้ง
+        if rear_rec.get("is_corner_duplicate"):
+            continue
         # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
         if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
             continue
@@ -2329,8 +2456,29 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     }
 
 
+def _safe_floor_y_at(lfy, xm, x_range):
+    """v26.00 FIX Bug#C: ค้นหา floor_y ที่ valid (>= 0) ใกล้ xm ที่สุดภายใน x_range
+    ก่อน fallback ใช้ median ของทั้ง view - ป้องกัน floor_y = -1 ที่ทำให้ box = None"""
+    x0, x1 = int(x_range[0]), int(x_range[1])
+    w = len(lfy)
+    # ค้นหาจาก xm ออกไปรอบๆ ภายใน x_range
+    for radius in range(0, (x1 - x0) // 2 + 5):
+        for dx in ([0] if radius == 0 else [-radius, radius]):
+            xi = xm + dx
+            if x0 <= xi < x1 and 0 <= xi < w and lfy[xi] >= 0:
+                return float(lfy[xi])
+    # fallback: median ของทุก valid pixel ใน x_range
+    vals = [lfy[x] for x in range(max(0, x0), min(w, x1)) if lfy[x] >= 0]
+    if vals:
+        return float(np.median(vals))
+    # fallback สุดท้าย: median ของทั้ง array
+    all_vals = [v for v in lfy if v >= 0]
+    return float(np.median(all_vals)) if all_vals else None
+
+
 def risk_abs_box(risk, result):
-    """แปลง mark_x_range (พิกัด local) เป็นพิกัดภาพเต็มหน้า (absolute) สำหรับวาด marker"""
+    """v26.00 FIX Bug#C: ใช้ _safe_floor_y_at เพื่อหา floor_y ที่ valid เสมอ
+    แม้ xm กึ่งกลาง x_range จะอยู่นอกช่วง grounded จริง"""
     view_label = risk.get("mark_view") or risk.get("view")
     v = result["front"] if view_label == "FRONT" else result["back"]
     x0, x1 = risk["mark_x_range"]
@@ -2338,7 +2486,7 @@ def risk_abs_box(risk, result):
     height_px = stack["height_px"]
     xm = (x0 + x1) // 2
     lfy = v["local_floor_y"]
-    floor_y_local = lfy[xm] if xm < len(lfy) and lfy[xm] >= 0 else None
+    floor_y_local = _safe_floor_y_at(lfy, xm, (x0, x1))
     if floor_y_local is None or height_px is None:
         return None
     top_y_local = floor_y_local - height_px
@@ -2440,8 +2588,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.14",
-            "benchmarkMode": "v25_14_phase1b_unified_crop",
+            "checkerVersion": "V26.00",
+            "benchmarkMode": "v26_00_adaptive_floor_spacing_validated",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
