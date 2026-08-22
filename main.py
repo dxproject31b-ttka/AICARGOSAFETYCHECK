@@ -1301,7 +1301,15 @@ def _p1b_merge_text_split_fragments(comps, x_tol=12, w_tol=25, gap_max=40):
     return merged
 
 
-def _p1b_classify_view(crop, area_min=1200):
+def _p1b_classify_view(crop, area_min=None):
+    if area_min is None:
+        # calibrate จาก hi_scale=4 region จริง
+        # 1200px² คือ calibrate ที่ scale=4, region ~400×300px
+        # ถ้า region เล็กกว่า → scale ลงตามสัดส่วน
+        h, w = crop.shape[:2]
+        ref_area = 400 * 300  # region size ที่ calibrate ไว้
+        area_min = max(300, int(1200 * (h * w) / ref_area))
+
     S, _ = _p1b_sat_val(crop)
     colors = _p1b_dominant_colors(crop)
     all_cells = []
