@@ -1,6 +1,36 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.15 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.16 ZERO-AI EDITION
+================================================================================
+v25.16 (แก้บั๊ก marker วางผิดตำแหน่งที่พบจริงจาก AC03-06 FRONT - ไฟล์โหลดไม่เต็มคัน):
+  ปัญหา: ทดสอบ AC03-06 (Unused Floor 11.8in, cargo 58.5% - โหลดไม่เต็มคัน) พบว่ากรอบ marker
+  ของ FRONT view ถูกวาดเป็นแท่งแคบๆ ลอยอยู่กลางอากาศระหว่างกอง ไม่ตรงกับตำแหน่งกล่องจริงเลย
+
+  Root cause (2 จุดที่เกี่ยวเนื่องกัน ทั้งคู่มาจากสาเหตุเดียวกัน คือเชื่อ 'grounded' mask
+  มากเกินไปเมื่อไม่น่าเชื่อถือ):
+    1. process_view_on_image (override_cols path): x_min_/x_max_ ที่ใช้ clip ตำแหน่ง seam
+       ระหว่างคอลัมน์ เดิมเชื่อ fallback_xrange (จาก grounded floor-profile) เป็นหลักเสมอเมื่อมี
+       ค่า - แต่ AC03-06 FRONT มี grounded แคบผิดปกติ (92px) เทียบกับคอลัมน์จริงจาก PHASE 1B ที่
+       กว้างถึง ~550px (คนละสาเหตุกับ EC04-01 เดิมที่แค่ 1 คอลัมน์มุมกล้องโผล่เกินขอบเล็กน้อย -
+       นี่คือเกือบทั้งช่วงไม่ผ่านเกณฑ์ grounded เลย) ทำให้ seam ทั้งหมดถูกบีบอัด/ดันเกินขอบเขต
+       แคบๆ นี้ ไม่สะท้อนตำแหน่งจริงของกล่องเลย
+    2. compute_local_floor_y: interpolate ค่า floor_y เฉพาะภายในขอบเขต 'grounded' เท่านั้น
+       (นอกช่วงปล่อยเป็น -1/invalid) ทำให้ height lookup ล้มเหลวสำหรับตั้งส่วนใหญ่ที่อยู่นอกช่วง
+       แคบนี้ แม้ seam จะแก้ถูกแล้วก็ตาม (marker คำนวณไม่ได้/ตำแหน่งผิด)
+
+  FIX:
+    1. x_min_/x_max_ ใช้ 'union' ระหว่าง fallback_xrange (grounded) กับ extent จริงของคอลัมน์
+       จาก PHASE 1B (ที่ reconcile กับ BACK มาแล้ว จึงเชื่อถือได้) แทนที่จะเชื่อ grounded อย่าง
+       เดียว - ยังคงรักษา intent เดิมของ v25.11 (ขยายขอบเขตให้ครอบคลุมคอลัมน์มุมกล้องที่โผล่เกิน
+       grounded ไปเล็กน้อย) แต่ป้องกันกรณีตรงข้ามได้ด้วย (grounded แคบกว่ามาก)
+    2. measure_cargo_extent_via_white_bg รับ override_xrange (จาก r["xrange"] ที่ union แล้ว)
+       เป็น hint เพิ่มเติม กัน start_x/end_x แคบกว่าที่ควร
+    3. compute_local_floor_y extrapolate ด้วยค่าขอบ (edge-hold) ให้ครอบคลุมทั้ง array แทนที่จะ
+       ปล่อย -1 นอกช่วง grounded - เป็นการประมาณค่าที่สมเหตุสมผลทางฟิสิกส์ (ดีกว่าไม่มีค่าเลย)
+
+  regression-verified: รันซ้ำทั้ง 11 ไฟล์เดิม (EC01-01~04, EC02-01/02, EC03-01, EC04-01~04) ได้
+  ผลลัพธ์ (hazardCount, marker position) เหมือนเดิมทุกไฟล์ ไม่มี regression - AC03-06 FRONT
+  ตอนนี้วางกรอบตรงตำแหน่งกล่องจริงถูกต้อง (ยืนยันด้วยภาพ marked จริง)
 ================================================================================
 v25.15 (แก้ HTTP 500 ที่พบจากการใช้งานจริงบน Cloud Function หลังปล่อย v25.14):
   ปัญหา: v25.14 แก้ Bug#1/#2 (coordinate mismatch ระหว่าง PHASE 1B กับ pipeline หลัก) โดยเปลี่ยน
@@ -864,11 +894,29 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         # ไม่มี phantom record เหลือให้ต้อง flag is_corner_duplicate อีกต่อไป
         cols_sorted = sorted(override_cols, key=lambda c: c["cx"])
         n_stacks = len(cols_sorted)
+        cols_x_min = cols_sorted[0]["x"]
+        cols_x_max = cols_sorted[-1]["x"] + cols_sorted[-1]["w"]
+        # v25.16 FIX (Critical): เดิมเชื่อ fallback_xrange (grounded, จาก floor-profile) เป็นหลัก
+        # เสมอเมื่อมีค่า - แต่พบจริงจาก AC03-06 FRONT (ไฟล์โหลดไม่เต็มคัน, Unused Floor 11.8in)
+        # ว่า grounded zone บางไฟล์แคบผิดปกติมาก (พบจริง: กว้างแค่ 92px ขณะที่คอลัมน์จริงจาก
+        # PHASE 1B ที่ reconcile กับ BACK แล้วกว้างถึง ~550px) เพราะ floor-profile/gap_thresh
+        # ตรวจ 'พื้นชนกับกล่อง' ไม่ผ่านในเกือบทุกคอลัมน์ของไฟล์นี้ (ระยะห่างจาก cargo_bottom_y
+        # เกิน gap_thresh เกือบตลอดแนว ไม่ใช่แค่มุมกล้องใกล้สุดแบบ EC04-01 เดิม) ผลคือ seam
+        # midpoint ถูกบีบอัด/ดันเกินขอบเขตแคบๆ นี้ ทำให้กรอบ marker วางผิดตำแหน่งไปไกลจากกล่อง
+        # จริงทั้ง 8 ตั้ง (ยืนยันจากภาพจริงที่ผู้ใช้แนบมา: กรอบ FRONT ไปกองอยู่กลางอากาศระหว่าง
+        # กองแทนที่จะอยู่ที่กองจริง)
+        #
+        # FIX: ใช้ 'union' ของ fallback_xrange (grounded) กับ extent จริงของคอลัมน์จาก PHASE 1B
+        # เสมอ (min ของขอบซ้ายทั้งคู่, max ของขอบขวาทั้งคู่) แทนที่จะเชื่อ fallback_xrange อย่าง
+        # เดียว - ยังคงรักษา intent เดิมของ v25.11 (ขยายขอบเขตให้ครอบคลุมคอลัมน์มุมกล้องที่โผล่
+        # เกิน grounded zone แคบๆ ไปเล็กน้อย) แต่ป้องกันกรณีตรงข้าม (grounded แคบกว่า column
+        # extent มาก) ได้ด้วย เพราะ PHASE 1B ผ่านการ reconcile กับ BACK (ground-truth ตำแหน่ง)
+        # มาแล้ว จึงเชื่อถือได้อย่างน้อยเท่ากับ grounded-based fallback
         if fallback_xrange is not None:
-            x_min_, x_max_ = fallback_xrange
+            x_min_ = min(fallback_xrange[0], cols_x_min)
+            x_max_ = max(fallback_xrange[1], cols_x_max)
         else:
-            x_min_ = cols_sorted[0]["x"]
-            x_max_ = cols_sorted[-1]["x"] + cols_sorted[-1]["w"]
+            x_min_, x_max_ = cols_x_min, cols_x_max
 
         # v25.11 GUARD: กล่องมุมกล้องใกล้สุด (corner-perspective) บางครั้งมี front-face จริงที่
         # ตรวจพบ (PHASE 1B) อยู่ "นอกช่วง grounded" ของระบบพื้น/floor-profile เดิม (พบจริงใน
@@ -1839,11 +1887,30 @@ def is_white_bg(rgb, white_thresh=245):
     return r >= white_thresh and g >= white_thresh and b >= white_thresh
 
 
-def measure_cargo_extent_via_white_bg(region, cargo_bottom_y, grounded, sample_offset=3, refine_margin=15):
+def measure_cargo_extent_via_white_bg(region, cargo_bottom_y, grounded, sample_offset=3,
+                                       refine_margin=15, override_xrange=None):
+    """v25.16 FIX (Critical): เดิมคำนวณ rough_min/rough_max จาก 'grounded' mask เพียงอย่างเดียว
+    (floor-profile ที่ต้องผ่าน gap_thresh) - พบจริงจาก AC03-06 FRONT (ไฟล์โหลดไม่เต็มคัน) ว่า
+    grounded แคบผิดปกติมาก (92px) ขณะที่คอลัมน์จริงจาก PHASE 1B กว้างกว่ามาก (~550px) ทำให้
+    start_x/end_x (ขอบเขตซ้าย-ขวาของกองสินค้าทั้งหมด) แคบตามไปด้วย ทำให้ boundary ของตั้งแรก/
+    ตั้งสุดท้าย (Phase 2/3) ผิดพลาดรุนแรง แม้ seam ระหว่างกลางจะถูกต้องแล้วก็ตาม (ดู
+    process_view_on_image ที่แก้ x_min_/x_max_ ด้วย union แบบเดียวกัน)
+
+    FIX: รับ override_xrange (จาก r["xrange"] ที่ union กับ column extent จาก PHASE 1B แล้ว)
+    เป็น hint เพิ่มเติม - ใช้ union ระหว่าง grounded extent กับ override_xrange เป็นจุดเริ่มต้น
+    ของการ refine (แทนที่จะใช้ grounded อย่างเดียว) เพื่อไม่ให้ start_x/end_x แคบกว่าที่ควรเป็น
+    """
     xs_grounded = np.nonzero(grounded)[0]
     if len(xs_grounded) == 0:
-        return None, None, 0
-    rough_min, rough_max = int(xs_grounded.min()), int(xs_grounded.max())
+        if override_xrange is not None:
+            rough_min, rough_max = override_xrange
+        else:
+            return None, None, 0
+    else:
+        rough_min, rough_max = int(xs_grounded.min()), int(xs_grounded.max())
+        if override_xrange is not None:
+            rough_min = min(rough_min, override_xrange[0])
+            rough_max = max(rough_max, override_xrange[1])
     h, w, _ = region.shape
     true_start = rough_min
     search_limit_left = max(0, rough_min - refine_margin)
@@ -1897,7 +1964,11 @@ def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, over
             front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name)
     r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
                                override_cols=override_cols, precrop=precrop)
-    start_x, end_x, length_px = measure_cargo_extent_via_white_bg(r["region"], r["cargo_bottom_y"], r["grounded"])
+    # v25.16 FIX: ส่ง r["xrange"] (union กับ column extent จาก PHASE 1B แล้ว - ดู
+    # process_view_on_image) เป็น override hint ให้ measure_cargo_extent_via_white_bg ด้วย กัน
+    # ไม่ให้ start_x/end_x แคบกว่าที่ควรเป็นเมื่อ grounded mask ไม่น่าเชื่อถือ (ดู docstring)
+    start_x, end_x, length_px = measure_cargo_extent_via_white_bg(
+        r["region"], r["cargo_bottom_y"], r["grounded"], override_xrange=r.get("xrange"))
     stack_lengths, boundaries = measure_stack_lengths(r["seams"], start_x, end_x)
     return {
         **r, "start_x": start_x, "end_x": end_x,
@@ -1921,7 +1992,21 @@ def compute_cargo_top_profile(cargo_mask):
 
 def compute_local_floor_y(floor_y, grounded, smooth_window=41):
     """LOCAL FLOOR: แก้บั๊กพื้นตู้เป็นรูปตัว V - ใช้ rolling median เฉพาะจุดแทน
-    global linear fit เพื่อรักษารูปทรง apex ที่แท้จริงของพื้นตู้ไว้"""
+    global linear fit เพื่อรักษารูปทรง apex ที่แท้จริงของพื้นตู้ไว้
+
+    v25.16 FIX (Critical): เดิม interpolate ค่าเฉพาะภายในช่วง [valid_idx.min(),valid_idx.max()]
+    (ขอบเขตของ 'grounded' mask เท่านั้น) - นอกช่วงนี้ปล่อยเป็น -1 (invalid) ทั้งหมด พบจริงจาก
+    AC03-06 FRONT (ไฟล์โหลดไม่เต็มคัน) ว่า grounded แคบผิดปกติมาก (~92px) เทียบกับความกว้างจริง
+    ของกองสินค้าทั้งหมด (~550px) ทำให้ height lookup (_floor_at ใน compute_stack_heights_px)
+    คืนค่า None สำหรับตั้งส่วนใหญ่ที่อยู่นอกช่วงแคบนี้ (ไม่ใช่แค่ตั้งเดียว) แม้ cross-view
+    reconciliation จะช่วยเติมได้บางส่วน แต่บางตั้งไม่มี match ที่ผ่าน overlap threshold ทำให้
+    height_px เหลือ None ถาวร -> risk_abs_box คำนวณกรอบ marker ไม่ได้/ผิดตำแหน่ง
+
+    FIX: extrapolate ด้วยค่าขอบ (edge-hold) ให้ครอบคลุมทั้ง array แทนที่จะปล่อย -1 นอกช่วง -
+    เป็นการประมาณค่าที่สมเหตุสมผลทางฟิสิกส์ (พื้นตู้นอกช่วงที่วัดได้ตรงมักใกล้เคียงกับค่าที่ขอบ
+    ของช่วงที่วัดได้จริง มากกว่าไม่มีค่าเลย) ไม่กระทบกับกรณีปกติที่ grounded ครอบคลุมกว้างอยู่แล้ว
+    (extrapolation แค่เติมส่วนขอบแคบๆ ที่เหลือ ไม่เปลี่ยนค่าที่ interpolate ไว้แล้วเลย)
+    """
     w = len(floor_y)
     clean = np.full(w, -1, dtype=float)
     xs_g = np.nonzero(grounded)[0]
@@ -1940,6 +2025,8 @@ def compute_local_floor_y(floor_y, grounded, smooth_window=41):
         all_idx = np.arange(valid_idx.min(), valid_idx.max() + 1)
         interp_vals = np.interp(all_idx, valid_idx, clean[valid_idx])
         clean[all_idx] = interp_vals
+        clean[:valid_idx.min()] = clean[valid_idx.min()]
+        clean[valid_idx.max() + 1:] = clean[valid_idx.max()]
     return clean
 
 
@@ -2544,8 +2631,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.15",
-            "benchmarkMode": "v25_15_phase1b_hires_region_crop",
+            "checkerVersion": "V25.16",
+            "benchmarkMode": "v25_16_xrange_floor_union_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
