@@ -1,6 +1,21 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.11 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.12 ZERO-AI EDITION
+================================================================================
+v25.12 (สำรวจแนวทางเสริม - ไม่แก้ pipeline หลัก): นำผลสำรวจจาก session พัฒนาแยกต่างหาก
+(ทดสอบแนวทาง "นับกล่อง/แยกหน้ากล่อง" กับไฟล์ตัวอย่างชุดอื่น - EA03-01, EB08-01, ED86-02,
+ED03-01 ฯลฯ) มาตรวจสอบกับ AC03-01 (1 ใน 6 ไฟล์ calibration จริงของ PHASE 1B) พบว่า:
+  - แนวคิด "กรองสีโครงสร้างตู้ล่วงหน้าด้วย boundary-touch test" ล้มเหลวกับ AC03-01 (โหลด
+    เต็มคัน 100% ทำให้สีกล่องจริงถูกเข้าใจผิดเป็นสีโครงสร้าง) - "ไม่ integrate" เข้า pipeline
+  - แนวคิด "หา apex/width-vector จากรูปทรงล้วน ๆ เพื่อจำแนก near/far-half" ให้ผล FRONT/BACK
+    ไม่ตรงกันเมื่อทดสอบกับ AC03-01 (โหลดเต็มคันเช่นกัน) - เก็บเป็น utility เฉย ๆ พร้อมคำเตือน
+    ยังไม่ wire เข้า pipeline จนกว่าจะแก้ไขและ regression-test ผ่านครบ 6 ไฟล์
+  - แนวคิด "แยกเส้น grid-line ปลอมออกจากเส้นแบ่งกล่องจริงด้วยพิกเซล (darkening-ratio vs
+    black-core)" ปลอดภัย (default คืนค่า REAL_SEAM เมื่อไม่แน่ใจ) แต่ยังไม่พบไฟล์จริงที่
+    จำเป็นต้องใช้ (ปัญหาที่เจอใน AC03-01 เป็นคนละกลไกกับที่ _p1b_merge_corner_artifact_columns
+    เดิมจัดการอยู่แล้ว) - เก็บเป็น utility สำรอง ไม่ wire เข้า pipeline เช่นกัน
+ดูรายละเอียดเต็มพร้อมหลักฐานที่หัวข้อ "v25.12 EXPERIMENTAL UTILITIES" ก่อน PHASE 2 ด้านล่าง
+ไม่มีการแก้ไข PHASE 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้ - คงพฤติกรรมเดิมทุกกรณี
 ================================================================================
 v25.11 FIX (สำคัญ): แทนที่ PHASE 1 (seam-based counting) ด้วย PHASE 1B (front-face
 color-blob clustering) เป็นวิธีนับหลัก เพราะพบว่า seam-based เดิมมีบั๊ก undercount จริงที่
@@ -1286,6 +1301,195 @@ def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
 
 
 # ============================================================================
+# v25.12 EXPERIMENTAL UTILITIES (จาก session พัฒนาแยกต่างหาก - ยังไม่ wire เข้า pipeline หลัก)
+# ============================================================================
+# บริบท: session พัฒนาแยกต่างหาก (ทดสอบกับไฟล์ตัวอย่างชุดอื่นที่ไม่ใช่ 6 ไฟล์ calibration ของ
+# PHASE 1B นี้ - EA03-01, EB08-01, ED86-02, ED03-01 ฯลฯ) ได้สำรวจแนวทางเสริม 3 เรื่องสำหรับ
+# ปัญหา "นับจำนวนกล่อง/แยกหน้ากล่อง" ในภาพ isometric คล้ายกัน แต่คนละ dataset กับที่ไฟล์นี้ใช้
+# คาลิเบรต เมื่อนำมาทดสอบกับ AC03-01 (1 ใน 6 ไฟล์ calibration จริงของไฟล์นี้ - ไฟล์เดียวที่มี
+# ให้ตรวจสอบในรอบนี้) ได้ผลสรุปดังนี้:
+#
+# 1) is_structural_color แนวคิด "สีพื้น/ผนัง/หลังคาเป็นแค่การระบายสี ไม่มีรูปทรงกล่อง จึงต้อง
+#    แตะขอบนอกสุดของภาพเสมอ ส่วนกล่องสินค้าจริงถูกล้อมรอบด้วยพื้น/ผนังเสมอ ไม่มีทางแตะขอบนอก
+#    สุดได้" ==> ทดสอบแล้ว "ล้มเหลวกับ AC03-01" เพราะเป็นโหลดเต็มคัน 100% (กล่องสีน้ำเงินชน
+#    หลังคาตู้พอดี ไม่เหลือแถบโครงสร้างล้อมรอบเลย) ทำให้สีกล่องจริงถูกเข้าใจผิดเป็นสีโครงสร้าง
+#    (พิกเซลบนสุดของกล่องแตะขอบบนสุดของภาพห่างกันแค่ 1px) - ถ้า integrate ตรง ๆ จะทำให้ BACK
+#    view ของ AC03-01 นับกล่องสีน้ำเงินได้ 0 ตั้งทันที (regression ร้ายแรงกับไฟล์ calibration
+#    จริง) ==> "ไม่ integrate" เก็บไว้เป็นบทเรียนเท่านั้น (ไม่มี code ให้เรียกใช้ ป้องกันการ
+#    เผลอเรียกใช้โดยไม่ได้ตั้งใจ)
+#
+#    หมายเหตุ: ตรวจสอบเพิ่มเติมพบว่า PHASE 1B เดิม (_p1b_classify_view) ก็ปล่อยให้สีโครงสร้าง
+#    (เช่น (178,178,89), (227,227,114) ในไฟล์ AC03-01 FRONT) หลุดเข้ามาเป็น 'front' cell ได้
+#    เช่นกัน แต่อาศัยขั้นตอน _p1b_reconcile_with_back (Hungarian matching กับ BACK ที่สะอาด
+#    กว่า) เป็นตัวกรองทิ้งทีหลังแทน ซึ่งพิสูจน์แล้วว่าทนทานกว่าการกรองสีล่วงหน้าด้วย global-
+#    boundary-touch มาก - ยืนยันว่ากลไกเดิมของไฟล์นี้ออกแบบมาดีกว่าที่คาดไว้ตอนแรก
+#
+# 2) locate_container_apex_and_width_vector แนวคิด "ใช้มิติจริงตายตัวของตู้ (กว้าง 2.4m) เป็น
+#    ไม้บรรทัดอ้างอิงอิสระ หาได้จากรูปทรง silhouette ของหลังคาล้วน ๆ ไม่พึ่งสี" - ทดสอบกับไฟล์
+#    ตัวอย่างชุดอื่น (EB08-01/ED03-01 รถรุ่นเดียวกัน) ได้ผลตรงกันเป๊ะ แต่เมื่อทดสอบกับ AC03-01
+#    (โหลดเต็มคัน ไม่มีช่องว่างรอบกล่องเช่นกัน) กลับได้ width_vector ไม่ตรงกันระหว่าง FRONT
+#    (216,108) กับ BACK (128,64) ของไฟล์เดียวกัน (อัตราส่วนเท่ากันพอดี 1.6875 เท่า - บ่งชี้ว่า
+#    corner-detection หยุดผิดจุดในบางกรณี ไม่ครบเงื่อนไข "โหลดเต็มคัน" เหมือนข้อ 1) ==> ยังไม่
+#    น่าเชื่อถือพอสำหรับ production เก็บไว้เป็น utility function เฉย ๆ (ไม่ wire เข้า pipeline)
+#    พร้อม docstring เตือนชัดเจน ต้องแก้ corner-detection ให้ทนทานต่อกรณีโหลดเต็มคันก่อน จึงจะ
+#    พิจารณาใช้งานจริงได้
+#
+# 3) classify_boundary_grid_vs_seam แนวคิด "แยกเส้นแบ่งจริงระหว่างกล่อง ออกจากเส้น grid/module
+#    reference ปลอมที่ overlay ทับหน้ากล่องเดียวกัน ด้วยพิกเซล (เส้นปลอม = สีพื้นเดิมคูณอัตรา
+#    ส่วนคงที่ ไม่เคยถึงดำสนิท / เส้นจริง = มีแกนดำสนิทปรากฏ)" - พิสูจน์แม่นยำกับไฟล์ตัวอย่าง
+#    ชุดอื่น (EA03-01: เขียว/ม่วง/แดง ทุกกรณี) และเป็นฟังก์ชันแบบ self-contained ที่ default
+#    ปลอดภัย (คืนค่า REAL_SEAM เมื่อไม่แน่ใจ - ไม่ merge มั่ว) ตรวจสอบกับ AC03-01 แล้วไม่พบเคส
+#    ambiguous ที่ _p1b_merge_text_split_fragments เดิม merge/ไม่ merge ผิดพลาดอยู่แล้ว (ปัญหา
+#    หลักของ AC03-01 FRONT คือ corner-artifact fragmentation ซึ่งเป็นกลไกคนละแบบ จัดการโดย
+#    _p1b_merge_corner_artifact_columns อยู่แล้ว) ==> เก็บไว้เป็น utility สำรอง "ปลอดภัยที่จะ
+#    เรียกใช้" เผื่อพบไฟล์ใหม่ในอนาคตที่ _p1b_merge_text_split_fragments เดิม (ซึ่งตัดสินจาก
+#    ตำแหน่ง x/w/gap เท่านั้น ไม่ดูพิกเซลเส้นแบ่งเลย) ตัดสินใจผิดพลาด - ยังไม่ wire เข้า
+#    pipeline หลักในเวอร์ชันนี้ เพราะยังไม่พบไฟล์จริงสักไฟล์ที่จำเป็นต้องใช้
+#
+# สรุปโดยรวม: เซสชันสำรวจนี้ไม่พบจุดที่ควร "แทนที่" กลไกใดใน PHASE 1B เดิม (ซึ่งผ่าน regression
+# 6 ไฟล์จริงมาแล้ว และพิสูจน์แล้วว่าทนทานกว่าที่คาดในหลายจุด) เก็บ utility ที่ปลอดภัย 2 ตัว
+# (ข้อ 2,3) ไว้เผื่อใช้ในอนาคต + บทเรียนจากแนวทางที่ล้มเหลว (ข้อ 1) ไว้เป็นเอกสารป้องกันการ
+# ประดิษฐ์ล้อใหม่ที่พังซ้ำ - ไม่มีการแก้ไข PHASE 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้
+# ============================================================================
+
+def classify_boundary_grid_vs_seam(region, x_gap_range, y_overlap_range,
+                                    black_thresh=30, ratio_low=0.35, ratio_high=0.85,
+                                    ratio_consistency_tol=0.12,
+                                    black_core_fraction_thresh=0.15):
+    """
+    [v25.12 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
+    แยกแยะเส้นแบ่งระหว่าง component สี 2 อัน ว่าเป็น 'GRID_LINE' (เส้น overlay ปลอม - ควร
+    merge เป็นกล่องเดียว) หรือ 'REAL_SEAM' (ขอบกล่องจริง - ไม่ควร merge)
+
+    หลักฐานที่พิสูจน์แล้ว (session พัฒนาแยก, ไฟล์ EA03-01):
+      GRID_LINE: พิกเซลเส้นแบ่ง = สีพื้นเดิม x อัตราส่วนคงที่ (~0.35-0.85) ไม่เคยถึงดำสนิท
+                 แม้พื้นหลังจะเปลี่ยนสี (ข้าม SKU) อัตราส่วนก็ยังคงที่ (วัดได้จริง: 0.622 บน
+                 พื้นแดง, 0.625 บนพื้นเขียว - ยืนยันว่าเป็นเส้นเดียวกันที่ overlay ทับ)
+      REAL_SEAM: มีแกนดำสนิท (0,0,0) ปรากฏอย่างมีนัยสำคัญ (>black_core_fraction_thresh
+                 ของความยาวเส้น) ซึ่งเส้น overlay แบบ multiply-blend ไม่มีทางให้ค่าดำสนิทได้
+
+    Args:
+      region: ภาพ RGB (numpy array, ต้องเป็นพิกัดเดียวกับที่ x_gap_range/y_overlap_range อ้างถึง)
+      x_gap_range: (x0,x1) ของช่องว่างระหว่าง 2 component (พิกัด local ของ region เดียวกัน)
+      y_overlap_range: (y0,y1) ส่วนที่ทั้ง 2 component ทับซ้อนกันในแนวตั้งเท่านั้น (สำคัญมาก:
+        ต้องจำกัดแค่ช่วงที่ทับซ้อนจริง ห้าม scan ทั้งคอลัมน์ภาพ มิฉะนั้นจะไปโดน text label อื่น
+        ที่ไม่เกี่ยวข้องปนเข้ามาทำให้ตัดสินผิด - เป็นบั๊กที่เคยพบและแก้ไขแล้วใน session พัฒนา)
+
+    Returns:
+      'GRID_LINE' หรือ 'REAL_SEAM' (default ปลอดภัย = REAL_SEAM เมื่อข้อมูลไม่พอ/ไม่แน่ใจ
+      เพื่อไม่ให้ merge ผิดพลาดโดยไม่มีหลักฐานเพียงพอ)
+    """
+    y0, y1 = y_overlap_range
+    x0, x1 = x_gap_range
+    if y1 <= y0 or x1 <= x0:
+        return 'REAL_SEAM'
+
+    total_rows = 0
+    black_core_rows = 0
+    grid_like_rows = 0
+    left_x = max(x0 - 1, 0)
+
+    for y in range(y0, y1):
+        gap_pixels = region[y, x0:x1]
+        if len(gap_pixels) == 0:
+            continue
+        total_rows += 1
+
+        min_sum = min(int(p[0]) + int(p[1]) + int(p[2]) for p in gap_pixels)
+        if min_sum < black_thresh:
+            black_core_rows += 1
+            continue
+
+        darkest = min(gap_pixels, key=lambda p: int(p[0]) + int(p[1]) + int(p[2]))
+        neighbor = region[y, left_x]
+        r, g, b = (int(v) for v in darkest)
+        nr, ng, nb = (int(v) for v in neighbor)
+        ratios = [c / nc for c, nc in zip((r, g, b), (nr, ng, nb)) if nc > 20]
+        if not ratios:
+            continue
+        avg_ratio = sum(ratios) / len(ratios)
+        consistent = all(abs(v - avg_ratio) < ratio_consistency_tol for v in ratios)
+        if consistent and ratio_low < avg_ratio < ratio_high:
+            grid_like_rows += 1
+
+    if total_rows == 0:
+        return 'REAL_SEAM'
+
+    black_core_frac = black_core_rows / total_rows
+    grid_like_frac = grid_like_rows / total_rows
+
+    if black_core_frac > black_core_fraction_thresh:
+        return 'REAL_SEAM'
+    if grid_like_frac > 0.6:
+        return 'GRID_LINE'
+    return 'REAL_SEAM'
+
+
+def locate_container_apex_and_width_vector(region, sat_thresh=0.16, val_thresh=0.24,
+                                            min_flat_run=3, max_trace_rows=500):
+    """
+    [v25.12 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
+    [คำเตือน: ทดสอบกับ AC03-01 แล้วให้ผล FRONT/BACK ไม่ตรงกัน (216,108) vs (128,64) ทั้งที่
+     ควรเป็นค่าเดียวกัน (ความกว้างตู้จริง 2400mm คงที่) - คาดว่า corner-detection หยุดผิดจุด
+     ในกรณีโหลดเต็มคัน (ไม่มีช่องว่างโครงสร้างให้ trace ต่อ) ยังไม่ควรใช้งานจริงจนกว่าจะแก้
+     ปัญหานี้และ regression-test ผ่านครบ 6 ไฟล์ calibration ก่อน]
+
+    หาจุดยอดหลังคา (apex) และ pixel-vector ของความกว้างตู้เต็ม (คงที่จริง 2400mm ในรถรุ่น
+    TTKA6WH) จากรูปทรง silhouette ล้วน ๆ ไม่พึ่งสี/SKU ใด ๆ - แนวคิด: ใช้มิติจริงตายตัวของตู้
+    เป็นไม้บรรทัดอ้างอิงอิสระ สำหรับจำแนกกล่องว่าอยู่ครึ่ง near-half หรือ far-half ของความกว้าง
+    ตู้ในอนาคต (ถ้า _p1b_reconcile_with_back ปัจจุบันไม่พอสำหรับเคสใหม่ที่ยังไม่เจอ)
+
+    Args:
+      region: ภาพ RGB ของ 1 view (front หรือ back) - ควรเป็น region ที่ยังไม่ตัด/ครอปซ้ำ
+      sat_thresh, val_thresh: เกณฑ์ S/V (สเกล 0-1 ตรงกับ _p1b_sat_val ในไฟล์นี้) สำหรับหา
+        พิกเซลที่เป็นส่วนหนึ่งของตู้/กล่อง (ไม่ใช่พื้นหลังขาว)
+      min_flat_run: จำนวนแถวติดต่อกันขั้นต่ำที่ต้องมี x คงที่ ก่อนยอมรับว่าเป็นมุมจริง
+
+    Returns:
+      (apex_xy, width_vector_xy) เป็น numpy array 2 ค่า (x,y) หรือ (apex_xy, None) หาก
+      หามุมไม่เจอ หรือ (None, None) หากหา silhouette ไม่เจอเลย
+    """
+    S, V = _p1b_sat_val(region)
+    fill_mask = (S > sat_thresh) & (V > val_thresh)
+    structure = np.ones((3, 3), dtype=int)
+    labeled, num = ndimage.label(fill_mask, structure=structure)
+    if num == 0:
+        return None, None
+    sizes = ndimage.sum(fill_mask, labeled, range(1, num + 1))
+    largest_label = int(np.argmax(sizes)) + 1
+    silhouette = (labeled == largest_label)
+
+    ys, xs = np.nonzero(silhouette)
+    apex_y = int(ys.min())
+    apex_xs = xs[ys == apex_y]
+    apex = np.array([float(apex_xs.mean()), float(apex_y)])
+
+    prev_xmax = None
+    consecutive = 0
+    corner = None
+    h = silhouette.shape[0]
+    for y in range(apex_y, min(apex_y + max_trace_rows, h)):
+        xs_row = np.nonzero(silhouette[y])[0]
+        if len(xs_row) == 0:
+            continue
+        xmax = int(xs_row.max())
+        if prev_xmax is not None and xmax == prev_xmax:
+            consecutive += 1
+            if consecutive >= min_flat_run:
+                corner = np.array([float(xmax), float(y - min_flat_run)])
+                break
+        else:
+            consecutive = 0
+        prev_xmax = xmax
+
+    if corner is None:
+        return apex, None
+
+    width_vector = corner - apex
+    return apex, width_vector
+
+
+# ============================================================================
 # PHASE 2: ความยาวของแต่ละตั้งของกล่อง แต่ละ VIEW
 # ============================================================================
 
@@ -1958,7 +2162,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.11",
+            "checkerVersion": "V25.12",
             "benchmarkMode": "v25_11_zero_ai_rule_engine",
         }, 200, headers)
     except Exception as e:
