@@ -1,21 +1,27 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.12 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.13 ZERO-AI EDITION
 ================================================================================
-v25.12 (สำรวจแนวทางเสริม - ไม่แก้ pipeline หลัก): นำผลสำรวจจาก session พัฒนาแยกต่างหาก
-(ทดสอบแนวทาง "นับกล่อง/แยกหน้ากล่อง" กับไฟล์ตัวอย่างชุดอื่น - EA03-01, EB08-01, ED86-02,
-ED03-01 ฯลฯ) มาตรวจสอบกับ AC03-01 (1 ใน 6 ไฟล์ calibration จริงของ PHASE 1B) พบว่า:
-  - แนวคิด "กรองสีโครงสร้างตู้ล่วงหน้าด้วย boundary-touch test" ล้มเหลวกับ AC03-01 (โหลด
-    เต็มคัน 100% ทำให้สีกล่องจริงถูกเข้าใจผิดเป็นสีโครงสร้าง) - "ไม่ integrate" เข้า pipeline
-  - แนวคิด "หา apex/width-vector จากรูปทรงล้วน ๆ เพื่อจำแนก near/far-half" ให้ผล FRONT/BACK
-    ไม่ตรงกันเมื่อทดสอบกับ AC03-01 (โหลดเต็มคันเช่นกัน) - เก็บเป็น utility เฉย ๆ พร้อมคำเตือน
-    ยังไม่ wire เข้า pipeline จนกว่าจะแก้ไขและ regression-test ผ่านครบ 6 ไฟล์
-  - แนวคิด "แยกเส้น grid-line ปลอมออกจากเส้นแบ่งกล่องจริงด้วยพิกเซล (darkening-ratio vs
-    black-core)" ปลอดภัย (default คืนค่า REAL_SEAM เมื่อไม่แน่ใจ) แต่ยังไม่พบไฟล์จริงที่
-    จำเป็นต้องใช้ (ปัญหาที่เจอใน AC03-01 เป็นคนละกลไกกับที่ _p1b_merge_corner_artifact_columns
-    เดิมจัดการอยู่แล้ว) - เก็บเป็น utility สำรอง ไม่ wire เข้า pipeline เช่นกัน
-ดูรายละเอียดเต็มพร้อมหลักฐานที่หัวข้อ "v25.12 EXPERIMENTAL UTILITIES" ก่อน PHASE 2 ด้านล่าง
-ไม่มีการแก้ไข PHASE 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้ - คงพฤติกรรมเดิมทุกกรณี
+v25.13 (แก้ไข 2 จุดจาก v25.12 ด้วยหลักฐานจริง - ยังไม่แก้ pipeline หลัก):
+  v25.12 เคยเสนอ utility ทดลอง 2 ตัวที่ "พังจริง" เมื่อทดสอบกับ AC03-01 (ไฟล์โหลดเต็มคัน
+  100% - 1 ใน 6 ไฟล์ calibration): (1) structural-color exclusion (single-view boundary-
+  touch) ทำให้กล่องสีน้ำเงินถูกเข้าใจผิดเป็นพื้นตู้ (2) width-vector geometry classifier
+  ให้ผล FRONT/BACK ไม่ตรงกันเอง (216,108 vs 128,64)
+  v25.13 สืบสวนสาเหตุจริงและแก้ไขทั้งคู่ด้วยหลักฐานที่ทดสอบกับ AC03-01 จริง:
+    (1) is_structural_color_cross_view: เปลี่ยนจากตรวจ view เดียวเป็นตรวจ "ต้องปรากฏและ
+        ชนขอบภาพในทั้ง FRONT และ BACK พร้อมกัน" (สีโครงสร้างเป็นส่วนของรถทั้งคัน ต้องเห็นได้
+        จาก 2 มุมกล้อง) - ทดสอบแล้ว: สีน้ำเงิน (กล่องจริง) ชนขอบแค่ฝั่ง BACK ไม่ชนฝั่ง FRONT
+        -> ถูกเก็บไว้เป็นกล่องถูกต้อง (ไม่ผิดพลาดเหมือน v25.12 เดิมอีกต่อไป)
+    (2) locate_apex_and_width_vector_consistent: เพิ่ม cross-view consistency-gate เทียบ
+        magnitude ของ width_vector ระหว่าง FRONT/BACK (ควรเท่ากันเพราะรถคันเดียวกัน) - ถ้า
+        ต่างกันเกินเกณฑ์ (ratio<0.85) จะคืนค่า None ทั้งคู่แทนการเชื่อค่าที่อาจผิด - ทดสอบกับ
+        AC03-01 (ratio จริง=0.593) -> ปฏิเสธถูกต้อง แทนที่จะคืนเลขผิดอย่างมั่นใจเหมือน v25.12
+  ข้อจำกัดที่ยังต้องบอกตรงไปตรงมา: มีไฟล์ให้ regression-test แค่ 1 ใน 6 ไฟล์ calibration
+  ของ PHASE 1B (AC03-01 เท่านั้น ไม่มี EC01-01/EC04-01/02/03/04) ทั้ง 2 utility ที่แก้ไขแล้ว
+  จึงยังคง "ไม่ wire เข้า pipeline หลัก" รอการ regression-test เต็มรูปแบบครบ 6 ไฟล์ก่อน
+  ดูรายละเอียดหลักฐานเต็มที่หัวข้อ "v25.13 EXPERIMENTAL UTILITIES" ก่อน PHASE 2 ด้านล่าง
+  ไม่มีการแก้ไข PHASE 1B/2/3/Rule Engine เดิมแต่อย่างใด (regression-verified: AC03-01 ยังคง
+  front=7, back=7 ตรงเดิมทุกประการ หลังเพิ่ม utility ใหม่เข้าไปในไฟล์)
 ================================================================================
 v25.11 FIX (สำคัญ): แทนที่ PHASE 1 (seam-based counting) ด้วย PHASE 1B (front-face
 color-blob clustering) เป็นวิธีนับหลัก เพราะพบว่า seam-based เดิมมีบั๊ก undercount จริงที่
@@ -1301,55 +1307,77 @@ def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
 
 
 # ============================================================================
-# v25.12 EXPERIMENTAL UTILITIES (จาก session พัฒนาแยกต่างหาก - ยังไม่ wire เข้า pipeline หลัก)
+# v25.13 EXPERIMENTAL UTILITIES (จาก session พัฒนาแยกต่างหาก - ยังไม่ wire เข้า pipeline หลัก)
 # ============================================================================
-# บริบท: session พัฒนาแยกต่างหาก (ทดสอบกับไฟล์ตัวอย่างชุดอื่นที่ไม่ใช่ 6 ไฟล์ calibration ของ
-# PHASE 1B นี้ - EA03-01, EB08-01, ED86-02, ED03-01 ฯลฯ) ได้สำรวจแนวทางเสริม 3 เรื่องสำหรับ
-# ปัญหา "นับจำนวนกล่อง/แยกหน้ากล่อง" ในภาพ isometric คล้ายกัน แต่คนละ dataset กับที่ไฟล์นี้ใช้
-# คาลิเบรต เมื่อนำมาทดสอบกับ AC03-01 (1 ใน 6 ไฟล์ calibration จริงของไฟล์นี้ - ไฟล์เดียวที่มี
-# ให้ตรวจสอบในรอบนี้) ได้ผลสรุปดังนี้:
+# ประวัติ: v25.12 เคยเสนอ utility 3 ตัว (classify_boundary_grid_vs_seam,
+# locate_container_apex_and_width_vector, และแนวคิด structural-color exclusion) โดยตอนนั้น
+# 2 ใน 3 แนวคิด "พังจริง" เมื่อทดสอบกับ AC03-01 (ไฟล์โหลดเต็มคัน 100% - ไม่เหลือช่องว่าง
+# โครงสร้างรอบกล่องเลย): (1) structural-color exclusion แบบ single-view boundary-touch ทำให้
+# กล่องสีน้ำเงินถูกเข้าใจผิดเป็นพื้นตู้ (2) width-vector geometry classifier ให้ผล FRONT/BACK
+# ไม่ตรงกันเอง (216,108) vs (128,64) ทั้งที่ควรเป็นค่าเดียวกัน (ความกว้างตู้จริงคงที่)
 #
-# 1) is_structural_color แนวคิด "สีพื้น/ผนัง/หลังคาเป็นแค่การระบายสี ไม่มีรูปทรงกล่อง จึงต้อง
-#    แตะขอบนอกสุดของภาพเสมอ ส่วนกล่องสินค้าจริงถูกล้อมรอบด้วยพื้น/ผนังเสมอ ไม่มีทางแตะขอบนอก
-#    สุดได้" ==> ทดสอบแล้ว "ล้มเหลวกับ AC03-01" เพราะเป็นโหลดเต็มคัน 100% (กล่องสีน้ำเงินชน
-#    หลังคาตู้พอดี ไม่เหลือแถบโครงสร้างล้อมรอบเลย) ทำให้สีกล่องจริงถูกเข้าใจผิดเป็นสีโครงสร้าง
-#    (พิกเซลบนสุดของกล่องแตะขอบบนสุดของภาพห่างกันแค่ 1px) - ถ้า integrate ตรง ๆ จะทำให้ BACK
-#    view ของ AC03-01 นับกล่องสีน้ำเงินได้ 0 ตั้งทันที (regression ร้ายแรงกับไฟล์ calibration
-#    จริง) ==> "ไม่ integrate" เก็บไว้เป็นบทเรียนเท่านั้น (ไม่มี code ให้เรียกใช้ ป้องกันการ
-#    เผลอเรียกใช้โดยไม่ได้ตั้งใจ)
+# v25.13 นี้ กลับไปสืบสวนหาสาเหตุที่แท้จริงและแก้ไขทั้ง 2 จุด ด้วยการทดสอบสมมติฐานใหม่กับ
+# AC03-01 จริงทุกขั้นตอน (ไม่ใช่แค่คาดเดา) สรุปผลดังนี้:
 #
-#    หมายเหตุ: ตรวจสอบเพิ่มเติมพบว่า PHASE 1B เดิม (_p1b_classify_view) ก็ปล่อยให้สีโครงสร้าง
-#    (เช่น (178,178,89), (227,227,114) ในไฟล์ AC03-01 FRONT) หลุดเข้ามาเป็น 'front' cell ได้
-#    เช่นกัน แต่อาศัยขั้นตอน _p1b_reconcile_with_back (Hungarian matching กับ BACK ที่สะอาด
-#    กว่า) เป็นตัวกรองทิ้งทีหลังแทน ซึ่งพิสูจน์แล้วว่าทนทานกว่าการกรองสีล่วงหน้าด้วย global-
-#    boundary-touch มาก - ยืนยันว่ากลไกเดิมของไฟล์นี้ออกแบบมาดีกว่าที่คาดไว้ตอนแรก
+# --------------------------------------------------------------------------------------
+# (1) FIX: is_structural_color_cross_view -- ใช้หลักฐาน "ปรากฏในทั้ง 2 view พร้อมกัน" แทน
+# --------------------------------------------------------------------------------------
+# root cause ที่แท้จริงของความล้มเหลวเดิม (พิสูจน์ด้วย AC03-01 จริง): วิธี single-view
+# boundary-touch เดิม ตรวจแค่ view เดียว - กล่องสีน้ำเงินที่ชนขอบภาพ (เพราะโหลดเต็มคัน) ใน BACK
+# ถูกเข้าใจผิดเป็นพื้นตู้ ทั้งที่ในไฟล์เดียวกันนี้ FRONT (สีน้ำเงินเดียวกัน) "ไม่ชนขอบภาพเลย"
 #
-# 2) locate_container_apex_and_width_vector แนวคิด "ใช้มิติจริงตายตัวของตู้ (กว้าง 2.4m) เป็น
-#    ไม้บรรทัดอ้างอิงอิสระ หาได้จากรูปทรง silhouette ของหลังคาล้วน ๆ ไม่พึ่งสี" - ทดสอบกับไฟล์
-#    ตัวอย่างชุดอื่น (EB08-01/ED03-01 รถรุ่นเดียวกัน) ได้ผลตรงกันเป๊ะ แต่เมื่อทดสอบกับ AC03-01
-#    (โหลดเต็มคัน ไม่มีช่องว่างรอบกล่องเช่นกัน) กลับได้ width_vector ไม่ตรงกันระหว่าง FRONT
-#    (216,108) กับ BACK (128,64) ของไฟล์เดียวกัน (อัตราส่วนเท่ากันพอดี 1.6875 เท่า - บ่งชี้ว่า
-#    corner-detection หยุดผิดจุดในบางกรณี ไม่ครบเงื่อนไข "โหลดเต็มคัน" เหมือนข้อ 1) ==> ยังไม่
-#    น่าเชื่อถือพอสำหรับ production เก็บไว้เป็น utility function เฉย ๆ (ไม่ wire เข้า pipeline)
-#    พร้อม docstring เตือนชัดเจน ต้องแก้ corner-detection ให้ทนทานต่อกรณีโหลดเต็มคันก่อน จึงจะ
-#    พิจารณาใช้งานจริงได้
+# FIX: สีโครงสร้างจริง (พื้น/ผนัง/หลังคา) เป็นส่วนหนึ่งของตัวรถทั้งคัน จึงต้องปรากฏใน "ทั้ง 2
+# view" (FRONT และ BACK คือรถคันเดียวกัน มองจากคนละมุม) และต้องชนขอบภาพใน "ทั้งคู่พร้อมกัน"
+# ส่วนกล่องสินค้าที่บังเอิญชนขอบภาพจากโหลดเต็มคัน มักชนแค่ฝั่งเดียว (มุมกล้องคนละมุมทำให้ขอบ
+# ตัดกล่องคนละตำแหน่ง) - ทดสอบยืนยันกับ AC03-01 จริง:
+#   สีน้ำเงิน (0,0,255) กล่องจริง: FRONT ไม่ชนขอบ (False), BACK ชนขอบ (True)
+#     -> เดิม (single-view): ผิดเป็น STRUCTURAL ใน BACK
+#     -> ใหม่ (cross-view AND): ต้องชนทั้งคู่ถึงจะนับเป็น STRUCTURAL -> ถูกต้อง เก็บเป็น BOX
+#   สีทอง (203,203,101)/(178,178,89) หลังคาจริง: ปรากฏเฉพาะใน FRONT (ชนขอบ=True) ไม่มีใน BACK
+#     -> ใช้ single-view fallback (เพราะไม่มีข้อมูล cross-view ให้เทียบ) -> ยังคง STRUCTURAL
+#     ถูกต้อง (ตรวจสอบด้วยภาพจริงแล้ว: เป็นแผงผนังด้านข้างขวาของตู้ ไม่ใช่กล่อง)
+#   สีทอง (210,210,105) พื้น/ผนัง฿ฝั่ง BACK: ปรากฏเฉพาะใน BACK (ชนขอบ=True) ไม่มีใน FRONT
+#     -> single-view fallback -> ยังคง STRUCTURAL ถูกต้อง
+# ผลลัพธ์: ผ่านการทดสอบ AC03-01 ครบทุกสีที่ตรวจสอบได้ ไม่มี false-positive กับกล่องอีกต่อไป
 #
-# 3) classify_boundary_grid_vs_seam แนวคิด "แยกเส้นแบ่งจริงระหว่างกล่อง ออกจากเส้น grid/module
-#    reference ปลอมที่ overlay ทับหน้ากล่องเดียวกัน ด้วยพิกเซล (เส้นปลอม = สีพื้นเดิมคูณอัตรา
-#    ส่วนคงที่ ไม่เคยถึงดำสนิท / เส้นจริง = มีแกนดำสนิทปรากฏ)" - พิสูจน์แม่นยำกับไฟล์ตัวอย่าง
-#    ชุดอื่น (EA03-01: เขียว/ม่วง/แดง ทุกกรณี) และเป็นฟังก์ชันแบบ self-contained ที่ default
-#    ปลอดภัย (คืนค่า REAL_SEAM เมื่อไม่แน่ใจ - ไม่ merge มั่ว) ตรวจสอบกับ AC03-01 แล้วไม่พบเคส
-#    ambiguous ที่ _p1b_merge_text_split_fragments เดิม merge/ไม่ merge ผิดพลาดอยู่แล้ว (ปัญหา
-#    หลักของ AC03-01 FRONT คือ corner-artifact fragmentation ซึ่งเป็นกลไกคนละแบบ จัดการโดย
-#    _p1b_merge_corner_artifact_columns อยู่แล้ว) ==> เก็บไว้เป็น utility สำรอง "ปลอดภัยที่จะ
-#    เรียกใช้" เผื่อพบไฟล์ใหม่ในอนาคตที่ _p1b_merge_text_split_fragments เดิม (ซึ่งตัดสินจาก
-#    ตำแหน่ง x/w/gap เท่านั้น ไม่ดูพิกเซลเส้นแบ่งเลย) ตัดสินใจผิดพลาด - ยังไม่ wire เข้า
-#    pipeline หลักในเวอร์ชันนี้ เพราะยังไม่พบไฟล์จริงสักไฟล์ที่จำเป็นต้องใช้
+# ข้อจำกัดที่ยังต้องระวัง (บอกตรงไปตรงมา): "single-view fallback" (ใช้เมื่อสีนั้นปรากฏใน
+# แค่ 1 view) ยังคงพึ่ง boundary-touch เดี่ยวเหมือนเดิม - ถ้ามีไฟล์ที่กล่องสี unique (ปรากฏ
+# แค่ view เดียว) บังเอิญชนขอบภาพจากโหลดเต็มคันเช่นกัน จุดอ่อนเดิมจะกลับมา - ยังไม่มีไฟล์
+# ตัวอย่างที่ยืนยันเคสนี้ได้ในรอบนี้ (มีแค่ AC03-01 ให้ตรวจสอบ) จึงยังไม่ integrate เข้า
+# pipeline หลัก คงเป็น utility function แยกเท่านั้น
 #
-# สรุปโดยรวม: เซสชันสำรวจนี้ไม่พบจุดที่ควร "แทนที่" กลไกใดใน PHASE 1B เดิม (ซึ่งผ่าน regression
-# 6 ไฟล์จริงมาแล้ว และพิสูจน์แล้วว่าทนทานกว่าที่คาดในหลายจุด) เก็บ utility ที่ปลอดภัย 2 ตัว
-# (ข้อ 2,3) ไว้เผื่อใช้ในอนาคต + บทเรียนจากแนวทางที่ล้มเหลว (ข้อ 1) ไว้เป็นเอกสารป้องกันการ
-# ประดิษฐ์ล้อใหม่ที่พังซ้ำ - ไม่มีการแก้ไข PHASE 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้
+# --------------------------------------------------------------------------------------
+# (2) FIX: locate_apex_and_width_vector_consistent -- เพิ่ม cross-view consistency-gate
+# --------------------------------------------------------------------------------------
+# สืบสวนสาเหตุ (debug เต็มรูปแบบกับ AC03-01): พบว่าปัญหาไม่ใช่ "false-positive plateau สั้น"
+# ตามที่คาดไว้ตอนแรก (ทดสอบเพิ่ม min_flat_run จาก 3 ไปถึง 300 - ผลลัพธ์ไม่เปลี่ยนเลยจนกว่าจะ
+# เกิน length ของ plateau จริง) แต่เป็นเพราะ BACK เจอ "แนวตั้งยาวจริง" (~102 แถวติดกัน) ที่ไม่ใช่
+# ขอบตู้จริง (ไม่มี plateau อื่นที่ยาวกว่านี้เลยแม้ค้นหาถึง 1200 แถว) ในขณะที่ FRONT เจอแนวตั้ง
+# จริงที่ยาวกว่ามาก (~265 แถว) ซึ่งตรงกับขอบตู้จริงตามหลักฟิสิกส์ isometric (เส้นดิ่งของกล่อง
+# สี่เหลี่ยมในมุมมอง isometric ต้องยาวต่อเนื่องตลอดความสูงกอง) - สรุปคือวิธี trace ตามลำพัง
+# (ไม่มีข้อมูลอ้างอิงอื่น) ไม่สามารถแยกแยะ "แนวตั้งจริงของขอบตู้" ออกจาก "แนวตั้งบังเอิญจากลูกศร/
+# เส้นบอกขนาดที่ทับซ้อนกันพอดี" ได้ 100% โดยเฉพาะไฟล์โหลดเต็มคันที่ไม่มีช่องว่างช่วยยืนยัน
+#
+# FIX ที่ตรวจสอบได้จริง (ไม่ใช่การเดา): เนื่องจากความกว้างตู้จริง (2400mm) ต้องเท่ากันทั้ง FRONT
+# และ BACK (รถคันเดียวกัน, render scale เดียวกัน) - เพิ่ม "consistency-gate": คำนวณทั้ง 2 view
+# แล้วเทียบขนาด (magnitude) ของ width_vector ที่ได้ ถ้าอัตราส่วน (ค่าน้อย/ค่ามาก) ต่ำกว่า
+# เกณฑ์ (min_consistency_ratio) -> ถือว่า "ไม่น่าเชื่อถือ" คืนค่า None ทั้งคู่ แทนที่จะเชื่อ
+# ตัวเลขที่อาจผิดอย่างมั่นใจ (เปลี่ยนจาก "มั่นใจผิด" เป็น "ซื่อสัตย์ว่าไม่รู้")
+# ทดสอบกับ AC03-01 จริง: FRONT mag=241.5, BACK mag=143.1, อัตราส่วน=0.593 (ห่างจาก 1.0 มาก)
+# -> ฟังก์ชันใหม่ปฏิเสธทั้งคู่อย่างถูกต้อง (แทนที่จะคืนค่าผิดอย่างมั่นใจเหมือน v25.12 เดิม)
+#
+# ข้อจำกัดที่ยังต้องระวัง (บอกตรงไปตรงมา): แก้ไขนี้เป็น "safety gate" ไม่ใช่ "ทำให้แม่นยำขึ้น"
+# - ยังไม่มีวิธียืนยันว่ากรณีที่ผ่านเกณฑ์ (ratio สูง) จะได้ค่าที่ถูกต้องจริง 100% เพราะมีเพียง
+# ไฟล์เดียว (AC03-01 ซึ่งเป็นกรณีที่ควรถูกปฏิเสธ) ให้ตรวจสอบในรอบนี้ - ยังไม่ integrate เข้า
+# pipeline หลัก คงเป็น utility function แยกเท่านั้น จนกว่าจะมีไฟล์เพิ่มเติมมายืนยัน true-positive
+#
+# สรุปโดยรวม v25.13: ทั้ง 2 utility ผ่านการแก้ไขที่มีหลักฐาน (evidence-based) และพิสูจน์แล้วว่า
+# แก้ปัญหาที่พบใน v25.12 ได้จริงกับ AC03-01 (ไฟล์เดียวที่มีให้ตรวจสอบ) แต่ยังคง "ไม่ wire เข้า
+# pipeline หลัก" เนื่องจากมีไฟล์ตัวอย่างให้ regression-test แค่ 1 ใน 6 ไฟล์ calibration ของ
+# PHASE 1B (ไม่มี EC01-01/EC04-01/02/03/04 ให้ตรวจสอบในรอบนี้) - แนะนำให้รัน regression เต็ม
+# ทั้ง 6 ไฟล์ก่อนพิจารณา integrate เข้า pipeline จริงในเวอร์ชันถัดไป ไม่มีการแก้ไข PHASE
+# 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้ (regression-verified: AC03-01 ยังคง
+# front=7, back=7 ตรงเดิมทุกประการ)
 # ============================================================================
 
 def classify_boundary_grid_vs_seam(region, x_gap_range, y_overlap_range,
@@ -1357,7 +1385,7 @@ def classify_boundary_grid_vs_seam(region, x_gap_range, y_overlap_range,
                                     ratio_consistency_tol=0.12,
                                     black_core_fraction_thresh=0.15):
     """
-    [v25.12 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
+    [v25.12/13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
     แยกแยะเส้นแบ่งระหว่าง component สี 2 อัน ว่าเป็น 'GRID_LINE' (เส้น overlay ปลอม - ควร
     merge เป็นกล่องเดียว) หรือ 'REAL_SEAM' (ขอบกล่องจริง - ไม่ควร merge)
 
@@ -1425,68 +1453,193 @@ def classify_boundary_grid_vs_seam(region, x_gap_range, y_overlap_range,
     return 'REAL_SEAM'
 
 
-def locate_container_apex_and_width_vector(region, sat_thresh=0.16, val_thresh=0.24,
-                                            min_flat_run=3, max_trace_rows=500):
-    """
-    [v25.12 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
-    [คำเตือน: ทดสอบกับ AC03-01 แล้วให้ผล FRONT/BACK ไม่ตรงกัน (216,108) vs (128,64) ทั้งที่
-     ควรเป็นค่าเดียวกัน (ความกว้างตู้จริง 2400mm คงที่) - คาดว่า corner-detection หยุดผิดจุด
-     ในกรณีโหลดเต็มคัน (ไม่มีช่องว่างโครงสร้างให้ trace ต่อ) ยังไม่ควรใช้งานจริงจนกว่าจะแก้
-     ปัญหานี้และ regression-test ผ่านครบ 6 ไฟล์ calibration ก่อน]
-
-    หาจุดยอดหลังคา (apex) และ pixel-vector ของความกว้างตู้เต็ม (คงที่จริง 2400mm ในรถรุ่น
-    TTKA6WH) จากรูปทรง silhouette ล้วน ๆ ไม่พึ่งสี/SKU ใด ๆ - แนวคิด: ใช้มิติจริงตายตัวของตู้
-    เป็นไม้บรรทัดอ้างอิงอิสระ สำหรับจำแนกกล่องว่าอยู่ครึ่ง near-half หรือ far-half ของความกว้าง
-    ตู้ในอนาคต (ถ้า _p1b_reconcile_with_back ปัจจุบันไม่พอสำหรับเคสใหม่ที่ยังไม่เจอ)
-
-    Args:
-      region: ภาพ RGB ของ 1 view (front หรือ back) - ควรเป็น region ที่ยังไม่ตัด/ครอปซ้ำ
-      sat_thresh, val_thresh: เกณฑ์ S/V (สเกล 0-1 ตรงกับ _p1b_sat_val ในไฟล์นี้) สำหรับหา
-        พิกเซลที่เป็นส่วนหนึ่งของตู้/กล่อง (ไม่ใช่พื้นหลังขาว)
-      min_flat_run: จำนวนแถวติดต่อกันขั้นต่ำที่ต้องมี x คงที่ ก่อนยอมรับว่าเป็นมุมจริง
-
-    Returns:
-      (apex_xy, width_vector_xy) เป็น numpy array 2 ค่า (x,y) หรือ (apex_xy, None) หาก
-      หามุมไม่เจอ หรือ (None, None) หากหา silhouette ไม่เจอเลย
-    """
+def _global_container_silhouette(region, sat_thresh=0.12, val_thresh=0.20):
+    """หา connected-component ที่ใหญ่ที่สุดของพิกเซลสี box-fill ใด ๆ (ทุก hue รวมกัน) -
+    แทน silhouette รวมของทั้งตัวรถ (พื้น+ผนัง+หลังคา+กล่องสินค้าทั้งหมด เพราะทุกอย่างสัมผัส
+    กันในภาพ isometric) ใช้เป็นกรอบอ้างอิงสำหรับ is_structural_color_cross_view ด้านล่าง"""
     S, V = _p1b_sat_val(region)
     fill_mask = (S > sat_thresh) & (V > val_thresh)
     structure = np.ones((3, 3), dtype=int)
     labeled, num = ndimage.label(fill_mask, structure=structure)
     if num == 0:
-        return None, None
+        return None
     sizes = ndimage.sum(fill_mask, labeled, range(1, num + 1))
     largest_label = int(np.argmax(sizes)) + 1
-    silhouette = (labeled == largest_label)
+    return labeled == largest_label
 
-    ys, xs = np.nonzero(silhouette)
-    apex_y = int(ys.min())
-    apex_xs = xs[ys == apex_y]
-    apex = np.array([float(apex_xs.mean()), float(apex_y)])
 
-    prev_xmax = None
-    consecutive = 0
-    corner = None
-    h = silhouette.shape[0]
-    for y in range(apex_y, min(apex_y + max_trace_rows, h)):
-        xs_row = np.nonzero(silhouette[y])[0]
-        if len(xs_row) == 0:
-            continue
-        xmax = int(xs_row.max())
-        if prev_xmax is not None and xmax == prev_xmax:
-            consecutive += 1
-            if consecutive >= min_flat_run:
-                corner = np.array([float(xmax), float(y - min_flat_run)])
-                break
-        else:
-            consecutive = 0
-        prev_xmax = xmax
+def _touches_boundary(region, color, silhouette, tol=12, margin=2):
+    """สีนี้มีพิกเซลอย่างน้อย 1 จุด (ภายใน silhouette) ที่สัมผัสขอบนอกสุดของ silhouette
+    (บน/ล่าง/ซ้าย/ขวา) หรือไม่ - ใช้เป็นสัญญาณเดี่ยว (single-view) สำหรับ fallback เท่านั้น
+    (พิสูจน์แล้วว่าใช้เดี่ยว ๆ ไม่ปลอดภัยกับไฟล์โหลดเต็มคัน - ดู is_structural_color_cross_view)"""
+    if silhouette is None:
+        return False
+    gys, gxs = np.nonzero(silhouette)
+    if len(gys) == 0:
+        return False
+    g_top, g_bottom = int(gys.min()), int(gys.max())
+    g_left, g_right = int(gxs.min()), int(gxs.max())
+    diff = np.abs(region.astype(int) - np.array(color, dtype=int))
+    mask = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
+    mask = mask & silhouette
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return False
+    return (ys.min() <= g_top + margin) or (xs.min() <= g_left + margin) or \
+           (xs.max() >= g_right - margin) or (ys.max() >= g_bottom - margin)
 
-    if corner is None:
-        return apex, None
 
-    width_vector = corner - apex
-    return apex, width_vector
+def is_structural_color_cross_view(front_region, back_region, color,
+                                    front_silhouette=None, back_silhouette=None,
+                                    tol=12, margin=2, color_match_tol=15):
+    """
+    [v25.13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
+    [แก้ไขจาก v25.12 ที่พังกับ AC03-01 (โหลดเต็มคัน) - ดู docstring หัวข้อ "v25.13
+     EXPERIMENTAL UTILITIES" ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม]
+
+    ตรวจสอบว่า `color` เป็นสีโครงสร้างตู้ (พื้น/ผนัง/หลังคา) หรือสีกล่องสินค้าจริง โดยใช้
+    หลักฐาน "ปรากฏในทั้ง FRONT และ BACK พร้อมกัน และชนขอบภาพทั้งคู่" (สีโครงสร้างเป็นส่วนหนึ่ง
+    ของรถทั้งคัน ต้องเห็นได้จากทั้ง 2 มุมกล้อง) แทนการตรวจแค่ view เดียว ซึ่งพิสูจน์แล้วว่า
+    ทำให้กล่องที่บังเอิญชนขอบภาพ (จากโหลดเต็มคัน) ถูกเข้าใจผิดเป็นโครงสร้าง
+
+    Args:
+      front_region, back_region: ภาพ RGB ของ FRONT และ BACK view
+      color: (r,g,b) สีที่ต้องการตรวจสอบ
+      front_silhouette, back_silhouette: ผลลัพธ์จาก _global_container_silhouette (ถ้ามีอยู่
+        แล้วจากการเรียกครั้งก่อน ส่งเข้ามาเพื่อลดการคำนวณซ้ำได้)
+      color_match_tol: ระยะห่างสี (แต่ละ channel) สูงสุดที่ยังถือว่าเป็น "สีเดียวกัน" ระหว่าง
+        2 view (สีที่ render ออกมาอาจมี pixel-value เพี้ยนเล็กน้อยระหว่าง view ได้)
+
+    Returns:
+      True = ตัดสินว่าเป็นสีโครงสร้าง (ควรตัดออกจากการนับกล่อง)
+      False = ตัดสินว่าเป็นสีกล่องจริง (เก็บไว้)
+
+    Logic:
+      - ถ้าสีนี้ปรากฏ (มี pixel มากพอ) ในทั้ง 2 view: ต้อง "ชนขอบภาพทั้งคู่" ถึงจะถือเป็น
+        โครงสร้าง (cross-view AND) - นี่คือจุดที่แก้บั๊กเดิม เพราะกล่องที่ชนขอบแค่ฝั่งเดียว
+        (เช่น สีน้ำเงินใน AC03-01 ที่ชนขอบเฉพาะ BACK ไม่ชนใน FRONT) จะถูกเก็บไว้ถูกต้อง
+      - ถ้าสีนี้ปรากฏแค่ 1 view: fallback ไปใช้ single-view boundary-touch (ข้อจำกัด: ยัง
+        เสี่ยง false-positive ถ้ากล่องสี unique บังเอิญชนขอบจากโหลดเต็มคัน - ยังไม่มีไฟล์
+        ตัวอย่างยืนยันเคสนี้)
+    """
+    if front_silhouette is None:
+        front_silhouette = _global_container_silhouette(front_region)
+    if back_silhouette is None:
+        back_silhouette = _global_container_silhouette(back_region)
+
+    def _color_present(region, color, silhouette, tol):
+        if silhouette is None:
+            return False
+        diff = np.abs(region.astype(int) - np.array(color, dtype=int))
+        mask = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
+        mask = mask & silhouette
+        return int(mask.sum()) > 200  # ต้องมี pixel มากพอ ไม่ใช่ noise เล็กน้อย
+
+    in_front = _color_present(front_region, color, front_silhouette, tol)
+    in_back = _color_present(back_region, color, back_silhouette, tol)
+
+    if in_front and in_back:
+        touch_f = _touches_boundary(front_region, color, front_silhouette, tol=tol, margin=margin)
+        touch_b = _touches_boundary(back_region, color, back_silhouette, tol=tol, margin=margin)
+        return touch_f and touch_b  # cross-view AND: ต้องชนขอบทั้งคู่
+
+    # สีนี้ปรากฏแค่ view เดียว -> fallback เป็น single-view test
+    if in_front:
+        return _touches_boundary(front_region, color, front_silhouette, tol=tol, margin=margin)
+    if in_back:
+        return _touches_boundary(back_region, color, back_silhouette, tol=tol, margin=margin)
+    return False  # ไม่พบสีนี้ในทั้ง 2 view เลย (ไม่ควรเกิดขึ้นถ้าเรียกถูกต้อง)
+
+
+def locate_apex_and_width_vector_consistent(front_region, back_region,
+                                             sat_thresh=0.16, val_thresh=0.24,
+                                             min_flat_run=3, max_trace_rows=1200,
+                                             min_consistency_ratio=0.85):
+    """
+    [v25.13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
+    [แก้ไขจาก v25.12 ที่ให้ผล FRONT/BACK ไม่ตรงกันเองกับ AC03-01 - ดู docstring หัวข้อ
+     "v25.13 EXPERIMENTAL UTILITIES" ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม]
+
+    หาจุดยอดหลังคา (apex) และ pixel-vector ของความกว้างตู้เต็ม (คงที่จริง 2400mm) จาก
+    FRONT และ BACK พร้อมกัน แล้วตรวจสอบว่าทั้ง 2 view เห็นพ้องกัน (ค่า magnitude ใกล้เคียงกัน
+    ตามที่ควรเป็นจริง เพราะเป็นตู้เดียวกัน) ก่อนจะคืนค่าใด ๆ - ถ้าไม่เห็นพ้องกัน (สงสัยว่า
+    ฝั่งใดฝั่งหนึ่งเจอ "แนวตั้งบังเอิญ" ที่ไม่ใช่ขอบตู้จริง) จะคืนค่า None ทั้งคู่แทนที่จะเชื่อ
+    ตัวเลขที่อาจผิดอย่างมั่นใจ
+
+    ทดสอบกับ AC03-01: FRONT ให้ magnitude≈241.5, BACK ให้≈143.1 (อัตราส่วน 0.593 < 0.85)
+    -> ฟังก์ชันนี้ปฏิเสธทั้งคู่ (คืนค่า None) อย่างถูกต้อง แทนที่จะคืนตัวเลขผิดเหมือน v25.12
+
+    Args:
+      front_region, back_region: ภาพ RGB ของ FRONT/BACK view
+      min_consistency_ratio: อัตราส่วนขั้นต่ำ (ค่าน้อย/ค่ามาก ของ magnitude ทั้ง 2 view)
+        ที่ยังยอมรับว่า "เห็นพ้องกันพอ" (default 0.85 คือต่างกันไม่เกิน ~15%)
+
+    Returns:
+      dict {'front': (apex, width_vector) หรือ (apex, None),
+            'back':  (apex, width_vector) หรือ (apex, None),
+            'consistent': bool} -- ถ้า consistent=False ค่า width_vector ทั้งคู่จะเป็น None
+      เสมอ (แม้จะคำนวณได้ตัวเลขก็ตาม) เพื่อป้องกันการนำค่าที่ไม่น่าเชื่อถือไปใช้ต่อโดยไม่รู้ตัว
+
+    ข้อจำกัด (บอกตรงไปตรงมา): เป็น "safety gate" ที่ป้องกันการใช้ค่าผิดอย่างมั่นใจ ไม่ใช่การ
+    ทำให้ค่าที่คำนวณได้แม่นยำขึ้น - ยังไม่มีไฟล์ตัวอย่างที่ยืนยันกรณี "ผ่านเกณฑ์แล้วถูกต้องจริง"
+    (true-positive) ในรอบนี้ มีเพียง AC03-01 ซึ่งเป็นกรณีที่ควรถูกปฏิเสธ (true-negative) เท่านั้น
+    """
+    def _locate(region):
+        S, V = _p1b_sat_val(region)
+        fill_mask = (S > sat_thresh) & (V > val_thresh)
+        structure = np.ones((3, 3), dtype=int)
+        labeled, num = ndimage.label(fill_mask, structure=structure)
+        if num == 0:
+            return None, None
+        sizes = ndimage.sum(fill_mask, labeled, range(1, num + 1))
+        largest_label = int(np.argmax(sizes)) + 1
+        silhouette = (labeled == largest_label)
+
+        ys, xs = np.nonzero(silhouette)
+        apex_y = int(ys.min())
+        apex_xs = xs[ys == apex_y]
+        apex = np.array([float(apex_xs.mean()), float(apex_y)])
+
+        prev_xmax = None
+        consecutive = 0
+        corner = None
+        h = silhouette.shape[0]
+        for y in range(apex_y, min(apex_y + max_trace_rows, h)):
+            xs_row = np.nonzero(silhouette[y])[0]
+            if len(xs_row) == 0:
+                continue
+            xmax = int(xs_row.max())
+            if prev_xmax is not None and xmax == prev_xmax:
+                consecutive += 1
+                if consecutive >= min_flat_run:
+                    corner = np.array([float(xmax), float(y - min_flat_run)])
+                    break
+            else:
+                consecutive = 0
+            prev_xmax = xmax
+
+        if corner is None:
+            return apex, None
+        return apex, corner - apex
+
+    apex_f, wv_f = _locate(front_region)
+    apex_b, wv_b = _locate(back_region)
+
+    consistent = False
+    if wv_f is not None and wv_b is not None:
+        mag_f, mag_b = float(np.linalg.norm(wv_f)), float(np.linalg.norm(wv_b))
+        if mag_f > 0 and mag_b > 0:
+            ratio = min(mag_f, mag_b) / max(mag_f, mag_b)
+            consistent = ratio >= min_consistency_ratio
+
+    if not consistent:
+        wv_f, wv_b = None, None
+
+    return {
+        'front': (apex_f, wv_f),
+        'back': (apex_b, wv_b),
+        'consistent': consistent,
+    }
 
 
 # ============================================================================
@@ -2162,7 +2315,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.12",
+            "checkerVersion": "V25.13",
             "benchmarkMode": "v25_11_zero_ai_rule_engine",
         }, 200, headers)
     except Exception as e:
