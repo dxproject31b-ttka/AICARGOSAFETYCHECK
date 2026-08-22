@@ -1,6 +1,44 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.17 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.18 ZERO-AI EDITION
+================================================================================
+v25.18 (เพิ่ม MID_GAP_RISK - ตรวจช่องว่างกลางตู้ผ่าน pairwise ที่มีอยู่แล้ว):
+
+  ปัญหา: ช่องว่างกลางตู้ (ไม่มีกล่องในบางช่วง) ควรเข้าเงื่อนไข STEP_DOWN_RISK (pairwise)
+  เพราะอยู่ในแนวระนาบเดียวกัน แต่โค้ดเดิมตรวจไม่พบเพราะ:
+    1. PHASE 1B ไม่สร้าง record ให้ช่องว่าง (ไม่มี color-blob = ไม่มี stack)
+    2. detect_step_down_pairwise วนเฉพาะ records ที่มีอยู่ → ข้ามช่องว่างไปเงียบๆ
+    3. fill_missing_heights carry-forward ค่า height จากตั้งก่อนหน้า → ทำให้ช่องว่าง
+       ที่อาจถูก inject เข้ามาในอนาคตได้ค่าผิดพลาด
+
+  FIX: เพิ่มฟังก์ชัน inject_gap_records() ที่:
+    - รับ records ที่ build_stack_records สร้างไว้แล้ว (sorted by pos_range)
+    - ตรวจหา "รอยเว้น" ระหว่าง pos_range ของ records ติดกัน
+    - ถ้า gap > MID_GAP_MIN_RATIO (8% ของความยาวตู้) → inject synthetic record ที่:
+        height_px = 0, height_source = "gap_injected", is_gap = True
+        x_range = interpolate จาก pos_range กลับเป็น pixel coordinates
+        idx = -1 (ไม่กระทบ marker index เดิม, marker วาดบน taller_rec ข้างๆ เสมอ)
+    - เรียกก่อน detect_step_down_pairwise ใน run_full_analysis_on_image
+
+  ผลที่ได้: detect_step_down_pairwise จะเห็น:
+    [กอง A: 300px] → [GAP: 0px] → [กอง B: 300px]
+    คู่ A→GAP: drop 100% > 20% → STEP_DOWN_RISK (subtype=pairwise) mark A (taller)
+    คู่ GAP→B: drop 100% > 20% → STEP_DOWN_RISK (subtype=pairwise) mark B (taller)
+    → flag ทั้ง 2 ฝั่งของช่องว่าง ครอบคลุม marker ทั้งซ้ายและขวาของช่องว่างจริง
+
+  guard 1 (front zone): gap ที่ pos_range[1] < MID_GAP_FRONT_ZONE (0.05 = 5% แรก)
+    ไม่ inject → หัวตู้มักมีช่องว่างโครงสร้าง ไม่ใช่จุดเสี่ยง
+  guard 2 (rear zone): gap ที่ pos_range[0] > MID_GAP_REAR_ZONE (0.93 = 7% สุดท้าย)
+    ไม่ inject → โซนนี้ REAR_EMPTY_RISK กลไก A/B ดูแลอยู่แล้ว กัน double-flag
+  guard 3 (corner_duplicate): ไม่นับ record ที่ is_corner_duplicate=True เป็นขอบของ gap
+
+  regression-note:
+    - synthetic record มี is_gap=True → detect_step_down_pairwise ตรวจ guard พิเศษ:
+      ถ้า taller_rec เป็น gap (is_gap=True) จะไม่ mark gap เอง (mark_stack_idx ใช้ -1)
+      เพื่อให้ risk_abs_box ข้ามได้อย่างปลอดภัย (box = None → วาดไม่ได้ → ข้าม)
+    - ไม่มีการแก้ไข PHASE 1B / 2 / 3 / cross_view / REAR_EMPTY / reconcile ใดๆ
+    - checkerVersion → "V25.18", benchmarkMode → "v25_18_mid_gap_inject"
+
 ================================================================================
 v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
         ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
@@ -279,6 +317,13 @@ REAR_GAP_MIN_RATIO = 0.06
 REAR_COLOR_ANOMALY_MIN_COLORS = 3
 REAR_COLOR_MIN_FRACTION = 0.03
 REAR_COLOR_MIN_PIXELS = 80
+
+# --- MID_GAP inject (v25.18) ---
+# ช่องว่างกลางตู้ที่ PHASE 1B ไม่สร้าง record ให้ → inject synthetic record height_px=0
+# แล้วปล่อยให้ detect_step_down_pairwise ตรวจเองตามปกติ (drop 100% > threshold 20%)
+MID_GAP_MIN_RATIO  = 0.08   # ช่องว่างต้องกว้างเกิน 8% ของความยาวตู้จึง inject
+MID_GAP_FRONT_ZONE = 0.05   # ไม่ inject ถ้า gap อยู่ใน 5% แรก (หัวตู้/โครงสร้าง)
+MID_GAP_REAR_ZONE  = 0.93   # ไม่ inject ถ้า gap อยู่ใน 7% สุดท้าย (REAR_EMPTY ดูแลอยู่)
 
 
 def generate_action_report(case_type, description="", sku_list=""):
@@ -2323,9 +2368,95 @@ def build_stack_records(view_result, view_label, flip_position=None):
     return records
 
 
+def inject_gap_records(records, view_result):
+    """v25.18 NEW: ตรวจช่องว่างระหว่าง records ติดกัน (pos_range) แล้ว inject synthetic
+    record ที่ height_px=0 ให้ detect_step_down_pairwise เห็นช่องว่างกลางตู้ได้
+
+    Args:
+        records   : list ของ record จาก build_stack_records (sorted by pos_range[0])
+        view_result: dict จาก process_view_with_height_on_image (ใช้ start_x/end_x)
+
+    Returns:
+        records_with_gaps: list ใหม่ที่รวม synthetic gap records เข้าไปในลำดับที่ถูกต้อง
+                           (real records ไม่ถูกแก้ไข is_gap ไม่มีใน real records เดิม)
+    """
+    start_x = view_result.get("start_x", 0)
+    end_x   = view_result.get("end_x", 1)
+    span_px = max(1, end_x - start_x)
+
+    # เรียงตาม pos_range[0] และกรอง corner_duplicate ออกก่อนตรวจ gap
+    real_recs = sorted(
+        [r for r in records if not r.get("is_corner_duplicate")],
+        key=lambda r: r["pos_range"][0]
+    )
+
+    injected = []
+    for i in range(len(real_recs) - 1):
+        cur  = real_recs[i]
+        nxt  = real_recs[i + 1]
+        gap_pos_start = cur["pos_range"][1]   # ปลายของ record ปัจจุบัน
+        gap_pos_end   = nxt["pos_range"][0]   # ต้นของ record ถัดไป
+        gap_width = gap_pos_end - gap_pos_start
+
+        # guard 1: ช่องว่างแคบเกินไป → ไม่ inject
+        if gap_width < MID_GAP_MIN_RATIO:
+            continue
+        # guard 2: อยู่ใน front zone (หัวตู้) → โครงสร้าง ไม่ใช่ความเสี่ยง
+        if gap_pos_end <= MID_GAP_FRONT_ZONE:
+            continue
+        # guard 3: อยู่ใน rear zone (7% ท้ายตู้) → REAR_EMPTY ดูแลอยู่แล้ว
+        if gap_pos_start >= MID_GAP_REAR_ZONE:
+            continue
+
+        # แปลง pos_range กลับเป็น pixel x_range
+        # (pos_range ใน coordinate 0=หัวตู้, 1=ท้ายตู้ ซึ่ง flip แล้วใน build_stack_records)
+        # ใช้ pos_range ตรงๆ เพื่อ map กลับเป็น pixel สำหรับ x_range ของ gap
+        # ทิศทางใน view_result คือ pixel x จาก start_x ถึง end_x (ไม่ flip)
+        # → แปลงกลับผ่าน span_px ปกติ แล้ว risk_abs_box จะใช้ x_range ของ taller_rec
+        #   (real record ข้างๆ) เสมอ ไม่ใช่ของ gap → ค่า x_range ของ gap แค่ต้องสมเหตุสมผล
+        gap_x0 = int(start_x + gap_pos_start * span_px)
+        gap_x1 = int(start_x + gap_pos_end   * span_px)
+
+        gap_rec = {
+            "idx": -1,                        # ไม่ใช่ index จริง → risk_abs_box ข้ามได้
+            "view": cur["view"],
+            "x_range": (gap_x0, gap_x1),
+            "pos_range": (gap_pos_start, gap_pos_end),
+            "height_px": 0,                   # ช่องว่าง = ความสูง 0
+            "height_source": "gap_injected",
+            "is_corner_duplicate": False,
+            "is_gap": True,                   # flag พิเศษ → pairwise ไม่ mark gap เอง
+        }
+        injected.append((i + 1, gap_rec))     # จะ insert หลัง real_recs[i]
+        print(f"inject_gap_records [{cur['view']}]: gap pos {gap_pos_start:.3f}-{gap_pos_end:.3f} "
+              f"({gap_width:.1%}) x={gap_x0}-{gap_x1}")
+
+    if not injected:
+        return records  # ไม่มีช่องว่าง → คืน records เดิมไม่แก้ไข
+
+    # สร้าง list ใหม่: real_recs + gap records ในตำแหน่งที่ถูกต้อง
+    # (ยังรวม corner_duplicate records จาก records เดิมด้วย เพื่อไม่ให้หาย)
+    result = list(records)  # copy เพื่อไม่แก้ records เดิม
+    # insert จากหลังไปหน้า (ป้องกัน index shift)
+    for insert_after_real_idx, gap_rec in reversed(injected):
+        # หาตำแหน่งจริงใน result list (ซึ่งรวม corner_dup ด้วย)
+        # → หา real record ตัวที่ insert_after_real_idx - 1 แล้ว insert ต่อจากนั้น
+        target_rec = real_recs[insert_after_real_idx - 1]
+        pos_in_result = next(
+            (j for j, r in enumerate(result) if r is target_rec), None
+        )
+        if pos_in_result is not None:
+            result.insert(pos_in_result + 1, gap_rec)
+
+    return result
+
+
 def detect_step_down_pairwise(records, view_label):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
-    (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
+    (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)
+    v25.18: รองรับ synthetic gap records (is_gap=True, height_px=0) จาก inject_gap_records
+    - ถ้า taller_rec เป็น gap → ไม่ mark (gap ไม่มีตำแหน่งวาด marker) → risk ยังถูก flag
+      แต่ mark_stack_idx = -1 ให้ risk_abs_box คืน None → skip การวาดอย่างปลอดภัย"""
     risks = []
     for i in range(len(records) - 1):
         a, b = records[i], records[i + 1]
@@ -2337,13 +2468,22 @@ def detect_step_down_pairwise(records, view_label):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
+        # gap record มี height_px=0 → taller_h=0 → threshold=0 → shorter_h=0 ไม่ < 0
+        # → ป้องกัน GAP vs GAP false trigger (ไม่ควรเกิด แต่ guard ไว้ปลอดภัย)
+        if taller_h == 0:
+            continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
+            # v25.18: ถ้า taller เป็น gap (height_px=0 ไม่ควรเกิด) ใช้ shorter เป็น mark แทน
+            # ในทางปฏิบัติ taller_rec มักเป็น real record เสมอ (เพราะ gap height=0 < real)
+            # shorter_rec เป็น gap → taller_rec เป็น real → mark_stack_idx = real idx ปกติ
+            mark_rec = taller_rec if not taller_rec.get("is_gap") else shorter_rec
+            subtype = "pairwise_mid_gap" if (a.get("is_gap") or b.get("is_gap")) else "pairwise"
             risks.append({
-                "risk_type": "STEP_DOWN_RISK", "subtype": "pairwise", "view": view_label,
+                "risk_type": "STEP_DOWN_RISK", "subtype": subtype, "view": view_label,
                 "mark_view": view_label,
-                "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
+                "mark_stack_idx": mark_rec["idx"], "mark_x_range": mark_rec["x_range"],
                 "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                 "drop_ratio": drop_ratio, "pair_indices": (a["idx"], b["idx"]),
             })
@@ -2624,9 +2764,15 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
             sh["height_px"] = rec["height_px"]
             sh["height_source"] = rec["height_source"]
 
+    # v25.18: inject synthetic gap records (height_px=0) สำหรับช่องว่างกลางตู้
+    # ที่ PHASE 1B ไม่สร้าง record ให้ → ทำก่อน pairwise เท่านั้น
+    # cross_view และ REAR_EMPTY ยังใช้ records เดิม (ไม่มี gap) เพื่อป้องกัน regression
+    records_front_with_gaps = inject_gap_records(records_front, front)
+    records_back_with_gaps  = inject_gap_records(records_back,  back)
+
     risks = []
-    risks += detect_step_down_pairwise(records_front, "FRONT")
-    risks += detect_step_down_pairwise(records_back, "BACK")
+    risks += detect_step_down_pairwise(records_front_with_gaps, "FRONT")
+    risks += detect_step_down_pairwise(records_back_with_gaps,  "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
@@ -2757,8 +2903,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.17",
-            "benchmarkMode": "v25_17_dynamic_page_idx_fix",
+            "checkerVersion": "V25.18",
+            "benchmarkMode": "v25_18_mid_gap_inject",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
