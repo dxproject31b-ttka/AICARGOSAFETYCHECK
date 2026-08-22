@@ -1,49 +1,64 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.18b ZERO-AI EDITION
+AI Cargo Safety Checker - v25.18 ZERO-AI EDITION
 ================================================================================
-v25.18b (แก้ STEP_DOWN_RISK pairwise ตรวจ "stack บนสุดเตี้ยกว่าข้างๆ" ไม่ได้ -
-         ยืนยันจากภาพ AE02-01/AE02-02 ที่มีกองเตี้ยกว่าปรากฏชัดแต่โค้ดไม่ flag):
+v25.18 (แก้บั๊กสำคัญ - undercounting cascade ใน PHASE 1B ที่บังตัวมองไม่เห็น STEP_DOWN/
+REAR_EMPTY บางเคส - พบจากคำขอผู้ใช้ให้ตรวจ AE02-01/AE02-02 ที่ "เห็นช่องว่างกลางตู้ด้วยตา
+เปล่า" แต่ระบบรายงาน SAFE):
 
-  Root cause (3 ชั้นที่เชื่อมกัน):
+  ขั้นตอนสืบสวน (ตามที่ผู้ใช้ขอ "ตรวจสอบลึกที่สุดเริ่มตั้งแต่ต้น crop,scan"):
+  1. ตรวจ crop/region ของ AE02-01/02 ทั้ง FRONT/BACK - ถูกต้องตามที่คาดหวัง ไม่มีปัญหา
+  2. ตรวจ PHASE 1B raw front-face fragments (ก่อน cluster) ของ BACK พบ 9 fragments (สีเขียว
+     ล้วน) แต่หลัง cluster+merge_corner ได้ 7 คอลัมน์ แล้วหลัง _p1b_drop_side_wall_
+     contaminated_columns เหลือแค่ 5 คอลัมน์ - มี 2 คอลัมน์ถูกลบทิ้ง!
+  3. สืบสาเหตุ: เจอ roof สีแดง (255,0,0) 2 จุดใน BACK ที่ไม่มี front-face สีแดงปรากฏใน BACK
+     เลย (แต่ area/aspect ของ roof เหล่านี้เป็นรูปร่างกล่องจริง ไม่ใช่ noise) - ฟังก์ชันเดิม
+     ตีความว่าเป็น "side-wall contamination" แล้วลบคอลัมน์สีเขียวที่ใกล้ที่สุด 2 คอลัมน์ทิ้ง
+  4. ตรวจ FRONT พบว่ามี front-face สีแดงจริงปรากฏอยู่ (cx=1530 hi-res, area=4012) - สรุปได้ว่า
+     กล่องสีแดงนี้มีอยู่จริง เพียงแต่ front-face ของมันถูกกล่องเพื่อนบ้านที่สูงกว่าบังมุมมองจาก
+     กล้อง BACK ทั้งหมด (เหลือแค่ roof โผล่พ้นมาให้เห็น) - เป็นสัญญาณลักษณะเดียวกับ "gap/step
+     down" ที่ผู้ใช้อธิบาย (กล่องเตี้ยที่ถูกกล่องสูงกว่าบังจนมองไม่เห็น front-face จากมุมกล้อง
+     ฝั่งหนึ่ง) แต่ฟังก์ชันเดิมเช็คแค่ within-view เดียว (ไม่ cross-view) เลยตีความผิดว่าเป็น
+     contamination และลบคอลัมน์ข้างเคียงที่ "ไม่เกี่ยวข้อง" (สีเขียว) ทิ้งไปด้วยความเข้าใจผิด
+  5. ตรวจย้อนกลับไฟล์ calibration เดิมของฟังก์ชันนี้เอง (EC04-04) พบว่าเกิดปัญหาเดียวกันทุก
+     ประการ! วาดกรอบทับตำแหน่งคอลัมน์ที่ถูกลบเทียบกับภาพจริง พบว่าตรงกับกล่อง "STEMA-D1" สีเขียว
+     ที่มองเห็นได้ชัดเจนในภาพ (ไม่ใช่ contamination) และสีนี้ก็มี front-face จริงปรากฏใน FRONT
+     ด้วย - สรุปว่าการ "verified" เดิมของ v25.11 ไม่ครบถ้วน (เช็คแค่ single-view จริงๆ)
 
-  ชั้น 1 — compute_stack_heights_px ตัด apex ทิ้งมากเกินไป:
-    apex_x = detect_isometric_apex() หาจุดที่ cargo_top_y ต่ำสุดในภาพรวม
-    แต่ถ้า stack ที่เตี้ยอยู่ก่อน apex → eff_b1 = min(b1, apex_x) ทำให้
-    ช่วง [b0, eff_b1] แคบมากหรือ b0 >= eff_b1 → xs_top ว่าง → height_px = None
-    สรุป: stack ที่เตี้ยซึ่งอยู่ฝั่งเดียวกับ apex ถูกตัดทิ้งก่อนวัดเสมอ
+  ROOT CAUSE: _p1b_drop_side_wall_contaminated_columns() เช็ค "has_matching_front_anywhere"
+  เฉพาะภายใน view เดียวกัน - เมื่อกล่องถูกบังจนไม่มี front-face ใน view นั้นเลย (แต่มีจริงใน
+  อีก view) ฟังก์ชันตีความผิดว่าเป็น contamination แล้วลบคอลัมน์ข้างเคียงที่ไม่เกี่ยวข้องทิ้ง -
+  ทำให้ BACK นับได้น้อยกว่าจริง (5 แทนที่จะเป็น 7 ใน AE02-01/02, 5 แทนที่จะเป็น 6 ใน EC04-04)
+  และที่ร้ายแรงกว่านั้น: จำนวนที่ผิดนี้ "บังเอิญ" ไปตรงกับจำนวนที่ FRONT รายงาน (ก็ผิดเช่นกัน
+  จากสาเหตุคนละจุด - ดูข้อ 6) ทำให้ Bug#4 (v25.14, M<N synthetic augmentation) ไม่ถูกกระตุ้น
+  ให้ทำงานแก้ไขจำนวนที่แท้จริง เพราะเงื่อนไข M==N ผ่านไปโดยไม่มีการเตือนใดๆ
 
-  ชั้น 2 — fill_missing_heights carry-forward ปิดบังปัญหา:
-    stack ที่ height_px=None (เพราะชั้น 1) → carry-forward ค่า height จาก
-    stack ก่อนหน้าที่วัดได้ → ทำให้ stack เตี้ยได้รับค่าเท่ากับข้างๆ
-    → STEP_DOWN pairwise เห็น gap = 0% → ไม่ trigger เลย
+  6. ตรวจ FRONT เพิ่มเติม: เดิม FRONT เองมี raw fragments ครบ 7 คอลัมน์จริง (ไม่ synthetic) แต่
+  ถูก _p1b_reconcile_with_back ตัดทิ้งไป 2 คอลัมน์ (Hungarian assignment จับคู่กับ BACK's ผิด
+  N=5 แล้วทิ้งตัวที่ "เกิน" ทิ้งไป ทั้งที่เป็นคอลัมน์จริง) - เป็นผลกระทบต่อเนื่อง (cascade) จาก
+  root cause เดียวกันข้อ 5 ไม่ใช่บั๊กแยกต่างหาก
 
-  ชั้น 3 — threshold 20% อาจแคบเกินไปสำหรับ stack ที่ต่างกันแบบ "ขาดชั้น":
-    ถ้า stack หนึ่งสูง 3 ชั้น อีกข้างสูง 2 ชั้น → ต่างกัน ~33% → ควร flag
-    แต่ถ้า height_px None → carry-forward → gap = 0 → ไม่ผ่าน threshold เลย
+  FIX: _p1b_drop_side_wall_contaminated_columns รับพารามิเตอร์ other_view_all_cells เพิ่มเติม
+  (optional, backward-compatible) - เช็ค has_matching_front_anywhere จากทั้ง 2 view (cross-view
+  OR) แทน single-view - ถ้ามี front-face สีเดียวกันปรากฏใน "view ใดก็ได้" ถือว่ากล่องนั้นมีอยู่
+  จริง ไม่ลบคอลัมน์ข้างเคียง (สอดคล้องกับหลักการ cross-view ที่ใช้ตรวจ structural color ใน
+  v25.13 utilities อยู่แล้ว) compute_phase1b_columns คำนวณ front_all ล่วงหน้าก่อนเรียก drop
+  function ของ BACK เพื่อส่งเป็นหลักฐาน cross-view
 
-  FIX (แก้ที่ชั้น 1 เป็นหลัก — ชั้น 2/3 หายตามอัตโนมัติ):
+  ผลลัพธ์ (regression-verified ครบทั้ง 15 ไฟล์ตัวอย่างที่มี):
+    - 13/15 ไฟล์ (AC03-06/07, EC01-01~04, EC02-01/02, EC03-01, EC04-01/02/03): n_stacks และ
+      risks ตรงกับก่อนแก้ไข 100% ทุกไฟล์ ไม่มี regression เลย
+    - AE02-01/02: n_stacks แก้จาก 5→7 (ทั้ง front/back, ยืนยันเป็น real detection ไม่ใช่
+      synthetic) และตอนนี้ตรวจพบ REAR_EMPTY_RISK (length_mismatch, BACK idx6) ที่เคยถูกบัง
+    - EC04-04: n_stacks แก้จาก 5→6 (กู้คืนกล่อง STEMA-D1 ที่หายไปตั้งแต่ v25.11)
 
-  FIX 1 — compute_stack_heights_px: เปลี่ยนกลยุทธ์ apex cutoff
-    เดิม: eff_b1 = min(b1, apex_x) → ตัดทุก stack ที่ทับ apex
-    ใหม่: ตัด apex cutoff เฉพาะเมื่อ apex อยู่ใน "กลาง" ของ stack (< 70% ของความกว้าง)
-           ถ้า apex อยู่ใกล้ขอบขวาของ stack (>= 70%) → ใช้ช่วงเต็ม b0..b1 แทน
-           เพราะ top face ส่วนใหญ่ยังอยู่ก่อน apex → วัดได้น่าเชื่อถือ
-    เพิ่ม: fallback_to_full_range — ถ้า xs_top หลัง cutoff < 3 samples → ลอง
-           full range b0..b1 แทน (ยอมรับ noise เล็กน้อยดีกว่าไม่มีค่าเลย)
-
-  FIX 2 — fill_missing_heights: เพิ่ม "carry-backward" pass
-    เดิม: carry-forward เท่านั้น (ซ้าย→ขวา) → stack สุดท้ายที่ None ได้ค่าจากก่อนหน้า
-    ใหม่: pass ที่ 2 carry-backward (ขวา→ซ้าย) สำหรับที่ยัง None หลัง pass แรก
-           ป้องกัน stack หน้าสุดที่ไม่มี valid ก่อนหน้าเลย (corner case)
-    note: carry-forward/backward ยังเป็น last-resort เหมือนเดิม ไม่กระทบ
-          stack ที่วัดได้โดยตรงหรือได้จาก cross-view
-
-  regression-note:
-    - ไม่แก้ PHASE 1B / cross_view / REAR_EMPTY / REAR_GAP / inject_gap ใดๆ
-    - ไม่เปลี่ยน threshold STEP_DOWN_PAIRWISE_DROP_RATIO (คงที่ 20%)
-    - checkerVersion → "V25.18b", benchmarkMode → "v25_18b_apex_cutoff_fix"
-
+  หมายเหตุสำคัญเกี่ยวกับ STEP_DOWN ที่ผู้ใช้คาดหวังใน AE02-01/02: หลังแก้ไข พบว่าตำแหน่งที่
+  กล่องถูกบัง (real_pos ใกล้ 0 = หัวตู้) มีความสูงต่างจากเพื่อนบ้านจริง (~7-14%) แต่ยังไม่ถึง
+  เกณฑ์ 20% ของ STEP_DOWN_PAIRWISE_DROP_RATIO และฝั่ง FRONT ของตำแหน่งนี้ถูก flag
+  is_corner_duplicate=True (กลไกเดิมของระบบที่ยกเว้นการตรวจที่มุมภาพเนื่องจากความไม่แน่นอนของ
+  การวัดที่มุม isometric) จึงยังไม่ trigger STEP_DOWN_RISK แม้จำนวนตั้ง/ตำแหน่งจะถูกต้องแล้ว -
+  ถ้าต้องการให้ตรวจพบกรณีนี้ด้วย จะต้องพิจารณาปรับ threshold หรือทบทวนเงื่อนไข corner_duplicate
+  แยกต่างหาก (ยังไม่ได้ปรับในเวอร์ชันนี้ เพื่อไม่ให้กระทบไฟล์อื่นโดยไม่ได้ตรวจสอบผลกระทบให้ครบ)
 ================================================================================
 v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
         ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
@@ -1286,14 +1301,7 @@ def _p1b_merge_text_split_fragments(comps, x_tol=12, w_tol=25, gap_max=40):
     return merged
 
 
-def _p1b_classify_view(crop, area_min=None):
-    if area_min is None:
-        # calibrate จาก hi_scale=4 region จริง
-        # 1200px² คือ calibrate ที่ scale=4, region ~400×300px
-        # ถ้า region เล็กกว่า → scale ลงตามสัดส่วน
-        h, w = crop.shape[:2]
-        ref_area = 400 * 300  # region size ที่ calibrate ไว้
-        area_min = max(300, int(1200 * (h * w) / ref_area))
+def _p1b_classify_view(crop, area_min=1200):
     S, _ = _p1b_sat_val(crop)
     colors = _p1b_dominant_colors(crop)
     all_cells = []
@@ -1473,9 +1481,35 @@ def _p1b_merge_corner_artifact_columns(cols, all_cells, side_overlap_ratio=0.5, 
     return kept, dropped
 
 
-def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
-    """แก้ปัญหา 'หลงมองด้านข้างกล่อง ทำให้นับเกิน' เฉพาะกรณีที่วัดผลได้จริง (ยืนยันจาก EC04-04
-    BACK: roof สีแปลกปลอมในโซนแผงข้างที่ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ)"""
+def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45, other_view_all_cells=None):
+    """แก้ปัญหา 'หลงมองด้านข้างกล่อง ทำให้นับเกิน' เฉพาะกรณีที่วัดผลได้จริง (เดิมยืนยันจาก EC04-04
+    BACK: roof สีแปลกปลอมในโซนแผงข้างที่ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ)
+
+    v25.18 FIX (Critical - พบจริงจาก AE02-01/AE02-02): เดิมเช็ค 'has_matching_front_anywhere'
+    เฉพาะภายใน view เดียวกัน (all_cells ของ view นี้เท่านั้น) - พิสูจน์แล้วว่า "ไม่ปลอดภัย" เพราะ
+    กล่องที่สูงน้อยกว่า/ถูกบังจากกล่องเพื่อนบ้านที่สูงกว่าในมุมมองนี้ (มุมกล้องบัง front-face ทั้ง
+    แผ่นจนเหลือแค่ roof โผล่มา) จะ "ไม่มี front-face สีเดียวกันปรากฏใน view นี้เลย" ทั้งที่กล่องนั้น
+    มีอยู่จริงและมี front-face ปรากฏชัดเจนใน "อีก view หนึ่ง" (คนละมุมกล้อง มองเห็นกล่องนั้นไม่ถูกบัง)
+    ยืนยันด้วยหลักฐานจริง 2 จุด:
+      1. AE02-01/02 BACK: roof สีแดง (255,0,0) 2 จุด ไม่มี front สีแดงใน BACK เลย แต่ FRONT มี
+         front สีแดงจริงที่ cx=1588 (hi-res) - หมายความว่ากล่องแดงนี้มีจริง แค่ front-face ถูกบัง
+         จาก BACK - เดิมฟังก์ชันนี้ลบ 2 คอลัมน์จริงที่อยู่ใกล้ roof แดงนี้ทิ้งไปอย่างผิดพลาด (ทำให้
+         BACK นับได้ 5 แทนที่จะเป็น 7 จริง โดยบังเอิญไปตรงกับ FRONT ที่นับได้ 5 เช่นกัน - แมตช์กัน
+         "ผิดโดยบังเอิญ" ทำให้ Bug#4 (M<N augmentation) ไม่ถูกกระตุ้นให้ทำงานแก้ไขจำนวนที่แท้จริง)
+      2. EC04-04 BACK (ไฟล์ calibration เดิมของฟังก์ชันนี้เอง!): ตรวจสอบซ้ำด้วยภาพจริงพบว่าคอลัมน์
+         ที่เดิมถูกลบทิ้ง (roof สีเขียว (0,128,0)) วางทับตรงตำแหน่งกล่อง "STEMA-D1" สีเขียวจริงที่
+         มองเห็นได้ชัดเจนในภาพ (ไม่ใช่ contamination เลย) และสีเขียวนี้ก็มี front-face จริงปรากฏใน
+         FRONT view ด้วย (คนละคอลัมน์ แต่กล่องเดียวกันคนละมุมกล้อง) - แปลว่าการ "verified" เดิมที่
+         อ้างว่า "ไม่มี front-face สีเดียวกันปรากฏที่ไหนเลยในภาพ" นั้นไม่ครบถ้วน (เช็คแค่ single-view)
+
+    FIX: ตรวจสอบ 'has_matching_front_anywhere' จากทั้ง 2 view (cross-view OR แทน single-view) -
+    ถ้ามี front-face สีเดียวกันปรากฏใน "view ใดก็ได้" (view นี้ หรือ อีก view หนึ่ง) ให้ถือว่ากล่องนี้
+    มีอยู่จริง ไม่ใช่ contamination - ไม่ลบคอลัมน์ที่ใกล้ที่สุด (สอดคล้องกับหลักการ "cross-view AND/OR"
+    ที่ใช้ตรวจสอบ structural color ใน v25.13 utilities อยู่แล้ว)
+
+    other_view_all_cells: all_cells ของอีก view หนึ่ง (ถ้ามี) - ใช้เป็นหลักฐานเพิ่มเติมเท่านั้น
+    ไม่บังคับต้องส่งมา (backward-compatible, default=None เหมือนพฤติกรรมเดิมทุกประการถ้าไม่ส่ง)
+    """
     sides = [c for c in all_cells if c['kind'] == 'side']
     if not sides:
         return cols, []
@@ -1490,9 +1524,13 @@ def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
     if not foreign_roofs_in_zone:
         return cols, []
     all_fronts = [c for c in all_cells if c['kind'] == 'front']
+    other_fronts = [c for c in other_view_all_cells if c['kind'] == 'front'] if other_view_all_cells else []
     kept, dropped = list(cols), []
     for fr in foreign_roofs_in_zone:
-        has_matching_front_anywhere = any(f['color'] == fr['color'] for f in all_fronts)
+        has_matching_front_anywhere = (
+            any(f['color'] == fr['color'] for f in all_fronts)
+            or any(f['color'] == fr['color'] for f in other_fronts)
+        )
         if has_matching_front_anywhere:
             continue
         if not kept:
@@ -1674,6 +1712,12 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_region = regions["back"]
         front_region = regions["front"]
 
+        # v25.18 FIX: คำนวณ front_all ล่วงหน้า (ก่อน back's drop-side-wall) เพื่อใช้เป็นหลักฐาน
+        # cross-view ให้ _p1b_drop_side_wall_contaminated_columns ตรวจสอบ (ดู docstring ฟังก์ชันนั้น
+        # สำหรับหลักฐาน+เหตุผลเต็ม) - ไม่กระทบลำดับการคำนวณอื่นใด เพราะ front_all ถูกคำนวณอยู่แล้ว
+        # normally ด้านล่างนี้ (แค่ย้ายขึ้นมาก่อน)
+        front_all = _p1b_classify_view(front_region)
+
         back_all = _p1b_classify_view(back_region)
         back_fronts, _ = _p1b_front_faces(back_region)
         back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
@@ -1681,12 +1725,12 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
-        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(
+            back_cols_raw, back_all, other_view_all_cells=front_all)
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
 
-        front_all = _p1b_classify_view(front_region)
         front_fronts, _ = _p1b_front_faces(front_region)
         front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
         front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
@@ -2250,23 +2294,7 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 
     v25.2 FIX: ตัดข้อมูลที่อยู่ "หลังจุดยอด isometric" (apex) ออกจากการคำนวณ - สำหรับตั้งที่
     อยู่หลัง apex ทั้งตั้ง (วัดเองไม่ได้เลย) จะคืนค่า height_px=None ก่อน ให้ cross-view
-    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย
-
-    v25.18b FIX — apex cutoff ฉลาดขึ้น + fallback_to_full_range:
-      ปัญหาเดิม: eff_b1 = min(b1, apex_x) ตัด stack ที่ "บังเอิญทับ apex" ทิ้งเสมอ
-      แม้ top face ส่วนใหญ่ของ stack นั้นยังอยู่ก่อน apex และวัดได้น่าเชื่อถือ
-      ผลคือ stack เตี้ยที่อยู่ก่อน apex → xs_top ว่าง → height_px=None → carry-forward
-      ได้ค่าจาก stack ข้างๆ → pairwise เห็น gap=0% → ไม่ trigger STEP_DOWN_RISK
-
-      FIX 1: ตัด apex เฉพาะเมื่อ apex อยู่ใน "ครึ่งซ้าย" ของ stack (< 70% ของความกว้าง)
-             ถ้า apex >= 70% width → top face ส่วนใหญ่ยังวัดได้ → ใช้ full range b0..b1
-      FIX 2: fallback_to_full_range — ถ้า xs_top หลัง cutoff < MIN_SAMPLES (3) →
-             ลอง full range b0..b1 แทน แล้ว mark height_source="direct_full_range"
-             ยอมรับ noise เล็กน้อยดีกว่าปล่อย None แล้ว carry-forward ค่าผิด
-    """
-    MIN_SAMPLES = 3          # ขั้นต่ำ samples สำหรับ fit ที่น่าเชื่อถือ
-    APEX_INNER_RATIO = 0.70  # apex ต้องอยู่ใน 70% ซ้ายของ stack จึงตัด
-
+    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย"""
     boundaries = [start_x] + sorted(seams) + [end_x]
     results = []
 
@@ -2275,48 +2303,26 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
             return local_floor_y[x]
         return None
 
-    def _collect_top(x_lo, x_hi):
-        """เก็บ (xs, ys) จาก cargo_top_y ในช่วง [x_lo, x_hi)"""
-        xs, ys = [], []
-        for x in range(max(0, x_lo), max(0, x_hi)):
-            if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
-                xs.append(x)
-                ys.append(cargo_top_y[x])
-        return xs, ys
-
     apex_x = detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x)
 
     for i in range(len(boundaries) - 1):
         b0 = boundaries[i] + margin
         b1 = boundaries[i + 1] - margin
-        stack_width = max(1, b1 - b0)
+        eff_b1 = b1
+        if apex_x is not None:
+            eff_b1 = min(b1, apex_x)
 
-        # --- v25.18b: apex cutoff ฉลาดขึ้น ---
-        use_apex_cut = False
-        if apex_x is not None and apex_x < b1:
-            # apex อยู่ใน stack นี้ → ตัดเฉพาะถ้า apex อยู่ก่อน 70% ของ stack
-            apex_pos_in_stack = (apex_x - b0) / stack_width
-            if apex_pos_in_stack < APEX_INNER_RATIO:
-                use_apex_cut = True
-
-        eff_b1 = min(b1, apex_x) if (use_apex_cut and apex_x is not None) else b1
-
-        xs_top, ys_top = _collect_top(b0, eff_b1)
-
-        # --- v25.18b: fallback_to_full_range ถ้า samples น้อยเกินไป ---
-        height_source = "direct"
-        if len(xs_top) < MIN_SAMPLES and eff_b1 < b1:
-            xs_top, ys_top = _collect_top(b0, b1)
-            if len(xs_top) >= MIN_SAMPLES:
-                height_source = "direct_full_range"
-                print(f"compute_stack_heights_px stack{i}: fallback full_range "
-                      f"b0={b0} b1={b1} samples={len(xs_top)}")
-
-        top_fit = _robust_local_line_fit(xs_top, ys_top) if len(xs_top) >= MIN_SAMPLES else None
+        xs_top, ys_top = [], []
+        for x in range(max(0, b0), max(0, eff_b1)):
+            if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
+                xs_top.append(x)
+                ys_top.append(cargo_top_y[x])
+        top_fit = _robust_local_line_fit(xs_top, ys_top) if xs_top else None
 
         height_px = None
         n_samples = 0
-        if top_fit is not None:
+        height_source = "direct"
+        if top_fit is not None and len(xs_top) >= 3:
             eff_mid = (max(0, b0) + eff_b1) / 2.0
             top_at_mid = top_fit["a"] * eff_mid + top_fit["b"]
             floor_at_mid = _floor_at(int(eff_mid))
@@ -2340,17 +2346,8 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 
 def fill_missing_heights(records):
     """เติมค่า height_px=None ที่เหลือ (หลัง cross-view reconciliation พยายามเติมให้แล้ว
-    แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward/backward จากตั้งใกล้เคียงในมุมมองเดียวกัน -
-    เป็นทางเลือกสุดท้ายเท่านั้น ข้าม is_corner_duplicate เสมอ (ทั้งเป้าหมายและแหล่งอ้างอิง)
-
-    v25.18b FIX: เพิ่ม pass ที่ 2 carry-backward (ขวา→ซ้าย) สำหรับ record ที่ยัง None
-    หลัง pass แรก — ป้องกัน stack แรกสุด (หน้าตู้) ที่ไม่มี valid record ก่อนหน้าเลย
-    ยังคง carry-forward ก่อน (priority ซ้าย→ขวา เหมือนเดิม) เพื่อ regression safety
-    note: carry ใดๆ เป็น last-resort — ไม่กระทบ stack ที่ได้ height จาก direct/cross-view
-    WARNING: carry-forward/backward ทำให้ stack เตี้ยได้ค่าเท่ากับข้างๆ → pairwise
-    ไม่ trigger ได้ ซึ่งเป็นปัญหาชั้น 2 ที่แก้ได้โดยการแก้ชั้น 1 (apex cutoff) ก่อน
-    carry นี้จึงเป็น safety net สำหรับ corner case ที่ apex cutoff แก้ไม่ได้จริงๆ เท่านั้น"""
-    # Pass 1: carry-forward (ซ้าย→ขวา) — เหมือนเดิม
+    แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward จากตั้งก่อนหน้าในมุมมองเดียวกัน -
+    เป็นทางเลือกสุดท้ายเท่านั้น ข้าม is_corner_duplicate เสมอ (ทั้งเป้าหมายและแหล่งอ้างอิง)"""
     last_valid = None
     for r in records:
         if r.get("is_corner_duplicate"):
@@ -2360,18 +2357,6 @@ def fill_missing_heights(records):
         elif last_valid is not None:
             r["height_px"] = last_valid
             r["height_source"] = "carried_forward_same_view"
-
-    # Pass 2: carry-backward (ขวา→ซ้าย) — v25.18b เพิ่มใหม่
-    last_valid = None
-    for r in reversed(records):
-        if r.get("is_corner_duplicate"):
-            continue
-        if r["height_px"] is not None:
-            last_valid = r["height_px"]
-        elif last_valid is not None:
-            r["height_px"] = last_valid
-            r["height_source"] = "carried_backward_same_view"
-
     return records
 
 
@@ -2866,8 +2851,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.18b",
-            "benchmarkMode": "v25_18b_apex_cutoff_fix",
+            "checkerVersion": "V25.18",
+            "benchmarkMode": "v25_18_crossview_sidewall_drop_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
