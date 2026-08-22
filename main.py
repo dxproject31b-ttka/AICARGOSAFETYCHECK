@@ -318,6 +318,27 @@ STEP_DOWN_PAIRWISE_DROP_RATIO = 0.20
 REAR_EMPTY_LENGTH_RATIO = 0.07
 CROSSVIEW_MIN_OVERLAP_RATIO = 0.5       # ต้องทับซ้อนตำแหน่งจริงอย่างน้อย 50% จึงถือเป็นคู่เดียวกัน
 
+# --- STEP_DOWN_RISK (hidden_behind) v25.23 NEW ---
+# กรณีพิเศษที่ 3 กฎเดิมตรวจไม่พบ: กล่องที่ "ซ่อนอยู่แถวหลัง" (ข้ามความกว้างตู้ 2400mm อีกแถว
+# ที่ตำแหน่งความยาวเดียวกัน) สูงกว่ากล่องแถวหน้าที่บังอยู่ - สังเกตได้จาก "top-face bleed-
+# through": หลังคา (roof) ของกล่องหลังโผล่พ้นกล่องหน้าขึ้นมา ทำให้ cargo_top_y ในคอลัมน์
+# เดียวกัน (front-face column เดิมจาก Phase 1B) กระโดดขึ้นกะทันหัน (แคบกว่า 3-5px) กลางคอลัมน์
+# แทนที่จะค่อยๆลาดตามธรรมชาติของมุมมอง isometric (ดูหลักฐาน pixel จริงจาก AE02-01 FRONT
+# idx4 และ BACK idx1 ที่ยืนยันแล้วในบทสนทนา - ทั้งคู่มี jump แนวตั้งคมชัด 28-50px ภายใน
+# ระยะแนวนอนแค่ 3px พร้อมทั้ง 2 ฝั่งของ jump มีค่าเรียบนิ่งมาก (std<2px) ตรงข้ามกับความชัน
+# ธรรมชาติของ isometric slope ที่ลาดต่อเนื่องนุ่มนวลกว่ามาก)
+# เกณฑ์ (ปรับตัวเลขได้ที่นี่จุดเดียว): ต้องกระโดดขึ้นอย่างน้อย HIDDEN_BEHIND_MIN_JUMP_PX พิกเซล
+# ภายในหน้าต่างแคบๆ (win พิกเซล) และทั้ง 2 ฝั่งต้องนิ่ง (std <= HIDDEN_BEHIND_MAX_SIDE_STD)
+# เพื่อแยกแยะจาก noise ของตัวอักษร SKU/isometric slope ธรรมชาติ (ยืนยันแล้วว่าเกณฑ์นี้แยก
+# กรณีจริง (AE02-01 FRONT idx4, BACK idx1) ออกจาก false-positive ที่พบระหว่างพัฒนา (FRONT
+# idx6 - ขอบขวาสุดที่มี isometric slope + label noise ธรรมชาติ - Lstd ขึ้นสูงถึง ~26 เทียบ
+# กับกรณีจริงที่ Lstd<1 เสมอ)
+STEP_DOWN_HIDDEN_BEHIND_MIN_JUMP_PX = 20
+STEP_DOWN_HIDDEN_BEHIND_MAX_SIDE_STD = 6.0
+STEP_DOWN_HIDDEN_BEHIND_WIN = 6
+STEP_DOWN_HIDDEN_BEHIND_MARGIN = 3
+STEP_DOWN_HIDDEN_BEHIND_MIN_SEG = 8
+
 # --- REAR_EMPTY_RISK v2 (แก้บั๊ก v25.0: pos_range เดิม self-normalize ทำให้ตั้งสุดท้าย
 #     ของทุก view ได้ pos=1.0 เสมอ ทำให้ position-overlap matching ผิดพลาดเป็นระบบ) ---
 # กลไก A: เทียบ length_px (Phase 2, ค่าจริงหน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK
@@ -2486,6 +2507,77 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
     return results
 
 
+def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
+                                 margin=STEP_DOWN_HIDDEN_BEHIND_MARGIN,
+                                 min_seg=STEP_DOWN_HIDDEN_BEHIND_MIN_SEG,
+                                 jump_thresh_px=STEP_DOWN_HIDDEN_BEHIND_MIN_JUMP_PX,
+                                 win=STEP_DOWN_HIDDEN_BEHIND_WIN,
+                                 max_side_std=STEP_DOWN_HIDDEN_BEHIND_MAX_SIDE_STD):
+    """v25.23 NEW: หาจุด 'seam ที่ซ่อนอยู่กลางคอลัมน์' ซึ่งเกิดจากกล่องแถวหลัง (ข้ามความกว้าง
+    ตู้) สูงกว่ากล่องแถวหน้าที่บังอยู่ - สัญญาณคือ top-face bleed-through (หลังคากล่องหลัง
+    โผล่พ้นกล่องหน้า) ทำให้ cargo_top_y กระโดดขึ้นกะทันหันกลางคอลัมน์ (คนละสาเหตุกับ seam
+    ระหว่างคอลัมน์ปกติที่ Phase 1B ตรวจจับจากรอยต่อสี front-face)
+
+    วิธีตรวจ: หาตำแหน่ง k ที่ median(height ก่อน k) กับ median(height หลัง k) ต่างกันอย่างน้อย
+    jump_thresh_px พิกเซล โดยทั้ง 2 ฝั่ง (หน้าต่างกว้าง win พิกเซล) ต้องนิ่งมาก (std <=
+    max_side_std) เพื่อแยกแยะจาก noise ของตัวอักษร SKU หรือความชันธรรมชาติของมุมมอง
+    isometric (ซึ่งมักมี std สูงกว่านี้มากเพราะเป็นการไล่ระดับต่อเนื่อง ไม่ใช่การกระโดดคมชัด)
+    ใช้ median-filter (size=5) ก่อนเพื่อกันจุด outlier เดี่ยวๆจากรู/ขอบตัวอักษรบนกล่อง
+
+    คืนค่า dict(split_x, front_height, hidden_height, jump_px) ถ้าพบ (เฉพาะทิศทาง 'สูงขึ้น'
+    เท่านั้น - กล่องซ่อนหลังสูงกว่าฝั่งหน้า ตามหลักฐานจริงที่ยืนยันแล้วทั้ง FRONT/BACK ของ
+    AE02-01) หรือ None ถ้าไม่พบรูปแบบที่น่าเชื่อถือ"""
+    xs, vals = [], []
+    for x in range(x0 + margin, x1 - margin):
+        if x < 0 or x >= len(cargo_top_y):
+            continue
+        t = cargo_top_y[x]
+        f = local_floor_y[x] if x < len(local_floor_y) else -1
+        if t >= 0 and f >= 0:
+            xs.append(x)
+            vals.append(f - t)
+    n = len(vals)
+    if n < min_seg * 2:
+        return None
+    vals = np.array(vals, dtype=float)
+    smoothed = ndimage.median_filter(vals, size=5, mode="nearest")
+    for k in range(win, n - win + 1):
+        left_win = smoothed[max(0, k - win):k]
+        right_win = smoothed[k:k + win]
+        if len(left_win) < 3 or len(right_win) < 3:
+            continue
+        left_std = float(np.std(left_win))
+        right_std = float(np.std(right_win))
+        left_med = float(np.median(left_win))
+        right_med = float(np.median(right_win))
+        jump = right_med - left_med
+        if jump >= jump_thresh_px and left_std <= max_side_std and right_std <= max_side_std:
+            return {
+                "split_x": xs[k], "front_height": left_med, "hidden_height": right_med,
+                "jump_px": jump, "left_std": left_std, "right_std": right_std,
+            }
+    return None
+
+
+def detect_hidden_behind_columns(view_result):
+    """v25.23 NEW: สแกนทุกคอลัมน์ (ตั้ง) ของ view นี้หาจุด 'hidden_behind split' - คืนค่า
+    dict {stack_idx: {split_x, front_height, hidden_height, jump_px}} เฉพาะคอลัมน์ที่พบ
+    รูปแบบที่ผ่านเกณฑ์ทางสถิติเท่านั้น (ดู _detect_hidden_behind_split)"""
+    cargo_top_y = view_result["cargo_top_y"]
+    local_floor_y = view_result["local_floor_y"]
+    seams = view_result["seams"]
+    start_x, end_x = view_result["start_x"], view_result["end_x"]
+    boundaries = [start_x] + sorted(seams) + [end_x]
+    found = {}
+    for i in range(len(boundaries) - 1):
+        x0, x1 = boundaries[i], boundaries[i + 1]
+        r = _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1)
+        if r is not None:
+            r["x1"] = x1
+            found[i] = r
+    return found
+
+
 def fill_missing_heights(records):
     """เติมค่า height_px=None ที่เหลือ (หลัง cross-view reconciliation พยายามเติมให้แล้ว
     แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward จากตั้งก่อนหน้าในมุมมองเดียวกัน -
@@ -2510,7 +2602,11 @@ def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, marg
     local_floor_y = compute_local_floor_y(r["floor_y"], r["grounded"])
     stack_heights = compute_stack_heights_px(
         r["seams"], r["start_x"], r["end_x"], cargo_top_y, margin=margin, local_floor_y=local_floor_y)
-    return {**r, "cargo_top_y": cargo_top_y, "local_floor_y": local_floor_y, "stack_heights": stack_heights}
+    view_result = {**r, "cargo_top_y": cargo_top_y, "local_floor_y": local_floor_y,
+                   "stack_heights": stack_heights}
+    # v25.23 NEW: สแกนหา 'hidden_behind' หลังมี cargo_top_y/local_floor_y ครบแล้ว
+    view_result["hidden_behind"] = detect_hidden_behind_columns(view_result)
+    return view_result
 
 
 # ============================================================================
@@ -2586,6 +2682,45 @@ def detect_step_down_pairwise(records, view_label):
     return risks
 
 
+def detect_step_down_hidden_behind(view_result, records, view_label):
+    """v25.23 NEW: STEP_DOWN_RISK (hidden_behind) - ตรวจกล่องแถวหลัง (ข้ามความกว้างตู้) ที่
+    ซ่อนอยู่หลังกล่องแถวหน้าในคอลัมน์เดียวกัน แต่สูงกว่าจนหลังคาโผล่พ้นขึ้นมา (top-face
+    bleed-through) - คนละกลไกจาก pairwise/cross_view เดิม (ซึ่งเทียบระหว่างคอลัมน์ ไม่ใช่
+    ภายในคอลัมน์เดียวกัน) ใช้ _detect_hidden_behind_split เป็นตัวตรวจจับ (ดู docstring
+    ที่นั่นสำหรับหลักฐาน+เกณฑ์เต็ม) ข้ามคอลัมน์ที่เป็น is_corner_duplicate=True เสมอ (เข้ากับ
+    กฎเดิมทั้ง 3 ข้อ - ไม่ flag บริเวณมุมกล้องที่รู้อยู่แล้วว่านับซ้ำ)
+
+    วาด marker เฉพาะ 'โซนที่กล่องซ่อนหลังโผล่ให้เห็น' (จาก split_x ถึงขอบคอลัมน์) ไม่ใช่ทั้ง
+    คอลัมน์ เพื่อความแม่นยำของตำแหน่งกรอบ (คำนวณ abs_box ตรงที่นี่เลย แทนการพึ่ง
+    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)"""
+    risks = []
+    hidden_behind = view_result.get("hidden_behind", {})
+    ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
+    local_floor_y = view_result["local_floor_y"]
+    for idx, info in hidden_behind.items():
+        if idx >= len(records):
+            continue
+        parent = records[idx]
+        if parent.get("is_corner_duplicate"):
+            continue
+        split_x, x1 = info["split_x"], info["x1"]
+        hidden_h = info["hidden_height"]
+        xm = (split_x + x1) // 2
+        floor_y_local = local_floor_y[xm] if 0 <= xm < len(local_floor_y) and local_floor_y[xm] >= 0 else None
+        if floor_y_local is None:
+            continue
+        top_y_local = floor_y_local - hidden_h
+        abs_box = (ox + split_x, oy + top_y_local, ox + x1, oy + floor_y_local)
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK", "subtype": "hidden_behind", "view": view_label,
+            "mark_view": view_label, "mark_stack_idx": idx, "mark_x_range": (split_x, x1),
+            "taller_height_px": hidden_h, "shorter_height_px": info["front_height"],
+            "drop_ratio": 1 - (info["front_height"] / hidden_h) if hidden_h > 0 else 0,
+            "jump_px": info["jump_px"], "abs_box": abs_box,
+        })
+    return risks
+
+
 def _overlapping_records(target_pos_range, other_records, min_overlap_ratio=CROSSVIEW_MIN_OVERLAP_RATIO):
     t0, t1 = target_pos_range
     t_width = max(1e-6, t1 - t0)
@@ -2657,6 +2792,9 @@ def reconcile_heights_cross_view(records_front, records_back,
         smaller = min(max(1e-6, a1 - a0), max(1e-6, b1 - b0))
         return inter / smaller if smaller > 0 else 0.0
 
+    # v25.23 FIX (Critical): rec_b (แหล่งอ้างอิง) ไม่ควรถูกกันออกเพียงเพราะ is_corner_duplicate
+    # (flag นี้มีไว้ห้าม "เป็นเป้าหมายที่ถูกวาด marker" เท่านั้น ไม่ได้แปลว่าความสูงที่วัดได้
+    # ใช้อ้างอิงไม่ได้ - กล่องมุมเดียวกันที่เห็นจาก 2 กล้องยังเป็นกล่องจริงกล่องเดียวกัน)
     corrections = []
     for rec_a, records_b in [(r, records_back) for r in records_front] + \
                             [(r, records_front) for r in records_back]:
@@ -2664,7 +2802,7 @@ def reconcile_heights_cross_view(records_front, records_back,
             continue
         best_match, best_overlap = None, 0.0
         for rec_b in records_b:
-            if rec_b.get("is_corner_duplicate") or rec_b["height_px"] is None:
+            if rec_b["height_px"] is None:
                 continue
             ov = _overlap_ratio(rec_a["pos_range"], rec_b["pos_range"])
             if ov > best_overlap:
@@ -2681,8 +2819,6 @@ def reconcile_heights_cross_view(records_front, records_back,
             continue
         best_match, best_overlap = None, 0.0
         for rec_b in records_b:
-            if rec_b.get("is_corner_duplicate"):
-                continue
             ov = _overlap_ratio(rec_a["pos_range"], rec_b["pos_range"])
             if ov > best_overlap:
                 best_overlap, best_match = ov, rec_b
@@ -2864,6 +3000,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_pairwise(records_front, "FRONT")
     risks += detect_step_down_pairwise(records_back, "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
+    risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
+    risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -2961,7 +3099,10 @@ def process_request(request):
         for risk in risks:
             risk_type = risk["risk_type"]
             outline_color = RISK_COLORS.get(risk_type, "red")
-            box = risk_abs_box(risk, result)
+            # v25.23 FIX: risk บาง subtype (hidden_behind) คำนวณ abs_box ไว้ตรงจุดตรวจจับเลย
+            # (ไม่ได้ผูกกับ stack_heights index ปกติ) ใช้ค่านี้ก่อนถ้ามี ไม่งั้น fallback ไป
+            # risk_abs_box เดิม
+            box = risk.get("abs_box") or risk_abs_box(risk, result)
             if box:
                 _draw_single_rectangle(draw, box, outline_color)
             else:
@@ -2993,8 +3134,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.22",
-            "benchmarkMode": "v25_22_roof_overlap_guard_fix",
+            "checkerVersion": "V25.23",
+            "benchmarkMode": "v25_23_hidden_behind_step_down",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
