@@ -1,6 +1,33 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.21 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
+================================================================================
+v25.22 (แก้บั๊ก "marker คลาดเคลื่อน 1 ตำแหน่ง" สำหรับไฟล์ AE02-01 BACK view):
+
+  ปัญหา: marker กรอบแดงวาดผิดตำแหน่ง ไปทางขวา 1 กอง จากตำแหน่งที่ถูกต้อง
+  (กล่องที่สูงกว่าอยู่ที่ idx ซ้ายสุด แต่ marker ไปวาดที่ idx ถัดไป)
+
+  Root cause: _p1b_drop_side_wall_contaminated_columns เดิม (v25.20) ตรวจนับจำนวน
+  candidates เพียงอย่างเดียว (candidates==1 → drop) แต่ไม่ตรวจตำแหน่งว่า foreign roof
+  อยู่บน nearest_col จริงหรือไม่ เมื่อกล่องสีแดงซ้อนเป็นชั้น 3 บนกองซ้ายสุด ทำให้
+  roof สีแดงถูก classify เป็น 'foreign roof' 1 ชิ้น → เข้าเงื่อนไข candidates==1 →
+  ตัด nearest_col (กองที่มีกล่องแดงจริง) ทิ้ง → back_cols เหลือ 6 จาก 7 →
+  boundaries เลื่อนทั้งหมด → marker วาดผิดตำแหน่ง 1 ช่อง
+
+  FIX: เพิ่ม x-overlap guard ก่อนตัดทิ้ง:
+    - คำนวณ overlap ระหว่าง candidate roof กับ nearest_col (หน่วยเป็นสัดส่วน roof width)
+    - overlap >= 30%: roof ทับบนกองจริง = กล่องสินค้าจริงซ้อนอยู่ → ไม่ตัด (return ทันที)
+    - overlap < 30%: roof ลอยนอกขอบกอง = side-wall noise จริง (เช่น EC04-04) → ตัดได้
+
+  regression-verified:
+    - EC04-04 BACK: noise จริง → roof อยู่นอกขอบ nearest_col (overlap ต่ำ) → drop ถูกต้อง
+    - AE02-01 BACK: กล่องจริง → roof ทับบนกอง (overlap สูง) → ไม่ drop → cols ครบ 7
+    - ไฟล์อื่น (ไม่มี candidate): ผ่านเงื่อนไข candidates!=1 ก่อน ไม่ถึง overlap check → ปลอดภัย
+
+  เพิ่ม debug prints ทุกจุดสำคัญ:
+    [DROP_SIDE] แสดงจำนวน foreign_roofs/candidates, overlap_frac ของแต่ละ candidate
+    [P1B] แสดงจำนวนและ cx ของ cols หลัง merge_corner, drop_side_wall, reconcile
+
 ================================================================================
 v25.21 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่มีกล่องซ้อนสูงผิดปกติ (AE02-01/AE02-02)
         กล่องสีแดงในโซนกล่องสีเขียวไม่ปรากฏจุดเสี่ยง STEP_DOWN_RISK):
@@ -1506,7 +1533,25 @@ def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
     พร้อมกัน จึงเพิ่มเงื่อนไข: ถ้ามี candidate มากกว่า 1 ชิ้น ให้ถือว่าเป็นกล่องสินค้าจริง (ไม่ตัด
     ทิ้งเลยทั้งกลุ่ม) แทนที่จะตัดทิ้งทีละชิ้นแบบเดิม (regression-verified: EC04-04 ยังคง drop
     ถูกต้องเหมือนเดิมทุกประการ เพราะมี candidate แค่ 1 ชิ้น - ไม่กระทบไฟล์อื่นเลยเพราะฟังก์ชันนี้
-    ถูกเรียกเฉพาะกับ BACK เท่านั้น ในทั้ง 15 ไฟล์มีแค่ AE02-01/02/EC04-04 ที่มี candidate จริง)"""
+    ถูกเรียกเฉพาะกับ BACK เท่านั้น ในทั้ง 15 ไฟล์มีแค่ AE02-01/02/EC04-04 ที่มี candidate จริง)
+
+    v25.22 FIX (แก้ marker คลาดเคลื่อน 1 ตำแหน่ง ที่พบจริงจาก AE02-01 BACK):
+    ปัญหา: แม้ v25.20 จะเพิ่มเงื่อนไข candidates==1 แล้ว แต่พบว่า AE02-01 ยังเข้าเงื่อนไขนี้ได้
+    เมื่อกล่องแดงชั้น 3 บน "กอง 1 กองเดียว" ทำให้ได้ candidate=1 → ตัด nearest_col ทิ้ง →
+    back_cols เหลือ 6 จาก 7 → seam/boundary เลื่อน → marker วาดผิดตำแหน่ง 1 ช่อง
+
+    Root cause: nearest_col ที่ถูกตัดคือกองที่มีกล่องแดงซ้อนอยู่จริงๆ ไม่ใช่ side-wall noise
+    สัญญาณที่บ่งบอกว่า "foreign roof อยู่บนกองจริง" คือ foreign_roof มี x-overlap
+    กับ nearest_col สูง (roof อยู่บนกอง = x-range ทับกัน) ต่างจาก side-wall noise จริง
+    (EC04-04) ที่ roof ลอยอยู่นอกขอบ nearest_col (x-overlap ต่ำ)
+
+    FIX: ก่อน drop ตรวจ x-overlap ระหว่าง candidate roof กับ nearest_col
+    ถ้า overlap >= 30% ของ roof width → roof นั้นอยู่บนกองจริง → ไม่ตัด (return ทันที)
+    ถ้า overlap < 30% → roof ลอยนอกกอง → เป็น side-wall noise จริง → ตัดได้ปลอดภัย
+
+    regression-verified: EC04-04 (noise จริง) roof อยู่นอกขอบ nearest_col (overlap ต่ำ)
+    → ยังคง drop ถูกต้องเหมือนเดิม | AE02-01 (กล่องจริง) roof ทับบนกอง (overlap สูง)
+    → ไม่ตัดแล้ว → back_cols ครบ 7 → marker ตรงตำแหน่ง"""
     sides = [c for c in all_cells if c['kind'] == 'side']
     if not sides:
         return cols, []
@@ -1523,17 +1568,47 @@ def _p1b_drop_side_wall_contaminated_columns(cols, all_cells, cx_tol=45):
     all_fronts = [c for c in all_cells if c['kind'] == 'front']
     candidates = [fr for fr in foreign_roofs_in_zone
                   if not any(f['color'] == fr['color'] for f in all_fronts)]
+
+    print(f"[DROP_SIDE] foreign_roofs_in_zone={len(foreign_roofs_in_zone)}, "
+          f"candidates={len(candidates)}, cols_in={len(cols)}")
+
     if len(candidates) != 1:
         # 0 candidate = ไม่มีอะไรต้องตัด, >=2 candidates = แพทเทิร์นกล่องสินค้าจริงซ้อนหลายชิ้น
-        # (ดู docstring) ไม่ใช่ noise เดี่ยวๆ แบบ EC04-04 -> ไม่ตัดทิ้งเลยเพื่อความปลอดภัย
+        # (ดู docstring v25.20) ไม่ใช่ noise เดี่ยวๆ แบบ EC04-04 -> ไม่ตัดทิ้งเลยเพื่อความปลอดภัย
         return cols, []
+
+    # v25.22 FIX: ตรวจ x-overlap ระหว่าง candidate roof กับ nearest_col ก่อนตัดทิ้ง
+    # ถ้า roof ทับบนกอง (overlap สูง) = กล่องจริงซ้อนอยู่บนนั้น ไม่ใช่ noise → ไม่ตัด
     kept, dropped = list(cols), []
     for fr in candidates:
         if not kept:
             continue
         nearest_col = min(kept, key=lambda c: abs(c['cx'] - fr['cx']))
+
+        # คำนวณ x-overlap ระหว่าง roof กับ nearest_col
+        roof_x0, roof_x1 = fr['x'], fr['x'] + fr['w']
+        col_x0, col_x1 = nearest_col['x'], nearest_col['x'] + nearest_col['w']
+        overlap_px = max(0.0, min(roof_x1, col_x1) - max(roof_x0, col_x0))
+        roof_width = max(1, roof_x1 - roof_x0)
+        overlap_frac = overlap_px / roof_width
+
+        print(f"[DROP_SIDE] candidate roof color={fr['color']} "
+              f"x=[{roof_x0},{roof_x1}] nearest_col cx={nearest_col['cx']:.1f} "
+              f"x=[{col_x0},{col_x1}] overlap_frac={overlap_frac:.2f}")
+
+        if overlap_frac >= 0.30:
+            # roof ทับบนกองจริง (>= 30% ของ roof width) → เป็นกล่องสินค้าจริงที่ซ้อนอยู่
+            # ไม่ใช่ side-wall noise → ไม่ตัดทิ้ง ออกจากลูปทันที
+            print(f"[DROP_SIDE] overlap_frac={overlap_frac:.2f} >= 0.30 → roof อยู่บนกองจริง "
+                  f"ไม่ตัด col นี้ (v25.22 FIX)")
+            return kept, []
+
+        # overlap ต่ำ = roof ลอยนอกขอบกอง = side-wall noise จริง (เช่น EC04-04) → ตัดได้
+        print(f"[DROP_SIDE] overlap_frac={overlap_frac:.2f} < 0.30 → side-wall noise → drop col")
         kept.remove(nearest_col)
         dropped.append(nearest_col)
+
+    print(f"[DROP_SIDE] cols_out={len(kept)} (dropped {len(dropped)})")
     return kept, dropped
 
 
@@ -1715,7 +1790,11 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
-        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        print(f"[P1B] BACK after merge_corner: {len(back_cols_raw)} cols, "
+              f"cx={[round(c['cx'],1) for c in back_cols_raw]}")
+        back_cols, dropped_back = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
+        print(f"[P1B] BACK after drop_side_wall: {len(back_cols)} cols "
+              f"(dropped {len(dropped_back)}), cx={[round(c['cx'],1) for c in back_cols]}")
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
@@ -1727,12 +1806,16 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not front_cols_pre:
             return {"front": None, "back": None}
         front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
+        print(f"[P1B] FRONT after merge_corner: {len(front_cols_raw)} cols, "
+              f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent)
         if not front_cols:
             return {"front": None, "back": None}
+        print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
+              f"cx={[round(c['cx'],1) for c in front_cols]}")
 
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
@@ -2910,8 +2993,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.21",
-            "benchmarkMode": "v25_21_apex_slope_change_fix",
+            "checkerVersion": "V25.22",
+            "benchmarkMode": "v25_22_roof_overlap_guard_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
