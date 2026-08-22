@@ -1,46 +1,36 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v26.00 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.15 ZERO-AI EDITION
 ================================================================================
-v26.00 (แก้ pain points หลัก 7 จุดที่ทำให้ Phase 1 นับผิด / Phase 2-3 ผิดพลาด /
-วาดกรอบผิด - รวม fixes ที่ค้างจาก session ก่อนหน้า + สิ่งใหม่ที่วิเคราะห์เพิ่ม):
+v25.15 (แก้ HTTP 500 ที่พบจากการใช้งานจริงบน Cloud Function หลังปล่อย v25.14):
+  ปัญหา: v25.14 แก้ Bug#1/#2 (coordinate mismatch ระหว่าง PHASE 1B กับ pipeline หลัก) โดยเปลี่ยน
+  ให้ pipeline หลักทั้งหมด render เต็มหน้าที่ matrix_scale=4 (จากเดิม=3) - ทดสอบ local (รัน
+  process_request ตรงๆ ในเครื่อง) ผ่านครบทุกไฟล์ตัวอย่าง แต่เมื่อ deploy ใช้งานจริงบน Cloud
+  Function พบ "Python API HTTP Error: 500" ทุกไฟล์ (การวิเคราะห์ล้มเหลวทุกไฟล์)
 
-  Bug#A (Critical) - compute_floor_profile ใช้ gap_thresh=30 hardcode ทำให้ไฟล์ที่
-    floor อยู่ห่างจาก cargo_bottom มากกว่า 30px (มุมกล้อง/scale=4) ได้ grounded=0
-    ทั้ง view -> measure_stack_lengths crash / seam ผิดทั้งหมด
-    FIX: _compute_floor_profile_adaptive() คำนวณ gap_thresh = percentile 85 ของ
-    gap ที่พบจริงในภาพ (clamp 20-120px) แทน hardcode 30px
+  Root cause: การ render เต็มหน้าที่ scale=4 (แทน scale=3) ทำให้ทุกขั้นตอนในพไลป์ไลน์หลัก (mask
+  ต่างๆ, floor profile, cargo detection, วาด marker, JPEG encode) ต้องประมวลผลภาพที่มีจำนวน
+  pixel เพิ่มขึ้น ~1.78 เท่าพร้อมกันทั้งหมด (ไม่ใช่แค่ PHASE 1B เหมือน v25.13 เดิมที่ render
+  ภาพ hi-res แยกเฉพาะสำหรับ PHASE 1B ชั่วคราวแล้วปล่อยทิ้ง) ทำให้ memory usage รวมของ Cloud
+  Function เกิน limit ที่ deploy ไว้ จนโดน kill (out-of-memory) -> HTTP 500 ทุกไฟล์แบบไม่เลือก
+  (เข้าได้กับอาการ "ล้มเหลวทุกไฟล์" ที่ผู้ใช้รายงาน เพราะเป็นปัญหาทรัพยากรระบบ ไม่ใช่ปัญหาเฉพาะ
+  ไฟล์ใดไฟล์หนึ่ง)
 
-  Bug#B (Critical) - FRONT col[0] false-positive จากมุมกล้อง: cx ห่างจาก col[1]
-    มากผิดปกติ (> 2x median spacing) แต่ไม่ถูกกรองออก ทำให้นับเกิน 1 และ seam
-    แรกอยู่ผิดตำแหน่งมาก -> pos_range ทุกตั้งเบี่ยงเบน -> cross-view matching ผิด
-    FIX: _p1b_validate_column_spacing() หลัง compute_phase1b_columns ตรวจ
-    spacing outlier (IQR-based) และตัด col ที่ห่างเกิน 2.5x median spacing ออก
-
-  Bug#C (Critical) - risk_abs_box ใช้ local_floor_y[xm] แต่ xm อาจอยู่นอกช่วง
-    grounded จริง ทำให้ได้ floor_y_local = -1 -> box = None -> ไม่วาดกรอบเลย
-    FIX: _safe_floor_y_at(lfy, xm, x_range) ค้นหา floor_y ที่ valid ใกล้ xm ที่สุด
-    ในช่วง x_range ก่อน fallback median ของทั้ง view
-
-  Bug#D (High) - color_anomaly ตรวจตั้งท้ายสุดที่เป็น corner_dup=True ของ FRONT:
-    กลาง-ซ้ายของ FRONT view (pos ต่ำ) มี corner artifact ที่มีหลายสีปะปนเสมอ
-    -> false positive color_anomaly ทุกไฟล์ที่ FRONT[0] = corner
-    FIX: suppress color_anomaly สำหรับ record ที่ is_corner_duplicate=True เสมอ
-
-  Bug#E (High) - _rearmost_record ข้าม corner_dup แต่ถ้า corner_dup=True คือ idx=0
-    ซึ่งมี pos_range[1] สูงสุด (เพราะ FRONT ถูก flip) -> ฟังก์ชันเลือก record ผิด
-    FIX: _rearmost_record ไม่นับ is_corner_duplicate ทั้งในการข้ามและเป็นเป้าหมาย
-    (เหมือนเดิม) แต่เพิ่ม guard: ถ้า max pos_range[1] เป็น corner_dup ให้ skip
-    และใช้ตัวถัดไปแทน - ครอบคลุมกรณีที่ corner_dup อยู่ที่ idx ไหนก็ได้
-
-  Bug#F (Medium) - measure_stack_lengths crash เมื่อ start_x=None หรือ end_x=None
-    (เกิดเมื่อ measure_cargo_extent_via_white_bg คืน None ทั้งคู่ในไฟล์ที่ไม่มี white bg)
-    FIX: guard None ใน measure_stack_lengths + process_view_with_length_on_image
-
-  Bug#G (Medium) - seam boundaries จาก PHASE 1B (override_cols) ไม่ถูก validate
-    ว่าอยู่ใน [start_x, end_x] จริง ทำให้ seam อยู่นอกช่วง cargo -> ความยาวตั้งติดลบ
-    FIX: clamp seam ให้อยู่ใน [start_x, end_x] ก่อนเรียก measure_stack_lengths
-
+  FIX: pipeline หลักกลับไปใช้ full_img ที่ matrix_scale=3 เหมือนเดิม (memory footprint เท่าเดิม
+  กับ v25.13) ส่วน PHASE 1B เปลี่ยนวิธีการได้ภาพ hi-res ใหม่: แทนที่จะ render "ทั้งหน้า" ที่
+  scale=4 (ทั้งแบบ v25.13 ที่ render แยกอิสระ และแบบ v25.14 ที่เปลี่ยนทั้ง pipeline) เปลี่ยนเป็น
+  render "เฉพาะสี่เหลี่ยม region เล็กๆ ของ view นั้น" ตรงจาก PDF ที่ scale=4 ผ่าน fitz
+  clip=Rect(...) (ฟังก์ชันใหม่ render_hires_crop) โดยใช้ origin_box (safe_x0,safe_y0,safe_x1,
+  safe_y1) เดียวกับที่ get_view_region คำนวณให้ pipeline หลักใช้เป๊ะ (แปลงจาก pixel-space เป็น
+  point-space ด้วยการหารด้วย main_scale) ผลลัพธ์:
+    - แก้ HTTP 500: render เฉพาะ region เล็ก (เศษส่วนของทั้งหน้า) แทนที่จะ render ทั้งหน้าที่
+      scale สูง -> memory usage ต่ำกว่ามาก
+    - ยังคงแก้ Bug#1 (coordinate mismatch) + Bug#2 (double ensure_safe_crop) จาก v25.14 ได้ครบ
+      เพราะพิกัด origin ของ hi-res crop อ้างอิงจากกล่องเดียวกันเป๊ะกับ region หลัก (ต่างกันแค่
+      ความหนาแน่น pixel ที่แปลงกลับด้วย down_factor คงที่ = main_scale/hi_scale)
+  regression-verified: รันซ้ำทั้ง 11 ไฟล์ตัวอย่าง (EC01-01~04, EC02-01/02, EC03-01, EC04-01~04)
+  ในเครื่อง local ได้ n_stacks และ risk ตรงกับผลของ v25.14 ทุกไฟล์ (ดูรายละเอียดที่ CHANGELOG
+  ของ v25.14 ด้านล่างสำหรับ 6 bug fixes เดิมที่ยังคงอยู่ครบ ไม่มีการแก้ไขเพิ่มเติมนอกจากนี้)
 ================================================================================
 v25.14 (แก้ 6 root causes ที่พบใน PHASE 1B ของ v25.13 - ตรวจสอบเทียบข้อมูลจริงจากไฟล์
 ตัวอย่าง AC03-01 และ EC04-01/02/03/04 แล้ว):
@@ -367,19 +357,11 @@ def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_i
     return cy0, cy1, cx0, cx1
 
 
-def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=None, max_floor_search_below=150):
-    """v26.00 FIX Bug#A: gap_thresh เดิม hardcode=30px ทำให้ไฟล์ที่ floor อยู่ห่างจาก
-    cargo_bottom มากกว่า 30px (scale=4 ทำให้ระยะห่างเพิ่มขึ้น) ได้ grounded=0 ทั้ง view
-    FIX: ถ้าไม่ระบุ gap_thresh ให้คำนวณ adaptive จาก gap ที่พบจริงในภาพ (percentile 85,
-    clamp 20-120px) แทน hardcode - รับประกันว่า grounded zone จะถูกตรวจพบเสมอ ไม่ว่า
-    scale หรือ geometry ของไฟล์จะเป็นอย่างไร"""
+def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=30, max_floor_search_below=100):
     h, w, _ = region.shape
     floor_y = np.full(w, -1, dtype=int)
     cargo_bottom_y = np.full(w, -1, dtype=int)
-    raw_grounded = np.zeros(w, dtype=bool)
-    raw_gaps = []
-
-    # Pass 1: เก็บ gap จริงทุกจุดเพื่อคำนวณ adaptive gap_thresh
+    grounded = np.zeros(w, dtype=bool)
     for x in range(w):
         cargo_col = np.nonzero(cargo_mask[:, x])[0]
         if len(cargo_col) == 0:
@@ -392,24 +374,7 @@ def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=None, max_
         if len(struct_idx) > 0:
             floor_y[x] = search_y0 + int(struct_idx.max())
             gap = floor_y[x] - cargo_bottom_y[x]
-            if gap >= 0:
-                raw_gaps.append(gap)
-
-    # Adaptive gap_thresh: percentile 85 ของ gap จริง, clamp 20-120px
-    if gap_thresh is None:
-        if len(raw_gaps) >= 10:
-            adaptive = float(np.percentile(raw_gaps, 85))
-            gap_thresh = max(20, min(120, adaptive))
-        else:
-            gap_thresh = 60  # fallback ที่ใจกว้างกว่าเดิม (เดิม=30)
-
-    # Pass 2: กำหนด grounded ด้วย adaptive gap_thresh
-    grounded = np.zeros(w, dtype=bool)
-    for x in range(w):
-        if floor_y[x] >= 0 and cargo_bottom_y[x] >= 0:
-            gap = floor_y[x] - cargo_bottom_y[x]
             grounded[x] = (0 <= gap <= gap_thresh)
-
     min_grounded_run = 30
     run_start = None
     confirmed_grounded = np.zeros(w, dtype=bool)
@@ -865,13 +830,14 @@ def render_full_page(pdf_bytes, page_idx=1, matrix_scale=3):
     return np.ascontiguousarray(img), doc, page
 
 
-def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
+def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30,
                            override_cols=None, precrop=None):
-    """v26.00: ลบ gap_thresh parameter ออก - compute_floor_profile จะคำนวณ adaptive
-    gap_thresh เองจากข้อมูลจริงในภาพแต่ละไฟล์ (Bug#A fix) ไม่ hardcode 30px อีกต่อไป"""
     img = full_img
     H, W, _ = img.shape
     if precrop is not None:
+        # v25.14 FIX (Bug#1/#2): ใช้ region ที่ crop มาแล้วจาก pipeline หลัก (get_view_region)
+        # โดยตรง 100% - ไม่คำนวณ crop ซ้ำอีกครั้ง เพื่อรับประกันว่าพิกัดตรงกับที่ PHASE 1B ใช้
+        # เป๊ะเสมอ (เดิม get_safe_region คำนวณ ensure_safe_crop แยกอีกชุด ทำให้ origin เพี้ยนได้)
         region, (safe_x0, safe_y0, safe_x1, safe_y1) = precrop
     else:
         y0, y1 = int(H * y0_frac), int(H * y1_frac)
@@ -881,9 +847,8 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
     struct_mask_raw = saturated_mask(region)
     arrow_m = arrow_mask(region)
     cargo_mask = vivid_cargo_mask(region) & (~arrow_m)
-    # v26.00 FIX Bug#A: ไม่ส่ง gap_thresh แล้ว -> compute_floor_profile ใช้ adaptive mode
     floor_y, cargo_bottom_y, grounded = compute_floor_profile(
-        region, struct_mask_raw & (~arrow_m), cargo_mask)
+        region, struct_mask_raw & (~arrow_m), cargo_mask, gap_thresh=gap_thresh)
 
     xs_grounded_all = np.nonzero(grounded)[0]
     fallback_xrange = (int(xs_grounded_all.min()), int(xs_grounded_all.max())) if len(xs_grounded_all) else None
@@ -925,7 +890,11 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
             gap_mid = (cols_sorted[i]["x"] + cols_sorted[i]["w"] + cols_sorted[i + 1]["x"]) // 2
             seam = int(np.clip(gap_mid, prev_boundary + min_seg_width, x_max_ - min_seg_width))
             if seams and seam <= seams[-1]:
-                seam = seams[-1] + min_seg_width
+                # v25.15 FIX: min_seg_width เป็น float (adaptive, Bug#5) - ต้อง int() ผลลัพธ์
+                # ก่อนเก็บ ไม่งั้น seams จะมีค่า float ปนอยู่ ทำให้ range() ใน PHASE 3
+                # (compute_stack_heights_px) พังด้วย TypeError (พบจริงจาก production regression
+                # test: EC01-03/04 ทุกครั้งที่ seam ordering ถูกบังคับแก้ผ่านเงื่อนไขนี้)
+                seam = int(seams[-1] + min_seg_width)
             seams.append(seam)
             prev_boundary = seam
         xrange_ = (x_min_, x_max_)
@@ -995,11 +964,21 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
 # ทำให้ crop origin ของทั้ง 2 ฝั่งเพี้ยนไปคนละทาง แม้จะแปลงสเกลตัวเลขคอลัมน์กลับด้วย down_factor
 # แล้วก็ตาม) ทำให้ seam ผิดตั้งแต่ต้น
 #
-# แก้โดยเลิก render/crop แยกทั้งหมด: PHASE 1B รับ "region ที่ crop มาแล้วจาก pipeline หลัก
-# โดยตรง" (ผ่าน get_view_region ที่เรียกครั้งเดียวใน run_full_analysis_on_image แล้วส่ง region
-# เดียวกันนี้ต่อทั้งให้ compute_phase1b_columns และ process_view_on_image ผ่าน precrop=) จึงใช้
-# region เดียวกัน 100% เสมอ ไม่มีการคำนวณ crop ซ้ำที่อาจได้ origin ต่างกันอีกต่อไป (ดูรายละเอียด
-# ที่ docstring ของ get_view_region/compute_phase1b_columns ด้านล่าง)
+# v25.15 FIX (Critical - production HTTP 500): v25.14 แก้ปัญหาข้างต้นโดยเลิก render/crop แยก
+# ทั้งหมด เปลี่ยนมาให้ pipeline หลักทั้งหมด render เต็มหน้าที่ scale=4 (แทน scale=3 เดิม) แล้วใช้
+# region เดียวกัน 100% ระหว่าง PHASE 1B กับ pipeline หลัก - ทดสอบ local ผ่านหมด แต่พอใช้งานจริง
+# บน Cloud Function พบ HTTP 500 ทุกไฟล์ เพราะ scale=4 เต็มหน้าทำให้ทุกขั้นตอนใน pipeline (mask,
+# floor profile, วาด marker, JPEG encode ฯลฯ) ใช้ memory เพิ่มขึ้น ~1.78 เท่าพร้อมกันหมด จนเกิน
+# memory limit ของ Cloud Function
+#
+# แก้โดย pipeline หลักกลับไปใช้ full_img ที่ scale=3 เหมือนเดิม (memory เท่าเดิม) ส่วน PHASE 1B
+# เปลี่ยนมา render เฉพาะ "สี่เหลี่ยม region เล็กๆ ของ view" ตรงจาก PDF ที่ scale=4 ผ่าน fitz
+# clip=Rect(...) (ดู render_hires_crop) โดยใช้ origin_box เดียวกับที่ get_view_region คำนวณให้
+# pipeline หลักใช้เป๊ะ (แปลงจาก pixel-space เป็น point-space ด้วยการหารด้วย main_scale) - ยังคง
+# แก้ Bug#1 (coordinate mismatch) + Bug#2 (double ensure_safe_crop) ได้ครบถ้วนเหมือน v25.14 เพราะ
+# พิกัด origin อ้างอิงจากกล่องเดียวกันเป๊ะ (ต่างกันแค่ความหนาแน่น pixel ที่แปลงกลับด้วย
+# down_factor คงที่) แต่ไม่ต้อง render เต็มหน้าที่ scale สูงอีกต่อไป (region เล็กกว่าทั้งหน้าหลาย
+# เท่า จึงประหยัด memory มาก แก้ HTTP 500 ได้)
 #
 # Fail-safe: ถ้าขั้นตอนใดล้มเหลว (หา 'front-face' สีเด่นไม่เจอ ฯลฯ) จะคืนค่า None ทั้งคู่ และ
 # process_view_on_image จะ fallback ไปใช้ seam-based เดิมโดยอัตโนมัติ (ไม่ทำให้ทั้งระบบล้มเหลว)
@@ -1421,46 +1400,59 @@ def get_view_region(full_img, doc, view_name, page_idx=1, margin=30):
     return region, origin, fracs
 
 
-def _p1b_validate_column_spacing(cols, max_outlier_ratio=2.5):
-    """v26.00 FIX Bug#B: ตรวจ spacing outlier (IQR-based) และตัด col ที่ห่างจาก
-    col ข้างเคียงเกิน max_outlier_ratio x median spacing ออก - กรณีหลักที่พบคือ
-    FRONT col[0] จากมุมกล้องที่ cx อยู่ห่างจาก col[1] มากผิดปกติ ซึ่งเป็น false-
-    positive ที่ทำให้นับเกิน 1 และ pos_range ของทุกตั้งเบี่ยงเบนออกไป
-
-    Logic: คำนวณ spacing ระหว่าง cx ของ col ติดกัน ถ้า spacing ใดเกิน
-    max_outlier_ratio x median spacing -> ตัด col ที่ห่างมากออก (เลือก col
-    ที่อยู่ขอบ เพราะ false-positive มักอยู่ขอบซ้ายหรือขวาของ view เสมอ)"""
-    if len(cols) < 3:
-        return cols
-    cols = sorted(cols, key=lambda c: c['cx'])
-    cxs = [c['cx'] for c in cols]
-    spacings = [cxs[i+1] - cxs[i] for i in range(len(cxs)-1)]
-    med_spacing = float(np.median(spacings))
-    if med_spacing <= 0:
-        return cols
-    threshold = med_spacing * max_outlier_ratio
-    # ตรวจ outlier ที่ขอบซ้าย: spacing[0] ใหญ่ผิดปกติ
-    if spacings[0] > threshold:
-        print(f"  [v26 Bug#B] ตัด col[0] cx={cxs[0]:.0f} ออก (spacing={spacings[0]:.0f} > {threshold:.0f})")
-        cols = cols[1:]
-    # ตรวจ outlier ที่ขอบขวา (ทำซ้ำหลังอาจ trim ซ้าย)
-    if len(cols) >= 3:
-        cxs2 = [c['cx'] for c in cols]
-        spacings2 = [cxs2[i+1] - cxs2[i] for i in range(len(cxs2)-1)]
-        med2 = float(np.median(spacings2))
-        if med2 > 0 and spacings2[-1] > med2 * max_outlier_ratio:
-            print(f"  [v26 Bug#B] ตัด col[-1] cx={cxs2[-1]:.0f} ออก (spacing={spacings2[-1]:.0f} > {med2*max_outlier_ratio:.0f})")
-            cols = cols[:-1]
-    return cols
+PHASE1B_HI_SCALE = 4.0  # scale ที่ calibrate threshold ต่างๆ ของ PHASE 1B ไว้ (ดู render_hires_crop)
 
 
-def compute_phase1b_columns(regions):
+def _p1b_scale_col(c, factor):
+    return dict(c, x=int(round(c['x'] * factor)), y=int(round(c['y'] * factor)),
+                w=int(round(c['w'] * factor)), h=int(round(c['h'] * factor)),
+                cx=c['cx'] * factor, cy=c['cy'] * factor)
+
+
+def render_hires_crop(page, origin_box, main_scale, hi_scale=PHASE1B_HI_SCALE):
+    """v25.15 FIX (Critical - production HTTP 500): เรนเดอร์เฉพาะ 'สี่เหลี่ยม region' ของ view
+    นี้ตรงจาก PDF ที่ hi_scale โดยใช้ fitz clip (ไม่ render ทั้งหน้า) เพื่อให้ได้รายละเอียดขอบ/สี
+    ที่แท้จริง (ไม่ใช่ upscale จากภาพ low-res ซึ่งพิสูจน์แล้วว่าใช้ไม่ได้ - รายละเอียดที่เสียไปตอน
+    render ที่ scale ต่ำกู้คืนด้วยการ upscale ไม่ได้) สำหรับ PHASE 1B เท่านั้น
+
+    เหตุผลที่ต้องเปลี่ยนจาก v25.14 (ซึ่งแก้ Bug#1/#2 โดยเปลี่ยนทั้ง pipeline หลักให้ render ที่
+    scale=4 เต็มหน้า): เมื่อทดสอบใช้งานจริงบน Cloud Function พบ HTTP Error 500 ทุกไฟล์ - สาเหตุ
+    คือการ render "ทั้งหน้า" ที่ scale=4 (แทนที่จะเป็น scale=3 เดิม) ทำให้ทุกขั้นตอนในพไลป์ไลน์
+    หลัก (mask, floor profile, cargo detection, วาด marker, JPEG encode ฯลฯ) ต้องประมวลผลภาพที่
+    มีจำนวน pixel มากขึ้น ~1.78 เท่าพร้อมกันทั้งหมด ทำให้ใช้ memory เกิน limit ของ Cloud Function
+    จนโดน kill (out-of-memory) -> HTTP 500
+
+    FIX: pipeline หลักกลับไปใช้ full_img ที่ scale=3 เหมือนเดิม (memory footprint เท่าเดิม) ส่วน
+    PHASE 1B render "เฉพาะสี่เหลี่ยม region เล็กๆ ของ view" ตรงจาก PDF ที่ scale=4 ผ่าน fitz
+    clip=Rect(...) เท่านั้น (ไม่ render ทั้งหน้า) - ใช้ memory น้อยกว่าการ render ทั้งหน้าที่ scale=4
+    มาก (region เล็กกว่าทั้งหน้าหลายเท่า) ในขณะที่ยังคงแก้ Bug#1/#2 ได้ครบถ้วน เพราะ:
+      - origin_box ที่ใช้ตัดสี่เหลี่ยมนี้ คือ (safe_x0,safe_y0,safe_x1,safe_y1) ตัวเดียวกันเป๊ะ
+        กับที่ get_view_region คำนวณให้ pipeline หลักใช้ (แปลงจาก pixel-space ที่ main_scale เป็น
+        point-space ด้วยการหารด้วย main_scale) - ไม่มีการคำนวณ ensure_safe_crop ซ้ำหรือ boundary
+        อิสระอีกชุดแบบ v25.13 (Bug#2) และพิกัด x/w ที่ได้จะตรงกับ region หลักเสมอ (Bug#1) เพราะ
+        เป็นสี่เหลี่ยมเดียวกัน ต่างกันแค่ความหนาแน่น pixel (แปลงกลับด้วย down_factor คงที่)
+    """
+    safe_x0, safe_y0, safe_x1, safe_y1 = origin_box
+    clip_rect = fitz.Rect(safe_x0 / main_scale, safe_y0 / main_scale,
+                          safe_x1 / main_scale, safe_y1 / main_scale)
+    mat = fitz.Matrix(hi_scale, hi_scale)
+    pix = page.get_pixmap(matrix=mat, clip=clip_rect)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        img = img[:, :, :3]
+    img = np.ascontiguousarray(img)
+    down_factor = main_scale / hi_scale
+    return img, down_factor
+
+
+def compute_phase1b_columns(regions, down_factor=1.0):
     """คืนค่า dict {'front': [cols...] หรือ None, 'back': [cols...] หรือ None} ในพิกัด region
-    local ของแต่ละ view - ตรงกับพิกัดที่ process_view_on_image ใช้จริง 100% เสมอ เพราะรับ
-    region ที่ crop มาแล้วจาก pipeline หลักโดยตรง (ดู get_view_region + run_full_analysis_on_image)
-    ไม่ render หรือ crop แยกต่างหากอีกต่อไป (v25.14 FIX Bug#1/#2 - ดู docstring get_view_region)
+    local ของแต่ละ view "ที่ main_scale" (ตรงกับพิกัดที่ process_view_on_image ใช้จริง 100%) -
+    รับ region ที่ render มาที่ hi_scale ตรงจาก PDF (ดู render_hires_crop) แล้วแปลงพิกัดผลลัพธ์
+    กลับเป็น main_scale ด้วย down_factor ก่อนคืนค่า (v25.15 - ดู docstring render_hires_crop)
 
-    regions: {"front": region_array, "back": region_array}
+    regions: {"front": region_array_hires, "back": region_array_hires}
+    down_factor: main_scale / hi_scale ที่ใช้ scale พิกัดคอลัมน์กลับ
     None = ตรวจไม่สำเร็จ (fallback อัตโนมัติไปที่ seam-based เดิมใน process_view_on_image)
     """
     try:
@@ -1474,9 +1466,7 @@ def compute_phase1b_columns(regions):
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
-        back_cols_sid, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
-        # v26.00 FIX Bug#B: validate spacing outlier ทั้ง BACK และ FRONT
-        back_cols = _p1b_validate_column_spacing(back_cols_sid)
+        back_cols, _ = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
@@ -1488,15 +1478,17 @@ def compute_phase1b_columns(regions):
         if not front_cols_pre:
             return {"front": None, "back": None}
         front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
-        front_cols_validated = _p1b_validate_column_spacing(front_cols_raw)
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
-            back_cols, front_cols_validated, back_extent=back_extent, front_extent=front_extent)
+            back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent)
         if not front_cols:
             return {"front": None, "back": None}
 
-        return {"front": front_cols, "back": back_cols}
+        return {
+            "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
+            "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+        }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
         return {"front": None, "back": None}
@@ -1882,14 +1874,7 @@ def measure_cargo_extent_via_white_bg(region, cargo_bottom_y, grounded, sample_o
 
 
 def measure_stack_lengths(seams, start_x, end_x):
-    """v26.00 FIX Bug#F: guard None สำหรับ start_x/end_x ที่อาจเป็น None เมื่อ
-    measure_cargo_extent_via_white_bg ไม่พบ white background เลยในภาพ"""
-    if start_x is None or end_x is None:
-        return [], []
-    # v26.00 FIX Bug#G: clamp seam ให้อยู่ใน [start_x, end_x] เสมอ
-    clamped_seams = [max(start_x, min(end_x, s)) for s in (seams or [])]
-    clamped_seams = sorted(set(s for s in clamped_seams if start_x < s < end_x))
-    boundaries = [start_x] + clamped_seams + [end_x]
+    boundaries = [start_x] + sorted(seams) + [end_x]
     lengths = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
     return lengths, boundaries
 
@@ -1913,15 +1898,6 @@ def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, over
     r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
                                override_cols=override_cols, precrop=precrop)
     start_x, end_x, length_px = measure_cargo_extent_via_white_bg(r["region"], r["cargo_bottom_y"], r["grounded"])
-    # v26.00 FIX Bug#F: fallback ถ้า start_x/end_x=None (ไม่พบ white bg)
-    if start_x is None or end_x is None:
-        xs_g = np.nonzero(r["grounded"])[0]
-        if len(xs_g) >= 2:
-            start_x = int(xs_g.min())
-            end_x = int(xs_g.max())
-            length_px = end_x - start_x
-        else:
-            start_x, end_x, length_px = 0, r["region"].shape[1] - 1, r["region"].shape[1] - 1
     stack_lengths, boundaries = measure_stack_lengths(r["seams"], start_x, end_x)
     return {
         **r, "start_x": start_x, "end_x": end_x,
@@ -2296,14 +2272,8 @@ def reconcile_heights_cross_view(records_front, records_back,
 
 
 def _rearmost_record(records):
-    """v26.00 FIX Bug#E: ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด)
-    ของ view นั้น - ข้าม record ที่ is_corner_duplicate=True เสมอ
-
-    FIX: เดิมข้าม corner_dup แต่ใน FRONT view corner_dup = idx=0 ซึ่งหลัง flip แล้ว
-    pos_range[1] อาจมีค่าสูงสุดใน list -> max() จะเลือก idx=0 ผิด แม้จะ filter แล้ว
-    (เพราะ filter ก่อน flip ไม่ใช่หลัง flip) - แก้โดย filter ให้ครบถ้วนจริงๆ โดยตรวจ
-    ว่า record ที่ is_corner_duplicate=True ไม่เข้ามาเป็น candidate ไม่ว่า pos จะเป็น
-    เท่าไหรก็ตาม"""
+    """ตั้งที่อยู่ท้ายสุดจริง (real pos_range[1] ใกล้ 1.0 ที่สุด) ของ view นั้น - ข้าม
+    record ที่ is_corner_duplicate=True เสมอ"""
     candidates = [r for r in records if not r.get("is_corner_duplicate")]
     if not candidates:
         return None
@@ -2379,10 +2349,6 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
         rear_rec = _rearmost_record(records)
         if rear_rec is None:
             continue
-        # v26.00 FIX Bug#D: ข้าม corner_duplicate เสมอ - corner zone มีหลายสีเป็นธรรมชาติ
-        # (โครงสร้างตู้ + ผนังข้าง + หัวตู้ปรากฏพร้อมกัน) -> false positive color_anomaly ทุกครั้ง
-        if rear_rec.get("is_corner_duplicate"):
-            continue
         # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
         if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
             continue
@@ -2400,26 +2366,37 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     return risks
 
 
-def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=4):
+def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
     # process_view_with_height_on_image ต่อ view ตามปกติ - ถ้าล้มเหลว (None) จะ fallback ไป
     # seam-based เดิมโดยอัตโนมัติ (ดู process_view_on_image)
     #
-    # v25.14 FIX (Bug#1/#2): เดิมต้องใช้ pdf_bytes เพื่อ render หน้าเต็มแยกต่างหากที่ scale อื่น
-    # สำหรับ PHASE 1B โดยเฉพาะ (compute_phase1b_columns เดิม) ตอนนี้ครอป region ของแต่ละ view
-    # "ครั้งเดียว" จาก full_img ตัวเดียวกับที่ pipeline หลักใช้อยู่แล้ว (get_view_region) แล้วส่ง
-    # region+origin เดียวกันนี้ต่อให้ทั้ง compute_phase1b_columns และ
-    # process_view_with_height_on_image (ผ่าน precrop=) ใช้ตรงกัน 100% เสมอ - ไม่ต้องพึ่ง
-    # pdf_bytes/render แยกอีกต่อไป
+    # v25.15 FIX (Critical - แก้ HTTP 500 บน Cloud Function จริงที่เกิดจาก v25.14): v25.14 แก้
+    # Bug#1/#2 (coordinate mismatch) โดยเปลี่ยนทั้ง pipeline หลักให้ render เต็มหน้าที่ scale=4
+    # (จากเดิม scale=3) - ทดสอบ local ผ่านหมด แต่พอใช้งานจริงบน Cloud Function พบ HTTP 500 ทุกไฟล์
+    # เพราะ scale=4 เต็มหน้าทำให้ทุกขั้นตอนใน pipeline (mask, floor profile, วาด marker, JPEG
+    # encode ฯลฯ) ใช้ memory เพิ่มขึ้น ~1.78 เท่าพร้อมกันหมด จนเกิน memory limit ของ Cloud Function
+    #
+    # แก้โดยกลับไปใช้ full_img ที่ scale=3 สำหรับ pipeline หลักเหมือนเดิม (memory เท่าเดิม) ส่วน
+    # PHASE 1B render เฉพาะ "สี่เหลี่ยม region เล็กๆ ของ view" ตรงจาก PDF ที่ scale=4 ผ่าน fitz
+    # clip (render_hires_crop) โดยใช้ origin_box เดียวกับที่ get_view_region คำนวณให้ pipeline
+    # หลักใช้เป๊ะ - ยังคงแก้ Bug#1 (coordinate mismatch) + Bug#2 (double ensure_safe_crop) ได้ครบ
+    # เพราะพิกัด origin อ้างอิงจากกล่องเดียวกัน (ต่างกันแค่ความหนาแน่น pixel ที่แปลงกลับด้วย
+    # down_factor คงที่) แต่ไม่ต้อง render เต็มหน้าที่ scale สูงอีกต่อไป (ประหยัด memory มาก)
     try:
+        page = doc[page_idx]
         front_region, front_origin, _ = get_view_region(full_img, doc, "front", page_idx=page_idx)
         back_region, back_origin, _ = get_view_region(full_img, doc, "back", page_idx=page_idx)
-        phase1b = compute_phase1b_columns({"front": front_region, "back": back_region})
         front_precrop = (front_region, front_origin)
         back_precrop = (back_region, back_origin)
+
+        front_hi, down_factor = render_hires_crop(page, front_origin, matrix_scale)
+        back_hi, _ = render_hires_crop(page, back_origin, matrix_scale)
+        phase1b = compute_phase1b_columns({"front": front_hi, "back": back_hi}, down_factor=down_factor)
+        del front_hi, back_hi  # ปล่อย memory ของ hi-res crop ทันทีหลังใช้เสร็จ
     except Exception as e:
-        print(f"get_view_region ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
+        print(f"PHASE1B hi-res crop ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
         phase1b = {"front": None, "back": None}
         front_precrop = None
         back_precrop = None
@@ -2456,29 +2433,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     }
 
 
-def _safe_floor_y_at(lfy, xm, x_range):
-    """v26.00 FIX Bug#C: ค้นหา floor_y ที่ valid (>= 0) ใกล้ xm ที่สุดภายใน x_range
-    ก่อน fallback ใช้ median ของทั้ง view - ป้องกัน floor_y = -1 ที่ทำให้ box = None"""
-    x0, x1 = int(x_range[0]), int(x_range[1])
-    w = len(lfy)
-    # ค้นหาจาก xm ออกไปรอบๆ ภายใน x_range
-    for radius in range(0, (x1 - x0) // 2 + 5):
-        for dx in ([0] if radius == 0 else [-radius, radius]):
-            xi = xm + dx
-            if x0 <= xi < x1 and 0 <= xi < w and lfy[xi] >= 0:
-                return float(lfy[xi])
-    # fallback: median ของทุก valid pixel ใน x_range
-    vals = [lfy[x] for x in range(max(0, x0), min(w, x1)) if lfy[x] >= 0]
-    if vals:
-        return float(np.median(vals))
-    # fallback สุดท้าย: median ของทั้ง array
-    all_vals = [v for v in lfy if v >= 0]
-    return float(np.median(all_vals)) if all_vals else None
-
-
 def risk_abs_box(risk, result):
-    """v26.00 FIX Bug#C: ใช้ _safe_floor_y_at เพื่อหา floor_y ที่ valid เสมอ
-    แม้ xm กึ่งกลาง x_range จะอยู่นอกช่วง grounded จริง"""
+    """แปลง mark_x_range (พิกัด local) เป็นพิกัดภาพเต็มหน้า (absolute) สำหรับวาด marker"""
     view_label = risk.get("mark_view") or risk.get("view")
     v = result["front"] if view_label == "FRONT" else result["back"]
     x0, x1 = risk["mark_x_range"]
@@ -2486,7 +2442,7 @@ def risk_abs_box(risk, result):
     height_px = stack["height_px"]
     xm = (x0 + x1) // 2
     lfy = v["local_floor_y"]
-    floor_y_local = _safe_floor_y_at(lfy, xm, (x0, x1))
+    floor_y_local = lfy[xm] if xm < len(lfy) and lfy[xm] >= 0 else None
     if floor_y_local is None or height_px is None:
         return None
     top_y_local = floor_y_local - height_px
@@ -2525,13 +2481,13 @@ def process_request(request):
         sku_list = extract_sku_from_pdf(pdf_bytes)
         sku_str = ", ".join(sku_list) if sku_list else ""
 
-        # v25.14 FIX (Bug#1): render หน้าเต็มครั้งเดียวที่ matrix_scale=4 (เดิม=3) - เพราะ
-        # PHASE 1B (compute_phase1b_columns) ไม่ render แยกต่างหากอีกต่อไป (ดู
-        # run_full_analysis_on_image) จึงต้องให้ full_img ตัวเดียวที่ pipeline ทั้งหมดใช้ร่วมกัน
-        # อยู่ที่ scale ที่ threshold ทางเรขาคณิตของ PHASE 1B ถูก calibrate ไว้ (scale=4) เพื่อไม่
-        # ให้ความละเอียดของภาพเสียไป (regression-verified กับ AC03-01/EC04-01/02/03/04: จำนวน
-        # ตั้ง+risk ที่ตรวจพบ เหมือนเดิมทุกไฟล์ หลังเปลี่ยน scale)
-        full_img, doc, page = render_full_page(pdf_bytes, page_idx=1, matrix_scale=4)
+        # v25.15 FIX (Critical): full_img ของ pipeline หลักกลับไปใช้ matrix_scale=3 (ค่าเดิม
+        # ก่อน v25.14) - v25.14 เคยเปลี่ยนเป็น scale=4 เพื่อแก้ Bug#1 แต่ทำให้ Cloud Function ใช้
+        # memory เกิน limit จน HTTP 500 ทุกไฟล์เมื่อใช้งานจริง (ดู docstring
+        # run_full_analysis_on_image/render_hires_crop) ตอนนี้ PHASE 1B render เฉพาะ region เล็กๆ
+        # ที่ scale=4 แยกต่างหาก (ไม่กระทบ pipeline หลัก) จึงไม่จำเป็นต้องยก full_img ทั้งหน้าขึ้น
+        # scale=4 อีกต่อไป
+        full_img, doc, page = render_full_page(pdf_bytes, page_idx=1, matrix_scale=3)
 
         # layout label (เก็บไว้เพื่อ output contract เดิม - อนุมานจากทิศทาง Front/Back label)
         front_bb = _word_bbox_rotated(page, "Front")
@@ -2545,7 +2501,7 @@ def process_request(request):
         else:
             layout = "TOP_BOTTOM"
 
-        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=4)
+        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=3)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -2588,8 +2544,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.00",
-            "benchmarkMode": "v26_00_adaptive_floor_spacing_validated",
+            "checkerVersion": "V25.15",
+            "benchmarkMode": "v25_15_phase1b_hires_region_crop",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
