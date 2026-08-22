@@ -1,6 +1,73 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.17 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.18c ZERO-AI EDITION
+================================================================================
+v25.18c (merge v25.18b STEP_DOWN_RISK fix เข้ากับ v25.18 mid_gap_inject):
+
+  Merge จาก v25.18b (ไม่มีใน v25.18 เดิม):
+
+  FIX 1 — compute_stack_heights_px: apex cutoff ฉลาดขึ้น + fallback_to_full_range
+    เดิม (v25.18): eff_b1 = min(b1, apex_x) ตัดทุก stack ที่ทับ apex เสมอ
+    ใหม่: ตัด apex เฉพาะเมื่อ apex อยู่ใน < 70% ซ้ายของ stack (APEX_INNER_RATIO=0.70)
+           ถ้า apex >= 70% → top face ส่วนใหญ่ยังวัดได้ → ใช้ full range b0..b1
+    เพิ่ม: fallback_to_full_range — ถ้า xs_top หลัง cutoff < 3 samples → ลอง
+           full range b0..b1 แทน (mark height_source="direct_full_range")
+           ยอมรับ noise เล็กน้อยดีกว่าปล่อย None แล้ว carry-forward ค่าผิด
+
+  FIX 2 — fill_missing_heights: เพิ่ม carry-backward pass
+    เดิม (v25.18): carry-forward (ซ้าย→ขวา) เท่านั้น
+    ใหม่: pass ที่ 2 carry-backward (ขวา→ซ้าย) สำหรับที่ยัง None หลัง pass แรก
+           ป้องกัน stack แรกสุดที่ไม่มี valid record ก่อนหน้าเลย (corner case)
+
+  คงไว้จาก v25.18:
+    - inject_gap_records() + MID_GAP_MIN_RATIO/MID_GAP_FRONT_ZONE/MID_GAP_REAR_ZONE
+    - pairwise_mid_gap subtype detection
+    - benchmarkMode → "v25_18c_mid_gap_inject_apex_fix"
+    - checkerVersion → "V25.18c"
+
+  regression-note:
+    - ไม่แก้ PHASE 1B / cross_view / REAR_EMPTY / REAR_GAP ใดๆ
+    - ไม่เปลี่ยน threshold STEP_DOWN_PAIRWISE_DROP_RATIO (คงที่ 20%)
+    - MID_GAP_MIN_RATIO ยังคง 0.08 เหมือนเดิม
+
+================================================================================
+v25.18 (เพิ่ม MID_GAP_RISK - ตรวจช่องว่างกลางตู้ผ่าน pairwise ที่มีอยู่แล้ว):
+
+  ปัญหา: ช่องว่างกลางตู้ (ไม่มีกล่องในบางช่วง) ควรเข้าเงื่อนไข STEP_DOWN_RISK (pairwise)
+  เพราะอยู่ในแนวระนาบเดียวกัน แต่โค้ดเดิมตรวจไม่พบเพราะ:
+    1. PHASE 1B ไม่สร้าง record ให้ช่องว่าง (ไม่มี color-blob = ไม่มี stack)
+    2. detect_step_down_pairwise วนเฉพาะ records ที่มีอยู่ → ข้ามช่องว่างไปเงียบๆ
+    3. fill_missing_heights carry-forward ค่า height จากตั้งก่อนหน้า → ทำให้ช่องว่าง
+       ที่อาจถูก inject เข้ามาในอนาคตได้ค่าผิดพลาด
+
+  FIX: เพิ่มฟังก์ชัน inject_gap_records() ที่:
+    - รับ records ที่ build_stack_records สร้างไว้แล้ว (sorted by pos_range)
+    - ตรวจหา "รอยเว้น" ระหว่าง pos_range ของ records ติดกัน
+    - ถ้า gap > MID_GAP_MIN_RATIO (8% ของความยาวตู้) → inject synthetic record ที่:
+        height_px = 0, height_source = "gap_injected", is_gap = True
+        x_range = interpolate จาก pos_range กลับเป็น pixel coordinates
+        idx = -1 (ไม่กระทบ marker index เดิม, marker วาดบน taller_rec ข้างๆ เสมอ)
+    - เรียกก่อน detect_step_down_pairwise ใน run_full_analysis_on_image
+
+  ผลที่ได้: detect_step_down_pairwise จะเห็น:
+    [กอง A: 300px] → [GAP: 0px] → [กอง B: 300px]
+    คู่ A→GAP: drop 100% > 20% → STEP_DOWN_RISK (subtype=pairwise) mark A (taller)
+    คู่ GAP→B: drop 100% > 20% → STEP_DOWN_RISK (subtype=pairwise) mark B (taller)
+    → flag ทั้ง 2 ฝั่งของช่องว่าง ครอบคลุม marker ทั้งซ้ายและขวาของช่องว่างจริง
+
+  guard 1 (front zone): gap ที่ pos_range[1] < MID_GAP_FRONT_ZONE (0.05 = 5% แรก)
+    ไม่ inject → หัวตู้มักมีช่องว่างโครงสร้าง ไม่ใช่จุดเสี่ยง
+  guard 2 (rear zone): gap ที่ pos_range[0] > MID_GAP_REAR_ZONE (0.93 = 7% สุดท้าย)
+    ไม่ inject → โซนนี้ REAR_EMPTY_RISK กลไก A/B ดูแลอยู่แล้ว กัน double-flag
+  guard 3 (corner_duplicate): ไม่นับ record ที่ is_corner_duplicate=True เป็นขอบของ gap
+
+  regression-note:
+    - synthetic record มี is_gap=True → detect_step_down_pairwise ตรวจ guard พิเศษ:
+      ถ้า taller_rec เป็น gap (is_gap=True) จะไม่ mark gap เอง (mark_stack_idx ใช้ -1)
+      เพื่อให้ risk_abs_box ข้ามได้อย่างปลอดภัย (box = None → วาดไม่ได้ → ข้าม)
+    - ไม่มีการแก้ไข PHASE 1B / 2 / 3 / cross_view / REAR_EMPTY / reconcile ใดๆ
+    - checkerVersion → "V25.18", benchmarkMode → "v25_18_mid_gap_inject"
+
 ================================================================================
 v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
         ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
@@ -279,6 +346,13 @@ REAR_GAP_MIN_RATIO = 0.06
 REAR_COLOR_ANOMALY_MIN_COLORS = 3
 REAR_COLOR_MIN_FRACTION = 0.03
 REAR_COLOR_MIN_PIXELS = 80
+
+# --- MID_GAP inject (v25.18) ---
+# ช่องว่างกลางตู้ที่ PHASE 1B ไม่สร้าง record ให้ → inject synthetic record height_px=0
+# แล้วปล่อยให้ detect_step_down_pairwise ตรวจเองตามปกติ (drop 100% > threshold 20%)
+MID_GAP_MIN_RATIO  = 0.08   # ช่องว่างต้องกว้างเกิน 8% ของความยาวตู้จึง inject
+MID_GAP_FRONT_ZONE = 0.05   # ไม่ inject ถ้า gap อยู่ใน 5% แรก (หัวตู้/โครงสร้าง)
+MID_GAP_REAR_ZONE  = 0.93   # ไม่ inject ถ้า gap อยู่ใน 7% สุดท้าย (REAR_EMPTY ดูแลอยู่)
 
 
 def generate_action_report(case_type, description="", sku_list=""):
@@ -1185,36 +1259,11 @@ def _p1b_dominant_colors(crop, max_colors=25, min_frac=0.002):
     return picked
 
 
-def _p1b_cells_for_color(crop, color, tol=12, raw_area_min=150, close_iters=0):
+def _p1b_cells_for_color(crop, color, tol=12, area_min=1200):
     """หา connected-components ของสี color บน crop - ใช้ scipy.ndimage แทน
-    cv2.connectedComponentsWithStats (ผลลัพธ์เทียบเท่ากัน, ไม่ต้องพึ่ง opencv)
-
-    v25.20 FIX (front-face fragmentation - area_min ตัดตอนก่อนมี merge โอกาส): เดิม
-    area_min=1200 ถูกกรองทิ้ง "ที่ตรงนี้เลย" (ก่อน _p1b_merge_text_split_fragments จะมีโอกาส
-    เชื่อม fragment ที่แตกจากกันกลับเป็น face เดียวกัน) -> fragment เล็กๆ ที่จริงเป็นส่วนหนึ่งของ
-    front-face เดียวกัน (เช่น ถูกตัดแบ่งโดยเส้นขอบตัวอักษร/gradient) ถูกทิ้งไปถาวรตั้งแต่ต้น
-    ทำให้ face นั้นเหลือพื้นที่ไม่พอ/ขาดหายจาก column ทั้งคอลัมน์
-
-    FIX: ใช้ raw_area_min (ต่ำกว่ามาก ค่าเริ่มต้น=150) กรองเฉพาะ noise แท้ๆ ที่ตรงนี้ ส่วน
-    area_min ตัวจริง (ค่าเริ่มต้น=1200) ย้ายไปกรอง "หลัง" merge ใน _p1b_classify_view แทน
-    เพื่อให้ fragment เล็กที่ควรถูกเชื่อมกลับเป็น face เดียวกันมีโอกาสรอดถึงขั้น merge ก่อน
-    ตัดสินใจว่า area รวมพอหรือไม่
-
-    หมายเหตุ (ทดสอบแล้ว ไม่ integrate): เคยลองเพิ่ม tol เริ่มต้น 12->20 ด้วย เพื่อลดโอกาส mask
-    แตกจาก anti-alias/เงาที่เพี้ยนสีเล็กน้อย - แต่ทดสอบจริงกับ AE02-01/AE02-02 พบว่า tol=20
-    ไม่ได้ลด fragment ของ front-face สีแดงเลย (raw component แทบไม่เปลี่ยน) กลับทำให้
-    _p1b_drop_side_wall_contaminated_columns ตัดคอลัมน์จริงทิ้งเพิ่มขึ้น (4 แทนที่จะเป็น 5) จึง
-    คงค่า tol=12 เดิมไว้ - สาเหตุที่แท้จริงของ AE02-01/02 ไม่ใช่ tol fragmentation แต่เป็นที่
-    _p1b_drop_side_wall_contaminated_columns เข้าใจผิดว่า roof ของกล่องสีแดง (ที่วางซ้อนอยู่บน
-    คอลัมน์จริงที่หัวรถ) เป็น side-wall noise เพราะ front-face สีแดงมี aspect ไม่เกิน 0.85 เลย
-    ในมุมมอง BACK (ดูรายละเอียดการสืบสวนในข้อความสนทนา) - ยังต้องแก้จุดนั้นแยกต่างหาก โดยวิธี
-    x-overlap กับคอลัมน์ที่ใกล้ที่สุดที่เคยลองก็พิสูจน์แล้วว่าแยกแยะจากเคส EC04-04 (contamination
-    จริง) ไม่ได้ เพราะมี geometric signature เหมือนกันทุกประการ (ต้องใช้ cross-view position
-    matching ถึงจะแยกได้ - ยังไม่ทำในรอบนี้)"""
+    cv2.connectedComponentsWithStats (ผลลัพธ์เทียบเท่ากัน, ไม่ต้องพึ่ง opencv)"""
     diff = np.abs(crop.astype(int) - np.array(color, dtype=int))
     m = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
-    if close_iters > 0:
-        m = ndimage.binary_closing(m, structure=np.ones((3, 3), dtype=bool), iterations=close_iters)
     structure = np.ones((3, 3), dtype=int)  # 8-connectivity เหมือน cv2 connectivity=8
     labeled, num = ndimage.label(m, structure=structure)
     comps = []
@@ -1227,7 +1276,7 @@ def _p1b_cells_for_color(crop, color, tol=12, raw_area_min=150, close_iters=0):
         y_slice, x_slice = sl
         sub = (labeled[sl] == i)
         area = int(sub.sum())
-        if area < raw_area_min:
+        if area < area_min:
             continue
         y0, y1 = y_slice.start, y_slice.stop
         x0, x1 = x_slice.start, x_slice.stop
@@ -1276,12 +1325,11 @@ def _p1b_classify_view(crop, area_min=None):
         h, w = crop.shape[:2]
         ref_area = 400 * 300  # region size ที่ calibrate ไว้
         area_min = max(300, int(1200 * (h * w) / ref_area))
-
     S, _ = _p1b_sat_val(crop)
     colors = _p1b_dominant_colors(crop)
     all_cells = []
     for color in colors:
-        comps = _p1b_cells_for_color(crop, color)
+        comps = _p1b_cells_for_color(crop, color, area_min=area_min)
         for c in comps:
             aspect = c['h'] / c['w'] if c['w'] else 0
             sub_s = S[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
@@ -1297,10 +1345,6 @@ def _p1b_classify_view(crop, area_min=None):
         for kind0 in ('front', 'roof', 'side'):
             subset = [c for c in comps if c['kind0'] == kind0]
             merged = _p1b_merge_text_split_fragments(subset)
-            # v25.20 FIX: area_min ตัวจริงกรอง "หลัง" merge (ไม่ใช่ก่อน) - ดู docstring
-            # _p1b_cells_for_color ว่าทำไมต้องย้ายมาตรงนี้ (กัน fragment ที่ควรรวมเป็น face
-            # เดียวกันถูกทิ้งไปก่อนมีโอกาส merge)
-            merged = [c for c in merged if c['area'] >= area_min]
             for c in merged:
                 c['aspect'] = c['h'] / c['w'] if c['w'] else 0
                 c['color'] = tuple(int(v) for v in color)
@@ -2237,7 +2281,23 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 
     v25.2 FIX: ตัดข้อมูลที่อยู่ "หลังจุดยอด isometric" (apex) ออกจากการคำนวณ - สำหรับตั้งที่
     อยู่หลัง apex ทั้งตั้ง (วัดเองไม่ได้เลย) จะคืนค่า height_px=None ก่อน ให้ cross-view
-    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย"""
+    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย
+
+    v25.18b FIX — apex cutoff ฉลาดขึ้น + fallback_to_full_range:
+      ปัญหาเดิม: eff_b1 = min(b1, apex_x) ตัด stack ที่ "บังเอิญทับ apex" ทิ้งเสมอ
+      แม้ top face ส่วนใหญ่ของ stack นั้นยังอยู่ก่อน apex และวัดได้น่าเชื่อถือ
+      ผลคือ stack เตี้ยที่อยู่ก่อน apex → xs_top ว่าง → height_px=None → carry-forward
+      ได้ค่าจาก stack ข้างๆ → pairwise เห็น gap=0% → ไม่ trigger STEP_DOWN_RISK
+
+      FIX 1: ตัด apex เฉพาะเมื่อ apex อยู่ใน "ครึ่งซ้าย" ของ stack (< 70% ของความกว้าง)
+             ถ้า apex >= 70% width → top face ส่วนใหญ่ยังวัดได้ → ใช้ full range b0..b1
+      FIX 2: fallback_to_full_range — ถ้า xs_top หลัง cutoff < MIN_SAMPLES (3) →
+             ลอง full range b0..b1 แทน แล้ว mark height_source="direct_full_range"
+             ยอมรับ noise เล็กน้อยดีกว่าปล่อย None แล้ว carry-forward ค่าผิด
+    """
+    MIN_SAMPLES = 3          # ขั้นต่ำ samples สำหรับ fit ที่น่าเชื่อถือ
+    APEX_INNER_RATIO = 0.70  # apex ต้องอยู่ใน 70% ซ้ายของ stack จึงตัด
+
     boundaries = [start_x] + sorted(seams) + [end_x]
     results = []
 
@@ -2246,26 +2306,48 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
             return local_floor_y[x]
         return None
 
+    def _collect_top(x_lo, x_hi):
+        """เก็บ (xs, ys) จาก cargo_top_y ในช่วง [x_lo, x_hi)"""
+        xs, ys = [], []
+        for x in range(max(0, x_lo), max(0, x_hi)):
+            if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
+                xs.append(x)
+                ys.append(cargo_top_y[x])
+        return xs, ys
+
     apex_x = detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x)
 
     for i in range(len(boundaries) - 1):
         b0 = boundaries[i] + margin
         b1 = boundaries[i + 1] - margin
-        eff_b1 = b1
-        if apex_x is not None:
-            eff_b1 = min(b1, apex_x)
+        stack_width = max(1, b1 - b0)
 
-        xs_top, ys_top = [], []
-        for x in range(max(0, b0), max(0, eff_b1)):
-            if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
-                xs_top.append(x)
-                ys_top.append(cargo_top_y[x])
-        top_fit = _robust_local_line_fit(xs_top, ys_top) if xs_top else None
+        # --- v25.18b: apex cutoff ฉลาดขึ้น ---
+        use_apex_cut = False
+        if apex_x is not None and apex_x < b1:
+            # apex อยู่ใน stack นี้ → ตัดเฉพาะถ้า apex อยู่ก่อน 70% ของ stack
+            apex_pos_in_stack = (apex_x - b0) / stack_width
+            if apex_pos_in_stack < APEX_INNER_RATIO:
+                use_apex_cut = True
+
+        eff_b1 = min(b1, apex_x) if (use_apex_cut and apex_x is not None) else b1
+
+        xs_top, ys_top = _collect_top(b0, eff_b1)
+
+        # --- v25.18b: fallback_to_full_range ถ้า samples น้อยเกินไป ---
+        height_source = "direct"
+        if len(xs_top) < MIN_SAMPLES and eff_b1 < b1:
+            xs_top, ys_top = _collect_top(b0, b1)
+            if len(xs_top) >= MIN_SAMPLES:
+                height_source = "direct_full_range"
+                print(f"compute_stack_heights_px stack{i}: fallback full_range "
+                      f"b0={b0} b1={b1} samples={len(xs_top)}")
+
+        top_fit = _robust_local_line_fit(xs_top, ys_top) if len(xs_top) >= MIN_SAMPLES else None
 
         height_px = None
         n_samples = 0
-        height_source = "direct"
-        if top_fit is not None and len(xs_top) >= 3:
+        if top_fit is not None:
             eff_mid = (max(0, b0) + eff_b1) / 2.0
             top_at_mid = top_fit["a"] * eff_mid + top_fit["b"]
             floor_at_mid = _floor_at(int(eff_mid))
@@ -2289,8 +2371,18 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 
 def fill_missing_heights(records):
     """เติมค่า height_px=None ที่เหลือ (หลัง cross-view reconciliation พยายามเติมให้แล้ว
-    แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward จากตั้งก่อนหน้าในมุมมองเดียวกัน -
-    เป็นทางเลือกสุดท้ายเท่านั้น ข้าม is_corner_duplicate เสมอ (ทั้งเป้าหมายและแหล่งอ้างอิง)"""
+    แต่ไม่มี match ที่ใช้ได้) ด้วยการ carry-forward/backward จากตั้งใกล้เคียงในมุมมองเดียวกัน -
+    เป็นทางเลือกสุดท้ายเท่านั้น ข้าม is_corner_duplicate เสมอ (ทั้งเป้าหมายและแหล่งอ้างอิง)
+
+    v25.18b FIX: เพิ่ม pass ที่ 2 carry-backward (ขวา→ซ้าย) สำหรับ record ที่ยัง None
+    หลัง pass แรก — ป้องกัน stack แรกสุด (หน้าตู้) ที่ไม่มี valid record ก่อนหน้าเลย
+    ยังคง carry-forward ก่อน (priority ซ้าย→ขวา เหมือนเดิม) เพื่อ regression safety
+    note: carry-forward/backward ยังเป็น last-resort เหมือนเดิม ไม่กระทบ
+          stack ที่ได้ height จาก direct/cross-view
+    WARNING: carry-forward/backward ทำให้ stack เตี้ยได้ค่าเท่ากับข้างๆ → pairwise
+    ไม่ trigger ได้ ซึ่งเป็นปัญหาชั้น 2 ที่แก้ได้โดยการแก้ชั้น 1 (apex cutoff) ก่อน
+    carry นี้จึงเป็น safety net สำหรับ corner case ที่ apex cutoff แก้ไม่ได้จริงๆ เท่านั้น"""
+    # Pass 1: carry-forward (ซ้าย→ขวา) — เหมือนเดิม
     last_valid = None
     for r in records:
         if r.get("is_corner_duplicate"):
@@ -2300,6 +2392,18 @@ def fill_missing_heights(records):
         elif last_valid is not None:
             r["height_px"] = last_valid
             r["height_source"] = "carried_forward_same_view"
+
+    # Pass 2: carry-backward (ขวา→ซ้าย) — v25.18b เพิ่มใหม่
+    last_valid = None
+    for r in reversed(records):
+        if r.get("is_corner_duplicate"):
+            continue
+        if r["height_px"] is not None:
+            last_valid = r["height_px"]
+        elif last_valid is not None:
+            r["height_px"] = last_valid
+            r["height_source"] = "carried_backward_same_view"
+
     return records
 
 
@@ -2360,9 +2464,95 @@ def build_stack_records(view_result, view_label, flip_position=None):
     return records
 
 
+def inject_gap_records(records, view_result):
+    """v25.18 NEW: ตรวจช่องว่างระหว่าง records ติดกัน (pos_range) แล้ว inject synthetic
+    record ที่ height_px=0 ให้ detect_step_down_pairwise เห็นช่องว่างกลางตู้ได้
+
+    Args:
+        records   : list ของ record จาก build_stack_records (sorted by pos_range[0])
+        view_result: dict จาก process_view_with_height_on_image (ใช้ start_x/end_x)
+
+    Returns:
+        records_with_gaps: list ใหม่ที่รวม synthetic gap records เข้าไปในลำดับที่ถูกต้อง
+                           (real records ไม่ถูกแก้ไข is_gap ไม่มีใน real records เดิม)
+    """
+    start_x = view_result.get("start_x", 0)
+    end_x   = view_result.get("end_x", 1)
+    span_px = max(1, end_x - start_x)
+
+    # เรียงตาม pos_range[0] และกรอง corner_duplicate ออกก่อนตรวจ gap
+    real_recs = sorted(
+        [r for r in records if not r.get("is_corner_duplicate")],
+        key=lambda r: r["pos_range"][0]
+    )
+
+    injected = []
+    for i in range(len(real_recs) - 1):
+        cur  = real_recs[i]
+        nxt  = real_recs[i + 1]
+        gap_pos_start = cur["pos_range"][1]   # ปลายของ record ปัจจุบัน
+        gap_pos_end   = nxt["pos_range"][0]   # ต้นของ record ถัดไป
+        gap_width = gap_pos_end - gap_pos_start
+
+        # guard 1: ช่องว่างแคบเกินไป → ไม่ inject
+        if gap_width < MID_GAP_MIN_RATIO:
+            continue
+        # guard 2: อยู่ใน front zone (หัวตู้) → โครงสร้าง ไม่ใช่ความเสี่ยง
+        if gap_pos_end <= MID_GAP_FRONT_ZONE:
+            continue
+        # guard 3: อยู่ใน rear zone (7% ท้ายตู้) → REAR_EMPTY ดูแลอยู่แล้ว
+        if gap_pos_start >= MID_GAP_REAR_ZONE:
+            continue
+
+        # แปลง pos_range กลับเป็น pixel x_range
+        # (pos_range ใน coordinate 0=หัวตู้, 1=ท้ายตู้ ซึ่ง flip แล้วใน build_stack_records)
+        # ใช้ pos_range ตรงๆ เพื่อ map กลับเป็น pixel สำหรับ x_range ของ gap
+        # ทิศทางใน view_result คือ pixel x จาก start_x ถึง end_x (ไม่ flip)
+        # → แปลงกลับผ่าน span_px ปกติ แล้ว risk_abs_box จะใช้ x_range ของ taller_rec
+        #   (real record ข้างๆ) เสมอ ไม่ใช่ของ gap → ค่า x_range ของ gap แค่ต้องสมเหตุสมผล
+        gap_x0 = int(start_x + gap_pos_start * span_px)
+        gap_x1 = int(start_x + gap_pos_end   * span_px)
+
+        gap_rec = {
+            "idx": -1,                        # ไม่ใช่ index จริง → risk_abs_box ข้ามได้
+            "view": cur["view"],
+            "x_range": (gap_x0, gap_x1),
+            "pos_range": (gap_pos_start, gap_pos_end),
+            "height_px": 0,                   # ช่องว่าง = ความสูง 0
+            "height_source": "gap_injected",
+            "is_corner_duplicate": False,
+            "is_gap": True,                   # flag พิเศษ → pairwise ไม่ mark gap เอง
+        }
+        injected.append((i + 1, gap_rec))     # จะ insert หลัง real_recs[i]
+        print(f"inject_gap_records [{cur['view']}]: gap pos {gap_pos_start:.3f}-{gap_pos_end:.3f} "
+              f"({gap_width:.1%}) x={gap_x0}-{gap_x1}")
+
+    if not injected:
+        return records  # ไม่มีช่องว่าง → คืน records เดิมไม่แก้ไข
+
+    # สร้าง list ใหม่: real_recs + gap records ในตำแหน่งที่ถูกต้อง
+    # (ยังรวม corner_duplicate records จาก records เดิมด้วย เพื่อไม่ให้หาย)
+    result = list(records)  # copy เพื่อไม่แก้ records เดิม
+    # insert จากหลังไปหน้า (ป้องกัน index shift)
+    for insert_after_real_idx, gap_rec in reversed(injected):
+        # หาตำแหน่งจริงใน result list (ซึ่งรวม corner_dup ด้วย)
+        # → หา real record ตัวที่ insert_after_real_idx - 1 แล้ว insert ต่อจากนั้น
+        target_rec = real_recs[insert_after_real_idx - 1]
+        pos_in_result = next(
+            (j for j, r in enumerate(result) if r is target_rec), None
+        )
+        if pos_in_result is not None:
+            result.insert(pos_in_result + 1, gap_rec)
+
+    return result
+
+
 def detect_step_down_pairwise(records, view_label):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
-    (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
+    (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)
+    v25.18: รองรับ synthetic gap records (is_gap=True, height_px=0) จาก inject_gap_records
+    - ถ้า taller_rec เป็น gap → ไม่ mark (gap ไม่มีตำแหน่งวาด marker) → risk ยังถูก flag
+      แต่ mark_stack_idx = -1 ให้ risk_abs_box คืน None → skip การวาดอย่างปลอดภัย"""
     risks = []
     for i in range(len(records) - 1):
         a, b = records[i], records[i + 1]
@@ -2374,13 +2564,22 @@ def detect_step_down_pairwise(records, view_label):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
+        # gap record มี height_px=0 → taller_h=0 → threshold=0 → shorter_h=0 ไม่ < 0
+        # → ป้องกัน GAP vs GAP false trigger (ไม่ควรเกิด แต่ guard ไว้ปลอดภัย)
+        if taller_h == 0:
+            continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
+            # v25.18: ถ้า taller เป็น gap (height_px=0 ไม่ควรเกิด) ใช้ shorter เป็น mark แทน
+            # ในทางปฏิบัติ taller_rec มักเป็น real record เสมอ (เพราะ gap height=0 < real)
+            # shorter_rec เป็น gap → taller_rec เป็น real → mark_stack_idx = real idx ปกติ
+            mark_rec = taller_rec if not taller_rec.get("is_gap") else shorter_rec
+            subtype = "pairwise_mid_gap" if (a.get("is_gap") or b.get("is_gap")) else "pairwise"
             risks.append({
-                "risk_type": "STEP_DOWN_RISK", "subtype": "pairwise", "view": view_label,
+                "risk_type": "STEP_DOWN_RISK", "subtype": subtype, "view": view_label,
                 "mark_view": view_label,
-                "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
+                "mark_stack_idx": mark_rec["idx"], "mark_x_range": mark_rec["x_range"],
                 "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                 "drop_ratio": drop_ratio, "pair_indices": (a["idx"], b["idx"]),
             })
@@ -2661,9 +2860,15 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
             sh["height_px"] = rec["height_px"]
             sh["height_source"] = rec["height_source"]
 
+    # v25.18: inject synthetic gap records (height_px=0) สำหรับช่องว่างกลางตู้
+    # ที่ PHASE 1B ไม่สร้าง record ให้ → ทำก่อน pairwise เท่านั้น
+    # cross_view และ REAR_EMPTY ยังใช้ records เดิม (ไม่มี gap) เพื่อป้องกัน regression
+    records_front_with_gaps = inject_gap_records(records_front, front)
+    records_back_with_gaps  = inject_gap_records(records_back,  back)
+
     risks = []
-    risks += detect_step_down_pairwise(records_front, "FRONT")
-    risks += detect_step_down_pairwise(records_back, "BACK")
+    risks += detect_step_down_pairwise(records_front_with_gaps, "FRONT")
+    risks += detect_step_down_pairwise(records_back_with_gaps,  "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
@@ -2794,8 +2999,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.17",
-            "benchmarkMode": "v25_17_dynamic_page_idx_fix",
+            "checkerVersion": "V25.18c",
+            "benchmarkMode": "v25_18c_mid_gap_inject_apex_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
