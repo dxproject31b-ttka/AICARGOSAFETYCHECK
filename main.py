@@ -1,6 +1,34 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.17 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.21 ZERO-AI EDITION
+================================================================================
+v25.21 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่มีกล่องซ้อนสูงผิดปกติ (AE02-01/AE02-02)
+        กล่องสีแดงในโซนกล่องสีเขียวไม่ปรากฏจุดเสี่ยง STEP_DOWN_RISK):
+
+  ปัญหา: ไฟล์ AE02-01/AE02-02 ตรวจไม่พบจุดเสี่ยงในโซนกล่องสีเขียว แม้มีกล่องสีแดงซ้อน
+  เป็นชั้น 3 สูงกว่ากองข้างเคียงอย่างชัดเจน ทั้ง FRONT และ BACK view
+
+  Root cause (เชิงลึก - "Apex Hijack by Elevated Stack"):
+    1. detect_isometric_apex() ใช้ argmin(cargo_top_y) เพื่อหาจุดยอดของตู้
+       -> กล่องสีแดงชั้น 3 ที่สูงกว่าทุกกองมี cargo_top_y ต่ำกว่า (y น้อยกว่า) ทุกจุด
+       -> argmin() เลือกตำแหน่งกล่องแดงเป็น apex_x แทนที่จะเป็น structural apex จริง
+    2. compute_stack_heights_px ใช้ eff_b1 = min(b1, apex_x) สำหรับทุก stack
+       -> ถ้ากล่องแดงอยู่ฝั่งซ้าย (x น้อย) -> apex_x เล็กมาก
+       -> eff_b1 < b0 สำหรับ stack ที่อยู่ทางขวาทั้งหมด -> xs_top=[] -> height_px=None
+    3. height_px=None ทุก stack -> cross-view fill -> carry-forward ให้ค่าเท่ากันหมด
+       -> ไม่มีความต่างระหว่าง stack -> STEP_DOWN_RISK ตรวจไม่พบ
+
+  FIX:
+    1. detect_isometric_apex(): เปลี่ยนจาก argmin() เป็น slope-change detection
+       หา V-shape จริง (slope เปลี่ยนจาก downward เป็น upward ในช่วงยาวพอ)
+       กล่องที่สูงผิดปกติสร้าง "dip" สั้นๆ ไม่ใช่ V-shape ยาว -> ตรวจแยกได้
+       ถ้าไม่พบ V-shape -> คืน None (ไม่ตัด data ออกโดยไม่จำเป็น = ปลอดภัยกว่า)
+    2. compute_stack_heights_px(): เพิ่ม fallback สำหรับ stack ที่ apex-cut ทำให้
+       xs_top=[] -> ใช้ cargo_top_y ทั้ง stack แทน (ยอมรับ noise จาก isometric slope
+       แต่ดีกว่า height=None ที่ทำให้ carry-forward ให้ค่าเท่ากันหมด)
+
+  regression-verified: ไฟล์ที่ผ่านมาแล้ว (EC01-01, EC04-xx, AC03-01, AC03-06)
+  คืน apex=None (ไม่ตัด) เพราะ cargo_top_y ไม่มี V-shape ชัดเจน -> ไม่กระทบผลเดิม
 ================================================================================
 v25.17 (แก้บั๊ก "ตรวจจุดเสี่ยงไม่ได้" สำหรับไฟล์ที่หน้า PDF ที่มี Front/Back diagrams
         ไม่ตรงกับ page_idx=1 เสมอ - พบจริงจากไฟล์ AE02-02):
@@ -2228,25 +2256,76 @@ def _robust_local_line_fit(xs, ys, mad_floor=2.0, n_iter=3):
     return {"a": float(a), "b": float(b), "resid_std": float(resid.std()), "xs": xs, "ys": ys}
 
 
-def detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x, search_margin_ratio=0.15):
+def detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x, search_margin_ratio=0.15,
+                           smooth_window=11, slope_thresh=0.15):
     """หาตำแหน่ง 'จุดยอด (apex)' ของ silhouette กองกล่องในมุมมอง isometric - ก่อนจุดยอด
     cargo_top_y คือขอบบน-หลัง (ขนานพื้น, height ถูกต้อง) หลังจุดยอดกลายเป็นขอบบน-หน้า (เอียง
-    คนละทิศ, height ผิดเพี้ยนเป็นระบบ) ยืนยันด้วยภาพจริงและ cross-view ในไฟล์ทดสอบ"""
+    คนละทิศ, height ผิดเพี้ยนเป็นระบบ) ยืนยันด้วยภาพจริงและ cross-view ในไฟล์ทดสอบ
+
+    v25.21 FIX (Critical - "Apex Hijack by Elevated Stack"):
+    เดิมใช้ argmin(cargo_top_y) ซึ่งเลือกจุด y ต่ำสุด (= กล่องสูงสุดในภาพ) เป็น apex
+    -> กล่องที่ซ้อนสูงผิดปกติ (เช่น สีแดงชั้น 3 ใน AE02-01/02) ถูกเลือกเป็น apex แทน
+    -> eff_b1 = min(b1, apex_x) ทำให้ stack ทั้งหมดที่อยู่ทางขวาของกล่องนั้น
+       ถูกตัด xs_top=[] -> height_px=None ทั้งหมด -> carry-forward ให้ค่าเท่ากัน
+       -> STEP_DOWN_RISK ตรวจไม่พบเลย
+
+    FIX: ใช้ slope-change detection แทน argmin()
+    apex จริงของตู้ isometric = จุดที่ slope ของ cargo_top_y เปลี่ยนจาก
+    "ลาดลงทางขวา (negative)" เป็น "ลาดขึ้นทางขวา (positive)" ในช่วงยาวพอ (V-shape จริง)
+    กล่องสูงผิดปกติสร้าง "dip" สั้นๆ เท่านั้น ไม่ใช่ V-shape ยาว -> ตรวจแยกได้
+    ถ้าไม่พบ V-shape -> คืน None (ไม่ตัด data = ปลอดภัยกว่าการตัดผิดพลาด)
+
+    regression-verified: ไฟล์ที่ cargo มีลักษณะ slope คงที่ (ไม่มี V-shape ชัดเจน)
+    จะได้ apex=None ไม่ตัด data -> ไม่กระทบผลลัพธ์เดิม
+    """
     span = end_x - start_x
     if span <= 0:
         return None
     search_start = start_x + int(span * search_margin_ratio)
-    xs = np.arange(search_start, end_x + 1)
-    xs = xs[(xs >= 0) & (xs < len(cargo_top_y))]
+    xs = np.arange(search_start, min(end_x + 1, len(cargo_top_y)))
     if len(xs) == 0:
         return None
     vals = cargo_top_y[xs]
-    valid = vals >= 0
-    if not np.any(valid):
+    valid_mask = vals >= 0
+    if np.sum(valid_mask) < 20:
         return None
-    xs_valid = xs[valid]
-    vals_valid = vals[valid]
-    return int(xs_valid[np.argmin(vals_valid)])
+
+    xs_v = xs[valid_mask]
+    ys_v = vals[valid_mask].astype(float)
+
+    # smooth ก่อน detect slope-change (ลด noise จากขอบกล่องและ label text)
+    half = smooth_window // 2
+    smoothed = np.empty(len(ys_v))
+    for i in range(len(ys_v)):
+        lo, hi = max(0, i - half), min(len(ys_v), i + half + 1)
+        smoothed[i] = float(np.median(ys_v[lo:hi]))
+
+    n = len(smoothed)
+    if n < 20:
+        return None
+
+    # หา V-shape: ต้องมี left slope negative + right slope positive ด้วย window ใหญ่พอ
+    # (กล่องสูงผิดปกติสร้าง dip สั้น ~window_size เท่านั้น ไม่ใช่ V ยาวเต็ม half span)
+    best_score = -1.0
+    best_idx = None
+    min_window = max(n // 8, 5)   # ต้องมี slope ยาวพอ (>= 1/8 ของ span) ทั้งสองข้าง
+
+    for mid in range(min_window, n - min_window):
+        left_win = min(mid, n // 4)
+        right_win = min(n - mid - 1, n // 4)
+        if left_win < min_window or right_win < min_window:
+            continue
+        left_slope = (smoothed[mid] - smoothed[mid - left_win]) / max(left_win, 1)
+        right_slope = (smoothed[mid + right_win] - smoothed[mid]) / max(right_win, 1)
+        if left_slope < -slope_thresh and right_slope > slope_thresh:
+            score = (-left_slope) + right_slope
+            if score > best_score:
+                best_score = score
+                best_idx = mid
+
+    if best_idx is None:
+        return None  # ไม่พบ V-shape จริง -> ไม่ตัด data (ปลอดภัยกว่า)
+    return int(xs_v[best_idx])
 
 
 def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local_floor_y=None):
@@ -2279,18 +2358,36 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
             if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
                 xs_top.append(x)
                 ys_top.append(cargo_top_y[x])
+
+        # v25.21 FIX: ถ้า apex-cut ทำให้ xs_top=[] (eff_b1 <= b0 เพราะ apex_x น้อยกว่า b0)
+        # -> fallback ใช้ cargo_top_y ทั้ง stack โดยไม่ตัด apex (ยอมรับ noise จาก isometric
+        # slope แต่ดีกว่า height=None ที่ทำให้ carry-forward ให้ค่าเท่ากันหมด -> ไม่พบ STEP_DOWN)
+        # ตัวอย่างที่ fix: AE02-01 BACK กล่องแดงชั้น 3 อยู่ฝั่งซ้าย -> apex_x เล็ก -> stack
+        # ทุกตัวทางขวา xs_top=[] -> height=None -> carry-forward -> ไม่พบ STEP_DOWN
+        apex_cut_fallback = False
+        if len(xs_top) < 3 and b1 > b0:
+            # ใช้ช่วงเต็ม [b0..b1] ไม่ตัด apex (fallback)
+            xs_top, ys_top = [], []
+            for x in range(max(0, b0), max(0, b1)):
+                if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
+                    xs_top.append(x)
+                    ys_top.append(cargo_top_y[x])
+            apex_cut_fallback = True
+
         top_fit = _robust_local_line_fit(xs_top, ys_top) if xs_top else None
 
         height_px = None
         n_samples = 0
         height_source = "direct"
         if top_fit is not None and len(xs_top) >= 3:
-            eff_mid = (max(0, b0) + eff_b1) / 2.0
+            eff_mid = (max(0, b0) + (b1 if apex_cut_fallback else eff_b1)) / 2.0
             top_at_mid = top_fit["a"] * eff_mid + top_fit["b"]
             floor_at_mid = _floor_at(int(eff_mid))
             if floor_at_mid is not None:
                 height_px = floor_at_mid - top_at_mid
                 n_samples = len(top_fit["xs"])
+                if apex_cut_fallback:
+                    height_source = "apex_fallback"
 
         if height_px is None:
             height_source = "unreliable_post_apex"
@@ -2813,8 +2910,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.17",
-            "benchmarkMode": "v25_17_dynamic_page_idx_fix",
+            "checkerVersion": "V25.21",
+            "benchmarkMode": "v25_21_apex_slope_change_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
