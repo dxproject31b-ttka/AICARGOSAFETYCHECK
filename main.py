@@ -1,6 +1,37 @@
 """
 ================================================================================
-AI Cargo Safety Checker - v25.13 ZERO-AI EDITION
+AI Cargo Safety Checker - v25.14 ZERO-AI EDITION
+================================================================================
+v25.14 (แก้ 6 root causes ที่พบใน PHASE 1B ของ v25.13 - ตรวจสอบเทียบข้อมูลจริงจากไฟล์
+ตัวอย่าง AC03-01 และ EC04-01/02/03/04 แล้ว):
+
+  Bug#1 (Critical) - Double render, coordinate mismatch: PHASE 1B เดิม render PDF แยกที่
+    scale=4 แต่ pipeline หลักใช้ scale=3 -> พิกัด x ของ cols ที่ PHASE 1B ส่งคืนไม่ตรงกับ
+    coordinate system ของ region ใน process_view_on_image ทำให้ seam ผิดตั้งแต่ต้น
+    FIX: PHASE 1B รับ region ที่ crop แล้วจาก pipeline หลักโดยตรง (get_view_region เรียก
+    ครั้งเดียวใน run_full_analysis_on_image ส่ง region+origin เดียวกันให้ทั้ง 2 ฝั่งผ่าน
+    precrop=) ไม่ render/crop แยกอีกต่อไป
+
+  Bug#2 (Critical) - get_safe_region เรียก ensure_safe_crop ซ้ำ: crop origin ของ PHASE 1B
+    (เดิม) ≠ crop origin ของ process_view_on_image -> offset ต่างกัน
+    FIX: ลบ get_safe_region ออก แทนที่ด้วย get_view_region ตัวเดียวที่ใช้ region เดียวกัน 100%
+
+  Bug#3 (High) - cx_tol=45 ตายตัว: ไม่ปรับตามขนาดกล่องจริงในภาพ
+    FIX: _p1b_compute_adaptive_cx_tol() คำนวณ cx_tol = median(front_width) x 0.4 จากภาพจริง
+
+  Bug#4 (High) - _p1b_reconcile_with_back ไม่รองรับ M < N: เดิมเงื่อนไข M<=N คืนค่าเดิมทั้งหมด
+    โดยไม่ทำอะไร ปล่อยให้ FRONT undercount หลุดรอด
+    FIX: ถ้า FRONT นับได้น้อยกว่า BACK -> augment ด้วยตำแหน่ง synthetic ที่ interpolate จาก
+    BACK (Hungarian assignment หาตำแหน่ง BACK ที่ยังไม่มีคู่)
+
+  Bug#5 (Medium) - seam midpoint ตกนอก grounded zone: min_seg_width=20px hardcode
+    FIX: adaptive_min_seg = median(col_width) x 0.25 แทน hardcode 20px
+
+  Bug#6 (Medium) - ไม่ตรวจ corner artifact เมื่อใช้ override_cols: rail-check เดิมทำงานเฉพาะ
+    path fallback (seam-based) เท่านั้น
+    FIX: ย้าย rail-check ไปเป็น common code หลัง if/else -> ตรวจ rail เสมอทั้ง 2 path
+
+  ไม่ได้แก้ไข PHASE 2/3/Rule Engine หรือ risk detection logic ใดๆ เพิ่มเติมนอกเหนือจาก 6 จุดนี้
 ================================================================================
 v25.13 (แก้ไข 2 จุดจาก v25.12 ด้วยหลักฐานจริง - ยังไม่แก้ pipeline หลัก):
   v25.12 เคยเสนอ utility ทดลอง 2 ตัวที่ "พังจริง" เมื่อทดสอบกับ AC03-01 (ไฟล์โหลดเต็มคัน
@@ -769,13 +800,20 @@ def render_full_page(pdf_bytes, page_idx=1, matrix_scale=3):
     return np.ascontiguousarray(img), doc, page
 
 
-def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30, override_cols=None):
+def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thresh=30,
+                           override_cols=None, precrop=None):
     img = full_img
     H, W, _ = img.shape
-    y0, y1 = int(H * y0_frac), int(H * y1_frac)
-    x0, x1 = int(W * x0_frac), int(W * x1_frac)
-    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(img, y0, y1, x0, x1, margin=30)
-    region = img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
+    if precrop is not None:
+        # v25.14 FIX (Bug#1/#2): ใช้ region ที่ crop มาแล้วจาก pipeline หลัก (get_view_region)
+        # โดยตรง 100% - ไม่คำนวณ crop ซ้ำอีกครั้ง เพื่อรับประกันว่าพิกัดตรงกับที่ PHASE 1B ใช้
+        # เป๊ะเสมอ (เดิม get_safe_region คำนวณ ensure_safe_crop แยกอีกชุด ทำให้ origin เพี้ยนได้)
+        region, (safe_x0, safe_y0, safe_x1, safe_y1) = precrop
+    else:
+        y0, y1 = int(H * y0_frac), int(H * y1_frac)
+        x0, x1 = int(W * x0_frac), int(W * x1_frac)
+        safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(img, y0, y1, x0, x1, margin=30)
+        region = img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
     struct_mask_raw = saturated_mask(region)
     arrow_m = arrow_mask(region)
     cargo_mask = vivid_cargo_mask(region) & (~arrow_m)
@@ -811,7 +849,11 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         # พร้อมบังคับ min_seg_width ขั้นต่ำ กัน segment แคบผิดปกติ/ไม่เรียงลำดับ โดยยังคงจำนวนตั้ง
         # (n_stacks) ไว้ถูกต้องเสมอ (Phase 2/3 มีกลไก cross_view_filled/carried_forward รองรับ
         # อยู่แล้วสำหรับ segment ที่ข้อมูลพื้น/ความสูงไม่น่าเชื่อถือ ณ จุดนี้)
-        min_seg_width = 20
+        # v25.14 FIX (Bug#5): min_seg_width เดิม hardcode=20px ตายตัว ไม่ปรับตามขนาดกล่องจริง
+        # ในภาพ - เปลี่ยนเป็น adaptive: median ความกว้างคอลัมน์จริงจาก PHASE 1B x 0.25
+        # (floor ขั้นต่ำ 10px กันกรณี median เล็กผิดปกติ)
+        col_widths_ = [c["w"] for c in cols_sorted if c.get("w")]
+        min_seg_width = max(10, float(np.median(col_widths_)) * 0.25) if col_widths_ else 20
         seams = []
         prev_boundary = x_min_
         for i in range(len(cols_sorted) - 1):
@@ -826,19 +868,22 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         # fallback: PHASE 1B ไม่สำเร็จ (เช่น หา front-face สีเด่นไม่เจอ) - ใช้ seam-based เดิม
         n_stacks, seams, xrange_ = seam_based_count(region, grounded, cargo_bottom_y, cargo_mask, struct_mask_raw)
 
-        # v25.10 - ตรวจ 'corner artifact' (idx0 ที่เป็นภาพซ้ำ/หน้าด้านข้างของกล่องมุม หรือผนังหัวตู้
-        # ที่โผล่มาก่อนเส้นขอบฐานตู้จริงเริ่มต้น) ด้วยเส้น rail ทางเรขาคณิต (ไม่ hardcode ชื่อ view)
-        # ยืนยันด้วยข้อมูลจริง 3 ไฟล์: AC03-01 FRONT (diff=54, exclude, ตรงกับ 7 จริง),
-        # AC03-01 BACK (diff=17, keep, ตรงกับ 7 จริง), EC01-01/EC04-02 ทั้งคู่ pattern สอดคล้องกัน
-        if xrange_ is not None and seams:
-            x_min_, x_max_ = xrange_
-            rail_for_corner = detect_container_floor_rail(region, cargo_bottom_y, grounded)
-            if rail_for_corner is not None:
-                first_seam = sorted(seams)[0]
-                seg0_width = first_seam - x_min_
-                diff = rail_for_corner["corner_x"] - x_min_
-                if seg0_width > 0 and diff > 0.3 * seg0_width and diff > 15:
-                    idx0_is_corner_duplicate = True
+    # v25.10 - ตรวจ 'corner artifact' (idx0 ที่เป็นภาพซ้ำ/หน้าด้านข้างของกล่องมุม หรือผนังหัวตู้
+    # ที่โผล่มาก่อนเส้นขอบฐานตู้จริงเริ่มต้น) ด้วยเส้น rail ทางเรขาคณิต (ไม่ hardcode ชื่อ view)
+    # ยืนยันด้วยข้อมูลจริง 3 ไฟล์: AC03-01 FRONT (diff=54, exclude, ตรงกับ 7 จริง),
+    # AC03-01 BACK (diff=17, keep, ตรงกับ 7 จริง), EC01-01/EC04-02 ทั้งคู่ pattern สอดคล้องกัน
+    # v25.14 FIX (Bug#6): เดิมตรวจ rail นี้เฉพาะ path fallback (seam-based) เท่านั้น ไม่ได้ตรวจ
+    # เมื่อมาจาก override_cols (PHASE 1B) เลย ทั้งที่ corner-artifact ทางเรขาคณิตเป็นปัญหาของ
+    # "ภาพ/มุมกล้อง" ไม่ใช่ปัญหาเฉพาะวิธีนับ - ย้ายมาตรวจเป็น common code ให้ครบทั้ง 2 path เสมอ
+    if xrange_ is not None and seams:
+        x_min_, x_max_ = xrange_
+        rail_for_corner = detect_container_floor_rail(region, cargo_bottom_y, grounded)
+        if rail_for_corner is not None:
+            first_seam = sorted(seams)[0]
+            seg0_width = first_seam - x_min_
+            diff = rail_for_corner["corner_x"] - x_min_
+            if seg0_width > 0 and diff > 0.3 * seg0_width and diff > 15:
+                idx0_is_corner_duplicate = True
 
     return {
         "n_stacks": n_stacks, "seams": seams, "xrange": xrange_,
@@ -876,20 +921,23 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
 #   3. คืนค่าเป็นรายการคอลัมน์สุดท้ายของแต่ละ view (x,w,cx ในพิกัด region local ของ view นั้น)
 #      ให้ process_view_on_image ใช้แทนผลจาก seam_based_count โดยตรง (ดู override_cols)
 #
-# หมายเหตุ scale: threshold ต่างๆ (area_min, tol, gap ฯลฯ) ถูก calibrate ไว้ที่ render PDF
-# ตรงๆ ที่ matrix_scale=4 (ไม่ใช่ upscale จากภาพที่ resolution ต่ำกว่ามาที่หลัง) - ทดสอบแล้วว่า
-# การ NEAREST-upscale จากภาพที่ render ที่ matrix_scale=3 (ค่าเริ่มต้นของไฟล์นี้) มาเป็นสัดส่วน
-# เทียบเท่า 4 ทำให้รายละเอียดขอบ/สี ที่สูญเสียไปตอน render ที่ 3 (โดยเฉพาะไฟล์ที่กล่องเรียงถี่
-# อย่าง AC03-01) ไม่สามารถกู้คืนได้ ทำให้ blob-detection ผิดเพี้ยน (ยืนยันจากข้อมูลจริง: AC03-01
-# ด้วยวิธี upscale-from-3 ได้ front=5/back=7 ผิด แต่ render ตรงที่ scale=4 ได้ front=7/back=7
-# ถูกต้อง) จึงเปลี่ยนมาเป็น "render หน้าเต็มแยกต่างหากที่ matrix_scale=4 เฉพาะสำหรับ PHASE 1B"
-# (ใช้ pdf_bytes ตรงๆ ไม่พึ่ง full_img/region ที่ render มาที่ scale อื่นแล้ว) แล้วค่อยแปลงพิกัด
-# ผลลัพธ์คอลัมน์สุดท้ายกลับเป็น scale ของ region จริง (matrix_scale ของไฟล์นี้) ก่อนส่งคืน
+# v25.14 FIX (Bug#1 + Bug#2 - สำคัญ): เดิม (v25.11-v25.13) PHASE 1B render หน้า PDF แยก
+# ต่างหากที่ matrix_scale=4 ตรงจาก pdf_bytes (ผ่าน get_safe_region เดิม ซึ่งคำนวณ
+# ensure_safe_crop ของตัวเองอีกชุด) เพื่อให้ threshold ทางเรขาคณิต (area_min, tol, gap ฯลฯ)
+# ที่ calibrate ไว้ที่ scale=4 ทำงานถูกต้อง - แต่พบ ROOT CAUSE ว่าวิธีนี้ทำให้พิกัด x ของคอลัมน์ที่
+# PHASE 1B คืนมาไม่ตรงกับ coordinate system ของ region ที่ pipeline หลัก (matrix_scale=3) ใช้
+# จริง (margin=30px แบบ pixel คงที่ ที่ resolution ต่างกัน ขยาย/บีบขอบไม่เป็นสัดส่วนเดียวกัน
+# ทำให้ crop origin ของทั้ง 2 ฝั่งเพี้ยนไปคนละทาง แม้จะแปลงสเกลตัวเลขคอลัมน์กลับด้วย down_factor
+# แล้วก็ตาม) ทำให้ seam ผิดตั้งแต่ต้น
+#
+# แก้โดยเลิก render/crop แยกทั้งหมด: PHASE 1B รับ "region ที่ crop มาแล้วจาก pipeline หลัก
+# โดยตรง" (ผ่าน get_view_region ที่เรียกครั้งเดียวใน run_full_analysis_on_image แล้วส่ง region
+# เดียวกันนี้ต่อทั้งให้ compute_phase1b_columns และ process_view_on_image ผ่าน precrop=) จึงใช้
+# region เดียวกัน 100% เสมอ ไม่มีการคำนวณ crop ซ้ำที่อาจได้ origin ต่างกันอีกต่อไป (ดูรายละเอียด
+# ที่ docstring ของ get_view_region/compute_phase1b_columns ด้านล่าง)
 #
 # Fail-safe: ถ้าขั้นตอนใดล้มเหลว (หา 'front-face' สีเด่นไม่เจอ ฯลฯ) จะคืนค่า None ทั้งคู่ และ
 # process_view_on_image จะ fallback ไปใช้ seam-based เดิมโดยอัตโนมัติ (ไม่ทำให้ทั้งระบบล้มเหลว)
-
-PHASE1B_RENDER_SCALE = 4.0  # scale ที่ calibrate threshold ต่างๆ ไว้ (render ตรงจาก PDF เสมอ)
 
 
 def _p1b_sat_val(crop):
@@ -1035,6 +1083,20 @@ def _p1b_front_faces(crop, area_min=1200):
             kept.append(c)
     kept.sort(key=lambda c: c['cx'])
     return kept, cells
+
+
+def _p1b_compute_adaptive_cx_tol(fronts, factor=0.4, fallback=45, floor_px=10):
+    """v25.14 FIX (Bug#3): cx_tol เดิม hardcode=45px ตายตัว ไม่ปรับตามขนาดกล่องจริงในภาพ (ไฟล์ที่
+    กล่องเล็ก/บีบอัดมาก 45px อาจรวมคอลัมน์ที่ควรแยกกันเข้าด้วยกัน หรือไฟล์กล่องใหญ่มาก 45px อาจ
+    เล็กเกินไปจนแยกคอลัมน์เดียวกันออกเป็นหลายกลุ่มผิด) เปลี่ยนเป็น adaptive: median ความกว้างของ
+    front-face fragment จริงที่ตรวจพบ (ก่อน cluster) x 0.4 - ถ้าไม่มีข้อมูล fallback กลับไปที่
+    ค่าเดิม 45px"""
+    if not fronts:
+        return fallback
+    widths = [c['w'] for c in fronts if c.get('w')]
+    if not widths:
+        return fallback
+    return max(floor_px, float(np.median(widths)) * factor)
 
 
 def _p1b_cluster_columns(fronts, cx_tol=45):
@@ -1193,13 +1255,19 @@ def _p1b_roof_extent(cells):
 
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
-    (candidate M >= N ตำแหน่ง) ด้วย Hungarian algorithm - ตัด FRONT candidate ที่ไม่ถูกจับคู่ทิ้ง
-    (ของซ้ำใกล้มุมกล้อง)"""
+    (candidate M ตำแหน่ง) ด้วย Hungarian algorithm
+
+    - M > N: FRONT มี fragment ปลอมเกินมา (เช่น มุมกล้องใกล้สุดแตกเป็นหลาย fragment) -> ตัด
+      candidate ที่ไม่ถูกจับคู่ทิ้ง (ของซ้ำใกล้มุมกล้อง)
+    - M == N: จับคู่ตรงกันพอดี -> คืนค่าเดิมทั้งหมด
+    - M < N (v25.14 FIX Bug#4): FRONT นับได้น้อยกว่า BACK จริง (บั๊กเดิม: เงื่อนไข M<=N คืนค่า
+      front_cols เดิมทั้งหมดโดยไม่ทำอะไร ปล่อยให้ FRONT undercount หลุดรอดไปโดยไม่ถูกแก้) ->
+      หาตำแหน่ง BACK ที่ไม่มี FRONT ใดจับคู่ด้วย (Hungarian แบบ N>M) แล้ว "augment" ด้วยตำแหน่ง
+      สังเคราะห์ (synthetic column, marked synthetic=True) ที่ interpolate มาจากสัดส่วนตำแหน่ง
+      จริงของ BACK (แปลงกลับเป็นพิกัด local ของ FRONT ผ่าน front_extent) แทนที่จะปล่อยผ่าน
+    """
     N = len(back_cols)
     M = len(front_cols)
-    if M <= N:
-        cols = sorted(front_cols, key=lambda c: c['cx'])
-        return cols, []
 
     def frac(cols, extent):
         if extent is None:
@@ -1208,30 +1276,66 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
         else:
             x0, x1 = extent
         span = (x1 - x0) if x1 != x0 else 1.0
-        return [(c['cx'] - x0) / span for c in cols]
+        return [(c['cx'] - x0) / span for c in cols], (x0, span)
 
     back_sorted = sorted(back_cols, key=lambda c: c['cx'])
     front_sorted = sorted(front_cols, key=lambda c: c['cx'])
-    back_frac = frac(back_sorted, back_extent)
-    front_frac = frac(front_sorted, front_extent)
+
+    if M == 0:
+        return [], []
+    if M == N:
+        return front_sorted, []
+
+    back_frac, _ = frac(back_sorted, back_extent)
+    front_frac, (fx0, fspan) = frac(front_sorted, front_extent)
 
     cost = np.zeros((N, M))
     for i, bf in enumerate(back_frac):
         for j, ff in enumerate(front_frac):
             cost[i, j] = abs(bf - ff)
-
     row_ind, col_ind = linear_sum_assignment(cost)
-    matched_idx = set(col_ind)
-    kept = [front_sorted[j] for j in sorted(matched_idx)]
-    dropped = [front_sorted[j] for j in range(M) if j not in matched_idx]
-    kept.sort(key=lambda c: c['cx'])
-    return kept, dropped
+
+    if M > N:
+        matched_idx = set(col_ind)
+        kept = [front_sorted[j] for j in sorted(matched_idx)]
+        dropped = [front_sorted[j] for j in range(M) if j not in matched_idx]
+        kept.sort(key=lambda c: c['cx'])
+        return kept, dropped
+
+    # M < N: เติมตำแหน่งสังเคราะห์จาก BACK ที่ไม่มีคู่ใน FRONT
+    matched_back_idx = set(row_ind)
+    avg_w = float(np.median([c['w'] for c in front_sorted]))
+    avg_h = float(np.median([c['h'] for c in front_sorted]))
+    avg_y = float(np.median([c['y'] for c in front_sorted]))
+    result = list(front_sorted)
+    for i in range(N):
+        if i in matched_back_idx:
+            continue
+        target_cx = fx0 + back_frac[i] * fspan
+        result.append(dict(
+            x=int(round(target_cx - avg_w / 2)), y=int(round(avg_y)),
+            w=int(round(avg_w)), h=int(round(avg_h)),
+            cx=target_cx, cy=avg_y + avg_h / 2,
+            members=[], synthetic=True,
+        ))
+    result.sort(key=lambda c: c['cx'])
+    return result, []
 
 
-def get_safe_region(full_img, doc, view_name, page_idx=1):
-    """คำนวณ crop 'region' ของ view นี้ ด้วยวิธีเดียวกันเป๊ะกับที่ process_view_on_image ใช้
-    ภายใน (fraction จาก label text-layer + ensure_safe_crop margin=30) เพื่อรับประกันว่าพิกัด
-    x/w ที่ PHASE 1B คำนวณได้ จะตรงกับพิกัด region ที่ process_view_on_image ใช้จริง 100%"""
+def get_view_region(full_img, doc, view_name, page_idx=1, margin=30):
+    """คำนวณ crop 'region' ของ view นี้ ครั้งเดียว (fraction จาก label text-layer +
+    ensure_safe_crop margin=30) แล้วคืนค่าทั้ง region array และ origin - ให้ทั้ง
+    compute_phase1b_columns และ process_view_on_image (ผ่าน precrop=) ใช้ "ตัวเดียวกัน 100%"
+
+    v25.14 FIX (Bug#1 + Bug#2): เดิม PHASE 1B render หน้า PDF แยกต่างหากที่ matrix_scale=4
+    (ผ่าน get_safe_region เดิม ซึ่งคำนวณ ensure_safe_crop ของตัวเองอีกชุด) ในขณะที่ pipeline
+    หลัก (process_view_on_image) render/crop ที่ matrix_scale=3 - ทำให้พิกัด x ของคอลัมน์ที่
+    PHASE 1B ส่งคืนไม่ตรงกับ coordinate system ของ region จริงที่ pipeline หลักใช้ (margin
+    แบบ pixel คงที่ที่ resolution ต่างกัน ขยาย/บีบไม่เท่ากันเป็นสัดส่วน ทำให้ seam ผิดตั้งแต่ต้น)
+    แก้โดยลบการ render/crop แยกทั้งหมด เหลือฟังก์ชันเดียว (นี้) ที่คำนวณ crop ครั้งเดียวจาก
+    full_img ตัวเดียวกันที่ pipeline หลักใช้อยู่แล้ว แล้วส่ง region+origin นี้ต่อให้ทั้ง 2 ฝั่งใช้
+    ตรงกันเป๊ะเสมอ (ไม่มีการคำนวณ ensure_safe_crop ซ้ำที่อาจได้ origin ต่างกันอีกต่อไป)
+    """
     page = doc[page_idx]
     pw, ph = page.rect.width, page.rect.height
     front_bb = _word_bbox_rotated(page, "Front")
@@ -1245,37 +1349,30 @@ def get_safe_region(full_img, doc, view_name, page_idx=1):
     H, W, _ = full_img.shape
     y0, y1 = int(H * y0_frac), int(H * y1_frac)
     x0, x1 = int(W * x0_frac), int(W * x1_frac)
-    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30)
+    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(full_img, y0, y1, x0, x1, margin=margin)
     region = full_img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
-    return region, (safe_x0, safe_y0, safe_x1, safe_y1)
+    origin = (safe_x0, safe_y0, safe_x1, safe_y1)
+    fracs = (y0_frac, y1_frac, x0_frac, x1_frac)
+    return region, origin, fracs
 
 
-def _p1b_scale_col(c, factor):
-    return dict(c, x=int(round(c['x'] * factor)), y=int(round(c['y'] * factor)),
-                w=int(round(c['w'] * factor)), h=int(round(c['h'] * factor)),
-                cx=c['cx'] * factor, cy=c['cy'] * factor)
-
-
-def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
+def compute_phase1b_columns(regions):
     """คืนค่า dict {'front': [cols...] หรือ None, 'back': [cols...] หรือ None} ในพิกัด region
-    local ของแต่ละ view ที่ scale=target_matrix_scale (ตรงกับที่ process_view_on_image ใช้จริง)
-    None = ตรวจไม่สำเร็จ (fallback อัตโนมัติไปที่ seam-based เดิมใน process_view_on_image)
+    local ของแต่ละ view - ตรงกับพิกัดที่ process_view_on_image ใช้จริง 100% เสมอ เพราะรับ
+    region ที่ crop มาแล้วจาก pipeline หลักโดยตรง (ดู get_view_region + run_full_analysis_on_image)
+    ไม่ render หรือ crop แยกต่างหากอีกต่อไป (v25.14 FIX Bug#1/#2 - ดู docstring get_view_region)
 
-    v25.11 FIX: render หน้าเต็มแยกต่างหากที่ PHASE1B_RENDER_SCALE (=4) ตรงจาก pdf_bytes เสมอ
-    (ไม่ใช่ upscale ภาพที่ render มาที่ scale อื่นแล้ว) เพราะรายละเอียดขอบ/สีที่สูญเสียไปตอน
-    render ที่ scale ต่ำกว่าจะกู้คืนด้วยการ upscale ไม่ได้ - กระทบไฟล์ที่กล่องเรียงถี่ (เช่น
-    AC03-01) ทำให้ blob-detection ผิดเพี้ยน (ยืนยันจากข้อมูลจริง)
+    regions: {"front": region_array, "back": region_array}
+    None = ตรวจไม่สำเร็จ (fallback อัตโนมัติไปที่ seam-based เดิมใน process_view_on_image)
     """
     try:
-        hd_img, hd_doc, _ = render_full_page(pdf_bytes, page_idx=page_idx, matrix_scale=PHASE1B_RENDER_SCALE)
-        down_factor = target_matrix_scale / PHASE1B_RENDER_SCALE
-
-        back_region, _ = get_safe_region(hd_img, hd_doc, "back", page_idx)
-        front_region, _ = get_safe_region(hd_img, hd_doc, "front", page_idx)
+        back_region = regions["back"]
+        front_region = regions["front"]
 
         back_all = _p1b_classify_view(back_region)
         back_fronts, _ = _p1b_front_faces(back_region)
-        back_cols_pre = _p1b_cluster_columns(back_fronts)
+        back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
+        back_cols_pre = _p1b_cluster_columns(back_fronts, cx_tol=back_cx_tol)
         if not back_cols_pre:
             return {"front": None, "back": None}
         back_cols_raw, _ = _p1b_merge_corner_artifact_columns(back_cols_pre, back_all)
@@ -1286,7 +1383,8 @@ def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
 
         front_all = _p1b_classify_view(front_region)
         front_fronts, _ = _p1b_front_faces(front_region)
-        front_cols_pre = _p1b_cluster_columns(front_fronts)
+        front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
+        front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
         if not front_cols_pre:
             return {"front": None, "back": None}
         front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
@@ -1297,10 +1395,7 @@ def compute_phase1b_columns(pdf_bytes, target_matrix_scale, page_idx=1):
         if not front_cols:
             return {"front": None, "back": None}
 
-        return {
-            "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
-            "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
-        }
+        return {"front": front_cols, "back": back_cols}
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
         return {"front": None, "back": None}
@@ -1691,18 +1786,24 @@ def measure_stack_lengths(seams, start_x, end_x):
     return lengths, boundaries
 
 
-def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, override_cols=None):
-    page = doc[page_idx]
-    pw, ph = page.rect.width, page.rect.height
-    front_bb = _word_bbox_rotated(page, "Front")
-    back_bb = _word_bbox_rotated(page, "Back")
-    load_bb = _word_bbox_rotated(page, "Load")
-    cust_bb = _word_bbox_rotated(page, "Customer")
-    if front_bb is None or back_bb is None:
-        raise ValueError(f"ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า {page_idx}")
-    y0_frac, y1_frac, x0_frac, x1_frac = _view_fracs_from_bboxes(
-        front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name)
-    r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, override_cols=override_cols)
+def process_view_with_length_on_image(full_img, doc, view_name, page_idx=1, override_cols=None, precrop=None):
+    if precrop is not None:
+        # v25.14 FIX (Bug#1/#2): มี region ที่ crop มาแล้วจาก run_full_analysis_on_image
+        # (ใช้ตัวเดียวกับที่ PHASE 1B ใช้) - ไม่ต้องคำนวณ fraction/crop ซ้ำอีกรอบ
+        y0_frac = y1_frac = x0_frac = x1_frac = None
+    else:
+        page = doc[page_idx]
+        pw, ph = page.rect.width, page.rect.height
+        front_bb = _word_bbox_rotated(page, "Front")
+        back_bb = _word_bbox_rotated(page, "Back")
+        load_bb = _word_bbox_rotated(page, "Load")
+        cust_bb = _word_bbox_rotated(page, "Customer")
+        if front_bb is None or back_bb is None:
+            raise ValueError(f"ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า {page_idx}")
+        y0_frac, y1_frac, x0_frac, x1_frac = _view_fracs_from_bboxes(
+            front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name)
+    r = process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac,
+                               override_cols=override_cols, precrop=precrop)
     start_x, end_x, length_px = measure_cargo_extent_via_white_bg(r["region"], r["cargo_bottom_y"], r["grounded"])
     stack_lengths, boundaries = measure_stack_lengths(r["seams"], start_x, end_x)
     return {
@@ -1868,8 +1969,10 @@ def fill_missing_heights(records):
     return records
 
 
-def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, margin=6, override_cols=None):
-    r = process_view_with_length_on_image(full_img, doc, view_name, page_idx=page_idx, override_cols=override_cols)
+def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, margin=6,
+                                       override_cols=None, precrop=None):
+    r = process_view_with_length_on_image(full_img, doc, view_name, page_idx=page_idx,
+                                           override_cols=override_cols, precrop=precrop)
     cargo_top_y = compute_cargo_top_profile(r["cargo_mask"])
     local_floor_y = compute_local_floor_y(r["floor_y"], r["grounded"])
     stack_heights = compute_stack_heights_px(
@@ -2170,20 +2273,36 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     return risks
 
 
-def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
+def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=4):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
     # process_view_with_height_on_image ต่อ view ตามปกติ - ถ้าล้มเหลว (None) จะ fallback ไป
-    # seam-based เดิมโดยอัตโนมัติ (ดู process_view_on_image) ต้องการ pdf_bytes เพื่อ render
-    # หน้าเต็มแยกต่างหากที่ scale ที่ calibrate ไว้ (ดู compute_phase1b_columns)
-    if pdf_bytes is not None:
-        phase1b = compute_phase1b_columns(pdf_bytes, target_matrix_scale=matrix_scale, page_idx=page_idx)
-    else:
+    # seam-based เดิมโดยอัตโนมัติ (ดู process_view_on_image)
+    #
+    # v25.14 FIX (Bug#1/#2): เดิมต้องใช้ pdf_bytes เพื่อ render หน้าเต็มแยกต่างหากที่ scale อื่น
+    # สำหรับ PHASE 1B โดยเฉพาะ (compute_phase1b_columns เดิม) ตอนนี้ครอป region ของแต่ละ view
+    # "ครั้งเดียว" จาก full_img ตัวเดียวกับที่ pipeline หลักใช้อยู่แล้ว (get_view_region) แล้วส่ง
+    # region+origin เดียวกันนี้ต่อให้ทั้ง compute_phase1b_columns และ
+    # process_view_with_height_on_image (ผ่าน precrop=) ใช้ตรงกัน 100% เสมอ - ไม่ต้องพึ่ง
+    # pdf_bytes/render แยกอีกต่อไป
+    try:
+        front_region, front_origin, _ = get_view_region(full_img, doc, "front", page_idx=page_idx)
+        back_region, back_origin, _ = get_view_region(full_img, doc, "back", page_idx=page_idx)
+        phase1b = compute_phase1b_columns({"front": front_region, "back": back_region})
+        front_precrop = (front_region, front_origin)
+        back_precrop = (back_region, back_origin)
+    except Exception as e:
+        print(f"get_view_region ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
         phase1b = {"front": None, "back": None}
+        front_precrop = None
+        back_precrop = None
+
     front = process_view_with_height_on_image(
-        full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"))
+        full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"),
+        precrop=front_precrop)
     back = process_view_with_height_on_image(
-        full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"))
+        full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"),
+        precrop=back_precrop)
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -2258,7 +2377,13 @@ def process_request(request):
         sku_list = extract_sku_from_pdf(pdf_bytes)
         sku_str = ", ".join(sku_list) if sku_list else ""
 
-        full_img, doc, page = render_full_page(pdf_bytes, page_idx=1)
+        # v25.14 FIX (Bug#1): render หน้าเต็มครั้งเดียวที่ matrix_scale=4 (เดิม=3) - เพราะ
+        # PHASE 1B (compute_phase1b_columns) ไม่ render แยกต่างหากอีกต่อไป (ดู
+        # run_full_analysis_on_image) จึงต้องให้ full_img ตัวเดียวที่ pipeline ทั้งหมดใช้ร่วมกัน
+        # อยู่ที่ scale ที่ threshold ทางเรขาคณิตของ PHASE 1B ถูก calibrate ไว้ (scale=4) เพื่อไม่
+        # ให้ความละเอียดของภาพเสียไป (regression-verified กับ AC03-01/EC04-01/02/03/04: จำนวน
+        # ตั้ง+risk ที่ตรวจพบ เหมือนเดิมทุกไฟล์ หลังเปลี่ยน scale)
+        full_img, doc, page = render_full_page(pdf_bytes, page_idx=1, matrix_scale=4)
 
         # layout label (เก็บไว้เพื่อ output contract เดิม - อนุมานจากทิศทาง Front/Back label)
         front_bb = _word_bbox_rotated(page, "Front")
@@ -2272,7 +2397,7 @@ def process_request(request):
         else:
             layout = "TOP_BOTTOM"
 
-        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=3)
+        result = run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=pdf_bytes, matrix_scale=4)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -2315,8 +2440,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.13",
-            "benchmarkMode": "v25_11_zero_ai_rule_engine",
+            "checkerVersion": "V25.14",
+            "benchmarkMode": "v25_14_phase1b_unified_crop",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
