@@ -1387,9 +1387,136 @@ def _p1b_classify_view(crop, area_min=None):
     return all_cells
 
 
+def _p1b_x_overlap_frac_generic(a0, a1, b0, b1):
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    return inter / max(1e-6, min(a1 - a0, b1 - b0))
+
+
+# v25.27 NEW: "inner-row roof-anchor" filter (ตามที่ผู้ใช้ยืนยันด้วยภาพจริง AC02-02 - mark X บน
+# หลังคาขั้นที่ 2,3,4,5 ของ 'บันไดหลังคา' แต่ไม่ mark ขั้นแรก) - ROOT CAUSE: เมื่อกล่อง SKU
+# เดียวกันหลายใบวางซ้อนกันตามความลึก/ความกว้างตู้ (คนละแถวจากมุมกล้อง) ในตำแหน่งความยาวเดียวกัน
+# (1 IDX เดียว) มุมมอง isometric จะทำให้หลังคาของแต่ละใบ "โผล่พ้น" ขึ้นมาเป็นขั้นบันไดต่อเนื่องกัน
+# (แถวหลังสูงกว่าแถวหน้าเสมอในภาพ FRONT เพราะระยะห่างจากมุมกล้อง) - ข้อสังเกตสำคัญ: front-face
+# ของกล่อง "แถวใน" (ไม่ใช่แถวหน้าสุด) ที่โผล่ให้เห็นบางส่วนจากช่องว่างระหว่างขั้นบันได จะถูก
+# Phase 1B ตรวจพบเป็น front-face fragment แยกต่างหาก ทั้งที่เป็นกล่อง SKU เดียวกัน ตำแหน่ง IDX
+# เดียวกันกับที่นับไปแล้วจากแถวหน้า (front-face หลักที่ต่อเนื่องจากพื้น) - ทำให้นับซ้ำ/นับเกิน
+#
+# วิธีแยกแยะ (ยืนยันจากข้อมูลจริง): หา "หลังคาขั้นแรก" (roof/top-face ที่มี bottom_y มากที่สุด
+# = ใกล้พื้นที่สุด = เชื่อมต่อกับ front-face หลักของคอลัมน์นั้นโดยตรง) ในกลุ่มสีเดียวกันที่ตำแหน่ง
+# x ทับซ้อนกัน - front-face candidate ใดๆ ที่ 'ผูกติด' อยู่กับหลังคาที่มี bottom_y น้อยกว่า (สูง
+# กว่า) หลังคาขั้นแรกนี้ ถือเป็น front-face ของกล่อง "แถวใน" (inner row) ให้กรองออก ไม่นับ
+# (ยืนยันด้วย AC02-02 FRONT: front-face x=932,1022,1111 สีส้ม(VCS1A-F1) ทั้งหมดผูกกับ roof ที่
+# bottom_y สูงกว่า (401-538) เทียบกับ roof ขั้นแรกจริงที่ bottom_y=583 (x=816) - ตรงกับที่ผู้ใช้
+# mark X ไว้บนหลังคาขั้นที่ 2/3/4 ทุกจุด ไม่กระทบ front-face ขั้นแรก (x=814) ที่ต้องนับ)
+def _p1b_filter_inner_row_fronts(fronts, roofs, x_overlap_thresh=0.5, y_gap_max=60,
+                                  single_box_height_ratio=0.6):
+    """กรอง front-face fragment ที่เป็น 'แถวใน' (inner row, ซ้ำซ้อนกับคอลัมน์ที่นับแล้วจากขั้น
+    บันไดหลังคาเดียวกัน) ออกจาก fronts - คืนค่า (kept, dropped)
+
+    v25.28 FIX (สำคัญ - แก้ false-positive ที่พบจริงจาก AE02-01): เดิมกฎนี้ตรวจสอบทุก front-face
+    candidate โดยไม่แยกแยะขนาด - พบว่าทำให้ front-face ที่เป็น 'การ merge ของกล่องหลายใบซ้อนกัน
+    แนวตั้งในคอลัมน์เดียวกันจริง' (เช่น 3-4 กล่องสูงรวมกันเป็นก้อนเดียว, h=422px) ถูกเข้าใจผิดว่า
+    เป็น inner-row เพราะไปทับซ้อนกับ roof ของคอลัมน์ข้างเคียงที่ overlap เพียงเล็กน้อย (>=15%)
+    โดยบังเอิญ (คอลัมน์กว้างมากจากการ merge ทำให้ x-range ยื่นไปแตะคอลัมน์ข้างๆ)
+    ROOT CAUSE ที่แท้จริงของความแตกต่าง: front-face ที่เป็น 'inner-row ghost' จริง (พิสูจน์จาก
+    AC02-02: h=86-87px) มีความสูงระดับ 'กล่องเดี่ยว 1 ใบ' เสมอ ในขณะที่ front-face ที่เป็น
+    'genuine merged column' (หลายกล่องซ้อนแนวตั้งจริง) มีความสูงมากกว่ามาก (h=195-422px ในไฟล์
+    ต่างๆ ที่ทดสอบ) - ความสูงที่มากกว่านี้เป็นหลักฐานว่ามันคือกล่องที่ต่อเนื่องจากพื้นขึ้นไปจริง
+    ไม่ใช่ชิ้นที่ 'ลอย' อยู่กลางอากาศจากการโผล่ทะลุของกล่องแถวหลัง
+    FIX: เพิ่ม guard - ตรวจสอบกฎ inner-row เฉพาะ front-face ที่ความสูง (h) ต่ำกว่า
+    single_box_height_ratio (60%) ของความสูงสูงสุดในกลุ่มสีเดียวกันทั้งภาพเท่านั้น (สอดคล้องกับ
+    หลักฐานจริงทั้ง AC02-02 (ghost h=86-87 << max h=290) และ AE02-01 (ที่เคย false-positive
+    h=422 ซึ่งเป็นค่าสูงสุดของกลุ่มสีเดียวกันเอง ไม่ใช่กล่องเตี้ยเลย - ผ่าน guard นี้ไปได้
+    เพราะไม่เข้าเงื่อนไข 'เตี้ยกว่า 60% ของค่าสูงสุด')"""
+    kept, dropped = [], []
+    # คำนวณความสูงสูงสุดต่อกลุ่มสี (ใช้เป็นเกณฑ์อ้างอิง 'genuine merged column' ของสีนั้น)
+    max_h_by_color = {}
+    for c in fronts:
+        max_h_by_color[c['color']] = max(max_h_by_color.get(c['color'], 0), c['h'])
+
+    for c in fronts:
+        max_h_this_color = max_h_by_color.get(c['color'], c['h'])
+        if c['h'] >= max_h_this_color * single_box_height_ratio:
+            # front-face นี้สูงพอที่จะเป็น genuine merged column เอง (ไม่ใช่ single-box peek)
+            # -> ปลอดภัย ไม่ต้องตรวจสอบกฎ inner-row เลย เก็บไว้ทันที
+            kept.append(c)
+            continue
+        # หา roof สีเดียวกัน ที่ x ทับซ้อนกับ c มาก และ 'เชื่อมต่อ' กับ c ในแนวตั้ง (roof อยู่
+        # เหนือ front-face นี้โดยตรง หรือ front-face นี้อยู่ใต้ roof นี้พอดี - y_gap เล็ก)
+        same_color_roofs = [r for r in roofs if r['color'] == c['color']]
+        connected_roofs = []
+        for r in same_color_roofs:
+            ov = _p1b_x_overlap_frac_generic(c['x'], c['x'] + c['w'], r['x'], r['x'] + r['w'])
+            if ov < x_overlap_thresh:
+                continue
+            # roof ควรอยู่ 'ติดกับ' หรือ 'คาบเกี่ยว' กับขอบบนของ front-face c (r bottom ~ c top)
+            y_gap = abs((r['y'] + r['h']) - c['y'])
+            if y_gap <= y_gap_max:
+                connected_roofs.append(r)
+        if not connected_roofs:
+            kept.append(c)
+            continue
+        # หาหลังคา "ขั้นแรก" ในกลุ่มสีเดียวกันทั้งภาพ (bottom_y มากที่สุด = ใกล้พื้นที่สุด) ที่
+        # x ทับซ้อนกับคอลัมน์นี้มาก (ใช้ threshold เดียวกับ connected เพื่อกันไม่ให้หยิบ roof
+        # ของคอลัมน์ข้างเคียงที่ทับซ้อนเพียงเล็กน้อยมาคำนวณผิด)
+        all_overlapping_roofs = [r for r in same_color_roofs
+                                  if _p1b_x_overlap_frac_generic(c['x'], c['x'] + c['w'],
+                                                                  r['x'], r['x'] + r['w']) >= x_overlap_thresh]
+        if not all_overlapping_roofs:
+            kept.append(c)
+            continue
+        first_step_bottom_y = max(r['y'] + r['h'] for r in all_overlapping_roofs)
+        # ถ้า roof ที่เชื่อมกับ c โดยตรง มี bottom_y ต่ำกว่า (น้อยกว่า) ขั้นแรกอย่างมีนัยสำคัญ
+        # (สูงกว่าขั้นแรกจริง ไม่ใช่แค่ noise เล็กน้อย) -> เป็น inner row -> กรองออก
+        connected_max_bottom = max(r['y'] + r['h'] for r in connected_roofs)
+        if connected_max_bottom < first_step_bottom_y - 10:
+            dropped.append(c)
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
+def _p1b_x_gap_generic(a0, a1, b0, b1):
+    return max(a0 - b1, b0 - a1)
+
+
+# v25.27 NEW: 'side-sliver' filter (ยืนยันจากภาพจริง AC02-02 - mark X บนเศษ VCS1A-F1 บางๆ
+# w=28px ที่ถูกผนัง/มุมกล้องบังบางส่วน จนเหลือแค่แถบแคบๆ ติดกับ front-face หลักที่กว้างกว่ามาก
+# ของสีเดียวกัน) - ต่างจาก inner-row filter (ซึ่งดูความสัมพันธ์กับ 'หลังคา') ตรงที่ filter นี้ดู
+# แค่ 'ความกว้างเทียบกับเพื่อนบ้านสีเดียวกันที่ติดกัน/ทับซ้อน' โดยตรง - ปลอดภัยเพราะ front-face
+# จริงที่แยกกันเป็นคอลัมน์ต่างกันจะไม่มีทางมีสีเดียวกันติดกันสนิทแบบนี้ (ถ้าเป็นคอลัมน์เดียวกันจริง
+# ก็ควรถูก merge เป็นก้อนเดียวไปแล้วโดย _p1b_merge_text_split_fragments)
+def _p1b_filter_side_slivers(fronts, width_ratio_thresh=0.5, gap_max=5, x_overlap_thresh=0.2):
+    kept, dropped = [], []
+    for c in fronts:
+        is_sliver = False
+        for other in fronts:
+            if other is c or other['color'] != c['color']:
+                continue
+            if c['w'] >= other['w'] * width_ratio_thresh:
+                continue  # ไม่แคบกว่าเพื่อนบ้านมากพอ
+            gap = _p1b_x_gap_generic(c['x'], c['x'] + c['w'], other['x'], other['x'] + other['w'])
+            ov = _p1b_x_overlap_frac_generic(c['x'], c['x'] + c['w'], other['x'], other['x'] + other['w'])
+            if gap <= gap_max or ov >= x_overlap_thresh:
+                is_sliver = True
+                break
+        if is_sliver:
+            dropped.append(c)
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
 def _p1b_front_faces(crop, area_min=1200):
     cells = _p1b_classify_view(crop, area_min=area_min)
     fronts = [c for c in cells if c['kind'] == 'front']
+    roofs = [c for c in cells if c['kind'] == 'roof']
+    # v25.27 NEW: กรอง front-face ของกล่อง 'แถวใน' (inner-row, ซ้ำซ้อนกับขั้นบันไดหลังคา) ก่อน
+    # ทำ duplicate-removal เดิม (ดู docstring _p1b_filter_inner_row_fronts สำหรับหลักฐานเต็ม)
+    fronts, inner_dropped = _p1b_filter_inner_row_fronts(fronts, roofs)
+    # v25.27 NEW: กรอง 'เศษบาง' (side-sliver) ที่เหลือ - เศษของ front-face เดียวกันที่ถูกบัง
+    # บางส่วนจนเหลือแถบแคบผิดปกติ (ดู docstring _p1b_filter_side_slivers)
+    fronts, sliver_dropped = _p1b_filter_side_slivers(fronts)
     fronts.sort(key=lambda c: -c['area'])
     kept = []
     for c in fronts:
@@ -1404,7 +1531,12 @@ def _p1b_front_faces(crop, area_min=1200):
         if not dup:
             kept.append(c)
     kept.sort(key=lambda c: c['cx'])
-    return kept, cells
+    # v25.28 NEW: นับจำนวน fragment ที่ถูก 'พิสูจน์แล้วจริง' ว่าเป็นแถวใน/เศษบาง (ไม่ใช่กล่อง
+    # แยกต่างหาก) ด้วยกฎ v25.27 - ใช้เป็นหลักฐานให้ _p1b_reconcile_with_back ตัดสินใจว่าจำนวน
+    # คอลัมน์ที่นับได้น้อยกว่า BACK นั้น 'ถูกต้องแล้วจริง' (ไม่ใช่บั๊ก undercount) ดู docstring
+    # เต็มที่ _p1b_reconcile_with_back
+    n_dropped_by_new_rules = len(inner_dropped) + len(sliver_dropped)
+    return kept, cells, n_dropped_by_new_rules
 
 
 def _p1b_compute_adaptive_cx_tol(fronts, factor=0.4, fallback=45, floor_px=10):
@@ -1642,7 +1774,8 @@ def _p1b_roof_extent(cells):
     return x0, x1
 
 
-def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None):
+def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
+                              n_dropped_by_new_rules=0):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
     (candidate M ตำแหน่ง) ด้วย Hungarian algorithm
 
@@ -1654,6 +1787,22 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
       หาตำแหน่ง BACK ที่ไม่มี FRONT ใดจับคู่ด้วย (Hungarian แบบ N>M) แล้ว "augment" ด้วยตำแหน่ง
       สังเคราะห์ (synthetic column, marked synthetic=True) ที่ interpolate มาจากสัดส่วนตำแหน่ง
       จริงของ BACK (แปลงกลับเป็นพิกัด local ของ FRONT ผ่าน front_extent) แทนที่จะปล่อยผ่าน
+
+    v25.28 NEW (สำคัญ - "หักล้างสมมติฐาน M<N=บั๊กเสมอ" ตามที่ผู้ใช้ระบุ): เดิมกรณี M<N ระบบ
+    เชื่อว่า BACK ถูกต้องเสมอ (ground-truth) แล้วเติม synthetic column ให้ FRONT จนเท่ากับ N
+    ทุกครั้งโดยไม่มีข้อยกเว้น - แต่พบจริงจาก AC02-02 ว่าสมมติฐานนี้ผิดได้ในบางกรณี: หลังจากกฎ
+    v25.27 (inner-row roof-anchor + side-sliver filter) กรอง fragment ที่ 'พิสูจน์แล้วจริงด้วย
+    หลักฐานทางเรขาคณิต' (ไม่ใช่แค่ heuristic เดา) ว่าเป็นหลังคา/หน้ากล่องซ้ำซ้อนของกล่องที่นับ
+    ไปแล้ว FRONT อาจมีจำนวนน้อยกว่า BACK จริงๆ ตามข้อเท็จจริงทางกายภาพ (FRONT=5, BACK=7 ใน
+    AC02-02 - ไม่ใช่บั๊ก undercount แต่เป็นเพราะมุมมอง FRONT เห็นกล่องบางกลุ่มรวมกันเป็นก้อน
+    เดียวที่ BACK แยกเห็นชัดกว่า)
+    FIX: ถ้า n_dropped_by_new_rules (จำนวน fragment ที่ v25.27 กรองออกจริง) >= ส่วนต่างที่
+    ขาดไป (N-M) ให้ถือว่าจำนวน M ที่ตรวจพบนี้ 'ได้รับการพิสูจน์แล้ว' ว่าถูกต้อง (ไม่ใช่บั๊ก
+    undercount) -> ข้าม synthetic-padding ทั้งหมด คืนค่า front_cols ตามจริง (M) โดยไม่เติมอะไร
+    เข้าไป - ถ้า n_dropped_by_new_rules < N-M (พิสูจน์ได้ไม่ครบ) ยังคง fallback ไปใช้
+    synthetic-padding เดิมสำหรับส่วนที่พิสูจน์ไม่ได้ (ความปลอดภัยสำหรับไฟล์อื่นที่ยังไม่เจอ
+    กรณีนี้ - ไม่ปิดกลไก synthetic-padding ทั้งหมด เพราะมันแก้บั๊ก undercount จริงในไฟล์อื่น
+    มาก่อน (v25.14 Bug#4) - ต้องคงไว้เป็น fallback สำหรับกรณีที่ยังพิสูจน์ไม่ได้)
     """
     N = len(back_cols)
     M = len(front_cols)
@@ -1691,7 +1840,14 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
         kept.sort(key=lambda c: c['cx'])
         return kept, dropped
 
-    # M < N: เติมตำแหน่งสังเคราะห์จาก BACK ที่ไม่มีคู่ใน FRONT
+    # v25.28 NEW: ตรวจสอบก่อนว่าส่วนต่าง (N-M) ถูก 'พิสูจน์แล้ว' ด้วยกฎ v25.27 หรือไม่ - ถ้าใช่
+    # ให้เชื่อค่า M ทันที ไม่เติม synthetic column (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล)
+    deficit = N - M
+    if n_dropped_by_new_rules >= deficit:
+        return front_sorted, []
+
+    # M < N: เติมตำแหน่งสังเคราะห์จาก BACK ที่ไม่มีคู่ใน FRONT (fallback เดิม - ใช้เมื่อพิสูจน์
+    # ไม่ได้ครบว่าส่วนต่างเกิดจากกฎ v25.27 จริง)
     matched_back_idx = set(row_ind)
     avg_w = float(np.median([c['w'] for c in front_sorted]))
     avg_h = float(np.median([c['h'] for c in front_sorted]))
@@ -1805,7 +1961,7 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         front_region = regions["front"]
 
         back_all = _p1b_classify_view(back_region)
-        back_fronts, _ = _p1b_front_faces(back_region)
+        back_fronts, _, back_n_dropped = _p1b_front_faces(back_region)
         back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
         back_cols_pre = _p1b_cluster_columns(back_fronts, cx_tol=back_cx_tol)
         if not back_cols_pre:
@@ -1821,18 +1977,20 @@ def compute_phase1b_columns(regions, down_factor=1.0):
             return {"front": None, "back": None}
 
         front_all = _p1b_classify_view(front_region)
-        front_fronts, _ = _p1b_front_faces(front_region)
+        front_fronts, _, front_n_dropped = _p1b_front_faces(front_region)
         front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
         front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
         if not front_cols_pre:
             return {"front": None, "back": None}
         front_cols_raw, _ = _p1b_merge_corner_artifact_columns(front_cols_pre, front_all)
         print(f"[P1B] FRONT after merge_corner: {len(front_cols_raw)} cols, "
-              f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
+              f"cx={[round(c['cx'],1) for c in front_cols_raw]}, "
+              f"n_dropped_by_new_rules={front_n_dropped}")
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
-            back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent)
+            back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
+            n_dropped_by_new_rules=front_n_dropped)
         if not front_cols:
             return {"front": None, "back": None}
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
@@ -3134,8 +3292,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.23",
-            "benchmarkMode": "v25_23_hidden_behind_step_down",
+            "checkerVersion": "V25.28",
+            "benchmarkMode": "v25_28_inner_row_sliver_filter_reconcile_override",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
