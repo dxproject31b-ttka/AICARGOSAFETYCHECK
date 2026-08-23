@@ -1960,8 +1960,17 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_region = regions["back"]
         front_region = regions["front"]
 
-        back_all = _p1b_classify_view(back_region)
-        back_fronts, _, back_n_dropped = _p1b_front_faces(back_region)
+        # v25.30 FIX (Performance - สำคัญ): เดิมเรียก _p1b_classify_view(back_region) แยกต่างหาก
+        # แล้วเรียก _p1b_front_faces(back_region) อีกครั้ง (ซึ่งข้างในเรียก _p1b_classify_view
+        # ซ้ำอีกรอบด้วย region เดียวกันเป๊ะ) ทำให้คำนวณ HSV/dominant-colors/connected-components
+        # (scipy.ndimage.label ต่อสี) ซ้ำ 2 รอบโดยไม่จำเป็น - วัดเวลาจริงพบว่า 1 ครั้งของ
+        # _p1b_classify_view บน region ขนาดจริง (hi_scale=4) ใช้เวลาหลักวินาที ทำให้ทั้ง
+        # compute_phase1b_columns (เรียกแบบนี้ทั้ง BACK และ FRONT) ช้าขึ้นเกือบเท่าตัวโดยไม่จำเป็น
+        # FIX: เรียก _p1b_front_faces เพียงครั้งเดียว แล้วใช้ค่า cells ที่มันคืนมา (return value
+        # ที่ 2) เป็น back_all/front_all แทน - ยืนยันแล้วว่าเป็นค่าเดียวกันทุกประการ (ฟังก์ชัน
+        # deterministic ไม่มี randomness, ไม่มี side-effect ข้าม call ใดๆ) จึงปลอดภัย 100% ไม่มี
+        # ผลข้างเคียงต่อผลลัพธ์การนับ/reconcile ใดๆ เลย (ตัดแค่การคำนวณซ้ำที่ไม่จำเป็นออกไป)
+        back_fronts, back_all, back_n_dropped = _p1b_front_faces(back_region)
         back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
         back_cols_pre = _p1b_cluster_columns(back_fronts, cx_tol=back_cx_tol)
         if not back_cols_pre:
@@ -1976,8 +1985,8 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not back_cols:
             return {"front": None, "back": None}
 
-        front_all = _p1b_classify_view(front_region)
-        front_fronts, _, front_n_dropped = _p1b_front_faces(front_region)
+        # v25.30 FIX (Performance): เหตุผลเดียวกับ BACK ด้านบน - ดู docstring ที่นั่น
+        front_fronts, front_all, front_n_dropped = _p1b_front_faces(front_region)
         front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
         front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
         if not front_cols_pre:
@@ -3308,8 +3317,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.29",
-            "benchmarkMode": "v25_29_grouped_action_report_by_risk_type",
+            "checkerVersion": "V25.30",
+            "benchmarkMode": "v25_30_dedupe_classify_view_perf_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
