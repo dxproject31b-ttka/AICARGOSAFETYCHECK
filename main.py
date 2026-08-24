@@ -3637,8 +3637,21 @@ def process_request(request):
         img = PIL.Image.fromarray(full_img).convert("RGB")
         draw = PIL.ImageDraw.Draw(img)
 
-        detected_hazards = []
-        reported_risk_keys = set()
+        # v25.29 FIX (ตามที่ผู้ใช้ระบุ - ตรวจพบว่าเคยถูกลบทิ้งไปโดยไม่ตั้งใจตอนพัฒนาต่อจาก
+        # v25.28 เป็น v25.30-36 เพราะใช้ v25.28 เป็นฐานแทนที่จะเป็น v25.29 - กู้คืน fix นี้กลับมา
+        # ในรอบนี้): เดิม detected_hazards เก็บ 1 รายการต่อ (risk_type, view, idx) ที่ไม่ซ้ำกัน
+        # แล้วพิมพ์ "คำแนะนำวิธีแก้ไข" (generate_action_report) เต็มทุกรายการ - ถ้าพบความเสี่ยง
+        # ประเภทเดียวกันหลายจุด (เช่น STEP_DOWN_RISK 3 จุด) รายงานจะพิมพ์คำแนะนำชุดเดิมซ้ำกัน 3
+        # รอบ ทำให้ยาวเกินความจำเป็นในการอ่าน (คำแนะนำแก้ไขของแต่ละ risk_type เป็นข้อความคงที่
+        # ไม่ได้ขึ้นกับตำแหน่ง/จุดที่พบเลย)
+        # FIX: จัดกลุ่มตาม "ประเภทความเสี่ยง" (risk_type) เท่านั้น - พิมพ์หัวข้อ + คำแนะนำ
+        # เพียง "ครั้งเดียวต่อประเภท" แล้วต่อท้ายหัวข้อด้วย "จำนวนจุดที่นับได้" ของประเภทนั้น
+        # แทนการพิมพ์ซ้ำตามจำนวนจุด - ยังคงวาดกรอบ (marker) บนภาพครบทุกจุดที่ตรวจพบเหมือนเดิม
+        # ทุกประการ (ไม่กระทบการแสดงผลภาพ) และยังคงนับ hazardCount = จำนวนจุดทั้งหมดจริง (ไม่ใช่
+        # จำนวนประเภท) เพื่อไม่ให้กระทบ WebApp/GAS ฝั่งรับผลที่อาจอ้างอิงค่านี้อยู่แล้ว
+        all_hazard_points = []
+        risk_type_counts = {}
+        risk_type_order = []  # รักษาลำดับการพบครั้งแรกของแต่ละประเภท
         for risk in risks:
             risk_type = risk["risk_type"]
             outline_color = RISK_COLORS.get(risk_type, "red")
@@ -3652,17 +3665,22 @@ def process_request(request):
                 print(f"Could not compute marker box for {risk_type} (view={risk.get('mark_view')}, "
                       f"idx={risk.get('mark_stack_idx')})")
 
-            report_key = f"{risk_type}_{risk.get('mark_view')}_{risk.get('mark_stack_idx')}"
-            if report_key not in reported_risk_keys:
-                reported_risk_keys.add(report_key)
-                title = f"ความเสี่ยง: {risk_type}"
-                detail = generate_action_report(risk_type, "", sku_str)
-                detected_hazards.append({"title": title, "detail": detail})
+            all_hazard_points.append(risk)
+            if risk_type not in risk_type_counts:
+                risk_type_counts[risk_type] = 0
+                risk_type_order.append(risk_type)
+            risk_type_counts[risk_type] += 1
 
-        if detected_hazards:
-            status_text = f"พบจุดเสี่ยงอันตราย ({len(detected_hazards)} จุด)"
+        if all_hazard_points:
+            status_text = f"พบจุดเสี่ยงอันตราย ({len(all_hazard_points)} จุด)"
             sep = "\n\n" + "-" * 50 + "\n\n"
-            action_text = sep.join(f"[{h['title']}]\n{h['detail']}" for h in detected_hazards)
+            blocks = []
+            for risk_type in risk_type_order:
+                count = risk_type_counts[risk_type]
+                title = f"ความเสี่ยง: {risk_type} (พบ {count} จุด)"
+                detail = generate_action_report(risk_type, "", sku_str)
+                blocks.append(f"[{title}]\n{detail}")
+            action_text = sep.join(blocks)
         else:
             status_text = "ปลอดภัย (SAFE)"
             action_text = generate_action_report("SAFE", "")
@@ -3673,12 +3691,12 @@ def process_request(request):
         gc.collect()
         return ({
             "status": status_text,
-            "hazardCount": len(detected_hazards),
+            "hazardCount": len(all_hazard_points),
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.36",
-            "benchmarkMode": "v25_36_shape_based_endcap_wall_detection",
+            "checkerVersion": "V25.37",
+            "benchmarkMode": "v25_37_restore_grouped_action_report",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
