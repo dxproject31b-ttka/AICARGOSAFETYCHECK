@@ -1656,6 +1656,10 @@ def _p1b_is_endcap_wall_shape(w, h, area=None):
 # จริงเต็มพื้นที่) ให้ปฏิเสธ candidate นี้ (ไม่ถือเป็น endcap wall) เพื่อความปลอดภัยไม่กระทบไฟล์ที่
 # endcap wall เป็นผนังเปล่าจริง (เช่น EA10 ที่ยืนยันไว้ก่อนหน้า)
 _ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE = 0.5
+# v25.46 NEW: เกณฑ์ area ขั้นต่ำที่ถือว่า front-face 'มีนัยสำคัญมากพอ' จะเป็นกล่องเต็มใบจริง
+# (ไม่ใช่เศษเล็กที่บังเอิญปนอยู่) - ยืนยันจาก AB01-02: STEMA-A3 front-face area=5994 (ใหญ่กว่า
+# เศษทั่วไปที่พบ 1200-2000px มาก) ตั้งค่าไว้กึ่งกลางระหว่าง 2 ช่วงนี้เพื่อความปลอดภัย
+_ENDCAP_WALL_SIGNIFICANT_FRONT_AREA = 3500
 
 
 def _p1b_find_endcap_wall_span(all_cells):
@@ -1673,16 +1677,40 @@ def _p1b_find_endcap_wall_span(all_cells):
     candidates = []
     for cand in shape_candidates:
         cx0, cx1 = cand['x'], cand['x'] + cand['w']
-        covered_width = 0.0
-        # รวมความกว้างที่ front-face สีจริง (ไม่ซ้ำกัน) ซ้อนทับอยู่ในโซนนี้ (ประมาณแบบง่าย
-        # โดยรวม interval ที่ทับซ้อน - พอเพียงสำหรับตัดสินใจ ไม่ต้องคำนวณ union interval แม่นยำ
-        # เป๊ะ เพราะ threshold ตั้งไว้ไม่สุดโต่ง)
+        # v25.46 FIX (สำคัญ - พบจริงจาก AB01-02 regression ระหว่างพัฒนา orphaned-roof
+        # detection): เดิมคำนวณ coverage แบบ "รวม interval ที่ทับซ้อนตรงๆ" (อาจนับซ้ำถ้า
+        # front-face หลายชิ้นทับซ้อนกันเอง หรือคำนวณต่ำกว่าจริงถ้าแยกเป็นหลายชิ้นเล็กๆ) - พบว่า
+        # กรณี STEMA-A3 (teal) ที่เป็นกล่องแรกสุดในตู้ (ไม่มีอะไรบัง) มี front-face จริงชัดเจน
+        # (area=5994) ซ้อนทับกับ endcap-wall-shape candidate 64px จาก 215px (=30% ของพื้นที่
+        # ผนัง) แต่ threshold เดิม (50%) หลวมเกินไป ทำให้ front-face จริงนี้ถูกกรองทิ้งอย่าง
+        # ผิดพลาด (คิดว่าเป็นผนังเปล่า) - ทำให้กล่อง teal หายไปจากคอลัมน์ที่นับได้ตั้งแต่ต้น
+        # FIX: ใช้ union coverage (พิกเซล-ระดับ ไม่นับซ้ำ) แทนการรวม interval ตรงๆ เพื่อความ
+        # แม่นยำสูงสุด (ถึงแม้ในกรณีนี้ผลจะไม่ต่างจากเดิมมากนัก แต่ปลอดภัยกว่าในกรณีทั่วไป)
+        gspan = int(cx1 - cx0)
+        covered = [False] * max(1, gspan)
         for f in genuine_fronts:
             fx0, fx1 = f['x'], f['x'] + f['w']
-            inter = max(0.0, min(cx1, fx1) - max(cx0, fx0))
-            covered_width += inter
-        coverage_frac = min(1.0, covered_width / max(1e-6, cx1 - cx0))
-        if coverage_frac <= _ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE:
+            ov0 = max(cx0, fx0); ov1 = min(cx1, fx1)
+            for px in range(int(max(cx0, ov0)), int(min(cx1, ov1))):
+                idx = px - int(cx0)
+                if 0 <= idx < gspan:
+                    covered[idx] = True
+        coverage_frac = sum(covered) / max(1, gspan)
+        # v25.46 FIX (สำคัญ - พบจริงจาก AB01-02): เดิมใช้แค่เกณฑ์ coverage_frac (สัดส่วนพื้นที่)
+        # เพียงอย่างเดียว - พบว่ากรณี STEMA-A3 (teal, กล่องแรกสุดในตู้ที่มองเห็นได้เต็มรูปแบบ
+        # area=5994) ซ้อนทับกับ endcap-candidate แค่ 30% ของพื้นที่ผนัง (ต่ำกว่า threshold เดิม
+        # 50%) ทำให้ยังถูกกรองทิ้งอย่างผิดพลาด ทั้งที่ front-face ขนาดใหญ่ขนาดนี้ (ไม่ใช่เศษเล็ก
+        # 1200-2000px ที่พบทั่วไป) คือหลักฐานหนักแน่นว่ามีกล่องจริงเต็มใบอยู่ตรงนั้น ไม่ใช่ผนัง
+        # เปล่า - FIX: เพิ่มเงื่อนไข OR - ถ้ามี genuine front-face เดี่ยวที่มี area สูงมาก
+        # (>= _ENDCAP_WALL_SIGNIFICANT_FRONT_AREA) ซ้อนทับกับ candidate แม้แต่ชิ้นเดียว (ไม่ว่า
+        # coverage% จะเท่าไหร่) ให้ปฏิเสธ endcap ทันที - เป็นเงื่อนไขเสริมที่เข้มงวดกว่าเดิม
+        # (ไม่ได้ผ่อนปรน) จึงไม่กระทบไฟล์ที่ endcap ถูกต้องอยู่แล้ว (เช่น EA10) เพราะเงื่อนไขเดิม
+        # (coverage_frac) ยังคงทำงานควบคู่กันแบบ AND ไม่ใช่แทนที่
+        has_significant_front = any(
+            f['area'] >= _ENDCAP_WALL_SIGNIFICANT_FRONT_AREA
+            and max(0.0, min(cx1, f['x'] + f['w']) - max(cx0, f['x'])) > 0
+            for f in genuine_fronts)
+        if coverage_frac <= _ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE and not has_significant_front:
             candidates.append(cand)
     if not candidates:
         return None
@@ -2089,6 +2117,161 @@ def _p1b_roof_extent(cells):
     return x0, x1
 
 
+# v25.46 NEW: "Orphaned Roof Detection" (หลังคาที่ไม่มีคอลัมน์ front-face รองรับ) - ตามที่ผู้ใช้
+# ยืนยันด้วยภาพจริง AC04-03: พบว่ากล่อง SNPR-AT (เทาม่วง) และ SHP1A-F2 (ส้ม) ในภาพ FRONT ถูกกอง
+# NTC1A-F1/F2 (เขียวทีล, แถวหลัง) ที่สูงกว่ามากบดบัง front-face จนเหลือน้อยเกินไป (area เพียง
+# 1966px และ 1251px ตามลำดับ - ต่ำกว่า/ใกล้เคียง area_min=1200 มาก) ทำให้ทั้ง 2 ตำแหน่งไม่ถูกนับ
+# เป็นคอลัมน์เลยในผลลัพธ์สุดท้าย ทั้งที่มองเห็น "หลังคา" (roof) ของทั้งคู่ชัดเจนในภาพ (พื้นที่
+# roof ใหญ่กว่า front-face มาก เพราะมุมกล้อง isometric ทำให้หลังคาโผล่พ้นขึ้นมาเต็มรูปแบบ แม้
+# ตัวกล่องจะถูกบังเกือบหมดก็ตาม)
+#
+# ROOT CAUSE: หลังคา (roof) คือหลักฐานที่เชื่อถือได้กว่า front-face ในกรณีที่กล่องถูกบังเกือบมิด
+# เพราะรูปทรงสี่เหลี่ยมขนมเปียกปูนของหลังคาไม่ได้ถูกบังในแนวนอน (x) เท่ากับ front-face (ซึ่งถูก
+# บังในแนวตั้ง y จากกล่องแถวหลังที่สูงกว่า) - จึงสามารถใช้ตำแหน่ง x ของ roof เป็นหลักฐานสร้าง
+# คอลัมน์ synthetic ขึ้นมาได้ แม้ front-face จะไม่พอจะนับเป็นคอลัมน์ปกติก็ตาม
+#
+# วิธีตรวจจับ (ทำงาน "หลังจาก" ได้คอลัมน์สุดท้ายจาก merge_corner + roof-overlap-merge แล้ว แต่
+# "ก่อน" reconcile_with_back เพื่อให้ synthetic column ที่เพิ่มเข้ามาถูกนำไป reconcile กับ BACK
+# ตามปกติ ไม่ต้องเขียน logic คู่ขนานแยกต่างหาก): สำหรับแต่ละ 'roof' ที่มีอยู่ในภาพ - ตรวจสอบว่า
+# x-range ของมันถูกคอลัมน์ front-face ที่มีอยู่แล้ว "ครอบคลุม" (cover) มากพอหรือไม่ (เทียบสัดส่วน
+# ความกว้างของ roof ที่ทับซ้อนกับคอลัมน์ใดๆ) - ถ้าความครอบคลุมต่ำกว่า threshold (บ่งชี้ว่า roof
+# นี้ "ไม่มีตัวแทน" ในคอลัมน์ที่นับไปแล้วเลย) ให้จัดกลุ่ม roof ที่ตำแหน่งใกล้เคียงกัน (ของสีเดียว
+# กัน หรือคนละสีที่ x-range ทับซ้อนกันมาก - เผื่อกรณีหลายกล่องซ้อนกันในแนวลึกที่ตำแหน่งเดียวกัน
+# เหมือน SNPR-AT+SHP1A-F2 ในภาพจริง) แล้วสร้างคอลัมน์ synthetic ขึ้นจาก union bbox ของกลุ่มนั้น
+#
+# Guard สำคัญ (ป้องกัน false-positive): กำหนด min_roof_area (กันเศษ noise เล็กๆ ที่ไม่ใช่หลังคา
+# กล่องจริง) และ max_coverage_frac (ถ้า roof ถูกคอลัมน์ที่มีอยู่ครอบคลุมมากพอแล้ว แสดงว่านับไป
+# แล้วจริง ไม่ต้องสร้างคอลัมน์ใหม่ซ้ำซ้อน)
+_ORPHANED_ROOF_MIN_AREA = 4000  # ต้องมีพื้นที่ใหญ่พอจึงเชื่อว่าเป็นหลังคากล่องจริง (ไม่ใช่ noise)
+_ORPHANED_ROOF_MAX_COVERAGE = 0.3  # ถ้าคอลัมน์ที่มีอยู่ครอบคลุม roof นี้เกิน 30% แล้ว ถือว่า
+# "มีตัวแทนอยู่แล้ว" ไม่ต้องสร้าง synthetic column ซ้ำ (ยืนยันจาก AC04-03: roof ของกล่องที่นับ
+# ไปแล้วปกติ (front-face ใหญ่) มักถูกคอลัมน์ตัวเองครอบคลุม >=80-100% อยู่แล้ว ต่างจากกรณี orphan
+# ที่ coverage=0% เพราะไม่มีคอลัมน์ front-face ใดๆ ในตำแหน่งนั้นเลย)
+_ORPHANED_ROOF_GROUP_XOVERLAP = 0.5  # เกณฑ์ x-overlap สำหรับจัดกลุ่ม roof หลายชิ้นที่ตำแหน่ง
+# เดียวกัน (เช่น SNPR-AT+SHP1A-F2 ซ้อนกันในแนวลึกที่ตำแหน่งความยาวเดียวกัน) ให้เป็น 1 synthetic
+# column เดียว - หมายเหตุ: parameter นี้เหลืออยู่เพื่อความเข้ากันได้ของ signature เดิม แต่ไม่ได้
+# ใช้งานจริงแล้วในเวอร์ชันนี้ (ดู docstring ในฟังก์ชันสำหรับเหตุผล - การจัดกลุ่มซ้ำซ้อนที่เคยใช้
+# parameter นี้ถูกตัดออกไปแล้วเพราะพบ bug จริง)
+
+
+def _p1b_find_orphaned_roof_columns(existing_cols, all_cells,
+                                     min_area=_ORPHANED_ROOF_MIN_AREA,
+                                     max_coverage=_ORPHANED_ROOF_MAX_COVERAGE,
+                                     group_xoverlap=_ORPHANED_ROOF_GROUP_XOVERLAP):
+    """v25.46 NEW: หา 'roof' ที่ไม่มีคอลัมน์ front-face ใดๆ ครอบคลุมเพียงพอ (orphaned roof) แล้ว
+    สร้างคอลัมน์ synthetic ขึ้นจากกลุ่ม roof ที่ตำแหน่งใกล้เคียงกัน - คืนค่า list ของคอลัมน์ใหม่
+    (โครงสร้างเดียวกับ cols ปกติ: x,y,w,h,cx,cy,members) พร้อม flag 'from_orphaned_roof'=True
+    เพื่อให้ debug/ตรวจสอบย้อนหลังได้ง่าย - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล"""
+    # v25.46 FIX (สำคัญ - พบระหว่างทดสอบ AB01-02 regression): เดิมไม่กรองสีโครงสร้างตู้ (เช่น
+    # พื้นตู้ 255,255,133) ออกจาก roof candidates เลย ทำให้ 'พื้นตู้ที่มองเห็นได้กว้าง' (บริเวณ
+    # ที่บรรทุกเบาบาง) ถูกเข้าใจผิดเป็น orphaned roof (สร้างคอลัมน์ปลอมขึ้นมา ทั้งที่ไม่ใช่กล่อง
+    # สินค้าเลย) - FIX: กรองสีโครงสร้างตู้ที่ทราบแน่ชัดออกก่อน (ใช้ตัวตรวจสอบเดียวกับที่ใช้กรอง
+    # front-face structural-color อยู่แล้วใน _p1b_front_faces เพื่อความสอดคล้องกันทั้งระบบ)
+    roofs = [c for c in all_cells if c['kind'] == 'roof' and c['area'] >= min_area
+             and not _p1b_is_structural_container_color(c['color'])]
+    if not roofs:
+        return []
+
+    # v25.46 FIX (สำคัญ - พบระหว่างทดสอบ AB01-02 regression): กล่องที่สูงมากมักมี 'หลังคา'
+    # ถูกตัดเป็นหลายชิ้นต่อเนื่องกัน (เช่น TPR1A-AO purple มี roof 3 ชิ้นทอดยาว x=(1303,1455),
+    # (1373,1525), (1461,1614)) - ชิ้นที่อยู่ใกล้คอลัมน์ front-face จริง (เช่น ชิ้นสุดท้ายที่ x
+    # ตรงกับคอลัมน์ cx=1502.5 ที่มีอยู่แล้ว) จะผ่านเกณฑ์ coverage ปกติ แต่ชิ้นก่อนหน้าที่ทอดยาว
+    # ออกไป (x=1303-1455) ไม่ทับซ้อนกับคอลัมน์นั้นโดยตรง (ห่างกันแค่ไม่กี่ px) ทำให้ถูกเข้าใจผิด
+    # ว่าเป็น orphaned roof ทั้งที่เป็นหลังคาต่อเนื่องของกล่องเดียวกันจริง (roof ชิ้นนี้ทับซ้อนกับ
+    # roof ชิ้นถัดไปเอง 82px - ยืนยันว่าเป็นแนวต่อเนื่องเดียวกัน ไม่ใช่กล่องคนละใบ)
+    # FIX: ก่อนเช็ค coverage กับคอลัมน์ ให้รวมกลุ่ม roof สีเดียวกันที่ x-range ทับซ้อน/ต่อเนื่อง
+    # กันเข้าด้วยกันก่อน (union-find) แล้วเช็ค coverage จาก x-range ของทั้งกลุ่ม (ไม่ใช่แค่ roof
+    # ชิ้นเดียว) - ถ้ากลุ่มนั้นมีชิ้นใดชิ้นหนึ่งที่คอลัมน์ front-face จริงครอบคลุมมากพอ ให้ถือว่า
+    # ทั้งกลุ่ม (รวมชิ้นที่ทอดยาวออกไป) "มีตัวแทนแล้ว" เช่นกัน
+    n_roofs = len(roofs)
+    roof_parent = list(range(n_roofs))
+
+    def rfind(x):
+        while roof_parent[x] != x:
+            roof_parent[x] = roof_parent[roof_parent[x]]
+            x = roof_parent[x]
+        return x
+
+    def runion(a, b):
+        ra, rb = rfind(a), rfind(b)
+        if ra != rb:
+            roof_parent[ra] = rb
+
+    for i in range(n_roofs):
+        for j in range(i + 1, n_roofs):
+            if roofs[i]['color'] != roofs[j]['color']:
+                continue
+            a0, a1 = roofs[i]['x'], roofs[i]['x'] + roofs[i]['w']
+            b0, b1 = roofs[j]['x'], roofs[j]['x'] + roofs[j]['w']
+            if min(a1, b1) - max(a0, b0) > 0:  # ทับซ้อนกันจริง (ไม่ใช่แค่ใกล้กัน)
+                runion(i, j)
+
+    roof_groups = {}
+    for i in range(n_roofs):
+        roof_groups.setdefault(rfind(i), []).append(i)
+
+    orphaned_groups = []
+    for group_idxs in roof_groups.values():
+        group_roofs = [roofs[i] for i in group_idxs]
+        gx0 = min(r['x'] for r in group_roofs)
+        gx1 = max(r['x'] + r['w'] for r in group_roofs)
+        # v25.46 FIX (สำคัญ - พบ bug จริงระหว่างทดสอบ AB01-02): เดิมเช็ค coverage ทีละคอลัมน์
+        # แล้วเอาค่ามากสุด (max) เป็นตัวตัดสิน - พบว่ากล่องที่สูงมาก (เช่น TPR1A-AO purple) อาจมี
+        # front-face ถูกแบ่งเป็นหลายคอลัมน์แยกกัน (คนละ x-range) ที่แต่ละคอลัมน์เดี่ยวๆ ครอบคลุม
+        # roof ได้แค่บางส่วน (28%, 21%) ไม่ถึง threshold แยกกัน แต่เมื่อรวมกันจริง (union ของ
+        # ทั้ง 2 คอลัมน์) ครอบคลุมได้ถึง 49% ซึ่งเกิน threshold แล้ว - การใช้ max ทีละคอลัมน์ทำให้
+        # เข้าใจผิดว่า 'ไม่มีตัวแทน' ทั้งที่มีตัวแทนอยู่แล้วจริง (แค่กระจายอยู่หลายคอลัมน์)
+        # FIX: คำนวณ 'union coverage' จากทุกคอลัมน์สีเดียวกันรวมกัน (สร้าง boolean array แทน
+        # แต่ละพิกเซลใน x-range ของกลุ่ม แล้วนับว่าพิกเซลใดถูกคอลัมน์ใดคอลัมน์หนึ่งครอบคลุมบ้าง -
+        # ป้องกันการนับซ้ำถ้าคอลัมน์ทับซ้อนกันเอง)
+        gspan = int(gx1 - gx0)
+        covered = [False] * max(1, gspan)
+        for col in existing_cols:
+            # v25.46 FIX (สำคัญ - พบระหว่างทดสอบ AC04-03): เดิมเช็ค coverage กับ "ทุกคอลัมน์"
+            # โดยไม่สนใจสี ทำให้ roof สีส้ม (SHP1A-F2) ที่ x-range บังเอิญทับซ้อนกับคอลัมน์สีเขียว
+            # ทีล (NTC1A, แถวหลัง คนละกล่องกันจริง) เกิน threshold ถูกเข้าใจผิดว่า "มีตัวแทนแล้ว"
+            # ทั้งที่คอลัมน์เขียวทีลนั้นไม่ใช่ตัวแทนของกล่องส้มเลย - FIX: ต้องมีสมาชิกอย่างน้อย
+            # 1 ชิ้นในคอลัมน์นั้นที่ "สีเดียวกับ roof" ก่อน จึงจะนับ coverage จากคอลัมน์นั้นได้
+            # (สอดคล้องกับหลักการเดิมทั้งหมดของระบบที่ยึดสีเป็นตัวระบุตัวตนกล่อง)
+            if not any(m['color'] == group_roofs[0]['color'] for m in col.get('members', [])):
+                continue
+            cx0, cx1 = col['x'], col['x'] + col['w']
+            ov0 = max(gx0, cx0); ov1 = min(gx1, cx1)
+            for px in range(int(max(gx0, ov0)), int(min(gx1, ov1))):
+                idx = px - int(gx0)
+                if 0 <= idx < gspan:
+                    covered[idx] = True
+        cov = sum(covered) / max(1, gspan)
+        if cov < max_coverage:
+            orphaned_groups.append(group_roofs)
+
+    if not orphaned_groups:
+        return []
+
+    # v25.46 FIX (สำคัญ - พบ bug จริงระหว่างทดสอบ AB01-02): เดิมหลังได้ orphaned roof (flat
+    # list) มาแล้ว มีการจัดกลุ่มซ้ำเป็นครั้งที่ 2 ด้วยเกณฑ์ x-overlap แบบ "สัดส่วนต่อความกว้างที่
+    # แคบกว่า" (group_xoverlap=0.5) - พบว่าเกณฑ์นี้เข้มกว่าการจัดกลุ่มในขั้นตอนแรก (ซึ่งใช้แค่
+    # 'ทับซ้อนกันจริง (>0)' ของ roof สีเดียวกัน) ทำให้กลุ่ม TPR1A-AO (purple) 3 ชิ้นที่รวมกันแล้ว
+    # อย่างถูกต้องในขั้นตอนแรก (ทับซ้อนต่อเนื่องกันจริง 82px และ 64px) กลับถูกแยกออกเป็น 2 กลุ่ม
+    # อีกครั้งในขั้นตอนที่ 2 (เพราะ roof แต่ละชิ้นกว้างถึง ~150px ทำให้ overlap-ratio ต่ำกว่า 0.5
+    # ทั้งที่ทับซ้อนกันจริงในเชิงพิกเซล) สร้างคอลัมน์ synthetic ปลอมซ้ำซ้อนกับคอลัมน์ purple ที่มี
+    # อยู่แล้ว (regression: FRONT เพิ่มจาก 7 เป็น 8 คอลัมน์ผิดพลาด)
+    # FIX: ตัดขั้นตอนการจัดกลุ่มซ้ำซ้อนนี้ทิ้งทั้งหมด - ใช้ roof_groups ที่ได้จากขั้นตอนแรก
+    # (ซึ่งจัดกลุ่มถูกต้องแล้วด้วยเงื่อนไข 'ทับซ้อนกันจริง' ของ roof สีเดียวกัน) สร้างคอลัมน์
+    # synthetic โดยตรงจากแต่ละกลุ่มที่ผ่านเกณฑ์ orphaned (ไม่ต้อง group_xoverlap parameter อีก
+    # ต่อไป - คงพารามิเตอร์นี้ไว้ใน signature เพื่อความเข้ากันได้แต่ไม่ใช้งานแล้ว)
+    new_cols = []
+    for group_roofs in orphaned_groups:
+        x0 = min(m['x'] for m in group_roofs)
+        y0 = min(m['y'] for m in group_roofs)
+        x1 = max(m['x'] + m['w'] for m in group_roofs)
+        y1 = max(m['y'] + m['h'] for m in group_roofs)
+        new_cols.append(dict(x=x0, y=y0, w=x1 - x0, h=y1 - y0,
+                              cx=(x0 + x1) / 2, cy=(y0 + y1) / 2,
+                              members=group_roofs, from_orphaned_roof=True))
+    return new_cols
+
+
 # v25.35 NEW: กฎ "overlapping-roof merge" ตามที่ผู้ใช้สอน (ยืนยันด้วยภาพจริง EC16 ที่ mark X):
 # "ตามกฎ FRONT view ตำแหน่ง idx นั้นๆ หากมี top-face (roof) มากกว่า 1 ชิ้น ให้นับเป็น idx เดียว
 # ที่ตำแหน่งตรงนั้น" - หลักฐานที่ยืนยัน: EC16 FRONT มีหลังคา 2 ชิ้น (เขียว x=(1336,1542) และ
@@ -2475,6 +2658,15 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_cols, dropped_back = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
         print(f"[P1B] BACK after drop_side_wall: {len(back_cols)} cols "
               f"(dropped {len(dropped_back)}), cx={[round(c['cx'],1) for c in back_cols]}")
+        # v25.46 NEW: เพิ่มคอลัมน์ synthetic จาก 'หลังคาที่ไม่มี front-face รองรับ' (orphaned
+        # roof) - ตามที่ผู้ใช้ยืนยันด้วยภาพจริง AC04-03 (ดู docstring เต็มที่
+        # _p1b_find_orphaned_roof_columns) ทำงานทั้ง 2 view เพื่อความสมมาตร (แม้ AC04-03 จะพบ
+        # ปัญหาแค่ฝั่ง FRONT แต่ในไฟล์อื่นอาจเกิดฝั่ง BACK ได้เช่นกัน)
+        back_orphaned = _p1b_find_orphaned_roof_columns(back_cols, back_all)
+        if back_orphaned:
+            print(f"[P1B] BACK orphaned-roof columns found: {len(back_orphaned)}, "
+                  f"cx={[round(c['cx'],1) for c in back_orphaned]}")
+            back_cols = sorted(back_cols + back_orphaned, key=lambda c: c['cx'])
         back_extent = _p1b_roof_extent(back_all)
         if not back_cols:
             return {"front": None, "back": None}
@@ -2497,6 +2689,14 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after roof-overlap merge: {len(front_cols_raw)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols_raw]}, "
               f"n_roof_merges={n_roof_merges}")
+        # v25.46 NEW: เพิ่มคอลัมน์ synthetic จาก 'หลังคาที่ไม่มี front-face รองรับ' (orphaned
+        # roof) ก่อนเข้าสู่ reconcile_with_back - ให้ synthetic column ถูกนำไปจับคู่กับ BACK
+        # ตามกระบวนการปกติ (ดู docstring เต็มที่ _p1b_find_orphaned_roof_columns)
+        front_orphaned = _p1b_find_orphaned_roof_columns(front_cols_raw, front_all)
+        if front_orphaned:
+            print(f"[P1B] FRONT orphaned-roof columns found: {len(front_orphaned)}, "
+                  f"cx={[round(c['cx'],1) for c in front_orphaned]}")
+            front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
@@ -4058,8 +4258,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.45",
-            "benchmarkMode": "v25_45_snapshot_best_overlap_wins_crossview_reconcile",
+            "checkerVersion": "V25.46",
+            "benchmarkMode": "v25_46_orphaned_roof_detection_and_endcap_significant_front_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
