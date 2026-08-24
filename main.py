@@ -1150,7 +1150,40 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
     # v25.14 FIX (Bug#6): เดิมตรวจ rail นี้เฉพาะ path fallback (seam-based) เท่านั้น ไม่ได้ตรวจ
     # เมื่อมาจาก override_cols (PHASE 1B) เลย ทั้งที่ corner-artifact ทางเรขาคณิตเป็นปัญหาของ
     # "ภาพ/มุมกล้อง" ไม่ใช่ปัญหาเฉพาะวิธีนับ - ย้ายมาตรวจเป็น common code ให้ครบทั้ง 2 path เสมอ
-    if xrange_ is not None and seams:
+    #
+    # v25.38 FIX (Critical - พบจริงจากการใช้งานจริงของผู้ใช้ v25.37): เดิม (v25.14) บังคับตรวจ
+    # rail-based check นี้ทั้ง 2 path เสมอ โดยอ้างเหตุผลว่า "corner-artifact เป็นปัญหาของภาพ/
+    # มุมกล้อง ไม่ใช่ปัญหาเฉพาะวิธีนับ" - แต่พบจริงจาก 4 ไฟล์ที่ผู้ใช้รายงาน (AB01-02, AB03-04,
+    # AB04-02, AC04-03) ว่า idx0 (คอลัมน์แรกสุด/หัวตู้) ที่มาจาก override_cols (PHASE 1B) ถูก
+    # ตรวจพบเป็น idx0_is_corner_duplicate=True ผิดพลาด (false-positive) ทั้งที่เป็นกล่องจริง 1 ใบ
+    # ที่ถูกต้องแล้ว (ยืนยันด้วยภาพจริง: AB01-02 FRONT idx0 คือกองกล่องแดง+เขียว SES1A-A3/SHP1A
+    # ที่เตี้ยกว่ากอง STEMB (idx1) อย่างชัดเจน 36.3% - เกินเกณฑ์ STEP_DOWN_RISK 20% มาก แต่ risk
+    # ไม่ถูกตรวจพบเพราะ detect_step_down_pairwise ข้าม record ที่ is_corner_duplicate=True เสมอ)
+    # ROOT CAUSE: rail-based check นี้ใช้ 'ตำแหน่งที่เส้นขอบพื้นตู้ (floor rail) เริ่มปรากฏชัดเจน
+    # พอจะ trace ได้' (corner_x) เทียบกับขอบซ้ายของคอลัมน์แรก (x_min_) - เดิมออกแบบมาสำหรับกรณีที่
+    # seam-based counting (ก่อน PHASE 1B) แตกคอลัมน์ผิดจากมุมกล้องใกล้สุด ซึ่งมักทำให้ rail เริ่ม
+    # ปรากฏช้ากว่าตำแหน่งจริงมาก - แต่ไฟล์ที่บรรทุกหนาแน่นมาก (Unused Floor น้อย เช่น AB01-02 มี
+    # แค่ 9.4in) จะมีพื้นตู้โผล่ให้เห็นน้อยมากหรือไม่มีเลย ทำให้เส้น rail ที่ trace ได้ (แม้จะมี
+    # n_inliers สูงและ resid_std ต่ำ ดูน่าเชื่อถือทางสถิติ) อาจไม่ใช่ 'ขอบพื้นตู้จริงบริเวณกล่องแรก'
+    # แต่เป็นเส้นที่ fit ได้บังเอิญจากจุดอื่นในภาพที่มี slope ใกล้เคียงกัน (ยืนยันจาก AB01-02:
+    # corner_x=751 ซึ่ง 'เลยจุด first_seam=703 ไปแล้ว' - หมายความว่าตำแหน่งที่อ้างว่าเป็น 'ขอบ
+    # ของ corner artifact ในคอลัมน์แรก' อยู่เลยขอบเขตคอลัมน์แรกไปแล้วจริง จึงเป็นไปไม่ได้ทาง
+    # ตรรกะที่จะเป็นหลักฐานของ corner-duplicate ภายในคอลัมน์แรกนั้นเอง)
+    # นอกจากนี้ PHASE 1B (override_cols) มีกลไกตรวจ+รวม corner-duplicate ของตัวเองอยู่แล้ว
+    # (_p1b_merge_corner_artifact_columns ที่ใช้หลักฐาน 'side' fragment ซ้อนทับ ไม่ใช่ rail
+    # geometry) ซึ่งผ่านการ regression-test มาแล้วหลายไฟล์โดยเฉพาะ - ตรงกับที่ comment เดิมของ
+    # v25.11 ด้านบน (บรรทัด "เพราะ merge เอา fragment ปลอมออกไปตั้งแต่ต้นเลย จึงไม่มี phantom
+    # record เหลือให้ต้อง flag is_corner_duplicate อีกต่อไป") ระบุไว้อยู่แล้วว่าไม่จำเป็นต้องใช้
+    # rail-check นี้ซ้ำอีกเมื่อมาจาก PHASE 1B
+    # FIX: จำกัดให้ rail-based check นี้ทำงานเฉพาะ path fallback (seam-based, override_cols is
+    # None) เท่านั้น กลับไปเป็นพฤติกรรมก่อน v25.14 Bug#6 - เพราะ PHASE 1B มีกลไกของตัวเองที่
+    # แม่นยำกว่าและตรวจสอบแล้วอยู่แล้ว ไม่ต้องพึ่ง rail-geometry ซ้ำซ้อน
+    # ข้อจำกัดที่ต้องบอกตรงไปตรงมา: ไม่มีไฟล์ AC03-01 (ที่เคยใช้ validate v25.14 Bug#6) ให้ทดสอบ
+    # ยืนยันซ้ำในรอบนี้ - แต่ประเมินความเสี่ยงแล้วว่าปลอดภัยกว่า เพราะ (1) PHASE 1B's merge_
+    # corner_artifact_columns เป็นกลไกที่ออกแบบมาเฉพาะสำหรับปัญหานี้และ regression-test มาแล้ว
+    # หลายไฟล์ (AC03-01 รวมอยู่ในนั้นด้วยตั้งแต่ v25.11) (2) หลักฐาน false-positive จากรอบนี้มาจาก
+    # การใช้งานจริง 4 ไฟล์ที่ผู้ใช้ยืนยันแล้วว่าเป็นปัญหาจริง ไม่ใช่แค่การเดา
+    if override_cols is None and xrange_ is not None and seams:
         x_min_, x_max_ = xrange_
         rail_for_corner = detect_container_floor_rail(region, cargo_bottom_y, grounded)
         if rail_for_corner is not None:
@@ -3695,8 +3728,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.37",
-            "benchmarkMode": "v25_37_restore_grouped_action_report",
+            "checkerVersion": "V25.38",
+            "benchmarkMode": "v25_38_fix_head_corner_false_positive_stepdown",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
