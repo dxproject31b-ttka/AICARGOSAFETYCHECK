@@ -1554,12 +1554,42 @@ _STRUCTURAL_CONTAINER_COLORS = [
 _STRUCTURAL_COLOR_TOL = 12
 
 
+# v25.39 NEW (สำคัญ - พบจริงจากไฟล์ AC03-01 ที่ผู้ใช้ขอให้ทดสอบเพิ่มเติมหลัง v25.38): เดิม
+# ตรวจสีโครงสร้างตู้ด้วยรายการสีตายตัว (exact-match list + tolerance=12) - พบว่าไฟล์ AC03-01 มี
+# ผนังปลายตู้ (endcap wall จริง ยืนยันด้วยภาพ) ที่ใช้สี (227,227,114) ซึ่งต่างจากทุกสีใน
+# catalog เดิมเกิน tolerance (diff สูงสุด 24 เทียบ tolerance=12) ทำให้หลุดรอดการกรอง กลายเป็น
+# คอลัมน์ front-face ปลอมแทรกกลางแถว (FRONT นับได้ 11 แทนที่จะเป็น 10 กล่องจริง -> reconcile
+# กับ BACK=7 เหลือ 8 แทนที่จะเป็น 7 ที่ถูกต้อง)
+# ROOT CAUSE ที่แท้จริง: สีโครงสร้างตู้ทุกสีที่เคย catalog ไว้ (รวมสีใหม่นี้ด้วย) มี "รูปแบบ hue"
+# ร่วมกันชัดเจน คือ R≈G เสมอ (โทนน้ำตาล/ทอง ไม่ใช่สีสดแบบกล่องสินค้า) และ R-B อยู่ในช่วงแคบๆ
+# (วัดได้จริง 80-122 จากสีที่ catalog ไว้ทั้งหมด) - ตรวจสอบยืนยันด้วยสี 'front'-kind ทั้งหมด 16 สี
+# ที่พบจริงข้าม 11 ไฟล์ทดสอบ พบว่ามีแค่ 3 สีที่เข้า pattern นี้ (178,178,89)/(227,227,114)/
+# (255,255,175) และทั้ง 3 สีเป็นสีโครงสร้างตู้จริงทั้งหมด (2 ใน 3 ตรงกับ/ใกล้เคียง catalog เดิม
+# มาก - ไม่มี false-positive กับสีกล่องสินค้าเลยแม้แต่สีเดียว รวมถึง (128,128,0) ซึ่งเป็นสีกล่อง
+# จริง (STEMB) ที่ R-B=128 เกินขอบเขตบนพอดี (125) จึงไม่ถูกจับผิดพลาด)
+# FIX: เพิ่มการตรวจจับด้วย pattern (hue-based) เป็นชั้นที่ 2 ต่อจาก exact-match list เดิม - ถ้า
+# สีใดตรง exact-list เดิม (คงไว้ทุกประการ ไม่กระทบ) หรือเข้า pattern ใหม่นี้ ก็ถือเป็นสีโครงสร้าง
+# ตู้ทั้งคู่ (union ของ 2 เงื่อนไข ไม่ใช่แทนที่กัน - ปลอดภัยกว่าเพราะยังคงพฤติกรรมเดิมสำหรับสีที่
+# เคย verify ไว้แล้ว และเพิ่มการครอบคลุมสีใหม่ที่มี hue เดียวกันแต่ค่าต่างออกไปเล็กน้อย)
+_STRUCTURAL_HUE_RG_MAX_DIFF = 8     # R และ G ต้องใกล้เคียงกันมาก (โทนน้ำตาล/ทอง ไม่ใช่สีสด)
+_STRUCTURAL_HUE_RB_MIN = 75          # R-B ขั้นต่ำ (กันสีที่ B สูงใกล้ R เช่นสีเทา/ขาว)
+_STRUCTURAL_HUE_RB_MAX = 125         # R-B ขั้นสูง (กันสีเหลือง/มะกอกเข้มที่เป็นสีกล่องจริง เช่น
+# (128,128,0) ที่ R-B=128 เกินขอบเขตนี้ไปเล็กน้อยพอดี - ยืนยันด้วยข้อมูลจริงจาก AB01-02/AC02-02)
+
+
 def _p1b_is_structural_container_color(color):
-    """True ถ้าสีนี้ตรงกับสีโครงสร้างตู้ที่ทราบแน่ชัด (ไม่ใช่สีกล่องสินค้า) - ดู docstring เต็ม
-    ด้านบน _STRUCTURAL_CONTAINER_COLORS"""
+    """True ถ้าสีนี้ตรงกับสีโครงสร้างตู้ที่ทราบแน่ชัด (ไม่ใช่สีกล่องสินค้า) - ตรวจ 2 ชั้น:
+    (1) exact-match list เดิม (ดู docstring _STRUCTURAL_CONTAINER_COLORS)
+    (2) pattern เชิง hue ใหม่ (v25.39 - ดู docstring ด้านบน) สำหรับสีโครงสร้างที่ต่างเฉดเล็กน้อย
+    จากรายการเดิมแต่ยังเป็นโทนน้ำตาล/ทองแบบเดียวกัน"""
     for sc in _STRUCTURAL_CONTAINER_COLORS:
         if all(abs(int(color[i]) - sc[i]) <= _STRUCTURAL_COLOR_TOL for i in range(3)):
             return True
+    r, g, b = int(color[0]), int(color[1]), int(color[2])
+    rg_diff = abs(r - g)
+    rb_diff = r - b
+    if rg_diff <= _STRUCTURAL_HUE_RG_MAX_DIFF and _STRUCTURAL_HUE_RB_MIN <= rb_diff <= _STRUCTURAL_HUE_RB_MAX:
+        return True
     return False
 
 
@@ -3728,8 +3758,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.38",
-            "benchmarkMode": "v25_38_fix_head_corner_false_positive_stepdown",
+            "checkerVersion": "V25.39",
+            "benchmarkMode": "v25_39_hue_pattern_structural_color_detection",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
