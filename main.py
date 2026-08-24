@@ -3657,23 +3657,62 @@ def reconcile_heights_cross_view(records_front, records_back,
         rec_a["height_source"] = "cross_view_filled"
         corrections.append((rec_a["view"], rec_a["idx"], None, best_match["height_px"]))
 
+    # v25.45 NEW (สำคัญ - พบจริงจาก AB01-02 ที่ผู้ใช้ทดสอบ v25.44 แล้วพบว่า teal/purple ยัง
+    # ไม่มี risk marker): เดิม PASS2 เขียนทับ height_px ของ record ที่ "แพ้" ทันทีระหว่างวนลูป
+    # (sequential mutation) - พบว่าเมื่อ record ฝั่งหนึ่ง (เช่น BACK idx0) มี pos_range กว้างผิด
+    # สัดส่วน (เพราะ FRONT span=576px กับ BACK span=462px ต่างกัน ~25% - เกิดจากการที่แต่ละ view
+    # ถูก crop/render แยกกันคนละภาพ คนละ pixel-scale โดยธรรมชาติ ไม่ใช่บั๊กจากการคำนวณ extent
+    # ที่แก้ไขได้ตรงๆ) จนไปทับซ้อน (overlap>min_overlap_ratio) กับ FRONT record 2 ตัวพร้อมกัน
+    # (F5 overlap=0.70, F6 overlap=1.00) - ระบบประมวลผล F5 ก่อน (index น้อยกว่า) แล้ว "ชนะ" แก้ไข
+    # BACK idx0 ไปก่อน จากนั้น F6 (ซึ่งควรเป็นคู่ที่แท้จริงกว่ามาก เพราะ overlap=1.00 หมายถึง
+    # pos_range ของ F6 อยู่ในขอบเขตของ BACK idx0 เต็มรูปแบบ) กลับมาประมวลผลทีหลัง แล้วได้รับค่าที่
+    # BACK idx0 "ปนเปื้อน" จาก F5 ไปแล้ว (292.9) แทนที่จะเห็นค่าดั้งเดิมจริงของ BACK idx0 (335.8)
+    # ทำให้ F6 (purple, TPR1A-AO) ถูกตั้งเป็น 292.9 (เท่ากับ F5/teal พอดี) ซ่อน step-down risk ที่
+    # แท้จริง (ค่าจริงของ F6 คือ 213.7 apex_fallback ซึ่งต่างจาก F5's 292.9 ถึง 27% - เกิน
+    # threshold 20% ควรตรวจพบ STEP_DOWN_RISK แต่กลับไม่พบเพราะถูกปนเปื้อนไปก่อน)
+    # ROOT CAUSE ที่แท้จริง: การประมวลผลแบบ "sequential, เขียนทับทันที" ทำให้ผลลัพธ์ขึ้นกับ
+    # "ลำดับการประมวลผล" (order-dependent) ซึ่งไม่ควรเป็นเช่นนั้น - record ที่มี overlap สูงกว่า
+    # (หลักฐานที่น่าเชื่อถือกว่า) ควรชนะเสมอ ไม่ว่าจะถูกประมวลผลก่อนหรือหลัง
+    # ได้ทดสอบ "Method 1" (normalize extent ให้ FRONT/BACK อ้างอิงขอบเขตเดียวกัน) ตามที่ผู้ใช้
+    # เสนอก่อนแล้ว พบว่าไม่สามารถแก้ปัญหาได้จริง เพราะ FRONT/BACK เป็นภาพคนละใบที่ crop/render
+    # แยกจาก PDF คนละพิกัด คนละ pixel-scale โดยสิ้นเชิง (ยืนยันด้วยข้อมูลจริง: แม้แต่ column-based
+    # extent จาก PHASE 1B เอง - cols_x_min/cols_x_max - ก็ยังต่างกันมากกว่าเดิม 28.6% เทียบกับ
+    # floor-union extent เดิมที่ต่าง 24.7% - แสดงว่าปัญหาไม่ได้อยู่ที่วิธีคำนวณ extent แต่อยู่ที่
+    # ธรรมชาติของการ render 2 ภาพแยกกัน ซึ่งไม่มีทาง "union" พิกัดข้าม coordinate system ได้ตรงๆ)
+    # FIX ที่ใช้จริง (ปลอดภัยกว่ามาก เพราะไม่แตะ pos_range ที่ใช้ร่วมกับฟังก์ชันอื่น เช่น
+    # detect_step_down_crossview/_rearmost_record/REAR_EMPTY_RISK เลย - ขอบเขตการแก้ไขจำกัดอยู่
+    # แค่ภายในฟังก์ชันนี้เท่านั้น): เปลี่ยนจาก "ประมวลผลแล้วเขียนทับทันที" เป็น "snapshot ค่าเดิม
+    # ทั้งหมดก่อน (ป้องกันการปนเปื้อนข้ามกันระหว่างการตัดสินใจ) รวบรวมข้อเสนอการแก้ไขทั้งหมดจาก
+    # ทุกคู่ที่เข้าเกณฑ์ก่อน แล้วเมื่อมีหลายคู่แข่งกันแก้ไข target เดียวกัน ให้ 'คู่ที่มี overlap
+    # ratio สูงสุด' ชนะเสมอ (ไม่ใช่คู่ที่ประมวลผลก่อน) แล้วค่อย apply การแก้ไขทั้งหมดพร้อมกันในตอน
+    # ท้าย - ยืนยันด้วยข้อมูลจริงว่าแก้ปัญหา AB01-02 ได้ตรงจุด (F6 ชนะ F5 ในการแก้ไข BACK idx0
+    # ตามที่ควรจะเป็น เพราะ overlap 1.00 > 0.70) โดยไม่กระทบ logic เดิมของกรณีอื่นๆ ที่ไม่มีการ
+    # แข่งขัน (ผลลัพธ์เหมือนเดิมทุกประการเมื่อมีแค่ 1 คู่ต่อ target)
+    snapshot = {}
+    for rec_list in (records_front, records_back):
+        for r in rec_list:
+            snapshot[id(r)] = (r["height_px"], r.get("height_source", "direct"))
+
+    proposals = {}  # id(target) -> (overlap_ratio, target_ref, new_value, correction_tuple)
+
     for rec_a, records_b in [(r, records_back) for r in records_front] + \
                             [(r, records_front) for r in records_back]:
-        if rec_a.get("is_corner_duplicate") or rec_a["height_px"] is None:
+        if rec_a.get("is_corner_duplicate") or snapshot[id(rec_a)][0] is None:
             continue
         best_match, best_overlap = None, 0.0
         for rec_b in records_b:
             ov = _overlap_ratio(rec_a["pos_range"], rec_b["pos_range"])
             if ov > best_overlap:
                 best_overlap, best_match = ov, rec_b
-        if best_match is None or best_overlap < min_overlap_ratio or best_match["height_px"] is None:
+        if best_match is None or best_overlap < min_overlap_ratio or snapshot[id(best_match)][0] is None:
             continue
-        h_a, h_b = rec_a["height_px"], best_match["height_px"]
+        h_a, a_src = snapshot[id(rec_a)]
+        h_b, b_src = snapshot[id(best_match)]
         higher = max(h_a, h_b)
         if higher <= 0 or abs(h_a - h_b) / higher <= conflict_ratio:
             continue
-        a_reliable = rec_a.get("height_source", "direct") in ("direct", "cross_view_filled")
-        b_reliable = best_match.get("height_source", "direct") in ("direct", "cross_view_filled")
+        a_reliable = a_src in ("direct", "cross_view_filled")
+        b_reliable = b_src in ("direct", "cross_view_filled")
         if a_reliable and not b_reliable:
             trust_a = True
         elif b_reliable and not a_reliable:
@@ -3699,13 +3738,17 @@ def reconcile_heights_cross_view(records_front, records_back,
             else:
                 continue  # ทั้ง 2 ค่าผิดกฎกายภาพ - ปลอดภัยที่สุดคือไม่แก้ไขอะไรเลย
         if trust_a:
-            best_match["height_px"] = h_a
-            best_match["height_source"] = "cross_view_corrected"
-            corrections.append((best_match["view"], best_match["idx"], h_b, h_a))
+            correction = (best_match["view"], best_match["idx"], h_b, h_a)
         else:
-            rec_a["height_px"] = h_b
-            rec_a["height_source"] = "cross_view_corrected"
-            corrections.append((rec_a["view"], rec_a["idx"], h_a, h_b))
+            correction = (rec_a["view"], rec_a["idx"], h_a, h_b)
+        key = id(target)
+        if key not in proposals or best_overlap > proposals[key][0]:
+            proposals[key] = (best_overlap, target, value, correction)
+
+    for _overlap, target, value, correction in proposals.values():
+        target["height_px"] = value
+        target["height_source"] = "cross_view_corrected"
+        corrections.append(correction)
     return corrections
 
 
@@ -4015,8 +4058,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.44",
-            "benchmarkMode": "v25_44_endcap_genuine_coverage_and_max3color_cluster_cap",
+            "checkerVersion": "V25.45",
+            "benchmarkMode": "v25_45_snapshot_best_overlap_wins_crossview_reconcile",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
