@@ -3388,10 +3388,113 @@ def detect_step_down_crossview(records_front, records_back):
     return list(merged.values())
 
 
+# v25.40 NEW (สำคัญ - "Physical Validity Guard" ตามที่ผู้ใช้สอน): เดิม reconcile_heights_
+# cross_view (บรรทัด trust_a = h_a >= h_b) เลือก "เชื่อค่าที่สูงกว่าเสมอ" เมื่อทั้ง 2 ฝั่ง
+# reliable เท่ากัน (both direct) โดยไม่ตรวจสอบว่าค่าที่เลือกนั้น "เป็นไปได้ทางกายภาพ" หรือไม่
+# พบจริงจาก AC05-04 (ไฟล์ที่ผู้ใช้แนบ + สอนเทคนิค "ลากเส้น 2400mm เทียบกับเส้นแต่ละ idx"):
+# idx3 (DITHE-AF เขียวสด รวมกับ ATFBA-AJ น้ำเงินที่ cluster ผิดพลาด) ถูก "แก้ไข" ให้มีความสูง
+# 351.3px ทั้งที่ความสูงตู้จริง ณ ตำแหน่งนั้น (วัดจาก roofline fit จริง 308 จุด, resid_std=
+# 0.35px) มีแค่ 354.3px - คิดเป็น 99.2% ของความสูงตู้ทั้งหมด (ควรเป็นไปไม่ได้ทางกายภาพ เพราะ
+# กล่องสินค้าจริงต้องเตี้ยกว่าเพดานตู้เสมอ ไม่มีทางสูงชนเพดานพอดี)
+# เทคนิคตรวจสอบ (ตามที่ผู้ใช้สอน, ยืนยันด้วยข้อมูลจริง 2 ไฟล์ AB01-02 และ AC05-04):
+# "ลากเส้นจากพื้นตู้ (local_floor_y) ขึ้นไปถึงเพดานตู้ (roofline) ที่ตำแหน่ง x เดียวกับกล่อง
+# แต่ละ idx - ต้องไม่มีเส้นความสูงกล่องใด ยาวเท่ากับเส้นเพดานตู้เต็มความสูง" - วัด baseline
+# จาก AB01-02 (ไฟล์ปกติ ไม่มีปัญหา) ได้ค่าสูงสุด 97.0% เป็นค่าที่ "ปกติที่สุดที่เคยพบ" จึงตั้ง
+# threshold ที่ 97% (สูงกว่านี้ถือว่าผิดปกติ/ไม่น่าเชื่อถือทางกายภาพ)
+# FIX: ก่อนยอมรับค่าที่ "แก้ไขข้าม view" (ทั้ง cross_view_filled และ cross_view_corrected)
+# ตรวจสอบว่าค่าที่จะใช้ทำให้สัดส่วน (height / local_container_height ที่ตำแหน่ง x ของ record
+# นั้น) เกิน PHYSICAL_VALIDITY_MAX_RATIO หรือไม่ - ถ้าเกิน ให้ปฏิเสธการแก้ไขนั้น (คงค่าเดิม
+# ของ rec_a ไว้แทน ถ้ามี, หรือข้ามการเติมค่านั้นไปเลยถ้าเป็น PASS1/fill) เพื่อความปลอดภัย
+# ไม่กระทบไฟล์อื่น: การตรวจสอบนี้ทำงาน "เสริม" (additional guard) ไม่ได้แทนที่ logic เดิม -
+# ถ้า local roofline หาไม่ได้ (เช่น region ไม่มีสีผนังตู้ที่ชัดเจนพอ) จะข้ามการตรวจสอบไปเลย
+# (fail-safe: ใช้ logic เดิมทั้งหมดเหมือนก่อน v25.40)
+PHYSICAL_VALIDITY_MAX_RATIO = 0.97
+_ROOFLINE_WALL_COLOR = (179, 179, 90)  # สีแผงผนังตู้ (wall panel) - ใช้ fit roofline
+_ROOFLINE_WALL_COLOR_TOL = 15
+_ROOFLINE_MIN_RUN_PX = 15  # ต้องมีแนวตั้งต่อเนื่องอย่างน้อยเท่านี้ จึงนับเป็นจุด roofline
+# ที่เชื่อถือได้ (กันจุดเล็กๆ ที่เป็นเงา/ขอบกล่องบังเอิญมีสีใกล้เคียงผนังตู้)
+_ROOFLINE_MIN_POINTS = 5  # ต้องมีจุดที่เชื่อถือได้อย่างน้อยเท่านี้ จึง fit เส้นได้
+
+
+def _compute_local_roofline_fit(region, wall_color=_ROOFLINE_WALL_COLOR,
+                                 tol=_ROOFLINE_WALL_COLOR_TOL, min_run=_ROOFLINE_MIN_RUN_PX,
+                                 min_points=_ROOFLINE_MIN_POINTS):
+    """v25.40 NEW: fit เส้นตรง (slope, intercept) ของ 'roofline' (ขอบบนสุดของผนังตู้/เพดานตู้)
+    จากจุดที่มองเห็นสีผนังตู้ (wall panel, 179,179,90) ต่อเนื่องอย่างน้อย min_run พิกเซลในแต่ละ
+    คอลัมน์ x ของภาพ - ยืนยันด้วยข้อมูลจริง AC05-04: ได้ resid_std=0.35px จาก 308 จุด (แม่นยำสูง
+    มาก เพราะ container เป็น isometric ทำให้เพดานตู้เป็นเส้นตรงเป๊ะ) คืนค่า (slope, intercept)
+    หรือ None ถ้าหาจุดที่เชื่อถือได้ไม่พอ (fail-safe - ผู้เรียกใช้ต้องรับมือกับ None)"""
+    r = region[:, :, 0].astype(int)
+    g = region[:, :, 1].astype(int)
+    b = region[:, :, 2].astype(int)
+    wall_mask = (np.abs(r - wall_color[0]) < tol) & (np.abs(g - wall_color[1]) < tol) & \
+                (np.abs(b - wall_color[2]) < tol)
+    xs_pts, ys_pts = [], []
+    for x in range(region.shape[1]):
+        col = np.nonzero(wall_mask[:, x])[0]
+        if len(col) >= min_run:
+            top = col.min()
+            # ตรวจสอบว่า min_run พิกเซลแรกต่อเนื่องกันจริง (ไม่ใช่แค่กระจัดกระจายบังเอิญ)
+            seg = col[col < top + min_run * 2]
+            if len(seg) >= min_run:
+                xs_pts.append(x)
+                ys_pts.append(top)
+    if len(xs_pts) < min_points:
+        return None
+    xs_arr = np.array(xs_pts, dtype=float)
+    ys_arr = np.array(ys_pts, dtype=float)
+    A = np.vstack([xs_arr, np.ones_like(xs_arr)]).T
+    slope, intercept = np.linalg.lstsq(A, ys_arr, rcond=None)[0]
+    return float(slope), float(intercept)
+
+
+def _max_physical_height_at_x(roofline_fit, local_floor_y, x):
+    """v25.40 NEW: คำนวณ 'ความสูงตู้จริงสูงสุด' ณ ตำแหน่ง x ใดๆ (จาก roofline ถึง local floor)
+    คืนค่า None ถ้าคำนวณไม่ได้ (roofline_fit เป็น None หรือ floor_y ที่ตำแหน่งนั้นไม่ valid)"""
+    if roofline_fit is None:
+        return None
+    if x < 0 or x >= len(local_floor_y):
+        return None
+    fy = local_floor_y[x]
+    if fy < 0:
+        return None
+    slope, intercept = roofline_fit
+    roof_y = slope * x + intercept
+    h = fy - roof_y
+    return h if h > 0 else None
+
+
 def reconcile_heights_cross_view(records_front, records_back,
-                                  min_overlap_ratio=0.5, conflict_ratio=0.10):
+                                  min_overlap_ratio=0.5, conflict_ratio=0.10,
+                                  front_result=None, back_result=None):
     """เทียบความสูงของกล่องตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK - ข้าม record ที่
-    is_corner_duplicate=True เสมอ PASS1: เติมค่า None จาก cross-view PASS2: แก้ความขัดแย้ง"""
+    is_corner_duplicate=True เสมอ PASS1: เติมค่า None จาก cross-view PASS2: แก้ความขัดแย้ง
+
+    v25.40 NEW: รับ front_result/back_result (view_result เต็มจาก process_view_with_height_
+    on_image) เพิ่มเติม (optional - ถ้าไม่ส่งมา จะทำงานเหมือนเดิมทุกประการไม่มี guard เลย เพื่อ
+    ความปลอดภัยของโค้ดที่เรียกฟังก์ชันนี้แบบเก่า) ใช้คำนวณ 'Physical Validity Guard' - ดู
+    docstring เต็มด้านบน PHYSICAL_VALIDITY_MAX_RATIO สำหรับหลักฐาน+เหตุผล (ยืนยันจาก AC05-04
+    ตามเทคนิคที่ผู้ใช้สอน: ลากเส้นเทียบความสูงกล่องกับความสูงตู้จริง ต้องไม่มี idx ใดเท่ากับ
+    ความสูงเต็มตู้)"""
+    roofline_front = (_compute_local_roofline_fit(front_result["region"])
+                       if front_result is not None else None)
+    roofline_back = (_compute_local_roofline_fit(back_result["region"])
+                      if back_result is not None else None)
+
+    def _violates_physical_validity(rec, height_value):
+        """True ถ้า height_value ทำให้สัดส่วนเทียบความสูงตู้จริง ณ ตำแหน่ง x กึ่งกลางของ rec
+        เกิน PHYSICAL_VALIDITY_MAX_RATIO - คืน False (ไม่ปฏิเสธ) ถ้าคำนวณไม่ได้ (fail-safe)"""
+        view_result = front_result if rec["view"] == "FRONT" else back_result
+        roofline_fit = roofline_front if rec["view"] == "FRONT" else roofline_back
+        if view_result is None or roofline_fit is None:
+            return False
+        x0, x1 = rec["x_range"]
+        xm = (x0 + x1) // 2
+        max_h = _max_physical_height_at_x(roofline_fit, view_result["local_floor_y"], xm)
+        if max_h is None:
+            return False
+        return (height_value / max_h) > PHYSICAL_VALIDITY_MAX_RATIO
+
     def _overlap_ratio(a, b):
         a0, a1 = a; b0, b1 = b
         inter = max(0.0, min(a1, b1) - max(a0, b0))
@@ -3414,6 +3517,9 @@ def reconcile_heights_cross_view(records_front, records_back,
             if ov > best_overlap:
                 best_overlap, best_match = ov, rec_b
         if best_match is None or best_overlap < min_overlap_ratio:
+            continue
+        # v25.40 NEW: Physical Validity Guard - ปฏิเสธการเติมค่าถ้าทำให้สูงเกินตู้จริง
+        if _violates_physical_validity(rec_a, best_match["height_px"]):
             continue
         rec_a["height_px"] = best_match["height_px"]
         rec_a["height_source"] = "cross_view_filled"
@@ -3442,6 +3548,24 @@ def reconcile_heights_cross_view(records_front, records_back,
             trust_a = False
         else:
             trust_a = h_a >= h_b
+        # v25.40 NEW: Physical Validity Guard - ก่อนเลือกใช้ค่าใด ตรวจสอบว่าค่านั้นไม่เกิน
+        # ความสูงตู้จริง ณ ตำแหน่งของ 'เป้าหมายที่จะถูกเขียนทับ' (ไม่ใช่ตำแหน่งของแหล่งอ้างอิง
+        # เพราะ x_range ของทั้งคู่อาจต่างกันเล็กน้อยจากการ reconcile คนละ view) - ถ้าค่าที่เลือก
+        # ไว้ (ตาม trust_a) ผิดกฎกายภาพ ให้ลองสลับไปใช้อีกฝั่งแทน (ถ้าฝั่งนั้นผ่านเกณฑ์) หรือ
+        # ข้ามการแก้ไขนี้ไปเลยถ้าทั้งคู่ผิดกฎ (ปลอดภัยที่สุด - คงค่าเดิมไว้)
+        if trust_a:
+            target, value = best_match, h_a
+        else:
+            target, value = rec_a, h_b
+        if _violates_physical_validity(target, value):
+            # ค่าที่เลือกไว้ผิดกฎกายภาพ - ลองอีกฝั่ง (ค่าที่ต่ำกว่า มักจะสมเหตุสมผลกว่า)
+            alt_target = rec_a if trust_a else best_match
+            alt_value = h_b if trust_a else h_a
+            if not _violates_physical_validity(alt_target, alt_value):
+                target, value = alt_target, alt_value
+                trust_a = not trust_a
+            else:
+                continue  # ทั้ง 2 ค่าผิดกฎกายภาพ - ปลอดภัยที่สุดคือไม่แก้ไขอะไรเลย
         if trust_a:
             best_match["height_px"] = h_a
             best_match["height_source"] = "cross_view_corrected"
@@ -3593,7 +3717,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     records_back = build_stack_records(back, "BACK")
 
     # ลำดับการแก้ไข height: 1) direct 2) cross_view_filled/corrected 3) carried_forward
-    reconcile_heights_cross_view(records_front, records_back)
+    reconcile_heights_cross_view(records_front, records_back,
+                                  front_result=front, back_result=back)
     fill_missing_heights(sorted(records_front, key=lambda r: r["idx"]))
     fill_missing_heights(sorted(records_back, key=lambda r: r["idx"]))
     for records, view_result in [(records_front, front), (records_back, back)]:
@@ -3758,8 +3883,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.39",
-            "benchmarkMode": "v25_39_hue_pattern_structural_color_detection",
+            "checkerVersion": "V25.40",
+            "benchmarkMode": "v25_40_physical_validity_guard_cross_view_height",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
