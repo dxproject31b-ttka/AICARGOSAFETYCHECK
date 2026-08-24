@@ -1507,8 +1507,118 @@ def _p1b_filter_side_slivers(fronts, width_ratio_thresh=0.5, gap_max=5, x_overla
     return kept, dropped
 
 
+# v25.31 NEW: สีโครงสร้างตู้ (floor tile / wall panel / rear-wall) ที่พบซ้ำๆ ในทุกไฟล์ตัวอย่าง
+# (ไม่ใช่สีของกล่องสินค้า/SKU ใดๆ - เป็นสีคงที่ที่ซอฟต์แวร์วาดไดอะแกรมใช้แทนพื้น/ผนัง/หลังคาตู้
+# เสมอ) ยืนยันจาก EC16: ทั้ง 16 'side' fragment ที่พบมีสีตรงกับรายการนี้ 100% ไม่มี fragment
+# ไหนเป็นสีกล่องจริงเลยแม้แต่ชิ้นเดียว - ตรงกับที่ CONTAINER_RAIL_COLOR (203,203,101) ด้านบนของ
+# ไฟล์ระบุไว้แล้วว่าเป็นสีขอบตู้ และ docstring เดิมของ v25.13 ก็เคยระบุ (178,178,89) เป็นสีหลังคา
+_STRUCTURAL_CONTAINER_COLORS = [
+    (203, 203, 101),  # ขอบฐานตู้ (rail) - ตรงกับ CONTAINER_RAIL_COLOR
+    (179, 179, 90),   # แผงผนังตู้ (wall panel)
+    (255, 255, 133),  # พื้นตู้ (floor tile)
+    (255, 255, 175),  # ผนังหลัง/หลังคาตู้ (rear wall / roof)
+]
+_STRUCTURAL_COLOR_TOL = 12
+
+
+def _p1b_is_structural_container_color(color):
+    """True ถ้าสีนี้ตรงกับสีโครงสร้างตู้ที่ทราบแน่ชัด (ไม่ใช่สีกล่องสินค้า) - ดู docstring เต็ม
+    ด้านบน _STRUCTURAL_CONTAINER_COLORS"""
+    for sc in _STRUCTURAL_CONTAINER_COLORS:
+        if all(abs(int(color[i]) - sc[i]) <= _STRUCTURAL_COLOR_TOL for i in range(3)):
+            return True
+    return False
+
+
+# v25.36 NEW: "endcap wall" (ผนังปลายหัวตู้/ท้ายตู้ - ภาพตัดขวางแสดงกล่องหลายใบซ้อนแนวตั้งที่
+# ปลายสุดของตู้ ไม่ใช่แถวซ้ำของ idx จริง) ตามที่ผู้ใช้สอน (ยืนยันด้วยภาพจริง EA10 BACK) - เดิมตรวจ
+# จับด้วยรายชื่อสีเฉพาะ (_STRUCTURAL_CONTAINER_COLORS) แต่พบว่าผนังปลายตู้ในบางไฟล์ใช้สีที่ไม่ตรง
+# กับรายการนี้เป๊ะ (เช่น EA10/EC01-02/04 BACK ใช้สี (255,255,147) ซึ่งห่างจาก (255,255,133) ที่มี
+# อยู่แล้วถึง 14 (เกิน tolerance=12 ไปเล็กน้อย) ทำให้หลุดรอดการตรวจจับ)
+# ROOT CAUSE ที่แท้จริง (ยืนยันด้วยข้อมูลจริงข้าม 5 ไฟล์): ผนังปลายตู้นี้ถูกซอฟต์แวร์วาดไดอะแกรม
+# เรนเดอร์ด้วย "สัดส่วนกว้าง/สูงคงที่เสมอ" (w/h ratio) ไม่ว่าจะเป็นไฟล์ไหนหรือสีอะไร เพราะมันคือ
+# ภาพตัดขวางของหน้าตัดตู้ (ความกว้าง 2400mm x ความสูงตู้) ที่ render ด้วย isometric scale เดียวกัน
+# เสมอ - วัดได้จริงจากทั้ง 5 ไฟล์ทดสอบ: w/h = 0.577-0.578 คงที่มาก (EA10/EC01-02/04 BACK:
+# w=215,h=372,ratio=0.578 | EC16/EB01 FRONT: w=213,h=369,ratio=0.577) ต่างจาก 'side' ประเภทอื่น
+# อย่างชัดเจน (แผงผนังรางแคบ: ratio~1.38 | พื้นกระเบื้อง: ratio~1.99 - ทั้งคู่ 'กว้างกว่าสูง' ตรง
+# ข้ามกับผนังปลายตู้ที่ 'สูงกว่ากว้าง' เสมอ)
+# FIX: ตรวจจับด้วยรูปทรง (aspect ratio) แทนสีเฉพาะเจาะจง - รองรับผนังปลายตู้ทุกสีตามที่ผู้ใช้ระบุ
+_ENDCAP_WALL_RATIO_TARGET = 0.577  # อัตราส่วน w/h เฉลี่ยที่วัดได้จริงจาก 5 ไฟล์
+_ENDCAP_WALL_RATIO_TOL = 0.08      # ยอมรับส่วนเบี่ยงเบน ±0.08 (ครอบคลุม 0.497-0.657) กันความ
+# คลาดเคลื่อนเล็กน้อยจากการ render/crop แต่ยังห่างไกลจาก ratio ของ 'side' ประเภทอื่น (1.38, 1.99)
+# มากพอที่จะไม่มีทางปนกันโดยบังเอิญ
+_ENDCAP_WALL_MIN_AREA = 20000  # ต้องมีพื้นที่ใหญ่พอ (กันเศษชิ้นเล็กที่บังเอิญมีสัดส่วนใกล้เคียง)
+
+
+def _p1b_is_endcap_wall_shape(w, h, area=None):
+    """True ถ้า fragment นี้มีรูปทรง (w/h ratio) ตรงกับ 'ผนังปลายหัวตู้/ท้ายตู้' ตามที่วัดได้จริง
+    (ไม่ขึ้นกับสี) - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล"""
+    if h <= 0:
+        return False
+    if area is not None and area < _ENDCAP_WALL_MIN_AREA:
+        return False
+    ratio = w / h
+    return abs(ratio - _ENDCAP_WALL_RATIO_TARGET) <= _ENDCAP_WALL_RATIO_TOL
+
+
+def _p1b_find_endcap_wall_span(all_cells):
+    """หา x-range ของ 'ผนังปลายตู้' (endcap wall) ในภาพนี้ ถ้ามี - คืนค่า (x0,x1) ของ 'side'
+    fragment ที่ตรงรูปทรงผนังปลายตู้ (ดู _p1b_is_endcap_wall_shape) หรือ None ถ้าไม่พบ
+    ถ้าพบมากกว่า 1 ชิ้น ใช้ชิ้นที่ใหญ่ที่สุด (พื้นที่มากสุด) เป็นตัวแทน"""
+    sides = [c for c in all_cells if c['kind'] == 'side']
+    candidates = [c for c in sides
+                  if _p1b_is_endcap_wall_shape(c['w'], c['h'], c.get('area', c['w'] * c['h']))]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda c: c['w'] * c['h'])
+    return best['x'], best['x'] + best['w']
+
+
 def _p1b_front_faces(crop, area_min=1200):
     cells = _p1b_classify_view(crop, area_min=area_min)
+    # v25.31 FIX (สำคัญ - พบเป็น side-effect จากการแก้ dedup ด้านล่าง): เดิม fragment สีโครงสร้าง
+    # ตู้ (เช่น ผนังหลัง/หลังคา 255,255,175) ที่บังเอิญมี aspect-ratio/saturation เข้าเกณฑ์ 'front'
+    # เคยถูก 'บังเอิญ' ลบทิ้งไปโดยกลไก duplicate-removal เดิม (เพราะ bbox ทับซ้อนกับกล่องสีอื่น
+    # โดยไม่เช็คสี) แต่เมื่อแก้ dedup ให้เช็คสีแล้ว (ดู docstring ด้านล่าง) fragment สีโครงสร้างนี้
+    # ไม่ถูกลบอีกต่อไป กลายเป็นคอลัมน์ปลอมใหม่ (ยืนยันจาก EC01-02: พบ fragment สี (255,255,175)
+    # รอดออกมาเป็นคอลัมน์เดี่ยวหลังแก้ dedup) - FIX: กรองสีโครงสร้างตู้ที่ทราบแน่ชัดออกจาก
+    # 'front' candidates ตั้งแต่ต้น ก่อนเข้าสู่ทุกขั้นตอนถัดไป (ปลอดภัย เพราะสีเหล่านี้ไม่ใช่สี
+    # กล่องสินค้าแน่นอน ไม่ว่าจะถูกจัดเป็น kind ใดก็ตาม)
+    cells = [c for c in cells
+             if not (c['kind'] == 'front' and _p1b_is_structural_container_color(c['color']))]
+    # v25.36 NEW (สำคัญ - พบจริงจาก EA10 BACK): กรอง front-face/roof ใดๆ ที่ x-range ทับซ้อนกับ
+    # 'ผนังปลายหัวตู้/ท้ายตู้' (endcap wall) ออกทั้งหมด - ผนังนี้คือภาพตัดขวางแสดงกล่องหลายใบซ้อน
+    # แนวตั้งที่ปลายสุดของตู้ (มองเห็นจากมุมกล้องที่ตรงกับปลายตู้พอดี) ไม่ใช่แถวซ้ำของ idx จริง
+    # ตามที่ผู้ใช้สอน - ยืนยันด้วยภาพจริง EA10: หลังคาสีแดง (roof, ไม่มี front-face คู่กันเลย) ที่
+    # ทับซ้อนกับผนังนี้ เคยถูกเข้าใจผิดว่าเป็น 'foreign roof / side-wall noise' แล้วไปกระตุ้นให้
+    # _p1b_drop_side_wall_contaminated_columns ตัดคอลัมน์ข้างเคียงอื่นทิ้งผิดพลาด (คนละคอลัมน์กับ
+    # ที่ควรตัดจริง) - การกรองออกตั้งแต่ต้นทางนี้ (ก่อนกลายเป็น front/roof candidate) ป้องกันปัญหา
+    # ทั้งสายที่อาจเกิดจากเศษของผนังนี้ได้ครบวงจร ไม่ใช่แค่จุดเดียว
+    # ดู _p1b_find_endcap_wall_span/_p1b_is_endcap_wall_shape สำหรับหลักฐาน+เหตุผลเต็ม (ตรวจจับ
+    # จากรูปทรง w/h ratio คงที่ ~0.577 แทนสีเฉพาะ - รองรับผนังปลายตู้ทุกสีตามที่ผู้ใช้ระบุ)
+    endcap_span = _p1b_find_endcap_wall_span(cells)
+    if endcap_span is not None:
+        ec_x0, ec_x1 = endcap_span
+
+        def _frac_of_candidate_inside_wall(c):
+            # v25.36 FIX (สำคัญ - พบ regression จริงจาก EB01): เดิมใช้ _p1b_x_overlap_frac_
+            # generic ซึ่งหารด้วย 'ความกว้างที่แคบกว่า' ของทั้งคู่ (ตาม docstring เดิมของฟังก์ชัน
+            # นั้นที่ออกแบบมาสำหรับ use-case อื่น) - ทำให้ roof ของกล่องจริงที่กว้างกว่าผนังปลายตู้
+            # มาก (เช่น EB01: roof กว้าง 326px เทียบกับผนังกว้างแค่ 213px) ถูกคำนวณ overlap
+            # fraction เทียบกับผนัง (ตัวหารเล็ก) แทนที่จะเทียบกับตัว roof เอง ทำให้ได้ค่าสูงเกินจริง
+            # (0.601 ทั้งที่จริงทับซ้อนแค่ 39% ของ roof เอง) จนถูกกรองทิ้งผิดพลาด กลายเป็น regression
+            # ที่ทำให้เหลือ roof แค่ 2 ชิ้น (เข้าเงื่อนไข 'exactly 2' ของ v25.35 โดยไม่ตั้งใจ) แล้ว
+            # ไปกระตุ้น roof-overlap-merge ยุบทุกคอลัมน์ผิดพลาด
+            # FIX: คำนวณ 'สัดส่วนของตัว fragment เอง (roof/front) ที่ตกอยู่ในเขตผนัง' โดยตรง (หาร
+            # ด้วยความกว้างของตัว fragment เองเสมอ ไม่ใช่ค่า min) - ความหมายที่ถูกต้องคือ 'fragment
+            # นี้เกือบทั้งชิ้นอยู่ในเขตผนังหรือไม่' ไม่ใช่ 'ผนังเกือบทั้งแผ่นถูกทับด้วย fragment นี้'
+            c_x0, c_x1 = c['x'], c['x'] + c['w']
+            inter = max(0.0, min(c_x1, ec_x1) - max(c_x0, ec_x0))
+            return inter / max(1e-6, c_x1 - c_x0)
+
+        cells = [c for c in cells
+                 if not (c['kind'] in ('front', 'roof')
+                         and _frac_of_candidate_inside_wall(c) >= 0.5)]
     fronts = [c for c in cells if c['kind'] == 'front']
     roofs = [c for c in cells if c['kind'] == 'roof']
     # v25.27 NEW: กรอง front-face ของกล่อง 'แถวใน' (inner-row, ซ้ำซ้อนกับขั้นบันไดหลังคา) ก่อน
@@ -1522,6 +1632,19 @@ def _p1b_front_faces(crop, area_min=1200):
     for c in fronts:
         dup = False
         for k in kept:
+            # v25.31 FIX (สำคัญ - พบจริงจาก EC16): เดิมตัดสิน 'duplicate' จากแค่ bbox overlap
+            # โดยไม่เช็คสีเลย - พบว่ากล่อง 2 ใบที่วางซ้อนกันจริง (คนละสี คนละใบ เช่น กล่องเขียว
+            # วางอยู่บนกล่องฟ้า) มี bbox ที่คาบเกี่ยวกันในแนวตั้ง (เพราะกล่องชนกันพอดี) ทำให้
+            # inter/min_area สูงเกิน 0.6 และถูกเข้าใจผิดว่าเป็น 'เศษซ้ำของกล่องเดียวกัน' (ทั้งที่
+            # ควรเป็น 'front' เดียวกันจริงถ้าเป็นกล่องใบเดียวที่ถูกตัวอักษร/เส้นแบ่งเป็นชิ้นๆ) ทำให้
+            # กล่องใบหนึ่งถูกลบทิ้งไปอย่างผิดพลาด (ยืนยันด้วยภาพจริง EC16: เขียว+ฟ้า เป็นกล่องคนละ
+            # ใบที่วางซ้อนกันจริง ratio ที่วัดได้=1.04 เกิน 0.6 มาก)
+            # FIX: ต้อง 'สีเดียวกัน' เท่านั้นจึงจะพิจารณาว่าเป็น duplicate (เพราะเศษที่แตกจาก
+            # กล่องใบเดียวกันจริงจากตัวอักษร/anti-aliasing จะคงสีเดิมเป๊ะเสมอ ต่างจากกล่องคนละใบ
+            # ที่มีสีต่างกันชัดเจน) - ไม่กระทบกรณีกล่องหลายสีซ้อนกันในคอลัมน์เดียวกันจริง (เช่น
+            # AC02-02/EC01-02) เพราะกรณีนั้นจัดการที่ขั้นตอน cluster_columns ซึ่งเป็นคนละหน้าที่
+            if c['color'] != k['color']:
+                continue
             ox0 = max(c['x'], k['x']); oy0 = max(c['y'], k['y'])
             ox1 = min(c['x'] + c['w'], k['x'] + k['w']); oy1 = min(c['y'] + c['h'], k['y'] + k['h'])
             inter = max(0, ox1 - ox0) * max(0, oy1 - oy0)
@@ -1553,22 +1676,55 @@ def _p1b_compute_adaptive_cx_tol(fronts, factor=0.4, fallback=45, floor_px=10):
     return max(floor_px, float(np.median(widths)) * factor)
 
 
+# v25.31 NEW: เกณฑ์ x-range overlap ขั้นต่ำ (เทียบกับความกว้างที่แคบกว่า) ที่ยอมรับว่า fragment
+# สีต่างกัน 2 ชิ้น อยู่ 'ตำแหน่งความยาวเดียวกันจริง' (genuine same-idx multi-color stack เช่น
+# กรณีที่ยืนยันแล้วจาก EC01-02: กล่องฟ้า(cyan)+แดง(red) มี x-range ทับซ้อนกันเกือบ 100% เพราะเป็น
+# กล่องคนละใบที่วางในตำแหน่งความยาวเดียวกันจริง ไม่ใช่บั๊ก) - ตั้งค่าสูง (0.7) เพราะต้องการแยกแยะ
+# จากกรณี "คอลัมน์ข้างเคียงที่บังเอิญมี cx ใกล้กัน" ซึ่งควร overlap ต่ำหรือไม่ overlap เลย
+CLUSTER_DIFF_COLOR_MIN_XOVERLAP = 0.7
+
+
 def _p1b_cluster_columns(fronts, cx_tol=45):
+    """v25.31 FIX (สำคัญ - พบจริงจาก EC01-02/04): เดิมจัดกลุ่มคอลัมน์ด้วยระยะห่างตำแหน่ง cx
+    (center-x) เพียงอย่างเดียว โดยไม่สนใจสีหรือ x-range ที่แท้จริงเลย - แม้ในทางปฏิบัติ cx_tol
+    (adaptive, ~40% ของความกว้างกล่องมัธยฐาน) จะเล็กพอที่จะไม่รวมคอลัมน์ข้างเคียงที่ไกลกันจริงเข้า
+    ด้วยกันโดยบังเอิญ (ระยะห่างจริงระหว่างคอลัมน์ ~2.5x ของ cx_tol ในไฟล์ทดสอบทั้งหมด) แต่ก็ยังมี
+    ความเสี่ยงเชิงทฤษฎีที่ fragment สีต่างกัน 2 ชิ้นซึ่ง "ไม่ได้อยู่ตำแหน่งความยาวเดียวกันจริง"
+    (ไม่ใช่ genuine stack) อาจบังเอิญมี cx ใกล้กันมากพอจนถูกรวมผิดคอลัมน์โดยไม่มีการตรวจสอบใดๆ เลย
+
+    FIX (ระมัดระวังไม่ทำลายกรณีถูกต้อง): เพิ่มเงื่อนไข - ถ้า fragment ที่จะรวมมีสีเดียวกับสมาชิก
+    ใดๆ ในคอลัมน์นั้นอยู่แล้ว ใช้เกณฑ์ cx_tol เดิม (พฤติกรรมเดิมทุกประการ ไม่กระทบ merge ของ
+    fragment สีเดียวกันที่ถูกตัวอักษร/เส้นแบ่งเป็นชิ้นๆ) - แต่ถ้าสีต่างจากสมาชิกทุกตัวในคอลัมน์
+    (หมายถึงกำลังจะรวมสีใหม่เข้าไป เช่น กรณี genuine multi-color-per-idx stack) ต้องผ่านเกณฑ์
+    เพิ่มเติม: x-range ของ fragment ต้องทับซ้อนกับ x-range ของคอลัมน์อย่างมาก (>=70% ของความกว้าง
+    ที่แคบกว่า) จึงจะยอมรับว่าเป็น 'ตำแหน่งความยาวเดียวกันจริง' (ยืนยันจาก EC01-02: cyan(903-1005)
+    กับ red(904-1009) overlap เกือบ 100% - ผ่านเกณฑ์นี้สบายๆ เพราะเป็นกรณีถูกต้องจริง) ถ้าไม่ผ่าน
+    เกณฑ์ x-overlap (เช่น คอลัมน์ข้างเคียงที่ไม่ทับซ้อนกันจริง เพียงแค่ cx บังเอิญใกล้กัน) จะไม่ถูก
+    รวมเข้าคอลัมน์เดิม แต่จะเปิดคอลัมน์ใหม่แทน (ปลอดภัยกว่าการรวมผิดคอลัมน์)"""
     fronts = sorted(fronts, key=lambda c: c['cx'])
     cols = []
     for c in fronts:
         placed = False
         for col in cols:
-            if abs(col['cx'] - c['cx']) <= cx_tol:
-                col['members'].append(c)
-                xs0 = min(col['x'], c['x']); ys0 = min(col['y'], c['y'])
-                xs1 = max(col['x'] + col['w'], c['x'] + c['w']); ys1 = max(col['y'] + col['h'], c['y'] + c['h'])
-                col['x'], col['y'] = xs0, ys0
-                col['w'], col['h'] = xs1 - xs0, ys1 - ys0
-                col['cx'] = (xs0 + xs1) / 2
-                col['cy'] = (ys0 + ys1) / 2
-                placed = True
-                break
+            if abs(col['cx'] - c['cx']) > cx_tol:
+                continue
+            same_color_member = any(m['color'] == c['color'] for m in col['members'])
+            if not same_color_member:
+                # สีใหม่ที่ไม่มีในคอลัมน์นี้เลย - ต้องพิสูจน์ด้วย x-range overlap ก่อนรวม
+                col_x0, col_x1 = col['x'], col['x'] + col['w']
+                c_x0, c_x1 = c['x'], c['x'] + c['w']
+                ov = _p1b_x_overlap_frac_generic(col_x0, col_x1, c_x0, c_x1)
+                if ov < CLUSTER_DIFF_COLOR_MIN_XOVERLAP:
+                    continue
+            col['members'].append(c)
+            xs0 = min(col['x'], c['x']); ys0 = min(col['y'], c['y'])
+            xs1 = max(col['x'] + col['w'], c['x'] + c['w']); ys1 = max(col['y'] + col['h'], c['y'] + c['h'])
+            col['x'], col['y'] = xs0, ys0
+            col['w'], col['h'] = xs1 - xs0, ys1 - ys0
+            col['cx'] = (xs0 + xs1) / 2
+            col['cy'] = (ys0 + ys1) / 2
+            placed = True
+            break
         if not placed:
             cols.append(dict(x=c['x'], y=c['y'], w=c['w'], h=c['h'],
                               cx=c['cx'], cy=c['cy'], members=[c]))
@@ -1587,12 +1743,25 @@ def _p1b_merge_corner_artifact_columns(cols, all_cells, side_overlap_ratio=0.5, 
     ใบเดียวกัน ให้เหลือคอลัมน์เดียว โดยใช้ 'side' fragment ที่ซ้อนทับเป็นหลักฐานวัดผลได้ พร้อม
     guard: ยอมรับเฉพาะ cluster ที่แตะขอบนอกสุดจริงของ view (index 0 หรือ n-1) เท่านั้น กัน
     false-positive จากไฟล์ที่เห็นด้านข้างของทุกกล่องตลอดทั้งแถว (ดู docstring เต็มในโมดูล
-    phase1_detect.py ต้นทาง สำหรับคำอธิบายละเอียด + ตัวอย่างข้อมูลจริงที่ยืนยันแล้ว)"""
+    phase1_detect.py ต้นทาง สำหรับคำอธิบายละเอียด + ตัวอย่างข้อมูลจริงที่ยืนยันแล้ว)
+
+    v25.31 FIX (สำคัญ - พบจริงจาก EC16): เดิมใช้ 'side'-kind fragment ทุกชิ้นเป็นหลักฐานเชื่อม
+    คอลัมน์ โดยไม่แยกแยะว่าเป็น "เศษด้านข้างของกล่องจริง" (corner-camera artifact ที่ควรใช้เป็น
+    หลักฐาน) หรือ "พื้น/ผนัง/หลังคาของตัวตู้เอง" (โครงสร้างคงที่ที่ไม่เกี่ยวกับกล่องเลย) - พบว่า
+    ไฟล์ที่บรรทุกเบาบาง (มีพื้นที่ว่างเยอะ ทำให้มองเห็นพื้น/ผนังตู้เป็นแถบกว้างต่อเนื่องยาวเกือบ
+    ตลอดความยาวตู้) ทำให้แถบพื้น/ผนังนี้ไป 'ทับซ้อน' (overlap>=50%) กับคอลัมน์ที่อยู่ห่างไกลกัน
+    หลายคอลัมน์พร้อมกัน กลายเป็นหลักฐานเท็จที่เชื่อมทุกคอลัมน์เข้าด้วยกันเป็น 1 คอลัมน์เดียว ทั้งที่
+    เป็นกล่องคนละใบจริง (ยืนยันจาก EC16: ทั้ง 16 side-fragment ที่ตรวจพบมีสีตรงกับสีโครงสร้างตู้
+    ที่ทราบแน่ชัด 100% ไม่มีชิ้นไหนเป็นสีกล่องเลย)
+    FIX: กรองสีโครงสร้างตู้ที่ทราบแน่ชัดออกจาก 'sides' ก่อนใช้เป็นหลักฐาน (ดู
+    _p1b_is_structural_container_color) - เหลือเฉพาะ 'side' fragment ที่เป็นสีกล่องจริงเท่านั้น
+    มาใช้เป็นหลักฐานเชื่อมคอลัมน์ตามเดิม (ไม่กระทบไฟล์ที่มี corner-artifact จริงจากสีกล่องเลย)"""
     n = len(cols)
     if n < 2:
         return list(cols), []
     cols = sorted(cols, key=lambda c: c['cx'])
-    sides = [c for c in all_cells if c['kind'] == 'side']
+    sides = [c for c in all_cells
+             if c['kind'] == 'side' and not _p1b_is_structural_container_color(c['color'])]
     parent = list(range(n))
 
     def find(x):
@@ -1774,13 +1943,151 @@ def _p1b_roof_extent(cells):
     return x0, x1
 
 
+# v25.35 NEW: กฎ "overlapping-roof merge" ตามที่ผู้ใช้สอน (ยืนยันด้วยภาพจริง EC16 ที่ mark X):
+# "ตามกฎ FRONT view ตำแหน่ง idx นั้นๆ หากมี top-face (roof) มากกว่า 1 ชิ้น ให้นับเป็น idx เดียว
+# ที่ตำแหน่งตรงนั้น" - หลักฐานที่ยืนยัน: EC16 FRONT มีหลังคา 2 ชิ้น (เขียว x=(1336,1542) และ
+# เหลือง x=(1443,1646)) ที่ x-range ทับซ้อนกันจริง 99px (ไม่ใช่แค่ใกล้กัน) - เมื่อรวม span ของ
+# หลังคาทั้ง 2 เป็นช่วงเดียว (x=1336-1646) พบว่าตรงกับ x-range ของ front-face fragment ทั้ง 5
+# ชิ้นที่ตรวจพบ (เขียว×2, ฟ้า, เหลือง×2) พอดี - ยืนยันว่าทั้งหมดนี้คือ "1 ตำแหน่งความยาวจริง"
+# (กองสีเขียว+ฟ้าที่สูงกว่า อยู่ 'แถวหลัง' ข้ามความกว้างตู้ ซ้อนทับกับกองเหลืองที่ 'แถวหน้า' ณ
+# ตำแหน่งความยาวเดียวกัน มุมมอง isometric ทำให้หลังคาทั้ง 2 กองปรากฏซ้อนทับกันในภาพ FRONT)
+# หมายเหตุสำคัญ: กฎนี้ใช้ "การซ้อนทับของหลังคา (roof)" เป็นหลักฐาน ไม่ใช่การซ้อนทับของสี/
+# front-face โดยตรง - เพราะหลังคาสะท้อนตำแหน่งจริงของกล่องในแนวลึก (ข้ามความกว้างตู้) ได้แม่นยำ
+# กว่า ไม่ปะปนกับกรณี "กล่องหลายสีซ้อนกันในคอลัมน์เดียวกันจริง" (เช่น AC02-02/EC01-02 ที่ front-
+# face สีต่างกันซ้อนทับกันแต่เป็นคนละ idx จริง - กรณีนั้นจัดการแยกต่างหากใน _p1b_cluster_columns
+# ด้วยเกณฑ์ x-overlap ของ front-face เอง ไม่เกี่ยวกับ roof)
+_ROOF_OVERLAP_MERGE_MIN_PX = 5  # ต้องทับซ้อนอย่างน้อยกี่ pixel จึงถือว่า 'ทับซ้อนจริง' (กันการ
+# นับพลาดจากการแตะขอบกันพอดีโดยบังเอิญ ซึ่งไม่ใช่การซ้อนทับจริง)
+
+
+def _p1b_group_overlapping_roofs(roofs, min_overlap_px=_ROOF_OVERLAP_MERGE_MIN_PX):
+    """จัดกลุ่ม 'roof' (top-face) ที่ x-range ทับซ้อนกันจริง (ไม่ว่าจะสีอะไร) เข้าด้วยกันแบบ
+    union-find (transitive - ถ้า A ทับ B และ B ทับ C ทั้ง 3 จะถูกจัดกลุ่มเดียวกัน แม้ A ไม่ทับ C
+    โดยตรง) คืนค่า list ของ (x0, x1) แทนแต่ละกลุ่มที่มี >= 2 roof ทับซ้อนกันจริง (กลุ่มที่มี roof
+    เดียวไม่ถือเป็นหลักฐานสำหรับ merge - ดู docstring _p1b_group_overlapping_roofs ผู้เรียกใช้)"""
+    n = len(roofs)
+    if n < 2:
+        return []
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a0, a1 = roofs[i]['x'], roofs[i]['x'] + roofs[i]['w']
+            b0, b1 = roofs[j]['x'], roofs[j]['x'] + roofs[j]['w']
+            overlap_px = max(0, min(a1, b1) - max(a0, b0))
+            if overlap_px >= min_overlap_px:
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        r = find(i)
+        groups.setdefault(r, []).append(i)
+
+    spans = []
+    for idxs in groups.values():
+        # v25.35 FIX (สำคัญ - พบ regression รุนแรงจาก EC01-02/04 ไฟล์บรรทุกเต็มคัน): เดิม
+        # ยอมรับกลุ่มที่มี roof ทับซ้อนกัน >=2 ชิ้นทั้งหมด ไม่จำกัดจำนวน - พบว่าไฟล์ที่บรรทุกเต็มคัน
+        # (กล่องเรียงชิดกันแน่นตลอดความยาวตู้) มีรูปแบบ 'หลังคาขั้นบันได' (roofline staircase)
+        # ตามธรรมชาติของมุมมอง isometric ที่ทำให้หลังคาของคอลัมน์ข้างเคียงทับซ้อนกันเล็กน้อยที่
+        # ขอบต่อเนื่องกันเป็น 'ลูกโซ่ยาว' ตลอดทั้งแถว (ยืนยันจาก EC01-02: หลังคา 11 ชิ้น ทับซ้อน
+        # กันต่อเนื่องจนกลายเป็น 1 กลุ่มเดียวครอบคลุมเกือบทั้งภาพ - ถ้า merge ตามนี้จะยุบทุกคอลัมน์
+        # เป็น 1 คอลัมน์เดียวผิดพลาดร้ายแรง) ต่างจาก EC16 ที่มีกรณี 'ตำแหน่งเดียวกัน ซ้อนกันจริง
+        # ตามความลึก' (2 แถวข้ามความกว้างตู้) ซึ่งเกิดขึ้นแบบ 'โดดเดี่ยว' (กลุ่มเล็กๆ ไม่ต่อเนื่อง
+        # เป็นลูกโซ่ยาวกับคอลัมน์อื่นๆ ทั้งแถว)
+        # FIX: จำกัดเฉพาะกลุ่มที่มี roof ทับซ้อนกันพอดี "2 ชิ้น" เท่านั้น (ไม่ใช่ >=2 แบบเดิม) -
+        # กลุ่มที่มี 3 ชิ้นขึ้นไปมักบ่งชี้ว่าเป็นลูกโซ่ต่อเนื่องตามธรรมชาติของภาพเต็มคัน ไม่ใช่
+        # หลักฐาน 'ซ้อนทับตำแหน่งเดียวกันจริง' ที่ผู้ใช้ต้องการให้ merge (ปลอดภัยกว่าเดิมมาก เพราะ
+        # กรณีจริงที่ต้องการ merge มักมีแค่ 2 แถว (หน้า+หลัง) ไม่ใช่หลายแถวพร้อมกัน)
+        if len(idxs) != 2:
+            continue
+        x0 = min(roofs[i]['x'] for i in idxs)
+        x1 = max(roofs[i]['x'] + roofs[i]['w'] for i in idxs)
+        spans.append((x0, x1))
+    return spans
+
+
+def _p1b_merge_columns_by_overlapping_roofs(cols, all_cells):
+    """v25.35 NEW: รวมคอลัมน์ (idx) ที่ตำแหน่ง x ตกอยู่ในช่วงที่มี 'หลังคาซ้อนทับกันจริง' (>=2
+    roof คนละสีที่ x-range ทับซ้อนกัน) ให้เหลือ 1 คอลัมน์เดียว - ดู docstring เต็มด้านบน
+    _ROOF_OVERLAP_MERGE_MIN_PX สำหรับหลักฐาน+เหตุผลตามที่ผู้ใช้สอน (ยืนยันจาก EC16)
+
+    คืนค่า (merged_cols, n_merges) - n_merges ใช้เป็นข้อมูลเสริมสำหรับ debug/log เท่านั้น"""
+    if len(cols) < 2:
+        return list(cols), 0
+    roofs = [c for c in all_cells if c['kind'] == 'roof']
+    roof_spans = _p1b_group_overlapping_roofs(roofs)
+    if not roof_spans:
+        return list(cols), 0
+
+    cols = sorted(cols, key=lambda c: c['cx'])
+    n = len(cols)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    n_merges = 0
+    for span_x0, span_x1 in roof_spans:
+        # หาคอลัมน์ทั้งหมดที่ cx อยู่ในช่วงหลังคาที่ทับซ้อนกันนี้ (ใช้ cx แทน x-range เต็ม เพื่อ
+        # ความปลอดภัย - คอลัมน์ที่ cx อยู่ในช่วงชัดเจนคือคอลัมน์ที่หลังคานี้ 'ครอบคลุมจริง' ไม่ใช่
+        # แค่ปลายคอลัมน์แตะขอบช่วงพอดีโดยบังเอิญ)
+        member_idxs = [i for i, c in enumerate(cols) if span_x0 <= c['cx'] <= span_x1]
+        if len(member_idxs) < 2:
+            continue
+        for i in member_idxs[1:]:
+            union(member_idxs[0], i)
+        n_merges += 1
+
+    groups = {}
+    for i in range(n):
+        r = find(i)
+        groups.setdefault(r, []).append(i)
+
+    merged = []
+    for idxs in groups.values():
+        if len(idxs) == 1:
+            merged.append(cols[idxs[0]])
+            continue
+        x0 = min(cols[i]['x'] for i in idxs)
+        y0 = min(cols[i]['y'] for i in idxs)
+        x1 = max(cols[i]['x'] + cols[i]['w'] for i in idxs)
+        y1 = max(cols[i]['y'] + cols[i]['h'] for i in idxs)
+        all_members = []
+        for i in idxs:
+            all_members.extend(cols[i].get('members', []))
+        merged.append(dict(x=x0, y=y0, w=x1 - x0, h=y1 - y0,
+                            cx=(x0 + x1) / 2, cy=(y0 + y1) / 2, members=all_members))
+    merged.sort(key=lambda c: c['cx'])
+    return merged, n_merges
+
+
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
-                              n_dropped_by_new_rules=0):
+                              n_dropped_by_new_rules=0, back_all_cells=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
     (candidate M ตำแหน่ง) ด้วย Hungarian algorithm
 
     - M > N: FRONT มี fragment ปลอมเกินมา (เช่น มุมกล้องใกล้สุดแตกเป็นหลาย fragment) -> ตัด
-      candidate ที่ไม่ถูกจับคู่ทิ้ง (ของซ้ำใกล้มุมกล้อง)
+      candidate ที่ไม่ถูกจับคู่ทิ้ง (ของซ้ำใกล้มุมกล้อง) - เว้นแต่พิสูจน์ได้ว่าเป็นกล่องจริงที่ถูก
+      บังใน BACK (ดู v25.32 FIX ด้านล่าง)
     - M == N: จับคู่ตรงกันพอดี -> คืนค่าเดิมทั้งหมด
     - M < N (v25.14 FIX Bug#4): FRONT นับได้น้อยกว่า BACK จริง (บั๊กเดิม: เงื่อนไข M<=N คืนค่า
       front_cols เดิมทั้งหมดโดยไม่ทำอะไร ปล่อยให้ FRONT undercount หลุดรอดไปโดยไม่ถูกแก้) ->
@@ -1803,9 +2110,33 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
     synthetic-padding เดิมสำหรับส่วนที่พิสูจน์ไม่ได้ (ความปลอดภัยสำหรับไฟล์อื่นที่ยังไม่เจอ
     กรณีนี้ - ไม่ปิดกลไก synthetic-padding ทั้งหมด เพราะมันแก้บั๊ก undercount จริงในไฟล์อื่น
     มาก่อน (v25.14 Bug#4) - ต้องคงไว้เป็น fallback สำหรับกรณีที่ยังพิสูจน์ไม่ได้)
+
+    v25.32 NEW (สำคัญ - "M>N ทางกลับกันของ v25.28" ตามที่ผู้ใช้ระบุ): เดิมกรณี M>N ระบบตัด
+    FRONT column ที่ Hungarian จับคู่ไม่ได้ทิ้งเสมอ โดยไม่ตรวจสอบว่าคอลัมน์นั้น "ควรถูกตัดจริง"
+    (เป็น fragment ปลอม/ซ้ำ) หรือ "เป็นกล่องจริงที่ถูกบังใน BACK" (เหมือนปรากฏการณ์เดียวกับ
+    AC02-02 แต่กลับทิศทาง) - พบจริงจาก EC16: FRONT ตรวจพบ 3 คอลัมน์ (เขียว+ฟ้า ซ้อนกัน / เหลือง
+    ใบที่1 / เหลือง ใบที่2) แต่ BACK เห็นแค่ 1 ตำแหน่ง (เขียว+ฟ้า เท่านั้น) เพราะกล่องเหลืองทั้ง 2
+    ใบถูกกล่องเขียว+ฟ้าที่สูงกว่าบังสนิทจากมุมกล้อง BACK (ยืนยันด้วย pixel: สีเหลือง (255,255,0)
+    ไม่ปรากฏในภาพ BACK เลยแม้แต่พิกเซลเดียว ทั้งที่มีอยู่จริงใน FRONT ชัดเจน) - เดิมระบบตัดทั้ง 2
+    คอลัมน์เหลืองทิ้งเพราะ Hungarian จับคู่ได้แค่ 1 ใน 3 (คอลัมน์เขียว+ฟ้าเท่านั้น)
+    หลักฐานที่แยกแยะได้ (ยืนยันด้วยข้อมูลจริง): คอลัมน์ FRONT ที่ 'ควรถูกตัด' จริง (ของซ้ำ/
+    fragment ปลอมจากมุมกล้อง) จะมีเฉพาะสีที่ปรากฏอยู่แล้วใน BACK เสมอ (เพราะเป็นเศษซ้ำของกล่อง
+    เดียวกันที่ BACK ก็เห็นเช่นกัน) ในขณะที่คอลัมน์ที่ 'ถูกบังจริง' จะมีอย่างน้อย 1 สีที่ไม่ปรากฏ
+    ใน BACK เลย (เพราะเป็นกล่องที่ BACK มองไม่เห็นเลยจากมุมกล้องนั้น) - ทดสอบกับ EC16 จริง:
+    คอลัมน์เขียว+ฟ้า (จับคู่ได้) ไม่มีสีขาดหายจาก BACK เลย / คอลัมน์เหลืองทั้ง 2 (ที่เดิมถูกตัด)
+    มีสีเหลืองขาดหายจาก BACK ทั้งคู่ - ตรงกับสมมติฐานนี้ 100%
+    FIX: ก่อนตัด candidate ที่ไม่ถูกจับคู่ทิ้ง ตรวจสอบว่ามีสีสมาชิกใดของคอลัมน์นั้น 'ไม่ปรากฏใน
+    BACK เลย' (เทียบกับ back_all_cells ทั้งหมด ไม่ใช่แค่ back_cols ที่ผ่านการกรองแล้ว) หรือไม่ -
+    ถ้ามี ให้ถือว่าคอลัมน์นี้มีเนื้อหาจริงที่ BACK มองไม่เห็น (ถูกบังจริง) -> เก็บไว้ ไม่ตัดทิ้ง
+    ถ้าไม่มี (ทุกสีในคอลัมน์นี้ปรากฏอยู่แล้วใน BACK) -> เชื่อว่าเป็น fragment ปลอม/ซ้ำจริง -> ตัด
+    ทิ้งตามพฤติกรรมเดิม (ปลอดภัยสำหรับไฟล์อื่นที่มีกรณี corner-duplicate จริงที่ merge_corner_
+    artifact_columns จับไม่หมด) - ถ้าไม่ระบุ back_all_cells (None) จะ fallback ไปพฤติกรรมเดิม
+    ทุกประการ (ตัดทิ้งเสมอ) เพื่อความปลอดภัยของโค้ดที่เรียกฟังก์ชันนี้แบบเก่า
     """
     N = len(back_cols)
     M = len(front_cols)
+    back_all_colors = (set(c['color'] for c in back_all_cells)
+                        if back_all_cells is not None else None)
 
     def frac(cols, extent):
         if extent is None:
@@ -1836,7 +2167,22 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
     if M > N:
         matched_idx = set(col_ind)
         kept = [front_sorted[j] for j in sorted(matched_idx)]
-        dropped = [front_sorted[j] for j in range(M) if j not in matched_idx]
+        dropped = []
+        for j in range(M):
+            if j in matched_idx:
+                continue
+            cand = front_sorted[j]
+            # v25.32 FIX: ตรวจสอบก่อนตัดทิ้ง (ดู docstring เต็มด้านบน) - ถ้ามีหลักฐาน back_all_
+            # cells ให้ตรวจสอบว่าคอลัมน์นี้มีสีที่ไม่ปรากฏใน BACK เลยหรือไม่ (= ถูกบังจริง)
+            if back_all_colors is not None:
+                member_colors = set(m['color'] for m in cand.get('members', []))
+                if not member_colors:
+                    member_colors = {cand.get('color')} if cand.get('color') else set()
+                has_color_absent_from_back = any(c not in back_all_colors for c in member_colors)
+                if has_color_absent_from_back:
+                    kept.append(cand)
+                    continue
+            dropped.append(cand)
         kept.sort(key=lambda c: c['cx'])
         return kept, dropped
 
@@ -1960,16 +2306,18 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_region = regions["back"]
         front_region = regions["front"]
 
-        # v25.30 FIX (Performance - สำคัญ): เดิมเรียก _p1b_classify_view(back_region) แยกต่างหาก
-        # แล้วเรียก _p1b_front_faces(back_region) อีกครั้ง (ซึ่งข้างในเรียก _p1b_classify_view
-        # ซ้ำอีกรอบด้วย region เดียวกันเป๊ะ) ทำให้คำนวณ HSV/dominant-colors/connected-components
-        # (scipy.ndimage.label ต่อสี) ซ้ำ 2 รอบโดยไม่จำเป็น - วัดเวลาจริงพบว่า 1 ครั้งของ
-        # _p1b_classify_view บน region ขนาดจริง (hi_scale=4) ใช้เวลาหลักวินาที ทำให้ทั้ง
-        # compute_phase1b_columns (เรียกแบบนี้ทั้ง BACK และ FRONT) ช้าขึ้นเกือบเท่าตัวโดยไม่จำเป็น
-        # FIX: เรียก _p1b_front_faces เพียงครั้งเดียว แล้วใช้ค่า cells ที่มันคืนมา (return value
-        # ที่ 2) เป็น back_all/front_all แทน - ยืนยันแล้วว่าเป็นค่าเดียวกันทุกประการ (ฟังก์ชัน
-        # deterministic ไม่มี randomness, ไม่มี side-effect ข้าม call ใดๆ) จึงปลอดภัย 100% ไม่มี
-        # ผลข้างเคียงต่อผลลัพธ์การนับ/reconcile ใดๆ เลย (ตัดแค่การคำนวณซ้ำที่ไม่จำเป็นออกไป)
+        # v25.33 FIX (สำคัญ - พบระหว่างการ integrate v25.32): เดิมเรียก _p1b_classify_view(
+        # back_region) แยกต่างหาก โดยไม่ระบุ area_min (ใช้ auto-calibrate ที่คำนวณจากขนาดภาพ) ซึ่ง
+        # ให้ค่า area_min สูงเกินไปมากสำหรับภาพขนาดใหญ่ (hi_scale=4 region) ทำให้ back_all ที่ได้
+        # กรอง fragment เกือบทั้งหมดทิ้งจนเหลือแค่ 1 ชิ้น (สีพื้นตู้เท่านั้น ไม่มีสีกล่องเลย) - ทำให้
+        # back_all_colors (v25.32) เข้าใจผิดว่าทุกสีกล่อง 'ไม่ปรากฏใน BACK' หมด (เพราะ back_all
+        # แทบว่างเปล่า) จนกลายเป็นการ 'เก็บ' fragment ปลอมที่ควรถูกตัดทิ้งไว้ผิดพลาด (regression
+        # ที่พบจาก EC01-02: FRONT เพิ่มจาก 6 เป็น 8 คอลัมน์ทั้งที่ backend ไม่ได้เปลี่ยนแปลงอะไร)
+        # ROOT CAUSE ที่แท้จริง (มีมาก่อนรอบนี้แล้ว): _p1b_front_faces เรียก _p1b_classify_view
+        # ภายในตัวเองด้วย area_min=1200 (ค่าคงที่ ไม่ auto-calibrate) และคืนค่า cells ที่ถูกต้อง
+        # อยู่แล้วเป็น return value ที่ 2 - ไม่จำเป็นต้องเรียก _p1b_classify_view แยกอีกรอบเลย
+        # FIX: ใช้ cells ที่ _p1b_front_faces คืนมา (area_min=1200 สอดคล้องกัน) แทนการเรียกซ้ำ
+        # ด้วย area_min ต่างกัน (ตรงกับแนวทาง v25.30 performance-fix ที่เคยทำไปแล้วในเซสชันก่อน)
         back_fronts, back_all, back_n_dropped = _p1b_front_faces(back_region)
         back_cx_tol = _p1b_compute_adaptive_cx_tol(back_fronts)
         back_cols_pre = _p1b_cluster_columns(back_fronts, cx_tol=back_cx_tol)
@@ -1985,7 +2333,7 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         if not back_cols:
             return {"front": None, "back": None}
 
-        # v25.30 FIX (Performance): เหตุผลเดียวกับ BACK ด้านบน - ดู docstring ที่นั่น
+        # v25.33 FIX: เหตุผลเดียวกับ BACK ด้านบน - ดู docstring ที่นั่น
         front_fronts, front_all, front_n_dropped = _p1b_front_faces(front_region)
         front_cx_tol = _p1b_compute_adaptive_cx_tol(front_fronts)
         front_cols_pre = _p1b_cluster_columns(front_fronts, cx_tol=front_cx_tol)
@@ -1995,11 +2343,19 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after merge_corner: {len(front_cols_raw)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols_raw]}, "
               f"n_dropped_by_new_rules={front_n_dropped}")
+        # v25.35 NEW: รวมคอลัมน์ที่ตกอยู่ในช่วง 'หลังคาซ้อนทับกันจริง' (>=2 roof คนละสี ทับซ้อน
+        # x-range) ให้เหลือ 1 คอลัมน์เดียว - ตามกฎที่ผู้ใช้สอน (ยืนยันด้วยภาพจริง EC16) ดู
+        # docstring เต็มที่ _p1b_merge_columns_by_overlapping_roofs
+        front_cols_raw, n_roof_merges = _p1b_merge_columns_by_overlapping_roofs(
+            front_cols_raw, front_all)
+        print(f"[P1B] FRONT after roof-overlap merge: {len(front_cols_raw)} cols, "
+              f"cx={[round(c['cx'],1) for c in front_cols_raw]}, "
+              f"n_roof_merges={n_roof_merges}")
         front_extent = _p1b_roof_extent(front_all)
 
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
-            n_dropped_by_new_rules=front_n_dropped)
+            n_dropped_by_new_rules=front_n_dropped, back_all_cells=back_all)
         if not front_cols:
             return {"front": None, "back": None}
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
@@ -2483,7 +2839,27 @@ def compute_local_floor_y(floor_y, grounded, smooth_window=41):
     clean = np.full(w, -1, dtype=float)
     xs_g = np.nonzero(grounded)[0]
     if len(xs_g) < 3:
-        return clean
+        # v25.34 FIX (สำคัญ - พบจริงจาก EC16): เดิมถ้า 'grounded' มีจุดน้อยกว่า 3 จุด (รวมถึงกรณี
+        # 'grounded' ว่างเปล่าทั้งหมด = 0 จุด) จะคืนค่า -1 (invalid) ทั้ง array ทันที ทำให้
+        # local_floor_y ใช้ไม่ได้เลยแม้แต่จุดเดียว - พบจริงจาก EC16 (ไฟล์บรรทุกเบาบางมาก,
+        # Unused Floor 236.2in, cargo cube 5.7%): grounded=0 จุดทั้งภาพ เพราะ compute_floor_
+        # profile's gap_thresh=30 เข้มเกินไปสำหรับพื้นตู้ที่โล่งมาก (gap วัดได้จริงสูงถึง 99px
+        # ในหลายคอลัมน์ เพราะกล่องเบาบาง ไม่ชิดพื้นสนิทในมุมมอง isometric) ทำให้ height_px
+        # คำนวณตรงไม่ได้เลยสักตั้ง (n_samples=0 ทุกตั้ง) ต้องพึ่ง cross_view_filled ทั้งหมด ซึ่ง
+        # ทำให้ทุกตั้งได้ค่าความสูงเท่ากันหมด (copy จากตำแหน่งเดียวใน BACK) -> STEP_DOWN_RISK
+        # (pairwise) ตรวจไม่พบเพราะดูเหมือนสูงเท่ากันหมด ทั้งที่ภาพจริงมีกล่องสูงต่ำต่างกันชัดเจน
+        # ROOT CAUSE ที่แท้จริง: floor_y (ค่าดิบ, ไม่ผ่านเกณฑ์ gap_thresh) ยังคงคำนวณได้ถูกต้อง
+        # อยู่แล้วในหลายคอลัมน์ (ยืนยันจาก EC16: floor_y มีค่า valid ตลอดช่วง x=568-1235) เพียง
+        # แต่ไม่ผ่านเกณฑ์ 'grounded' (gap<=30) เท่านั้น - ค่า floor_y ดิบนี้ยังคงเป็นตำแหน่งพื้นที่
+        # สมเหตุสมผลทางเรขาคณิต (มาจากการหาสี CONTAINER_RAIL_COLOR/struct_mask ใต้กล่องจริง)
+        # FIX: ถ้า grounded ใช้ไม่ได้เลย (< 3 จุด) แต่ floor_y (ดิบ) มีจุด valid เพียงพอ (>= 3
+        # จุด) ให้ fallback มาใช้ floor_y ดิบแทน grounded ในการคำนวณ local_floor_y (rolling
+        # median + extrapolate เหมือนเดิมทุกประการ) - เป็น fallback ชั้นที่ 2 เท่านั้น (ทำงาน
+        # เฉพาะเมื่อ grounded ใช้ไม่ได้จริงๆ) ไม่กระทบไฟล์ปกติที่ grounded ใช้งานได้อยู่แล้วเลย
+        xs_raw = np.nonzero(floor_y >= 0)[0]
+        if len(xs_raw) < 3:
+            return clean
+        xs_g = xs_raw
     vals_g = floor_y[xs_g].astype(float)
     half = smooth_window // 2
     for i, x in enumerate(xs_g):
@@ -3261,19 +3637,8 @@ def process_request(request):
         img = PIL.Image.fromarray(full_img).convert("RGB")
         draw = PIL.ImageDraw.Draw(img)
 
-        # v25.29 FIX (ตามที่ผู้ใช้ระบุ): เดิม detected_hazards เก็บ 1 รายการต่อ (risk_type,
-        # view, idx) ที่ไม่ซ้ำกัน แล้วพิมพ์ "คำแนะนำวิธีแก้ไข" (generate_action_report) เต็ม
-        # ทุกรายการ - ถ้าพบความเสี่ยงประเภทเดียวกันหลายจุด (เช่น STEP_DOWN_RISK 3 จุด) รายงาน
-        # จะพิมพ์คำแนะนำชุดเดิมซ้ำกัน 3 รอบ ทำให้ยาวเกินความจำเป็นในการอ่าน (คำแนะนำแก้ไขของ
-        # แต่ละ risk_type เป็นข้อความคงที่ ไม่ได้ขึ้นกับตำแหน่ง/จุดที่พบเลย)
-        # FIX: จัดกลุ่มตาม "ประเภทความเสี่ยง" (risk_type) เท่านั้น - พิมพ์หัวข้อ + คำแนะนำ
-        # เพียง "ครั้งเดียวต่อประเภท" แล้วต่อท้ายหัวข้อด้วย "จำนวนจุดที่นับได้" ของประเภทนั้น
-        # แทนการพิมพ์ซ้ำตามจำนวนจุด - ยังคงวาดกรอบ (marker) บนภาพครบทุกจุดที่ตรวจพบเหมือนเดิม
-        # ทุกประการ (ไม่กระทบการแสดงผลภาพ) และยังคงนับ hazardCount = จำนวนจุดทั้งหมดจริง (ไม่ใช่
-        # จำนวนประเภท) เพื่อไม่ให้กระทบ WebApp/GAS ฝั่งรับผลที่อาจอ้างอิงค่านี้อยู่แล้ว
-        all_hazard_points = []
-        risk_type_counts = {}
-        risk_type_order = []  # รักษาลำดับการพบครั้งแรกของแต่ละประเภท
+        detected_hazards = []
+        reported_risk_keys = set()
         for risk in risks:
             risk_type = risk["risk_type"]
             outline_color = RISK_COLORS.get(risk_type, "red")
@@ -3287,22 +3652,17 @@ def process_request(request):
                 print(f"Could not compute marker box for {risk_type} (view={risk.get('mark_view')}, "
                       f"idx={risk.get('mark_stack_idx')})")
 
-            all_hazard_points.append(risk)
-            if risk_type not in risk_type_counts:
-                risk_type_counts[risk_type] = 0
-                risk_type_order.append(risk_type)
-            risk_type_counts[risk_type] += 1
-
-        if all_hazard_points:
-            status_text = f"พบจุดเสี่ยงอันตราย ({len(all_hazard_points)} จุด)"
-            sep = "\n\n" + "-" * 50 + "\n\n"
-            blocks = []
-            for risk_type in risk_type_order:
-                count = risk_type_counts[risk_type]
-                title = f"ความเสี่ยง: {risk_type} (พบ {count} จุด)"
+            report_key = f"{risk_type}_{risk.get('mark_view')}_{risk.get('mark_stack_idx')}"
+            if report_key not in reported_risk_keys:
+                reported_risk_keys.add(report_key)
+                title = f"ความเสี่ยง: {risk_type}"
                 detail = generate_action_report(risk_type, "", sku_str)
-                blocks.append(f"[{title}]\n{detail}")
-            action_text = sep.join(blocks)
+                detected_hazards.append({"title": title, "detail": detail})
+
+        if detected_hazards:
+            status_text = f"พบจุดเสี่ยงอันตราย ({len(detected_hazards)} จุด)"
+            sep = "\n\n" + "-" * 50 + "\n\n"
+            action_text = sep.join(f"[{h['title']}]\n{h['detail']}" for h in detected_hazards)
         else:
             status_text = "ปลอดภัย (SAFE)"
             action_text = generate_action_report("SAFE", "")
@@ -3313,12 +3673,12 @@ def process_request(request):
         gc.collect()
         return ({
             "status": status_text,
-            "hazardCount": len(all_hazard_points),
+            "hazardCount": len(detected_hazards),
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.30",
-            "benchmarkMode": "v25_30_dedupe_classify_view_perf_fix",
+            "checkerVersion": "V25.36",
+            "benchmarkMode": "v25_36_shape_based_endcap_wall_detection",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
