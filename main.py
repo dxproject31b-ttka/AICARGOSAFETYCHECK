@@ -1577,18 +1577,32 @@ _STRUCTURAL_HUE_RB_MAX = 125         # R-B ขั้นสูง (กันส�
 # (128,128,0) ที่ R-B=128 เกินขอบเขตนี้ไปเล็กน้อยพอดี - ยืนยันด้วยข้อมูลจริงจาก AB01-02/AC02-02)
 
 
+# v25.41 NEW (สำคัญ - พบจริงจากไฟล์ EB74-ALL ที่ผู้ใช้ขอให้ทดสอบหลัง v25.40): เดิม pattern
+# เชิง hue (v25.39) ตรวจเฉพาะทิศทาง "R≈G, R-B บวก" (โทนน้ำตาล/ทอง) - พบว่าไฟล์ EB74-ALL ใช้
+# โทนสีผนังตู้เป็น "ฟ้าอมเขียว" (90,179,179) และ (175,255,255) ซึ่งเป็น hue-pattern เดียวกัน
+# ทุกประการแค่ "สลับแกน" (G≈B แทนที่จะเป็น R≈G, และ B-R บวกแทนที่จะเป็น R-B บวก) - ยืนยันด้วย
+# ตัวเลข: (90,179,179) มี G-B=0, B-R=89 ตรงกับช่วง 75-125 เดียวกันกับที่เคย catalog ไว้เป๊ะ
+# (แค่คนละแกนสี) - ทดสอบยืนยันกับสี 'front'-kind ทั้งหมด 14 สีที่พบจริงข้าม 7 ไฟล์ทดสอบ (รวม
+# EB74-ALL) พบว่า pattern ใหม่ (รองรับทั้ง 2 แกน) จับได้เฉพาะ 3 สีที่เป็นโครงสร้างตู้จริงเท่านั้น
+# ((90,179,179)/(175,255,255)/(255,255,175)) ไม่มี false-positive กับสีกล่องสินค้าเลยแม้แต่สี
+# เดียว รวมถึง (0,255,255) cyan และ (0,128,128) teal ซึ่งเป็นสีกล่องจริงที่ใกล้เคียงกันก็ไม่ถูก
+# จับผิดพลาด (เพราะ R,G,B ต่างกันมากเกินไปในทุกคู่แกน)
+# FIX: เพิ่มการตรวจสอบทิศทางที่ 2 (G≈B, B-R อยู่ในช่วงเดียวกัน) เป็น OR เพิ่มเติมจากทิศทางเดิม
 def _p1b_is_structural_container_color(color):
-    """True ถ้าสีนี้ตรงกับสีโครงสร้างตู้ที่ทราบแน่ชัด (ไม่ใช่สีกล่องสินค้า) - ตรวจ 2 ชั้น:
+    """True ถ้าสีนี้ตรงกับสีโครงสร้างตู้ที่ทราบแน่ชัด (ไม่ใช่สีกล่องสินค้า) - ตรวจ 3 ชั้น:
     (1) exact-match list เดิม (ดู docstring _STRUCTURAL_CONTAINER_COLORS)
-    (2) pattern เชิง hue ใหม่ (v25.39 - ดู docstring ด้านบน) สำหรับสีโครงสร้างที่ต่างเฉดเล็กน้อย
-    จากรายการเดิมแต่ยังเป็นโทนน้ำตาล/ทองแบบเดียวกัน"""
+    (2) pattern เชิง hue ทิศทาง R≈G (v25.39) สำหรับสีโครงสร้างโทนน้ำตาล/ทอง
+    (3) pattern เชิง hue ทิศทาง G≈B (v25.41) สำหรับสีโครงสร้างโทนฟ้า/เขียวอมฟ้า - ดู docstring
+    ด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EB74-ALL)"""
     for sc in _STRUCTURAL_CONTAINER_COLORS:
         if all(abs(int(color[i]) - sc[i]) <= _STRUCTURAL_COLOR_TOL for i in range(3)):
             return True
     r, g, b = int(color[0]), int(color[1]), int(color[2])
-    rg_diff = abs(r - g)
-    rb_diff = r - b
-    if rg_diff <= _STRUCTURAL_HUE_RG_MAX_DIFF and _STRUCTURAL_HUE_RB_MIN <= rb_diff <= _STRUCTURAL_HUE_RB_MAX:
+    # ทิศทางที่ 1: R≈G, R-B บวกอยู่ในช่วง (โทนน้ำตาล/ทอง)
+    if abs(r - g) <= _STRUCTURAL_HUE_RG_MAX_DIFF and _STRUCTURAL_HUE_RB_MIN <= (r - b) <= _STRUCTURAL_HUE_RB_MAX:
+        return True
+    # ทิศทางที่ 2: G≈B, B-R บวกอยู่ในช่วง (โทนฟ้า/เขียวอมฟ้า - v25.41)
+    if abs(g - b) <= _STRUCTURAL_HUE_RG_MAX_DIFF and _STRUCTURAL_HUE_RB_MIN <= (b - r) <= _STRUCTURAL_HUE_RB_MAX:
         return True
     return False
 
@@ -1624,13 +1638,52 @@ def _p1b_is_endcap_wall_shape(w, h, area=None):
     return abs(ratio - _ENDCAP_WALL_RATIO_TARGET) <= _ENDCAP_WALL_RATIO_TOL
 
 
+# v25.43 NEW (สำคัญ - พบจริงจาก AB01-02 ที่ผู้ใช้ถามเรื่อง "ช่วงสีม่วง"): เดิม _p1b_find_
+# endcap_wall_span ตรวจจับผนังปลายตู้ด้วยรูปทรง (w/h ratio) ของ 'side' fragment เพียงอย่างเดียว
+# โดยไม่ตรวจสอบว่ามีกล่องสินค้าจริง (front-face สีต่างจากผนัง) วางซ้อนทับอยู่ในโซนเดียวกันหรือไม่
+# พบว่าไฟล์ AB01-02 มีกล่อง TPR1A-AO (สีม่วง 128,0,128) วางอยู่ตำแหน่งสุดท้ายติดผนังหลังตู้พอดี
+# (เต็มความสูงเกือบชิดเพดาน) ทำให้ x-range ของกล่องทับซ้อนกับผนังหลัง (255,255,175) ที่ตรวจพบว่า
+# มีรูปทรง w/h ตรงกับ endcap-wall เป๊ะ (ratio=0.577) - ระบบเข้าใจผิดว่าทั้งโซนเป็นผนังเปล่า
+# ทั้งที่มี front-face สีม่วง+เขียวอมฟ้า (STEMA-A3 teal) ซ้อนทับอยู่เต็มพื้นที่จริง (4 ชิ้น รวม
+# พื้นที่มาก) ทำให้กล่องทั้ง 2 ตำแหน่งถูกกรองทิ้งไปอย่างผิดพลาด (หายไปจากผลลัพธ์สุดท้ายทั้งหมด)
+# ROOT CAUSE: endcap wall แท้จริง (เช่น EA10 ที่ยืนยันกฎนี้ไว้ก่อนหน้า) เป็น "ผนังเปล่า" ที่ไม่มี
+# กล่องสินค้าจริงบังอยู่ด้านหน้าเลย (มองทะลุเห็นผนังเต็มพื้นที่) ต่างจากกรณีนี้ที่ผนังหลังตู้ปกติ
+# (rear-wall) ถูกกล่องจริงบังจนเกือบมิด (เห็นผนังแค่ขอบบน/ล่างเล็กน้อย) - สัญญาณที่แยกแยะได้คือ
+# "สัดส่วนพื้นที่ที่ front-face สีไม่ใช่โครงสร้างซ้อนทับอยู่ในโซน" - ถ้าสูง (มีกล่องจริงเต็มพื้นที่)
+# แสดงว่าไม่ใช่ endcap wall เปล่า ต้องไม่กรองทิ้ง
+# FIX: ก่อนยอมรับ candidate ว่าเป็น endcap wall ตรวจสอบว่ามี front-face ที่ไม่ใช่สีโครงสร้างตู้
+# ซ้อนทับกับ x-range ของมันเกิน _ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE หรือไม่ - ถ้าเกิน (มีกล่อง
+# จริงเต็มพื้นที่) ให้ปฏิเสธ candidate นี้ (ไม่ถือเป็น endcap wall) เพื่อความปลอดภัยไม่กระทบไฟล์ที่
+# endcap wall เป็นผนังเปล่าจริง (เช่น EA10 ที่ยืนยันไว้ก่อนหน้า)
+_ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE = 0.5
+
+
 def _p1b_find_endcap_wall_span(all_cells):
     """หา x-range ของ 'ผนังปลายตู้' (endcap wall) ในภาพนี้ ถ้ามี - คืนค่า (x0,x1) ของ 'side'
-    fragment ที่ตรงรูปทรงผนังปลายตู้ (ดู _p1b_is_endcap_wall_shape) หรือ None ถ้าไม่พบ
-    ถ้าพบมากกว่า 1 ชิ้น ใช้ชิ้นที่ใหญ่ที่สุด (พื้นที่มากสุด) เป็นตัวแทน"""
+    fragment ที่ตรงรูปทรงผนังปลายตู้ (ดู _p1b_is_endcap_wall_shape) และไม่มีกล่องสินค้าจริงบังอยู่
+    เต็มพื้นที่ (v25.43 - ดู docstring ด้านบน) หรือ None ถ้าไม่พบ ถ้าพบมากกว่า 1 ชิ้น (ที่ผ่าน
+    เกณฑ์ทั้งคู่) ใช้ชิ้นที่ใหญ่ที่สุด (พื้นที่มากสุด) เป็นตัวแทน"""
     sides = [c for c in all_cells if c['kind'] == 'side']
-    candidates = [c for c in sides
-                  if _p1b_is_endcap_wall_shape(c['w'], c['h'], c.get('area', c['w'] * c['h']))]
+    shape_candidates = [c for c in sides
+                        if _p1b_is_endcap_wall_shape(c['w'], c['h'], c.get('area', c['w'] * c['h']))]
+    if not shape_candidates:
+        return None
+    genuine_fronts = [c for c in all_cells if c['kind'] == 'front'
+                      and not _p1b_is_structural_container_color(c['color'])]
+    candidates = []
+    for cand in shape_candidates:
+        cx0, cx1 = cand['x'], cand['x'] + cand['w']
+        covered_width = 0.0
+        # รวมความกว้างที่ front-face สีจริง (ไม่ซ้ำกัน) ซ้อนทับอยู่ในโซนนี้ (ประมาณแบบง่าย
+        # โดยรวม interval ที่ทับซ้อน - พอเพียงสำหรับตัดสินใจ ไม่ต้องคำนวณ union interval แม่นยำ
+        # เป๊ะ เพราะ threshold ตั้งไว้ไม่สุดโต่ง)
+        for f in genuine_fronts:
+            fx0, fx1 = f['x'], f['x'] + f['w']
+            inter = max(0.0, min(cx1, fx1) - max(cx0, fx0))
+            covered_width += inter
+        coverage_frac = min(1.0, covered_width / max(1e-6, cx1 - cx0))
+        if coverage_frac <= _ENDCAP_WALL_MAX_GENUINE_FRONT_COVERAGE:
+            candidates.append(cand)
     if not candidates:
         return None
     best = max(candidates, key=lambda c: c['w'] * c['h'])
@@ -1746,6 +1799,30 @@ def _p1b_compute_adaptive_cx_tol(fronts, factor=0.4, fallback=45, floor_px=10):
 # จากกรณี "คอลัมน์ข้างเคียงที่บังเอิญมี cx ใกล้กัน" ซึ่งควร overlap ต่ำหรือไม่ overlap เลย
 CLUSTER_DIFF_COLOR_MIN_XOVERLAP = 0.7
 
+# v25.44 NEW (สำคัญ - พบจริงจาก AB01-02 BACK ที่ผู้ใช้ถามเรื่อง "ช่วงสีม่วง"): เดิม x-overlap
+# rule (v25.31 ด้านบน) ไม่มีขีดจำกัดจำนวนสีที่รวมกันได้ในคอลัมน์เดียว - พบว่า BACK view ของ
+# AB01-02 รวม 4 สีต่างกัน (olive/purple/magenta/teal) เข้าเป็นคอลัมน์เดียวผิดพลาด ทั้งที่ยืนยัน
+# ด้วยภาพจริงแล้วว่าเป็นกล่องคนละตำแหน่งจริง (STEMA-teal และ TPR1A-purple เป็นคนละตำแหน่งความยาว
+# ในภาพ FRONT ชัดเจน) ทำให้กล่องเหล่านี้หายไปจากผลลัพธ์สุดท้ายหลัง reconcile กับ FRONT
+# ROOT CAUSE: x-overlap ratio (ทั้งแบบธรรมดาและ pairwise ทุกคู่) ไม่สามารถแยกแยะกรณีนี้จากกรณีที่
+# ถูกต้องแล้ว (AC02-02 BACK ที่รวม 3 สี purple/darkred/blue อย่างถูกต้อง - ยืนยันด้วย pairwise
+# overlap ที่ได้ค่า 1.000 เท่ากันหมดทั้ง 2 กรณี ไม่ต่างกันเลย) - ทดสอบ roof-matching evidence ก็
+# ไม่สามารถแยกแยะได้เช่นกัน (AC02-02's darkred ที่ merge ถูกต้อง กลับไม่มี roof สนับสนุนเลย
+# เหมือนกับ AB01-02's magenta ที่ merge ผิดพลาด)
+# สัญญาณเดียวที่แยกแยะได้ชัดเจนจากข้อมูลจริงทั้งหมด (สำรวจครบ 9 ไฟล์ x 2 view = 18 จุดทดสอบ):
+# "จำนวนสีที่แตกต่างกันสูงสุดที่เคย merge ถูกต้องจริงคือ 3 สี (AC02-02 BACK)" ในขณะที่กรณีที่
+# ยืนยันว่าผิดพลาด (AB01-02 BACK) มี 4 สี - ไม่มีไฟล์ใดในชุดทดสอบที่มี genuine 4-color merge เลย
+# เหตุผลเชิงกายภาพที่สนับสนุน: ไดอะแกรมตู้คอนเทนเนอร์แบบ isometric นี้ ตามปกติมีความลึกสูงสุดแค่
+# 2-3 ชั้น (แถวหน้า+แถวหลัง+อาจมีกล่องเตี้ยแทรกอีก 1 ชั้น) ที่จะมองเห็น front-face ซ้อนทับกันที่
+# ตำแหน่งความยาวเดียวกันได้ - การมี 4 สีต่างกันซ้อนทับกันจริงในตำแหน่งเดียวเป็นไปได้ยากมาก
+# FIX: จำกัดจำนวนสีที่แตกต่างกันสูงสุดต่อคอลัมน์ไว้ที่ 3 - ถ้าคอลัมน์มีสีที่แตกต่างกันครบ 3 สีแล้ว
+# (ไม่นับซ้ำ) และมีสีใหม่ (สีที่ 4) พยายามจะรวมเข้ามาอีก ให้ปฏิเสธเสมอ (เปิดคอลัมน์ใหม่แทน) โดยไม่
+# สนใจผล x-overlap เลย - ปลอดภัยเพราะยืนยันด้วยข้อมูลจริงแล้วว่าไม่มีไฟล์ใดในชุดทดสอบที่มี
+# genuine 4-color merge (ทดสอบยืนยันครบ 9 ไฟล์ x 2 view แล้วไม่พบ false-positive กับกรณีที่ถูก
+# ต้องเลย รวมถึง AC02-02's 3-color merge ที่ยังคงทำงานถูกต้องเหมือนเดิมทุกประการ เพราะจำกัดที่ 3
+# ไม่ใช่ 2)
+CLUSTER_MAX_DISTINCT_COLORS = 3
+
 
 def _p1b_cluster_columns(fronts, cx_tol=45):
     """v25.31 FIX (สำคัญ - พบจริงจาก EC01-02/04): เดิมจัดกลุ่มคอลัมน์ด้วยระยะห่างตำแหน่ง cx
@@ -1773,6 +1850,12 @@ def _p1b_cluster_columns(fronts, cx_tol=45):
                 continue
             same_color_member = any(m['color'] == c['color'] for m in col['members'])
             if not same_color_member:
+                # v25.44 FIX: ก่อนพิจารณา x-overlap ตรวจสอบจำนวนสีที่แตกต่างกันในคอลัมน์นี้ก่อน -
+                # ถ้าครบ CLUSTER_MAX_DISTINCT_COLORS แล้ว (สีใหม่นี้จะเป็นสีที่ 4+) ปฏิเสธทันที
+                # ไม่ต้องเช็ค x-overlap เลย (ดู docstring เต็มด้านบน CLUSTER_MAX_DISTINCT_COLORS)
+                n_distinct_colors = len(set(m['color'] for m in col['members']))
+                if n_distinct_colors >= CLUSTER_MAX_DISTINCT_COLORS:
+                    continue
                 # สีใหม่ที่ไม่มีในคอลัมน์นี้เลย - ต้องพิสูจน์ด้วย x-range overlap ก่อนรวม
                 col_x0, col_x1 = col['x'], col['x'] + col['w']
                 c_x0, c_x1 = c['x'], c['x'] + c['w']
@@ -3416,19 +3499,54 @@ _ROOFLINE_MIN_RUN_PX = 15  # ต้องมีแนวตั้งต่อเ
 _ROOFLINE_MIN_POINTS = 5  # ต้องมีจุดที่เชื่อถือได้อย่างน้อยเท่านี้ จึง fit เส้นได้
 
 
-def _compute_local_roofline_fit(region, wall_color=_ROOFLINE_WALL_COLOR,
-                                 tol=_ROOFLINE_WALL_COLOR_TOL, min_run=_ROOFLINE_MIN_RUN_PX,
+# v25.42 NEW (สำคัญ - พบจริงจาก EB74-ALL ที่ผู้ใช้ถามว่าทำไม v25.40 แก้ไขเฉพาะ AC05-04): เดิม
+# _compute_local_roofline_fit ใช้สีผนังตู้แบบ "ตายตัว" (179,179,90) เพียงสีเดียว - พบว่าไฟล์
+# EB74-ALL ใช้สีผนังตู้เป็น (90,179,179) แบบเดียวกับที่ v25.41 เพิ่งแก้ไปสำหรับ
+# _p1b_is_structural_container_color (โทนฟ้า/เขียวอมฟ้า G≈B แทน R≈G) - เมื่อ roofline_fit หา
+# สีตายตัวเดิมไม่เจอเลย (คืนค่า None) Physical Validity Guard จะ "fail-safe" ปิดตัวเองไปทั้งหมด
+# ไม่ตรวจสอบอะไรเลย ทำให้ logic เดิม (trust_a = h_a >= h_b) ทำงานตามปกติ และค่าที่ผิดพลาดจาก
+# ปัญหาคนละชั้น (Phase 1B ตัดคอลัมน์ผิดพลาด ทำให้จับคู่ตำแหน่งข้าม view ผิด) จึงหลุดรอดไปโดย
+# ไม่ถูกปฏิเสธ (เพราะ Guard ไม่ได้ทำงานเลยตั้งแต่ต้น ไม่ใช่เพราะ Guard ตรวจแล้วผ่าน)
+#
+# ความพยายามแก้ไขครั้งแรก (ใช้ _p1b_is_structural_container_color เต็ม pattern) พบ regression
+# ใหม่ที่ AB01-02: การรวมทุกสีโครงสร้างตู้ (rail/wall-panel/floor-tile/rear-wall) เข้าด้วยกัน
+# ทำให้จุดที่ใช้ fit เส้น roofline ปนกันจาก 2 พื้นผิวที่มีมุมเอียงต่างกันจริง (ผนังด้านข้าง vs
+# ผนังหลัง/หลังคา ซึ่งเป็นคนละระนาบในภาพ isometric ไม่ใช่เส้นเดียวกัน) แม้ใช้ robust line fit
+# (MAD-based rejection) ก็ยังแก้ไม่ได้ เพราะทั้ง 2 กลุ่มมีจำนวนจุดใกล้เคียงกัน (ไม่ใช่ outlier
+# ส่วนน้อย) ทำให้ resid_std พุ่งสูงถึง 36.2px (เทียบ AC05-04 เดิมที่ 0.35px) เส้นที่ fit ได้จึง
+# เอียงผิดจากผนังด้านข้างจริงไปมาก ทำให้ ratio ของกล่องสูงสุดขยับข้าม threshold 97% ไปเอง (จาก
+# 96.9% ที่เคยผ่าน กลายเป็น 99.3% ที่ถูกปฏิเสธผิดพลาด) เกิด chain-reaction กระทบคอลัมน์อื่น
+# FIX ที่ถูกต้อง: จำกัดเฉพาะสี "wall panel" (ผนังด้านข้างเท่านั้น - พื้นผิวเดียวที่ต้องการวัด
+# ความสูงเพดานจริง) ไม่ใช้สีอื่นทั้งหมด (rail/floor-tile/rear-wall เป็นคนละพื้นผิว/มุมเอียง) -
+# ระบุด้วยช่วง R-B แคบรอบค่า 89 (wall panel วัดได้จริง) ทั้ง 2 ทิศทาง (R≈G และ G≈B) แทนช่วงกว้าง
+# 75-125 เดิมที่ออกแบบมาสำหรับ "กรองไม่ใช่กล่องสินค้า" (กว้างเกินไปสำหรับงาน roofline ที่ต้องการ
+# ความแม่นยำสูงเฉพาะพื้นผิวเดียว)
+_ROOFLINE_RB_TARGET = 89   # ค่า R-B ของสี wall-panel จริง (179,179,90 หรือ 90,179,179)
+_ROOFLINE_RB_TOL = 15      # tolerance แคบ (74-104) แยกจาก rail(102)/floor(122)/rear-wall(80)
+# ได้เพียงพอ (rear-wall ที่ 80 อาจยังเหลื่อมบ้าง แต่ปริมาณจุดของ rear-wall ในภาพจริงน้อยกว่า
+# wall-panel มาก เพราะมองเห็นได้แคบกว่า - ยืนยันด้วยการทดสอบ regression ครบทุกไฟล์)
+
+
+def _compute_local_roofline_fit(region, min_run=_ROOFLINE_MIN_RUN_PX,
                                  min_points=_ROOFLINE_MIN_POINTS):
-    """v25.40 NEW: fit เส้นตรง (slope, intercept) ของ 'roofline' (ขอบบนสุดของผนังตู้/เพดานตู้)
-    จากจุดที่มองเห็นสีผนังตู้ (wall panel, 179,179,90) ต่อเนื่องอย่างน้อย min_run พิกเซลในแต่ละ
-    คอลัมน์ x ของภาพ - ยืนยันด้วยข้อมูลจริง AC05-04: ได้ resid_std=0.35px จาก 308 จุด (แม่นยำสูง
-    มาก เพราะ container เป็น isometric ทำให้เพดานตู้เป็นเส้นตรงเป๊ะ) คืนค่า (slope, intercept)
-    หรือ None ถ้าหาจุดที่เชื่อถือได้ไม่พอ (fail-safe - ผู้เรียกใช้ต้องรับมือกับ None)"""
+    """v25.40 NEW (แก้ไข v25.42): fit เส้นตรง (slope, intercept) ของ 'roofline' (ขอบบนสุดของ
+    ผนังด้านข้างตู้) จากจุดที่มองเห็นสี wall-panel เท่านั้น (ไม่ใช้สีโครงสร้างอื่นที่เป็นคนละ
+    พื้นผิว/มุมเอียง เช่น ผนังหลัง/หลังคา/พื้น/ราง - ดู docstring เต็มด้านบนสำหรับเหตุผล) ต่อเนื่อง
+    อย่างน้อย min_run พิกเซลในแต่ละคอลัมน์ x ของภาพ - ยืนยันด้วยข้อมูลจริง AC05-04: ได้
+    resid_std=0.35px จาก 308 จุด (แม่นยำสูงมาก เพราะ container เป็น isometric ทำให้เพดานตู้เป็น
+    เส้นตรงเป๊ะ) คืนค่า (slope, intercept) หรือ None ถ้าหาจุดที่เชื่อถือได้ไม่พอ (fail-safe -
+    ผู้เรียกใช้ต้องรับมือกับ None)"""
     r = region[:, :, 0].astype(int)
     g = region[:, :, 1].astype(int)
     b = region[:, :, 2].astype(int)
-    wall_mask = (np.abs(r - wall_color[0]) < tol) & (np.abs(g - wall_color[1]) < tol) & \
-                (np.abs(b - wall_color[2]) < tol)
+    rb_min = _ROOFLINE_RB_TARGET - _ROOFLINE_RB_TOL
+    rb_max = _ROOFLINE_RB_TARGET + _ROOFLINE_RB_TOL
+    # ทิศทางที่ 1: R≈G, R-B อยู่ในช่วงแคบรอบ wall-panel (โทนน้ำตาล/ทอง)
+    wall_mask = (np.abs(r - g) <= _STRUCTURAL_HUE_RG_MAX_DIFF) & \
+                ((r - b) >= rb_min) & ((r - b) <= rb_max)
+    # ทิศทางที่ 2: G≈B, B-R อยู่ในช่วงแคบรอบ wall-panel (โทนฟ้า/เขียวอมฟ้า - v25.41/42)
+    wall_mask |= (np.abs(g - b) <= _STRUCTURAL_HUE_RG_MAX_DIFF) & \
+                 ((b - r) >= rb_min) & ((b - r) <= rb_max)
     xs_pts, ys_pts = [], []
     for x in range(region.shape[1]):
         col = np.nonzero(wall_mask[:, x])[0]
@@ -3441,11 +3559,25 @@ def _compute_local_roofline_fit(region, wall_color=_ROOFLINE_WALL_COLOR,
                 ys_pts.append(top)
     if len(xs_pts) < min_points:
         return None
+    # v25.42 FIX (สำคัญ - พบ regression จริงจาก AB01-02 หลังขยาย hue-pattern ให้กว้างขึ้น):
+    # เดิมใช้ np.linalg.lstsq ธรรมดา (ไม่ทนทานต่อ outlier) - พบว่าการขยาย _p1b_is_structural_
+    # container_color ให้ครอบคลุมหลายเฉดสี (rail/wall-panel/floor-tile/rear-wall ที่อยู่คนละ
+    # ตำแหน่ง y ในภาพจริง ไม่ใช่ตำแหน่งเดียวกับ 'roofline' ของผนังด้านข้าง) ทำให้จุดที่ใช้ fit
+    # ปนกันหลายกลุ่ม (multi-modal) เกิด noise มาก (resid_std=36.2px ในไฟล์ AB01-02 เทียบกับ
+    # AC05-04 ที่ได้แค่ 0.35px) ทำให้เส้น roofline ที่ fit ได้เอียงผิดจากตำแหน่งจริงมาก ส่งผลให้
+    # max_physical_height คำนวณผิดพลาด (ratio ของกล่องสูงสุดขยับจาก 96.9% ที่เคยผ่านเกณฑ์ เป็น
+    # 99.3% ที่ถูก Guard ปฏิเสธผิดพลาด) เกิด chain-reaction ทำให้ค่าความสูงอื่นในคอลัมน์ใกล้เคียง
+    # ถูกแก้ไขผิดตามไปด้วย (regression ที่ค่าความสูงเปลี่ยนไปมาก 189.7->126.8 เป็นต้น)
+    # FIX: ใช้ _robust_local_line_fit (มีอยู่แล้วในโค้ด, iterative MAD-based outlier rejection)
+    # แทน simple least-squares - กรองจุดที่ไม่ใช่ roofline จริง (จากสีโครงสร้างกลุ่มอื่นที่อยู่
+    # คนละตำแหน่ง y) ออกโดยอัตโนมัติ ทำให้ fit เสถียรขึ้นมาก โดยไม่กระทบไฟล์ที่ roofline เดิม
+    # สะอาดอยู่แล้ว (เช่น AC05-04 - robust fit บนข้อมูลที่ไม่มี outlier จะให้ผลเหมือน simple fit)
     xs_arr = np.array(xs_pts, dtype=float)
     ys_arr = np.array(ys_pts, dtype=float)
-    A = np.vstack([xs_arr, np.ones_like(xs_arr)]).T
-    slope, intercept = np.linalg.lstsq(A, ys_arr, rcond=None)[0]
-    return float(slope), float(intercept)
+    fit = _robust_local_line_fit(xs_arr, ys_arr)
+    if fit is None:
+        return None
+    return fit["a"], fit["b"]
 
 
 def _max_physical_height_at_x(roofline_fit, local_floor_y, x):
@@ -3883,8 +4015,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.40",
-            "benchmarkMode": "v25_40_physical_validity_guard_cross_view_height",
+            "checkerVersion": "V25.44",
+            "benchmarkMode": "v25_44_endcap_genuine_coverage_and_max3color_cluster_cap",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
