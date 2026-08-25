@@ -2,6 +2,53 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.48 (แก้ 2 บั๊กที่ผู้ใช้แนบไฟล์จริง AA02-01/AA05-03 - กรอบแดง STEP_DOWN_RISK ปลอมใน
+BACK view ที่ผู้ใช้ระบุว่า "เกินมา" ควรลบทิ้ง):
+
+  บั๊ก#1 - orphaned-roof (v25.46) สร้างคอลัมน์ปลอมใน BACK: AA02-01 BACK มีหลังคาสีฟ้า
+  (MAPCA, w=205px) แทรกอยู่ระหว่างคอลัมน์สีเขียว (DSC1A) 2 คอลัมน์ที่นับไปแล้วครบถ้วน -
+  เกณฑ์ coverage เดิม (v25.46, ดู _p1b_find_orphaned_roof_columns) เช็คเฉพาะคอลัมน์ "สี
+  เดียวกับ roof" เท่านั้น (same-color) ทำให้คอลัมน์เขียว (คนละสีกับฟ้า) ไม่ถูกนับเป็น
+  coverage เลย (0%) ทั้งที่ในเชิงพื้นที่ union ของ 2 คอลัมน์เขียวครอบคลุมหลังคาฟ้าถึง 99%
+  (แทบไม่มีช่องว่างเหลือให้กล่องอื่นซ่อนอยู่จริง) -> เข้าใจผิดว่าเป็น orphaned roof จริง ->
+  สร้างคอลัมน์ synthetic แทรกกลาง -> BACK ได้ 6 คอลัมน์ (5 จริง+1 ปลอม) ตรงกับ FRONT (6
+  คอลัมน์) โดยบังเอิญ -> Hungarian matching จับคู่ผิดตำแหน่งทั้งกระดาน -> STEP_DOWN_RISK
+  ปลอมที่ตำแหน่งซึ่งกล่องสูงใกล้เคียงกันจริง (ยืนยันด้วยภาพจริงที่ผู้ใช้แนบ + zoom-crop
+  พิสูจน์ว่ากล่อง ASI1A ทั้ง 2 คอลัมน์สูงเท่ากันเป๊ะทั้ง FRONT และ BACK)
+  FIX: เพิ่มเงื่อนไข OR ใน coverage-check - ถ้า "any-color union coverage" (นับทุกคอลัมน์
+  ที่มีอยู่ ไม่สนสี) สูง >= 85% (_ORPHANED_ROOF_ANY_COLOR_MAX_COVERAGE) ให้ถือว่ามีตัวแทน
+  อยู่แล้วเช่นกัน (ไม่ orphan) - ทดสอบแล้วว่าไม่กระทบ AC04-03 ที่เคยยืนยันไว้ก่อนหน้า (teal
+  orphan ที่นั่นมี coverage แค่ ~60% เท่านั้น เพราะมีช่องว่างจริง 206px ที่ไม่มีคอลัมน์ใด
+  ครอบคลุมเลย - ยังคง trigger orphan ตามเดิมถูกต้อง ทั้ง 2 red box ของ AC04-03 ยังอยู่ครบ
+  เหมือนเดิมทุกประการ รวมถึง hazardCount=4 เท่าเดิม)
+
+  บั๊ก#2 - STEP_DOWN pairwise/cross_view เชื่อค่าความสูงที่ไม่น่าเชื่อถือมากเกินไป: แม้แก้
+  บั๊ก#1 แล้ว ยังพบกรอบแดงตำแหน่งเดิมใน AA02-01 BACK (คนละกลไก) - ตรวจสอบพบ 2 อาการย่อย:
+  (ก) AA05-03 BACK idx ขวาสุด วัดความสูงได้จาก direct-fit ที่มีจุดข้อมูลน้อยมาก (n_samples
+  =19 เทียบเพื่อนบ้าน 66-97 จุด) เพราะ apex_x (จุดเปลี่ยน slope ของพื้นตู้) ตกอยู่ในช่วง
+  คอลัมน์นั้นพอดี ตัดข้อมูลจนเหลือน้อยเกินจะเชื่อถือได้
+  (ข) AA02-01 BACK 2 คอลัมน์ท้ายสุด (ASI1A สีน้ำเงินล้วน มองด้วยตาสูงเท่ากันชัดเจนทั้ง 2
+  view) วัดได้ FRONT (direct, samples เต็ม)=154/214px (ต่าง 28%) แต่ BACK เอง (raw, ก่อน
+  reconcile)=270/230px (ต่าง 15% - ใกล้เคียงความจริงมากกว่า) - reconcile เลือกเชื่อ FRONT
+  เพราะ 'direct' อยู่ใน reliability-hierarchy สูงกว่า 'apex_fallback' ของ BACK เสมอ โดยไม่
+  สนใจว่าความขัดแย้งเดิม (conflict, ก่อนแก้ไข) ระหว่าง 2 view สูงแค่ไหน (สูงถึง 21-33%)
+  FIX: เพิ่ม 2 reliability guard ใหม่ก่อน flag STEP_DOWN (ทั้ง pairwise และ cross_view):
+  1) STEP_DOWN_MIN_RELIABLE_SAMPLES=25 - ถ้าฝั่งที่ "เตี้ยกว่า" เป็น direct fit ที่มี
+     n_samples ต่ำกว่านี้ (บ่งชี้ apex ตัดข้อมูลจนเหลือน้อยเกินไป) ไม่ flag คู่นั้น
+  2) STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO=0.15 - ถ้าฝั่งที่ "เตี้ยกว่า" เป็นค่าที่ถูก
+     cross_view_corrected จากความขัดแย้งเดิมที่สูงเกิน 15% (บ่งชี้ว่า FRONT/BACK เห็นไม่
+     ตรงกันมากตั้งแต่ต้น ไม่ใช่ค่าที่ทั้ง 2 view เห็นพ้องกัน) ไม่ flag คู่นั้น
+  ทั้ง 2 เกณฑ์ตรวจสอบแล้วว่าไม่กระทบคอลัมน์เตี้ยกว่าจริงในทุกไฟล์ทดสอบ (AA02-01 idx สุดท้าย
+  จริง n=66, ไม่ถูก cross_view_corrected เลย - ยังคง flag REAR_EMPTY_RISK ตามปกติ)
+
+  ข้อจำกัดที่ยังไม่ได้แก้ในรอบนี้ (บอกตรงไปตรงมา): ผู้ใช้ยังชี้ "วงกลมม่วง" ใน AA02-01 BACK
+  (กล่อง IRC1A สีแดงเข้ม เตี้ยกว่า ซ่อนอยู่หน้ากอง DSC1A เขียว) ว่าควรมี risk marker แต่ยัง
+  ไม่มีเลย - ตรวจสอบแล้วว่า detect_step_down_hidden_behind ไม่พบรูปแบบนี้ (ไม่ใช่ top-face
+  bleed-through ข้ามคอลัมน์เดียวกันแบบที่ฟังก์ชันนั้นออกแบบไว้) และ orphaned-roof ก็ไม่ได้
+  สร้างคอลัมน์ให้กล่องนี้เช่นกัน (roof ของมันเล็กเกินไป/ถูกบังเกือบมิด) - ยังไม่มีกลไกใดตรวจ
+  จับกรณีนี้ได้ในเวอร์ชันนี้ ต้องออกแบบกฎใหม่ + ทดสอบเพิ่มเติมก่อนจะ implement (v25.47 เคย
+  ลองแก้จุดนี้มาก่อนแล้วแต่ทำให้แย่ลง - กรอบเพิ่มขึ้นแทนที่จะแก้ปัญหา จึงไม่ถูกนำมาใช้ในรอบนี้)
+================================================================================
 v25.22 (แก้บั๊ก "marker คลาดเคลื่อน 1 ตำแหน่ง" สำหรับไฟล์ AE02-01 BACK view):
 
   ปัญหา: marker กรอบแดงวาดผิดตำแหน่ง ไปทางขวา 1 กอง จากตำแหน่งที่ถูกต้อง
@@ -315,6 +362,41 @@ VALID_RISK_TYPES = set(RISK_COLORS.keys())
 # ทั้ง 3 กฎ ข้าม record ที่ is_corner_duplicate=True เสมอ (ตรวจจาก pixel/เรขาคณิตจริง ไม่ hardcode ชื่อ view)
 STEP_DOWN_CROSSVIEW_DROP_RATIO = 0.20
 STEP_DOWN_PAIRWISE_DROP_RATIO = 0.20
+
+# v25.48 NEW (สำคัญ - พบจริงจาก AA05-03 ที่ผู้ใช้แนบ): STEP_DOWN_RISK (ทั้ง pairwise และ
+# cross_view) เดิมเชื่อค่า height_px ที่มาจาก "direct" fit เสมอ โดยไม่สนใจว่า fit นั้นมีจุดข้อมูล
+# (n_samples) มากพอจะเชื่อถือได้หรือไม่ - พบว่าไฟล์ AA05-03 BACK idx4 (คอลัมน์ขวาสุด) วัดความสูงได้
+# แค่ 212.4px (ต่ำกว่าเพื่อนบ้าน idx3 ที่ 274.8px ถึง 22.7% -> เกิน threshold 20% -> flag ผิดพลาด)
+# ตรวจสอบพบว่า n_samples ของ idx4 มีเพียง 19 จุด (เทียบเพื่อนบ้านที่มี 73-97 จุด) เพราะ apex_x
+# (จุดเปลี่ยน slope ของพื้นตู้ isometric) ตกอยู่ "ภายใน" ช่วงคอลัมน์นี้พอดี (x=1157 อยู่ในช่วง
+# 1132-1226) ทำให้ eff_b1=min(b1,apex_x) ตัดข้อมูลที่ใช้ fit เหลือแค่ 19px แคบๆ ก่อนถึง apex -
+# การ fit เส้นด้วยจุดน้อยมากขนาดนี้ใกล้จุดเปลี่ยน slope พอดี ไม่น่าเชื่อถือพอจะสรุปว่ากล่องนี้
+# "เตี้ยกว่าจริง" (ยืนยันด้วยภาพจริง: ผู้ใช้ระบุว่ากล่องขวาสุดสูงใกล้เคียงกับเพื่อนบ้าน ไม่ควรตีกรอบ)
+# FIX: เพิ่มเกณฑ์ขั้นต่ำของ n_samples ก่อนยอมรับว่า height_px "เชื่อถือได้พอจะใช้เป็นฝั่งที่
+# 'เตี้ยกว่า' ในการ flag ความเสี่ยง" - ถ้า n_samples ของฝั่งที่เตี้ยกว่าต่ำกว่าเกณฑ์นี้ (และค่า
+# height_px ยังไม่เคยถูกยืนยันซ้ำจาก cross-view ผ่าน height_source อื่น) จะไม่ flag ความเสี่ยงคู่
+# นั้น (ปลอดภัยกว่าการเดา - ตรงกับหลักการเดิมของระบบที่ "ซื่อสัตย์ว่าไม่รู้" ดีกว่า "มั่นใจผิด")
+# ตรวจสอบแล้วว่าไม่กระทบไฟล์อื่น: คอลัมน์ที่เตี้ยกว่าจริงทุกไฟล์ที่ทดสอบ (AA02-01 idx5 n=66,
+# AA05-03 idx0 n=96 ฯลฯ) มี n_samples สูงกว่าเกณฑ์นี้มาก ไม่ถูกกระทบ
+STEP_DOWN_MIN_RELIABLE_SAMPLES = 25
+
+# v25.48 NEW (สำคัญ - พบจริงจาก AA02-01 ที่ผู้ใช้แนบ หลังแก้ orphaned-roof แล้วยังพบกรอบแดง
+# ผิดพลาดที่ตำแหน่งเดิม): กล่อง ASI1A (สีน้ำเงินล้วน ทุกตำแหน่งเป็น SKU เดียวกัน มองด้วยตาจริง
+# ในภาพสูงเท่ากันทุกตั้งทั้ง FRONT และ BACK) แต่วัดได้ FRONT idx0=154.2px, idx1=214.2px
+# (ต่างกัน 28%) - ตรวจสอบพบว่าค่าดิบก่อน reconcile ของ BACK ฝั่งเดียวกัน (apex_fallback)
+# กลับใกล้เคียงกันมากกว่ามาก (270.7 vs 230.7 = 15%) แต่ reconcile เลือกเชื่อ FRONT (direct)
+# เพราะอยู่ใน "reliable" hierarchy สูงกว่า apex_fallback เสมอ โดยไม่ดูว่าความขัดแย้งเดิม
+# (conflict, ก่อนแก้ไข) รุนแรงแค่ไหน - ความขัดแย้งที่นี่สูงถึง 20.9%/33.2% (คำนวณจาก
+# cross_view_conflict_ratio) ซึ่งมากกว่าปกติมาก บ่งชี้ว่าการวัดฝั่งใดฝั่งหนึ่ง (หรือทั้งคู่)
+# มี noise สูงจากรอยต่อ isometric slope ระหว่างกล่อง SKU เดียวกันที่วางชิดกัน (ไม่ใช่กล่อง
+# เตี้ยกว่าจริง) - เกณฑ์ความน่าเชื่อถือแบบ n_samples (STEP_DOWN_MIN_RELIABLE_SAMPLES) ตรวจจับ
+# ไม่ได้ในกรณีนี้เพราะ FRONT idx0/idx1 มี n_samples เต็ม (107 ทั้งคู่) - ต้องใช้สัญญาณคนละตัว
+# FIX: ถ้าค่า height_px ของฝั่งที่ "เตี้ยกว่า" ในคู่เปรียบเทียบ มาจาก cross_view_corrected ที่มี
+# cross_view_conflict_ratio สูงเกินเกณฑ์นี้ (บ่งชี้ว่า FRONT/BACK เห็นไม่ตรงกันมากก่อนแก้ไข -
+# ค่าที่ใช้จริงไม่ใช่ค่าที่ทั้ง 2 view เห็นพ้องต้องกัน) ให้ถือว่าไม่น่าเชื่อถือพอจะ flag ความเสี่ยง
+# (เช่นเดียวกับหลักการของ STEP_DOWN_MIN_RELIABLE_SAMPLES - ปลอดภัยกว่าการเชื่อค่าที่มีข้อขัดแย้ง
+# สูงระหว่าง 2 มุมกล้องอย่างมั่นใจเกินไป)
+STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO = 0.15
 REAR_EMPTY_LENGTH_RATIO = 0.07
 CROSSVIEW_MIN_OVERLAP_RATIO = 0.5       # ต้องทับซ้อนตำแหน่งจริงอย่างน้อย 50% จึงถือเป็นคู่เดียวกัน
 
@@ -2147,6 +2229,10 @@ _ORPHANED_ROOF_MAX_COVERAGE = 0.3  # ถ้าคอลัมน์ที่ม�
 # "มีตัวแทนอยู่แล้ว" ไม่ต้องสร้าง synthetic column ซ้ำ (ยืนยันจาก AC04-03: roof ของกล่องที่นับ
 # ไปแล้วปกติ (front-face ใหญ่) มักถูกคอลัมน์ตัวเองครอบคลุม >=80-100% อยู่แล้ว ต่างจากกรณี orphan
 # ที่ coverage=0% เพราะไม่มีคอลัมน์ front-face ใดๆ ในตำแหน่งนั้นเลย)
+_ORPHANED_ROOF_ANY_COLOR_MAX_COVERAGE = 0.85  # v25.48 NEW: ดู docstring เต็มในลูปคำนวณ cov_any
+# ด้านล่าง (ใน _p1b_find_orphaned_roof_columns) - threshold สูงเพื่อแยก AA02-01 (99% covered,
+# ไม่ควร orphan) ออกจาก AC04-03 (~60% covered, ควร orphan จริง) ให้ถูกต้องทั้งคู่
+
 _ORPHANED_ROOF_GROUP_XOVERLAP = 0.5  # เกณฑ์ x-overlap สำหรับจัดกลุ่ม roof หลายชิ้นที่ตำแหน่ง
 # เดียวกัน (เช่น SNPR-AT+SHP1A-F2 ซ้อนกันในแนวลึกที่ตำแหน่งความยาวเดียวกัน) ให้เป็น 1 synthetic
 # column เดียว - หมายเหตุ: parameter นี้เหลืออยู่เพื่อความเข้ากันได้ของ signature เดิม แต่ไม่ได้
@@ -2226,6 +2312,7 @@ def _p1b_find_orphaned_roof_columns(existing_cols, all_cells,
         # ป้องกันการนับซ้ำถ้าคอลัมน์ทับซ้อนกันเอง)
         gspan = int(gx1 - gx0)
         covered = [False] * max(1, gspan)
+        covered_any_color = [False] * max(1, gspan)
         for col in existing_cols:
             # v25.46 FIX (สำคัญ - พบระหว่างทดสอบ AC04-03): เดิมเช็ค coverage กับ "ทุกคอลัมน์"
             # โดยไม่สนใจสี ทำให้ roof สีส้ม (SHP1A-F2) ที่ x-range บังเอิญทับซ้อนกับคอลัมน์สีเขียว
@@ -2233,16 +2320,33 @@ def _p1b_find_orphaned_roof_columns(existing_cols, all_cells,
             # ทั้งที่คอลัมน์เขียวทีลนั้นไม่ใช่ตัวแทนของกล่องส้มเลย - FIX: ต้องมีสมาชิกอย่างน้อย
             # 1 ชิ้นในคอลัมน์นั้นที่ "สีเดียวกับ roof" ก่อน จึงจะนับ coverage จากคอลัมน์นั้นได้
             # (สอดคล้องกับหลักการเดิมทั้งหมดของระบบที่ยึดสีเป็นตัวระบุตัวตนกล่อง)
-            if not any(m['color'] == group_roofs[0]['color'] for m in col.get('members', [])):
-                continue
+            same_color = any(m['color'] == group_roofs[0]['color'] for m in col.get('members', []))
             cx0, cx1 = col['x'], col['x'] + col['w']
             ov0 = max(gx0, cx0); ov1 = min(gx1, cx1)
             for px in range(int(max(gx0, ov0)), int(min(gx1, ov1))):
                 idx = px - int(gx0)
                 if 0 <= idx < gspan:
-                    covered[idx] = True
+                    if same_color:
+                        covered[idx] = True
+                    covered_any_color[idx] = True
         cov = sum(covered) / max(1, gspan)
-        if cov < max_coverage:
+        # v25.48 NEW (สำคัญ - พบ regression จริงจาก AA02-01 BACK): same-color coverage check
+        # (v25.46) ป้องกัน false-positive แบบ AC04-03 ได้ (orange vs teal คนละกล่องกันจริง) แต่
+        # ทำให้เกิด false-positive แบบใหม่กับ AA02-01: หลังคาสีฟ้า (MAPCA, w=205) ที่จริงๆ ถูก
+        # "คอลัมน์สีเขียว (DSC1A) ที่มีอยู่แล้ว 2 คอลัมน์ติดกัน" ครอบคลุมพื้นที่เกือบเต็ม (union
+        # ของทั้ง 2 คอลัมน์ = 203/205 = 99% แม้จะคนละสีก็ตาม) ถูกเข้าใจผิดว่า orphan เพราะไม่มี
+        # คอลัมน์ไหน "สีฟ้า" เลยสักคอลัมน์ (same-color coverage=0%)
+        # ROOT CAUSE ที่แยกแยะ 2 กรณีนี้ได้จริง (ตรวจสอบด้วยข้อมูลจริงทั้งคู่): AC04-03's teal
+        # orphan (รวม 4 ชิ้นแล้วกว้างถึง 525px) แม้แต่นับรวมทุกสีก็ยังถูกคอลัมน์ที่มีอยู่ครอบคลุม
+        # แค่ ~60% (มีช่องว่างจริงถึง 206px ที่ไม่มีคอลัมน์ใดเลยครอบคลุม เพราะกล่อง NTC1A ถูกบัง
+        # เกือบมิดจริง) ในขณะที่ AA02-01's cyan orphan (w=205, ไม่ได้ merge จากหลายชิ้น) ถูกคอลัมน์
+        # ที่มีอยู่ครอบคลุมสูงถึง 99% (แทบไม่มีช่องว่างเลย เพราะเป็นแค่หลังคาที่โผล่แทรกระหว่าง
+        # คอลัมน์เขียว 2 คอลัมน์ที่นับครบถ้วนอยู่แล้ว) - ใช้ threshold สูง (85%) เพื่อแยก 2 กรณีนี้
+        # FIX: เพิ่มเงื่อนไข OR - ถ้า any-color union coverage สูงมาก (>=85%, แทบไม่มีช่องว่าง)
+        # ให้ถือว่า "มีตัวแทนอยู่แล้วจริง" แม้จะคนละสีก็ตาม (เพราะแทบไม่มีพื้นที่เหลือให้กล่องอื่น
+        # ซ่อนอยู่ได้จริง) - ไม่กระทบ AC04-03 (coverage แค่ ~60% ยังต่ำกว่า 85% มาก ยังคง orphan)
+        cov_any = sum(covered_any_color) / max(1, gspan)
+        if cov < max_coverage and cov_any < _ORPHANED_ROOF_ANY_COLOR_MAX_COVERAGE:
             orphaned_groups.append(group_roofs)
 
     if not orphaned_groups:
@@ -2658,10 +2762,20 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_cols, dropped_back = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
         print(f"[P1B] BACK after drop_side_wall: {len(back_cols)} cols "
               f"(dropped {len(dropped_back)}), cx={[round(c['cx'],1) for c in back_cols]}")
-        # v25.46 NEW: เพิ่มคอลัมน์ synthetic จาก 'หลังคาที่ไม่มี front-face รองรับ' (orphaned
-        # roof) - ตามที่ผู้ใช้ยืนยันด้วยภาพจริง AC04-03 (ดู docstring เต็มที่
-        # _p1b_find_orphaned_roof_columns) ทำงานทั้ง 2 view เพื่อความสมมาตร (แม้ AC04-03 จะพบ
-        # ปัญหาแค่ฝั่ง FRONT แต่ในไฟล์อื่นอาจเกิดฝั่ง BACK ได้เช่นกัน)
+        # v25.48 FIX (สำคัญ - พบ regression จริงจาก AA02-01 BACK ที่ผู้ใช้แนบ): v25.46 เคยเพิ่ม
+        # 'orphaned-roof detection' ให้ทำงานทั้ง FRONT และ BACK "เพื่อความสมมาตร" - พบว่าเกณฑ์
+        # coverage เดิม (same-color เท่านั้น) ทำให้ BACK เกิด false-positive จริงกับ AA02-01:
+        # หลังคาสีฟ้า (MAPCA, w=205) ที่จริงๆ ถูกคอลัมน์สีเขียว (DSC1A) ที่มีอยู่แล้ว 2 คอลัมน์
+        # ติดกันครอบคลุมพื้นที่เกือบเต็ม (99%) แต่คนละสีจึงไม่ผ่าน same-color check เดิม ถูกเข้าใจ
+        # ผิดว่าเป็น orphaned roof -> สร้างคอลัมน์ synthetic แทรกกลาง -> ทำให้ BACK มี 6 คอลัมน์
+        # (5 จริง+1 ปลอม) -> Hungarian matching จับคู่ผิดตำแหน่งทั้งกระดาน -> เกิด STEP_DOWN_RISK
+        # ปลอม (ตรงกับที่ผู้ใช้ยืนยันด้วยภาพจริงว่าเป็น "เกินมา")
+        # FIX ที่ใช้จริง (ดู docstring เต็มที่ _ORPHANED_ROOF_ANY_COLOR_MAX_COVERAGE และในลูป
+        # คำนวณ cov_any ของ _p1b_find_orphaned_roof_columns): เพิ่มเงื่อนไข "any-color union
+        # coverage สูงมาก (>=85%)" เป็นอีกเหตุผลหนึ่งที่จะถือว่า "มีตัวแทนอยู่แล้ว" - แยกแยะออกจาก
+        # AC04-03 ได้ถูกต้อง (teal orphan coverage แค่ ~60% เท่านั้น ยังคง orphan ตามเดิม ไม่กระทบ
+        # การแก้ไขที่ผู้ใช้เคยยืนยันไว้แล้วสำหรับไฟล์นั้น) - จึงยังคงเปิดใช้งาน orphaned-roof
+        # detection ทั้ง 2 view ตามเดิม (ไม่ปิดฝั่ง BACK) เพียงแต่เกณฑ์ coverage แม่นยำขึ้น
         back_orphaned = _p1b_find_orphaned_roof_columns(back_cols, back_all)
         if back_orphaned:
             print(f"[P1B] BACK orphaned-roof columns found: {len(back_orphaned)}, "
@@ -3537,6 +3651,9 @@ def build_stack_records(view_result, view_label, flip_position=None):
             "x_range": h["x_range"], "pos_range": (real_p0, real_p1),
             "height_px": h["height_px"],
             "height_source": h.get("height_source", "direct"),
+            # v25.48 NEW: จำนวนจุดข้อมูลจริงที่ใช้ fit เส้นความสูง (n_samples) - เก็บไว้ใช้เป็น
+            # สัญญาณความน่าเชื่อถือของค่า height_px นี้ (ดู STEP_DOWN_MIN_RELIABLE_SAMPLES)
+            "n_samples": h.get("n_samples", 0),
             # True เฉพาะ idx==0 ที่ตรวจพบว่าเป็น corner artifact จริง (ตรวจจากเส้น rail
             # ทางเรขาคณิต ไม่ใช่ hardcode ชื่อ view - ดู process_view_on_image)
             "is_corner_duplicate": (i == 0 and is_corner_dup),
@@ -3558,6 +3675,17 @@ def detect_step_down_pairwise(records, view_label):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
+        # v25.48 NEW: ถ้าฝั่งที่ "เตี้ยกว่า" วัดจาก direct fit ที่มีจุดข้อมูลน้อยเกินไป (ไม่น่า
+        # เชื่อถือ - มักเกิดจาก apex ตัดข้อมูลออกเกือบหมด) ให้ข้ามการ flag คู่นี้ (ดู docstring
+        # เต็มที่ STEP_DOWN_MIN_RELIABLE_SAMPLES ด้านบนสำหรับหลักฐาน+เหตุผล)
+        if (shorter_rec.get("height_source") == "direct"
+                and shorter_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
+            continue
+        # v25.48 NEW: ดู docstring เต็มที่ STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO ด้านบน
+        if (shorter_rec.get("height_source") == "cross_view_corrected"
+                and shorter_rec.get("cross_view_conflict_ratio", 0.0)
+                > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+            continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
@@ -3647,6 +3775,14 @@ def detect_step_down_crossview(records_front, records_back):
             shorter_rec = rec_b if taller_rec is rec_a else rec_a
             taller_h = taller_rec["height_px"]
             shorter_h = shorter_rec["height_px"]
+            # v25.48 NEW: เกณฑ์เดียวกับ pairwise - ดู STEP_DOWN_MIN_RELIABLE_SAMPLES
+            if (shorter_rec.get("height_source") == "direct"
+                    and shorter_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
+                continue
+            if (shorter_rec.get("height_source") == "cross_view_corrected"
+                    and shorter_rec.get("cross_view_conflict_ratio", 0.0)
+                    > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+                continue
             threshold = taller_h * (1 - STEP_DOWN_CROSSVIEW_DROP_RATIO)
             if shorter_h < threshold:
                 drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
@@ -3941,13 +4077,19 @@ def reconcile_heights_cross_view(records_front, records_back,
             correction = (best_match["view"], best_match["idx"], h_b, h_a)
         else:
             correction = (rec_a["view"], rec_a["idx"], h_a, h_b)
+        # v25.48 NEW: บันทึกขนาดความขัดแย้งเดิม (ก่อนแก้ไข) ระหว่าง FRONT<->BACK ไว้ - ใช้เป็น
+        # สัญญาณความน่าเชื่อถือของค่าที่แก้ไขแล้ว (ดู STEP_DOWN_MAX_CORRECTION_RATIO ด้านล่าง)
+        conflict_mag = abs(h_a - h_b) / higher if higher > 0 else 0.0
         key = id(target)
         if key not in proposals or best_overlap > proposals[key][0]:
-            proposals[key] = (best_overlap, target, value, correction)
+            proposals[key] = (best_overlap, target, value, correction, conflict_mag)
 
-    for _overlap, target, value, correction in proposals.values():
+    for _overlap, target, value, correction, conflict_mag in proposals.values():
         target["height_px"] = value
         target["height_source"] = "cross_view_corrected"
+        # v25.48 NEW: ดู docstring เต็มที่ STEP_DOWN_MAX_CORRECTION_RATIO (ด้านล่าง ใกล้
+        # detect_step_down_pairwise) สำหรับหลักฐาน+เหตุผล (พบจริงจาก AA02-01)
+        target["cross_view_conflict_ratio"] = conflict_mag
         corrections.append(correction)
     return corrections
 
@@ -4258,8 +4400,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.46",
-            "benchmarkMode": "v25_46_orphaned_roof_detection_and_endcap_significant_front_guard",
+            "checkerVersion": "V25.48",
+            "benchmarkMode": "v25_48_orphaned_roof_any_color_coverage_guard_and_step_down_reliability_guards",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
