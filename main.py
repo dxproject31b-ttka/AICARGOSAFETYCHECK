@@ -2219,6 +2219,92 @@ def _p1b_roof_extent(cells):
     return x0, x1
 
 
+# v25.50 NEW: "Front-Row Shorter Box Detection" (กล่องแถวหน้าที่เตี้ยกว่า ซ่อนอยู่ด้านหน้า/ด้านล่าง
+# ของกล่องแถวหลังที่สูงกว่าในคอลัมน์เดียวกัน) - ตามที่ผู้ใช้ชี้ด้วยภาพจริง AA02-01 BACK idx0:
+# กล่อง IRC1A (สีแดงเข้ม, front-face h=108px @ hi_scale) สัมผัสพื้นตู้ (bottom ตรงกับขอบล่างสุดของ
+# คอลัมน์) อยู่ "หน้า" กล่อง DSC1A (สีเขียว, h=295px) ที่วางอยู่ด้านบน/ด้านหลังในคอลัมน์เดียวกัน -
+# DSC1A หยุดก่อนถึงพื้นตู้ (เว้นช่องว่าง 61px ให้ IRC1A) - เตี้ยกว่ากันถึง 63% แต่ไม่มีกลไกใดตรวจจับ
+# ได้เลยในเวอร์ชันก่อนหน้า (v25.13-v25.49) เพราะ:
+#   - detect_step_down_hidden_behind (v25.23) ตรวจจาก cargo_top_y "กระโดดขึ้น" กลางคอลัมน์ (กรณี
+#     กล่องหลังสูงกว่าโผล่พ้นกล่องหน้าขึ้นมา) - แต่กรณีนี้กลับด้าน (กล่องหน้าเตี้ยกว่า ไม่ได้โผล่พ้น
+#     อะไรขึ้นมาเลย) cargo_top_y ของทั้งคอลัมน์จึงเรียบลื่นต่อเนื่องตามเงาของ DSC1A เพียงอย่างเดียว
+#     ตลอดทั้งคอลัมน์ (ยืนยันจาก pixel scan จริง: ไม่มี jump ใดๆ เกิดขึ้นเลยตลอดช่วง idx0)
+#   - orphaned-roof detection (v25.46) ก็ไม่ช่วย เพราะ IRC1A มี roof เล็กเกินไป/ถูกบังเกือบมิด
+# ROOT CAUSE ที่แท้จริง: cargo_top_y เป็นการวัด "จุดบนสุด" ของทั้งคอลัมน์เท่านั้น - กล่องที่อยู่
+# "ด้านล่าง/ด้านหน้า" (ไม่ได้โผล่พ้นขึ้นไปเหนือกล่องอื่นเลย) จะไม่สร้างสัญญาณใดๆ ให้ cargo_top_y
+# เห็นได้เลย ไม่ว่าจะเตี้ยแค่ไหนก็ตาม - ต้องใช้หลักฐานคนละชนิด: ข้อมูล "front-face color-blob
+# members" ที่ PHASE 1B คำนวณไว้อยู่แล้ว (คนละสี, คนละตำแหน่ง y ในคอลัมน์เดียวกัน) ซึ่งบอกได้ตรงๆ
+# ว่ามีกล่อง 2 ใบซ้อนกันในแนวลึกที่ตำแหน่งเดียวกันจริง โดยกล่องที่ "สัมผัสพื้นตู้" (bottom ตรงกับ
+# ขอบล่างคอลัมน์) แต่ "เตี้ยกว่ากล่องที่ไม่สัมผัสพื้น" อย่างมีนัยสำคัญ คือกล่องแถวหน้าที่เตี้ยกว่าจริง
+_FRONT_ROW_SHORTER_MIN_RATIO_DROP = 0.20   # ต้องเตี้ยกว่าอย่างน้อย 20% (เกณฑ์เดียวกับ STEP_DOWN
+# ปกติ) จึงถือว่าต่างกันมีนัยสำคัญ - ยืนยันจาก AA02-01 (63% เตี้ยกว่า ผ่านเกณฑ์สบายๆ)
+_FRONT_ROW_SHORTER_MIN_GAP_PX = 15  # กล่อง "สูงกว่า" ต้องหยุดก่อนถึงพื้นอย่างน้อยเท่านี้ (หน่วย
+# hi_scale px) กัน false-positive จาก anti-aliasing/ความคลาดเคลื่อนเล็กน้อยที่ขอบกล่อง
+_FRONT_ROW_SHORTER_MIN_MEMBER_AREA = 1500  # พื้นที่ขั้นต่ำของแต่ละ member กัน noise/เศษเล็ก
+_FRONT_ROW_SHORTER_BOTTOM_TOL_PX = 10  # ระยะห่างสูงสุดระหว่าง bottom ของกล่องเตี้ยกว่ากับขอบล่าง
+# คอลัมน์ ที่ยังถือว่า "สัมผัสพื้นจริง" (กันความคลาดเคลื่อนเล็กน้อยจาก pixel rounding)
+def _p1b_find_front_row_shorter_members(cols, down_factor,
+                                         min_ratio_drop=_FRONT_ROW_SHORTER_MIN_RATIO_DROP,
+                                         min_gap_px=_FRONT_ROW_SHORTER_MIN_GAP_PX,
+                                         min_member_area=_FRONT_ROW_SHORTER_MIN_MEMBER_AREA,
+                                         bottom_tol_px=_FRONT_ROW_SHORTER_BOTTOM_TOL_PX):
+    """v25.50 NEW: หา 'กล่องแถวหน้าที่เตี้ยกว่า' ในแต่ละคอลัมน์ - ดู docstring เต็มด้านบนสำหรับ
+    หลักฐาน+เหตุผล (ยืนยันจาก AA02-01 BACK idx0)
+    Guard สำคัญ (กัน false-positive กับ 'genuine multi-color same-height stack' ที่เคยยืนยันถูกต้อง
+    ไว้แล้ว เช่น AC02-02/AA02-02 ที่มี 2-3 กล่องสีต่างกันซ้อนกันแต่ 'สูงใกล้เคียงกันจริง' หรือมี 3+
+    สี - ไม่ใช่กรณีนี้):
+      1) ต้องมีสมาชิกสีต่างกัน "พอดี 2 ชิ้น" เท่านั้น (ไม่ใช่ 3+ ซึ่งมักเป็น genuine 3-box stack -
+         ยืนยันจาก AA02-02 cx=1284 ที่มี 3 สีใกล้เคียงกัน ถูกยกเว้นด้วยเงื่อนไขนี้อัตโนมัติ)
+      2) กล่อง 'เตี้ยกว่า' ต้องมี bottom ตรงกับขอบล่างของคอลัมน์ (สัมผัสพื้นจริง, tol เล็ก)
+      3) กล่อง 'สูงกว่า' ต้องมี bottom อยู่เหนือขอบล่างคอลัมน์อย่างมีนัยสำคัญ (min_gap_px)
+      4) ต้องมี area ทั้งคู่ใหญ่พอ (min_member_area) กัน noise/เศษเล็ก
+      5) ratio (h เตี้ย/h สูง) ต้องต่ำกว่า (1-min_ratio_drop) จึงถือว่าต่างกันมีนัยสำคัญ - ยืนยันจาก
+         AB03-04 BACK cx=1060 (cyan h=127 vs blue h=172, ratio=0.738/26% ต่าง) ที่ผ่านเกณฑ์นี้ได้
+         เช่นกัน แต่ตำแหน่งนั้นถูก cross_view flag ไปแล้วอยู่แล้ว (ตำแหน่งเดียวกัน) - ต้อง dedup
+         ที่ชั้น risk engine (detect_step_down_front_row_shorter) อีกที ไม่ใช่ที่ฟังก์ชันนี้ เพื่อไม่
+         ให้ซ้ำซ้อนกับ risk ที่ตรวจพบแล้วจากกลไกอื่น
+    คืนค่า list ของ dict {cx, x0,y0,x1,y1 (bbox ของกล่องเตี้ยกว่า สเกลเป็น main_scale local-region
+    coords แล้ว), ratio, tall_h, short_h} - พิกัดยังอยู่ใน local coords ของ region (ยังไม่บวก origin)
+    """
+    results = []
+    for c in cols:
+        colors = set(m['color'] for m in c['members'])
+        if len(colors) != 2:
+            continue
+        by_color = {}
+        for m in c['members']:
+            by_color.setdefault(m['color'], []).append(m)
+        if any(len(v) != 1 for v in by_color.values()):
+            continue
+        members = [v[0] for v in by_color.values()]
+        members.sort(key=lambda m: m['y'])
+        m_top, m_bot = members[0], members[1]
+        if m_top['area'] < min_member_area or m_bot['area'] < min_member_area:
+            continue
+        col_bottom = c['y'] + c['h']
+        top_bottom = m_top['y'] + m_top['h']
+        bot_bottom = m_bot['y'] + m_bot['h']
+        if abs(bot_bottom - col_bottom) > bottom_tol_px:
+            continue
+        gap = col_bottom - top_bottom
+        if gap < min_gap_px:
+            continue
+        tall_h, short_h = m_top['h'], m_bot['h']
+        if short_h >= tall_h:
+            continue
+        ratio = short_h / tall_h if tall_h > 0 else 1.0
+        if ratio > (1 - min_ratio_drop):
+            continue
+        results.append({
+            "cx": c['cx'] * down_factor,
+            "x0": m_bot['x'] * down_factor, "y0": m_bot['y'] * down_factor,
+            "x1": (m_bot['x'] + m_bot['w']) * down_factor,
+            "y1": (m_bot['y'] + m_bot['h']) * down_factor,
+            "ratio": ratio, "tall_h": tall_h * down_factor, "short_h": short_h * down_factor,
+        })
+    return results
+
+
 # v25.46 NEW: "Orphaned Roof Detection" (หลังคาที่ไม่มีคอลัมน์ front-face รองรับ) - ตามที่ผู้ใช้
 # ยืนยันด้วยภาพจริง AC04-03: พบว่ากล่อง SNPR-AT (เทาม่วง) และ SHP1A-F2 (ส้ม) ในภาพ FRONT ถูกกอง
 # NTC1A-F1/F2 (เขียวทีล, แถวหลัง) ที่สูงกว่ามากบดบัง front-face จนเหลือน้อยเกินไป (area เพียง
@@ -2841,9 +2927,24 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
 
+        # v25.50 NEW: หา 'กล่องแถวหน้าที่เตี้ยกว่า' (front-row shorter box) ในแต่ละคอลัมน์ของทั้ง
+        # 2 view - ทำก่อน scale (members ยังเป็น hi-res raw coords ตรงกับ col x/y/w/h ที่ยังไม่
+        # scale เช่นกัน ณ จุดนี้ - สอดคล้องกัน) แล้วคืนพิกัดที่ scale เป็น main-scale local-region
+        # แล้ว (ฟังก์ชันเองจัดการ scale ให้) ดู docstring เต็มที่ _p1b_find_front_row_shorter_members
+        front_shorter = _p1b_find_front_row_shorter_members(front_cols, down_factor)
+        back_shorter = _p1b_find_front_row_shorter_members(back_cols, down_factor)
+        if front_shorter:
+            print(f"[P1B] FRONT front-row-shorter candidates: {len(front_shorter)}, "
+                  f"cx={[round(c['cx'],1) for c in front_shorter]}")
+        if back_shorter:
+            print(f"[P1B] BACK front-row-shorter candidates: {len(back_shorter)}, "
+                  f"cx={[round(c['cx'],1) for c in back_shorter]}")
+
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+            "front_shorter": front_shorter,
+            "back_shorter": back_shorter,
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
@@ -3719,7 +3820,7 @@ def detect_step_down_pairwise(records, view_label):
     return risks
 
 
-def detect_step_down_hidden_behind(view_result, records, view_label):
+def detect_step_down_hidden_behind(view_result, records, view_label, already_marked_idxs=None):
     """v25.23 NEW: STEP_DOWN_RISK (hidden_behind) - ตรวจกล่องแถวหลัง (ข้ามความกว้างตู้) ที่
     ซ่อนอยู่หลังกล่องแถวหน้าในคอลัมน์เดียวกัน แต่สูงกว่าจนหลังคาโผล่พ้นขึ้นมา (top-face
     bleed-through) - คนละกลไกจาก pairwise/cross_view เดิม (ซึ่งเทียบระหว่างคอลัมน์ ไม่ใช่
@@ -3729,7 +3830,23 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
 
     วาด marker เฉพาะ 'โซนที่กล่องซ่อนหลังโผล่ให้เห็น' (จาก split_x ถึงขอบคอลัมน์) ไม่ใช่ทั้ง
     คอลัมน์ เพื่อความแม่นยำของตำแหน่งกรอบ (คำนวณ abs_box ตรงที่นี่เลย แทนการพึ่ง
-    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)"""
+    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)
+
+    v25.50 NEW (สำคัญ - พบจริงจาก AB03-02 ที่ผู้ใช้ระบุ "กรอบกากบาทเกินมา"): เดิมไม่เคยตรวจสอบ
+    ว่าคอลัมน์ (idx) นี้ถูก flag ไปแล้วจาก pairwise/cross_view (ซึ่งวาดกรอบรอบทั้งคอลัมน์) หรือไม่
+    ก่อนจะวาดกรอบ hidden_behind เพิ่ม (ซึ่งวาดเฉพาะบางส่วนของคอลัมน์เดียวกัน) - พบว่าไฟล์ AB03-02
+    (บรรทุก SBI1A เต็มคันแบบ "staircase" ที่ความสูงเพิ่มขึ้นทีละขั้นตามธรรมชาติ) มีคอลัมน์ idx1
+    ถูก flag ทั้งจาก pairwise (เทียบ idx0/idx1 - กรอบเต็มคอลัมน์ x=841-900) และจาก hidden_behind
+    (ตรวจพบ jump ที่ x=878-900 ซึ่งแท้จริงเป็นผลจากการที่ seam ระหว่าง idx1/idx2 คลาดเคลื่อน
+    เล็กน้อย ทำให้ขอบขวาสุดของ idx1 ไปทับกับหลังคาของ idx2 ที่สูงกว่าจริง - ไม่ใช่กล่องแถวหลังที่
+    ซ่อนอยู่จริงตามที่ฟังก์ชันนี้ออกแบบไว้) ทำให้เกิดกรอบแดง 2 กรอบซ้อนทับกันบางส่วนที่ตำแหน่ง
+    เดียวกัน (มองดูคล้ายกากบาท/เครื่องหมาย X จากมุมที่กรอบทั้ง 2 ตัดกัน) ทั้งที่ pairwise เพียงพอ
+    อยู่แล้วสำหรับแจ้งเตือนตำแหน่งนี้
+    FIX: รับ already_marked_idxs (set ของ idx ที่ถูก mark_stack_idx จาก pairwise/cross_view ไปแล้ว
+    ในมุมมองเดียวกันนี้) - ถ้า idx อยู่ใน set นี้แล้ว ให้ข้ามการวาดกรอบ hidden_behind ซ้ำซ้อน (ไม่ใช่
+    การปิดกลไกตรวจจับ - ยังคงตรวจพบ jump เหมือนเดิม แต่ไม่วาดกรอบซ้ำเมื่อคอลัมน์นั้นถูกแจ้งเตือน
+    ไปแล้วจากกลไกอื่น) - ถ้าไม่ระบุ (None) จะทำงานเหมือนเดิมทุกประการเพื่อความปลอดภัยของโค้ดที่
+    เรียกฟังก์ชันนี้แบบเก่า"""
     risks = []
     hidden_behind = view_result.get("hidden_behind", {})
     ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
@@ -3739,6 +3856,8 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
             continue
         parent = records[idx]
         if parent.get("is_corner_duplicate"):
+            continue
+        if already_marked_idxs is not None and idx in already_marked_idxs:
             continue
         split_x, x1 = info["split_x"], info["x1"]
         hidden_h = info["hidden_height"]
@@ -3754,6 +3873,58 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
             "taller_height_px": hidden_h, "shorter_height_px": info["front_height"],
             "drop_ratio": 1 - (info["front_height"] / hidden_h) if hidden_h > 0 else 0,
             "jump_px": info["jump_px"], "abs_box": abs_box,
+        })
+    return risks
+
+
+def _match_candidate_to_idx(cx, records):
+    """v25.50 NEW: หา idx ของ record ที่ x_range ครอบคลุม cx (ตำแหน่งของ candidate front-row-
+    shorter) - ใช้จับคู่ candidate (จาก PHASE 1B, พิกัด local-region main-scale) เข้ากับ idx จริง
+    ใน records (ซึ่งมี x_range หน่วยเดียวกัน) คืนค่า idx หรือ None ถ้าไม่พบคอลัมน์ใดครอบคลุม cx นี้"""
+    for rec in records:
+        x0, x1 = rec["x_range"]
+        if x0 <= cx <= x1:
+            return rec["idx"]
+    return None
+
+
+def detect_step_down_front_row_shorter(candidates, records, view_result, view_label,
+                                        already_marked_idxs=None):
+    """v25.50 NEW: STEP_DOWN_RISK (front_row_shorter) - ตรวจ 'กล่องแถวหน้าที่เตี้ยกว่า' ซึ่งซ่อน
+    อยู่ด้านหน้า/ด้านล่างของกล่องแถวหลังที่สูงกว่าในคอลัมน์เดียวกัน (ตรงข้ามกับ hidden_behind ที่
+    ตรวจกล่องแถวหลังสูงกว่าโผล่พ้นขึ้นมา) - ดู docstring เต็มที่ _p1b_find_front_row_shorter_members
+    สำหรับหลักฐาน+เหตุผล (ยืนยันจาก AA02-01 BACK idx0: กล่อง IRC1A สีแดงเข้ม เตี้ยกว่า DSC1A สีเขียว
+    ถึง 63% สัมผัสพื้นตู้ อยู่หน้ากอง DSC1A ที่สูงกว่า)
+
+    candidates: list จาก phase1b.get('front_shorter'/'back_shorter', []) - พิกัด local-region
+    main-scale (ยังไม่บวก origin) - แปลงเป็นพิกัดสัมบูรณ์ (abs_box) ที่นี่โดยตรง (เหมือน
+    detect_step_down_hidden_behind) เพราะ 'กล่องเตี้ยกว่า' นี้ไม่ได้มี index ของตัวเองใน
+    stack_heights เช่นกัน (เป็น sub-region ภายในคอลัมน์เดียว ไม่ใช่คอลัมน์แยก)
+
+    ข้าม candidate ที่จับคู่กับคอลัมน์ (idx) ที่ is_corner_duplicate=True หรือถูก flag ไปแล้วจาก
+    pairwise/cross_view (already_marked_idxs) เพื่อไม่ให้ซ้ำซ้อน (เหตุผลเดียวกับที่เพิ่มใน
+    detect_step_down_hidden_behind - ยืนยันจาก AB03-04 BACK idx0 ที่ถูก cross_view flag ไปแล้ว
+    ควรไม่ต้องมีกรอบซ้ำจากกลไกนี้อีก)"""
+    risks = []
+    if not candidates:
+        return risks
+    ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
+    for cand in candidates:
+        idx = _match_candidate_to_idx(cand["cx"], records)
+        if idx is None or idx >= len(records):
+            continue
+        parent = records[idx]
+        if parent.get("is_corner_duplicate"):
+            continue
+        if already_marked_idxs is not None and idx in already_marked_idxs:
+            continue
+        abs_box = (ox + cand["x0"], oy + cand["y0"], ox + cand["x1"], oy + cand["y1"])
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK", "subtype": "front_row_shorter", "view": view_label,
+            "mark_view": view_label, "mark_stack_idx": idx,
+            "mark_x_range": (cand["x0"], cand["x1"]),
+            "taller_height_px": cand["tall_h"], "shorter_height_px": cand["short_h"],
+            "drop_ratio": 1 - cand["ratio"], "abs_box": abs_box,
         })
     return risks
 
@@ -4275,8 +4446,23 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_pairwise(records_front, "FRONT")
     risks += detect_step_down_pairwise(records_back, "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
-    risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
-    risks += detect_step_down_hidden_behind(back, records_back, "BACK")
+    # v25.50 NEW: เก็บ idx ที่ถูก flag ไปแล้วจาก pairwise/cross_view (แยกตาม view) - ใช้ dedup
+    # กัน hidden_behind และ front_row_shorter วาดกรอบซ้ำซ้อนที่คอลัมน์เดียวกัน (ดู docstring เต็ม
+    # ที่ detect_step_down_hidden_behind สำหรับหลักฐาน+เหตุผล - พบจริงจาก AB03-02)
+    marked_front_idxs = {r["mark_stack_idx"] for r in risks if r["mark_view"] == "FRONT"}
+    marked_back_idxs = {r["mark_stack_idx"] for r in risks if r["mark_view"] == "BACK"}
+    risks += detect_step_down_hidden_behind(front, records_front, "FRONT",
+                                             already_marked_idxs=marked_front_idxs)
+    risks += detect_step_down_hidden_behind(back, records_back, "BACK",
+                                             already_marked_idxs=marked_back_idxs)
+    # v25.50 NEW: STEP_DOWN_RISK (front_row_shorter) - ดู docstring เต็มที่
+    # detect_step_down_front_row_shorter / _p1b_find_front_row_shorter_members (ยืนยันจาก AA02-01)
+    risks += detect_step_down_front_row_shorter(
+        phase1b.get("front_shorter", []), records_front, front, "FRONT",
+        already_marked_idxs=marked_front_idxs)
+    risks += detect_step_down_front_row_shorter(
+        phase1b.get("back_shorter", []), records_back, back, "BACK",
+        already_marked_idxs=marked_back_idxs)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -4427,8 +4613,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.49",
-            "benchmarkMode": "v25_49_reconcile_max_conflict_ratio_guard",
+            "checkerVersion": "V25.50",
+            "benchmarkMode": "v25_50_front_row_shorter_and_hidden_behind_dedup",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
