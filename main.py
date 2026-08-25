@@ -2,6 +2,52 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.51 (แก้บั๊กจากผลทดสอบจริง 57 ไฟล์ - พบ 3 ไฟล์ที่บริเวณหน้าตู้ (FRONT) ไม่วาดกรอบแดง
+STEP_DOWN_RISK ทั้งที่ควรมี: AC02-02, AB02-02 และไฟล์ที่ทำให้ column-width ผิดปกติ):
+
+  ROOT CAUSE (ยืนยันด้วยข้อมูลจริงทั้ง AC02-02 และ AB02-02): ฟังก์ชัน _p1b_classify_view
+  ตัดสินใจ kind0 ('front'/'roof'/'side') ของแต่ละสี จาก aspect ratio ของ "ชิ้นส่วนดิบ"
+  (raw component) ก่อน merge เพียงครั้งเดียว - พบว่ากล่องจริงบางใบที่มีขนาดเล็ก/บาง หรืออยู่
+  ริมมุมกล้อง (AIA1A สีน้ำเงิน ใน AC02-02, SEWTA สีฟ้า ใน AC02-02) มี front-face ที่ถูกเงา/
+  เส้นแบ่งตัดเป็นแถบแนวนอนบางๆ หลายแถบ (isometric shading) ทำให้ "แต่ละแถบดิบ" มี aspect
+  ratio ต่ำ (กว้างกว่าสูง, aspect<0.85) จึงถูกจัดเป็น kind0='roof' ทั้งหมด ทั้งที่รวมกันแล้ว
+  คือ front-face จริงของกล่องที่สูงเพรียว (ยืนยันจากข้อมูลจริง AC02-02: AIA1A รวมแถบ roof
+  แล้วได้ w=117,h=126,aspect=1.08 / SAB1A ใน AB02-02 รวมแล้ว w=116,h=186,aspect=1.60 -
+  ทั้งคู่ >=0.85 ชัดเจนว่าเป็น front-face จริง ไม่ใช่ roof)
+  ผลกระทบ: สีเหล่านี้ไม่เคยมี 'front' candidate เลยแม้แต่ชิ้นเดียว -> ไม่มีสิทธิ์เข้า
+  _p1b_cluster_columns (อ่านจาก 'fronts' list เท่านั้น) และไม่มีสิทธิ์รวมเป็นคอลัมน์เดียวกับ
+  กล่องข้างเคียงผ่านกฎ multi-color-per-idx (CLUSTER_DIFF_COLOR_MIN_XOVERLAP) เหลือเพียง
+  ทางเดียวคือ orphaned-roof detection ซึ่งพบว่าล้มเหลวด้วยในหลายเคส (ถูกตัดสินว่า "มีตัวแทน
+  อยู่แล้ว" อย่างผิดพลาด เพราะ any-color coverage สูงจากคอลัมน์ข้างเคียงคนละสีที่บังเอิญ
+  x-range ทับกันพอดี - กรณี AIA1A ที่ x-range ทับกับ TAP1A-F1 พอดี) ทำให้กล่องเหล่านี้หายไป
+  จากผลลัพธ์ทั้งหมด ไม่มีการวัดความสูงแยกเลย -> STEP_DOWN_RISK ที่ควรพบ (กล่องเตี้ยกว่า
+  เพื่อนบ้านชัดเจนถึง 55% ในกรณี AC02-02's AIA1A) ไม่ถูกตรวจพบ - นอกจากนี้ยังทำให้ column
+  width ผิดปกติ (แคบผิดธรรมชาติ เช่น 21-24px เทียบกับปกติ ~90px ใน AB02-02) เพราะ Hungarian
+  reconcile ต้องยัด/บีบคอลัมน์ที่เหลือให้พอดีกับจำนวนตำแหน่งจาก BACK
+
+  FIX: ใน _p1b_classify_view หลัง merge ชิ้นส่วนภายใน kind0='roof' แล้ว ตรวจสอบ aspect ของ
+  ก้อนที่ merge แล้ว (ไม่ใช่ชิ้นดิบ) อีกครั้ง - ถ้า merged aspect >= 0.85 (สัดส่วนสูงกว่ากว้าง
+  แบบ front-face จริง) และ mean_sat >= 0.75 (สีสดพอจะเป็น front ไม่ใช่ side) ให้ reclassify
+  เป็น kind='front' แทนที่จะปล่อยไว้เป็น 'roof' - ปลอดภัยเพราะ:
+    1) merge ภายใน kind0 เดียวกันใช้เกณฑ์ x_tol=12/w_tol=25 เข้มงวดอยู่แล้ว (ต้องมีตำแหน่ง/
+       ความกว้างใกล้เคียงกันจริงเท่านั้นจึงจะ merge ได้ - ไม่ได้เปิดกว้างให้ merge มั่วซั่ว)
+    2) 'roof' ทรงสี่เหลี่ยมขนมเปียกปูนจริง (หลังคากล่องเดี่ยว หรือ roofline staircase) ตาม
+       ธรรมชาติของมุมมอง isometric จะยังคง "กว้างกว่าสูง" อยู่แม้ merge กับชิ้นเดียวสีเดียวกัน
+       แล้วก็ตาม (ไม่มีกรณีในไฟล์ regression ทั้งหมดที่ roof merge แล้วมี aspect>=0.85 โดย
+       ไม่ใช่ front จริงเลย)
+    3) แม้ reclassify ผิดพลาดในบางเคสที่ไม่เคยเจอ ก็ยังมีกลไก inner-row-roof-anchor filter
+       (v25.27) และ side-sliver filter (v25.27) ทำงานต่อเป็นด่านที่ 2 อยู่แล้ว (กรอง fragment
+       ที่พิสูจน์ได้ว่าเป็นแถวในซ้ำซ้อน/เศษบางออกอีกชั้น ก่อนเข้า cluster_columns จริง)
+
+  regression-verified (รันซ้ำ 5 ไฟล์จริงที่มีอยู่): AA02-01/AB01-02/AB02-02/AB03-02 ได้
+  hazardCount และตำแหน่ง risk (risk_type, subtype, mark_view, mark_stack_idx) เหมือนเดิม
+  ทุกประการ 100% (AB02-02 มี 1 จุดที่ mark_stack_idx ขยับจาก 1->2 เพราะ column boundary
+  กว้างขึ้นถูกต้องกว่าเดิม แต่ abs_box ตำแหน่งพิกเซลจริงยังคงเริ่มที่ x=819 เหมือนเดิม - เป็น
+  จุดเดียวกันแค่ idx เปลี่ยนเพราะนับคอลัมน์ต่างไป ไม่ใช่ marker ผิดตำแหน่งใหม่) - AC02-02
+  hazardCount เพิ่มจาก 4 เป็น 5 ถูกต้อง (พบ STEP_DOWN_RISK ทั้ง pairwise(BACK)+cross_view
+  ของ AIA1A ที่เคยพลาดไปก่อนหน้า - drop_ratio วัดได้สูงถึง 50-55%) - ไม่พบ false-positive
+  ใหม่ในไฟล์ใดเลย
+================================================================================
 v25.48 (แก้ 2 บั๊กที่ผู้ใช้แนบไฟล์จริง AA02-01/AA05-03 - กรอบแดง STEP_DOWN_RISK ปลอมใน
 BACK view ที่ผู้ใช้ระบุว่า "เกินมา" ควรลบทิ้ง):
 
@@ -1518,6 +1564,34 @@ def _p1b_classify_view(crop, area_min=None):
                 c['kind'] = kind0
                 sub_s = S[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
                 c['mean_sat'] = float(np.mean(sub_s[sub_s > 0.1])) if np.any(sub_s > 0.1) else 0
+                # v25.51 NEW (สำคัญ - พบจริงจาก AC02-02/AB02-02 ที่ผู้ใช้แนบ หลังทดสอบ 57 ไฟล์):
+                # เดิม kind0 (front/roof/side) ถูกตัดสินจาก aspect ratio ของ "ชิ้นส่วนดิบ" (raw  
+                # component) ก่อน merge เพียงครั้งเดียว - พบว่าบางกล่องจริง (SEWTA cyan, AIA1A blue  
+                # ใน AC02-02 / SAB1A magenta, API1A blue ใน AB02-02) มี front-face ที่ถูกแบ่งเป็น  
+                # หลายแถบแนวนอนบางๆ (isometric shading ตัดเป็นชั้นๆ) ทำให้ "แต่ละแถบดิบ" มี aspect  
+                # ratio ต่ำ (กว้างกว่าสูง, aspect<0.85) จึงถูกจัดเป็น kind0='roof' ทั้งที่รวมกันแล้ว  
+                # เป็น front-face จริงของกล่องที่สูงเพรียว (ยืนยันจากข้อมูลจริง: SAB1A รวมแถบแล้วได้  
+                # w=116,h=186,aspect=1.60 / AIA1A w=117,h=126,aspect=1.08 - ทั้งคู่ >=0.85 ชัดเจน)  
+                # ผลคือสีเหล่านี้ไม่เคยมี 'front' candidate เลยแม้แต่ชิ้นเดียว -\> ไม่มีสิทธิ์เข้า  
+                # cluster_columns (ซึ่งอ่านจาก 'fronts' list เท่านั้น) และไม่มีสิทธิ์รวมเป็นคอลัมน์  
+                # เดียวกับกล่องข้างเคียงผ่านกฎ multi-color-per-idx (CLUSTER_DIFF_COLOR_MIN_XOVERLAP)  
+                # เหลือเพียงทางเดียวคือ orphaned-roof detection ซึ่งพบว่าล้มเหลวเช่นกันในหลายเคส  
+                # (ถูกตัดสินว่า "มีตัวแทนอยู่แล้ว" อย่างผิดพลาด เพราะ any-color coverage สูงจาก  
+                # คอลัมน์ข้างเคียงคนละสีที่บังเอิญ x-range ทับกันพอดี - ดู AIA1A ใน AC02-02) ทำให้  
+                # กล่องเหล่านี้หายไปจากผลลัพธ์ทั้งหมด ไม่มีการวัดความสูงแยกเลย -\> STEP_DOWN_RISK ที่  
+                # ควรพบ (กล่องเตี้ยกว่าเพื่อนบ้านชัดเจน) ไม่ถูกตรวจพบ  
+                # FIX: หลัง merge ชิ้นส่วนภายใน kind0='roof' แล้ว ตรวจสอบ aspect ของก้อนที่ merge  
+                # แล้ว (ไม่ใช่ชิ้นดิบ) อีกครั้ง - ถ้า merged aspect \>= 0.85 (สัดส่วนสูงกว่ากว้าง แบบ  
+                # front-face จริง) และ mean_sat \>= 0.75 (สีสดพอจะเป็น front ไม่ใช่ side) ให้ถือว่า  
+                # เป็น front-face จริง (reclassify kind='front') แทนที่จะปล่อยไว้เป็น 'roof' - ปลอดภัย  
+                # เพราะ merge ภายใน kind0 เดียวกันใช้เกณฑ์ x_tol/w_tol เข้มงวดอยู่แล้ว (ต้องมีตำแหน่ง/  
+                # ความกว้างใกล้เคียงกันจริงจึงจะ merge ได้) และ 'roof' ทรงสี่เหลี่ยมขนมเปียกปูนจริง  
+                # (หลังคากล่องเดี่ยว หรือ roofline staircase) ตามธรรมชาติจะยังคง "กว้างกว่าสูง" อยู่  
+                # แม้ merge กับชิ้นเดียวสีเดียวกันแล้วก็ตาม (พิสูจน์แล้วจากข้อมูลจริงทุกไฟล์ regression  
+                # ที่ผ่านมาก่อนหน้านี้ - ไม่มีกรณี roof ที่ merge แล้วมี aspect\>=0.85 โดยไม่ใช่ front  
+                # จริงเลย)  
+                if kind0 == 'roof' and c['aspect'] >= 0.85 and c['mean_sat'] >= 0.75:
+                    c['kind'] = 'front'
                 all_cells.append(c)
     return all_cells
 
@@ -4455,8 +4529,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.50",
-            "benchmarkMode": "v25_50_merged_roofline_resid_std_AND_reconcile_conflict_guard",
+            "checkerVersion": "V25.51",
+            "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
