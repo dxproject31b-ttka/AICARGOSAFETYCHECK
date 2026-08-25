@@ -3881,6 +3881,29 @@ _ROOFLINE_RB_TARGET = 89   # ค่า R-B ของสี wall-panel จริ�
 _ROOFLINE_RB_TOL = 15      # tolerance แคบ (74-104) แยกจาก rail(102)/floor(122)/rear-wall(80)
 # ได้เพียงพอ (rear-wall ที่ 80 อาจยังเหลื่อมบ้าง แต่ปริมาณจุดของ rear-wall ในภาพจริงน้อยกว่า
 # wall-panel มาก เพราะมองเห็นได้แคบกว่า - ยืนยันด้วยการทดสอบ regression ครบทุกไฟล์)
+# v25.50 NEW (สำคัญ - พบจริงจาก AA02-01 ที่ผู้ใช้แนบ, พอร์ตมาจาก branch v25.48.5): _robust_local_
+# line_fit (MAD-based outlier rejection) ออกแบบมาเพื่อกรอง "จุดส่วนน้อยที่เป็น noise" ออกจากจุด
+# ส่วนใหญ่ที่ถูกต้อง - แต่พบว่าไฟล์ AA02-01 มี roofline เป็นรูปตัว "V" จริง (เพดานตู้แบบ isometric
+# มี apex แล้วลาดลง 2 ทิศทาง เหมือนปัญหาเดียวกับพื้นตู้ที่ compute_local_floor_y เคยแก้ไปแล้ว - แต่
+# _compute_local_roofline_fit ยังไม่เคยรองรับกรณีนี้) จุดข้อมูลทั้ง 2 กลุ่ม (ก่อน apex/หลัง apex)
+# ต่างก็เป็นจุดที่ถูกต้องจริง ไม่ใช่ minority-noise เลย (พบ 13 จุดฝั่งซ้าย + ~30 จุดฝั่งขวาที่เป็น
+# V-shape ชัดเจน) ทำให้ MAD-based rejection ไม่สามารถแยกออกได้ (ไม่มีฝั่งไหนเป็นส่วนน้อย) - fit
+# เส้นตรงเส้นเดียวข้าม 2 slope ที่ต่างกันจริงจึงให้ค่า resid_std=8.7px (แย่กว่า AC05-04's 0.35px
+# ถึง 25 เท่า) เส้นที่ fit ผิดนี้ทำให้ max_physical_height คำนวณผิดพลาด จนไปปฏิเสธค่าความสูงที่
+# ถูกต้องจริง (BACK idx0 วัดได้ 349.89px จาก direct-fit น่าเชื่อถือสูง n=82 จุด แต่ถูก Guard
+# ปฏิเสธเพราะ ratio คำนวณผิดเป็น 102.8% เกิน threshold ทั้งที่ container มี unused floor เหลือ
+# 51.2 นิ้ว - แสดงว่าไม่น่าเป็นไปได้ที่กล่องจะสูงชนเพดานจริง) ทำให้ระบบไปเชื่อค่า apex_fallback
+# ที่ไม่น่าเชื่อถือ (243.49px) แทน กลายเป็นซ่อนความแตกต่างของความสูงที่แท้จริงไว้ (มองด้วยตาจาก
+# ภาพจริงยืนยันว่า 2 คอลัมน์ที่ถูกลดค่าลงนี้สูงใกล้เคียงกันจริงตามที่วัดได้ก่อนถูก Guard ปฏิเสธ)
+# FIX: เพิ่มเกณฑ์ขั้นต่ำของคุณภาพ fit (resid_std) - ถ้า fit ที่ได้ (แม้จะผ่าน robust rejection
+# แล้ว) ยังมี resid_std สูงเกินไป แสดงว่าข้อมูลเป็น multi-modal จริง (V-shape หรือสีปนกันหลาย
+# พื้นผิว) ไม่ใช่แค่ noise ส่วนน้อย - เส้นตรงเส้นเดียวไม่เหมาะสมจะใช้แทนค่าจริงได้ -> คืนค่า None
+# (fail-safe, ปิด Guard สำหรับตำแหน่ง/ไฟล์นี้ไปเลย ดีกว่าใช้เส้นที่ fit ผิดมาปฏิเสธค่าที่ถูกต้อง)
+# เกณฑ์ที่ตั้งไว้ (3.0px) อ้างอิงจากหลักฐาน 2 จุดที่มี: AC05-04 (fit ดีจริง)=0.35px เทียบ AA02-01
+# (fit แย่จาก V-shape จริง)=8.7px - ให้ margin สูงกว่าค่าดีจริงมาก (~8 เท่า) แต่ยังต่ำกว่าค่าที่รู้
+# ว่าแย่มาก - regression-verified ร่วมกับ RECONCILE_MAX_CONFLICT_TO_APPLY (v25.49 AB03-04 fix)
+# ทั้งคู่เป็น guard คนละจุด/คนละฟังก์ชันกัน ไม่ทับซ้อนกัน จึงรวมเข้าด้วยกันได้ปลอดภัย
+_ROOFLINE_MAX_RESID_STD = 3.0
 
 
 def _compute_local_roofline_fit(region, min_run=_ROOFLINE_MIN_RUN_PX,
@@ -3932,6 +3955,11 @@ def _compute_local_roofline_fit(region, min_run=_ROOFLINE_MIN_RUN_PX,
     ys_arr = np.array(ys_pts, dtype=float)
     fit = _robust_local_line_fit(xs_arr, ys_arr)
     if fit is None:
+        return None
+    # v25.50 NEW: ดู docstring เต็มที่ _ROOFLINE_MAX_RESID_STD ด้านบนสำหรับหลักฐาน+เหตุผล
+    # (พบจริงจาก AA02-01 - roofline รูปตัว V ที่ robust rejection แก้ไม่ได้เพราะทั้ง 2 กลุ่ม
+    # จุดข้อมูลเป็นของจริงไม่ใช่ minority-noise)
+    if fit["resid_std"] > _ROOFLINE_MAX_RESID_STD:
         return None
     return fit["a"], fit["b"]
 
@@ -4427,8 +4455,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.49",
-            "benchmarkMode": "v25_49_reconcile_max_conflict_ratio_guard",
+            "checkerVersion": "V25.50",
+            "benchmarkMode": "v25_50_merged_roofline_resid_std_AND_reconcile_conflict_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
