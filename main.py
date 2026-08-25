@@ -2,6 +2,31 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.49 (แก้บั๊กที่ทำให้ STEP_DOWN_RISK จุดที่ผู้ใช้วง "วงกลมม่วง" ไว้ใน AA02-01 BACK view
+ไม่ถูกตรวจพบเลย - ผู้ใช้ระบุว่าเป็นจุดที่ "ควรวาดกรอบแต่ขาดหายไป"):
+
+  ROOT CAUSE: Physical Validity Guard (v25.40, ดู _compute_local_roofline_fit) fit เส้นตรง
+  เส้นเดียวกับข้อมูล roofline ที่แท้จริงเป็นรูปตัว "V" (เพดานตู้แบบ isometric มี apex แล้วลาดลง
+  2 ทิศทาง - ปัญหาเดียวกับที่พื้นตู้เคยเจอและแก้ไปแล้วด้วย compute_local_floor_y) - จุดข้อมูลทั้ง
+  2 ฝั่งของ apex (ก่อน/หลัง) ต่างก็เป็นข้อมูลจริงไม่ใช่ minority-noise เลย (13 จุด vs ~30 จุด)
+  ทำให้ _robust_local_line_fit (MAD-based rejection) ไม่สามารถแยกออกได้ ได้เส้นที่ fit ผิด
+  (resid_std=8.7px แย่กว่า AC05-04's 0.35px ถึง 25 เท่า) ทำให้ max_physical_height คำนวณผิด
+  จนไปปฏิเสธค่าความสูงที่ถูกต้องจริง (BACK "purple-circle column" วัดได้ตรง 349.89px จาก
+  direct-fit น่าเชื่อถือสูง n=82 จุด แต่ถูก Guard ปฏิเสธเพราะคำนวณ ratio ผิดเป็น 102.8% เกิน
+  threshold) ทำให้ระบบไปเชื่อค่า apex_fallback ที่ไม่น่าเชื่อถือแทน (243.49px) ซ่อนความแตกต่าง
+  ของความสูงที่แท้จริงระหว่างกอง DSC1A (สูง ~350px, ยืนยันด้วยภาพจริงและ pixel-level roofline
+  ต่อเนื่องไม่มีรอยกระโดด) กับกอง MAPCA สีฟ้า (เตี้ยกว่ามาก - เห็นแค่หลังคาโผล่แทรกเป็นเศษเล็กๆ
+  ระหว่างกอง DSC1A ที่สูงกว่า 2 ฝั่ง ยืนยันด้วยภาพจริงเช่นกัน)
+  FIX: เพิ่มเกณฑ์คุณภาพ fit (resid_std) ใน _compute_local_roofline_fit - ถ้า fit ที่ได้ (แม้
+  ผ่าน robust rejection แล้ว) ยังมี resid_std สูงเกิน 3.0px (มาร์จิ้นสูงกว่าค่าดีจริงที่เคยพบ
+  ~8 เท่า) แสดงว่าข้อมูลเป็น multi-modal จริง (V-shape/หลายพื้นผิวปนกัน) ไม่ใช่แค่ noise ส่วนน้อย
+  -> คืนค่า None (fail-safe ปิด Guard สำหรับตำแหน่ง/ไฟล์นั้นไปเลย ดีกว่าใช้เส้นที่ fit ผิดมา
+  ปฏิเสธค่าที่ถูกต้อง) - regression-verified: ไม่กระทบ AA05-03/AC04-03 (roofline ทั้งคู่เป็น
+  None อยู่แล้วในไฟล์เหล่านั้น จึงไม่ถูกเรียกถึงเงื่อนไขใหม่นี้เลย ผลลัพธ์เหมือนเดิมทุกประการ)
+  ผลลัพธ์หลังแก้: STEP_DOWN_RISK ใหม่ปรากฏขึ้นถูกต้องที่กอง DSC1A (สูงกว่า) ประชิดกับกอง MAPCA
+  (เตี้ยกว่า, drop_ratio=25%) ทั้ง FRONT และ BACK - ตำแหน่งกรอบแดงใหม่ใน BACK อยู่ติดกับคอลัมน์
+  ที่ผู้ใช้วงม่วงไว้พอดี (คอลัมน์ข้างเคียงที่แชร์ขอบเขตเดียวกัน) สอดคล้องกับที่ควรจะเป็น
+================================================================================
 v25.48 (แก้ 2 บั๊กที่ผู้ใช้แนบไฟล์จริง AA02-01/AA05-03 - กรอบแดง STEP_DOWN_RISK ปลอมใน
 BACK view ที่ผู้ใช้ระบุว่า "เกินมา" ควรลบทิ้ง):
 
@@ -397,26 +422,6 @@ STEP_DOWN_MIN_RELIABLE_SAMPLES = 25
 # (เช่นเดียวกับหลักการของ STEP_DOWN_MIN_RELIABLE_SAMPLES - ปลอดภัยกว่าการเชื่อค่าที่มีข้อขัดแย้ง
 # สูงระหว่าง 2 มุมกล้องอย่างมั่นใจเกินไป)
 STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO = 0.15
-# v25.49 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้แนบ): เดิม reconcile_heights_cross_view PASS2
-# (ดูฟังก์ชัน reconcile_heights_cross_view) เชื่อ "reliability hierarchy" (direct > apex_fallback)
-# เสมอเมื่อตัดสินว่าจะเขียนทับค่าฝั่งไหน โดยไม่สนใจว่า "ขนาดของความขัดแย้งเดิม (conflict_mag)"
-# สูงผิดปกติแค่ไหน - พบว่าไฟล์ AB03-04 มีคู่ FRONT idx2 (ASI1A-AJ ชั้นเดียว, apex_fallback,
-# height=121.17px) vs BACK idx0 (เห็น TEP1A-AJ ซ้อนอยู่อีกชั้นบน ASI1A-AJ จริงจากมุมกล้องนั้น,
-# direct, height=269.9px) conflict_mag=55.1% - สูงกว่าทุกเคส "noise ที่คาลิเบรตไว้แล้วว่าควรแก้"
-# มาก (AA02-01 สูงสุดที่เคยยืนยันว่าเป็น noise จริงคือ 33.2%) - ระบบยังคง "เชื่อ direct" แล้วเขียน
-# ทับ FRONT idx2 เป็น 269.9 ทั้งที่เป็นความแตกต่างทางกายภาพจริง (กล่องคนละความสูงจริงที่ตำแหน่งนี้
-# ไม่ใช่ noise) ทำให้ทั้ง 2 ฝั่งถูกทำให้เท่ากันไปก่อน detect_step_down_crossview จะได้เปรียบเทียบ
-# -> STEP_DOWN_RISK ที่ควรพบไม่ถูกตรวจพบเลย (หลักฐานถูกลบไปแล้วตั้งแต่ขั้น reconcile)
-# ROOT CAUSE: ไม่มีเพดานบนใดๆ กัน "ขนาดของความขัดแย้ง" เอาไว้เลย - ระบบแก้ไข conflict ทุกขนาด
-# เท่ากันหมด (แค่ 10.01% ก็แก้ไขเหมือนกับ 55% เป๊ะ) ทั้งที่ในทางสถิติ ยิ่งขัดแย้งกันสูงมาก ยิ่งไม่น่า
-# เป็น "measurement noise ธรรมดา" (ซึ่งควรมีขนาดจำกัด) และยิ่งน่าจะเป็นความจริงทางกายภาพมากกว่า
-# FIX: เพิ่มเพดานบน - ถ้า conflict_mag เกิน RECONCILE_MAX_CONFLICT_TO_APPLY ให้ "ไม่แก้ไขเลย" (ข้าม
-# proposal นี้ไปทั้งคู่ คงค่าเดิมทั้ง 2 ฝั่งไว้) ปล่อยให้ detect_step_down_crossview/pairwise ทำงาน
-# กับค่าจริงที่วัดได้ตามปกติแทน - ตั้งค่าไว้ที่ 0.40 (สูงกว่า 33.2% ที่เคยยืนยันว่าเป็น noise จริง
-# ของ AA02-01 มากพอสมควร กันไม่ให้กระทบเคสที่คาลิเบรตไว้แล้ว) และต่ำกว่า 55.1% ของ AB03-04 มากพอ
-# ที่จะจับเคสใหม่นี้ได้ - regression-verified: AA02-01 (conflict 20.9%/33.2%) ยังคงถูก correct
-# เหมือนเดิมทุกประการเพราะต่ำกว่า 40%
-RECONCILE_MAX_CONFLICT_TO_APPLY = 0.40
 REAR_EMPTY_LENGTH_RATIO = 0.07
 CROSSVIEW_MIN_OVERLAP_RATIO = 0.5       # ต้องทับซ้อนตำแหน่งจริงอย่างน้อย 50% จึงถือเป็นคู่เดียวกัน
 
@@ -2219,92 +2224,6 @@ def _p1b_roof_extent(cells):
     return x0, x1
 
 
-# v25.50 NEW: "Front-Row Shorter Box Detection" (กล่องแถวหน้าที่เตี้ยกว่า ซ่อนอยู่ด้านหน้า/ด้านล่าง
-# ของกล่องแถวหลังที่สูงกว่าในคอลัมน์เดียวกัน) - ตามที่ผู้ใช้ชี้ด้วยภาพจริง AA02-01 BACK idx0:
-# กล่อง IRC1A (สีแดงเข้ม, front-face h=108px @ hi_scale) สัมผัสพื้นตู้ (bottom ตรงกับขอบล่างสุดของ
-# คอลัมน์) อยู่ "หน้า" กล่อง DSC1A (สีเขียว, h=295px) ที่วางอยู่ด้านบน/ด้านหลังในคอลัมน์เดียวกัน -
-# DSC1A หยุดก่อนถึงพื้นตู้ (เว้นช่องว่าง 61px ให้ IRC1A) - เตี้ยกว่ากันถึง 63% แต่ไม่มีกลไกใดตรวจจับ
-# ได้เลยในเวอร์ชันก่อนหน้า (v25.13-v25.49) เพราะ:
-#   - detect_step_down_hidden_behind (v25.23) ตรวจจาก cargo_top_y "กระโดดขึ้น" กลางคอลัมน์ (กรณี
-#     กล่องหลังสูงกว่าโผล่พ้นกล่องหน้าขึ้นมา) - แต่กรณีนี้กลับด้าน (กล่องหน้าเตี้ยกว่า ไม่ได้โผล่พ้น
-#     อะไรขึ้นมาเลย) cargo_top_y ของทั้งคอลัมน์จึงเรียบลื่นต่อเนื่องตามเงาของ DSC1A เพียงอย่างเดียว
-#     ตลอดทั้งคอลัมน์ (ยืนยันจาก pixel scan จริง: ไม่มี jump ใดๆ เกิดขึ้นเลยตลอดช่วง idx0)
-#   - orphaned-roof detection (v25.46) ก็ไม่ช่วย เพราะ IRC1A มี roof เล็กเกินไป/ถูกบังเกือบมิด
-# ROOT CAUSE ที่แท้จริง: cargo_top_y เป็นการวัด "จุดบนสุด" ของทั้งคอลัมน์เท่านั้น - กล่องที่อยู่
-# "ด้านล่าง/ด้านหน้า" (ไม่ได้โผล่พ้นขึ้นไปเหนือกล่องอื่นเลย) จะไม่สร้างสัญญาณใดๆ ให้ cargo_top_y
-# เห็นได้เลย ไม่ว่าจะเตี้ยแค่ไหนก็ตาม - ต้องใช้หลักฐานคนละชนิด: ข้อมูล "front-face color-blob
-# members" ที่ PHASE 1B คำนวณไว้อยู่แล้ว (คนละสี, คนละตำแหน่ง y ในคอลัมน์เดียวกัน) ซึ่งบอกได้ตรงๆ
-# ว่ามีกล่อง 2 ใบซ้อนกันในแนวลึกที่ตำแหน่งเดียวกันจริง โดยกล่องที่ "สัมผัสพื้นตู้" (bottom ตรงกับ
-# ขอบล่างคอลัมน์) แต่ "เตี้ยกว่ากล่องที่ไม่สัมผัสพื้น" อย่างมีนัยสำคัญ คือกล่องแถวหน้าที่เตี้ยกว่าจริง
-_FRONT_ROW_SHORTER_MIN_RATIO_DROP = 0.20   # ต้องเตี้ยกว่าอย่างน้อย 20% (เกณฑ์เดียวกับ STEP_DOWN
-# ปกติ) จึงถือว่าต่างกันมีนัยสำคัญ - ยืนยันจาก AA02-01 (63% เตี้ยกว่า ผ่านเกณฑ์สบายๆ)
-_FRONT_ROW_SHORTER_MIN_GAP_PX = 15  # กล่อง "สูงกว่า" ต้องหยุดก่อนถึงพื้นอย่างน้อยเท่านี้ (หน่วย
-# hi_scale px) กัน false-positive จาก anti-aliasing/ความคลาดเคลื่อนเล็กน้อยที่ขอบกล่อง
-_FRONT_ROW_SHORTER_MIN_MEMBER_AREA = 1500  # พื้นที่ขั้นต่ำของแต่ละ member กัน noise/เศษเล็ก
-_FRONT_ROW_SHORTER_BOTTOM_TOL_PX = 10  # ระยะห่างสูงสุดระหว่าง bottom ของกล่องเตี้ยกว่ากับขอบล่าง
-# คอลัมน์ ที่ยังถือว่า "สัมผัสพื้นจริง" (กันความคลาดเคลื่อนเล็กน้อยจาก pixel rounding)
-def _p1b_find_front_row_shorter_members(cols, down_factor,
-                                         min_ratio_drop=_FRONT_ROW_SHORTER_MIN_RATIO_DROP,
-                                         min_gap_px=_FRONT_ROW_SHORTER_MIN_GAP_PX,
-                                         min_member_area=_FRONT_ROW_SHORTER_MIN_MEMBER_AREA,
-                                         bottom_tol_px=_FRONT_ROW_SHORTER_BOTTOM_TOL_PX):
-    """v25.50 NEW: หา 'กล่องแถวหน้าที่เตี้ยกว่า' ในแต่ละคอลัมน์ - ดู docstring เต็มด้านบนสำหรับ
-    หลักฐาน+เหตุผล (ยืนยันจาก AA02-01 BACK idx0)
-    Guard สำคัญ (กัน false-positive กับ 'genuine multi-color same-height stack' ที่เคยยืนยันถูกต้อง
-    ไว้แล้ว เช่น AC02-02/AA02-02 ที่มี 2-3 กล่องสีต่างกันซ้อนกันแต่ 'สูงใกล้เคียงกันจริง' หรือมี 3+
-    สี - ไม่ใช่กรณีนี้):
-      1) ต้องมีสมาชิกสีต่างกัน "พอดี 2 ชิ้น" เท่านั้น (ไม่ใช่ 3+ ซึ่งมักเป็น genuine 3-box stack -
-         ยืนยันจาก AA02-02 cx=1284 ที่มี 3 สีใกล้เคียงกัน ถูกยกเว้นด้วยเงื่อนไขนี้อัตโนมัติ)
-      2) กล่อง 'เตี้ยกว่า' ต้องมี bottom ตรงกับขอบล่างของคอลัมน์ (สัมผัสพื้นจริง, tol เล็ก)
-      3) กล่อง 'สูงกว่า' ต้องมี bottom อยู่เหนือขอบล่างคอลัมน์อย่างมีนัยสำคัญ (min_gap_px)
-      4) ต้องมี area ทั้งคู่ใหญ่พอ (min_member_area) กัน noise/เศษเล็ก
-      5) ratio (h เตี้ย/h สูง) ต้องต่ำกว่า (1-min_ratio_drop) จึงถือว่าต่างกันมีนัยสำคัญ - ยืนยันจาก
-         AB03-04 BACK cx=1060 (cyan h=127 vs blue h=172, ratio=0.738/26% ต่าง) ที่ผ่านเกณฑ์นี้ได้
-         เช่นกัน แต่ตำแหน่งนั้นถูก cross_view flag ไปแล้วอยู่แล้ว (ตำแหน่งเดียวกัน) - ต้อง dedup
-         ที่ชั้น risk engine (detect_step_down_front_row_shorter) อีกที ไม่ใช่ที่ฟังก์ชันนี้ เพื่อไม่
-         ให้ซ้ำซ้อนกับ risk ที่ตรวจพบแล้วจากกลไกอื่น
-    คืนค่า list ของ dict {cx, x0,y0,x1,y1 (bbox ของกล่องเตี้ยกว่า สเกลเป็น main_scale local-region
-    coords แล้ว), ratio, tall_h, short_h} - พิกัดยังอยู่ใน local coords ของ region (ยังไม่บวก origin)
-    """
-    results = []
-    for c in cols:
-        colors = set(m['color'] for m in c['members'])
-        if len(colors) != 2:
-            continue
-        by_color = {}
-        for m in c['members']:
-            by_color.setdefault(m['color'], []).append(m)
-        if any(len(v) != 1 for v in by_color.values()):
-            continue
-        members = [v[0] for v in by_color.values()]
-        members.sort(key=lambda m: m['y'])
-        m_top, m_bot = members[0], members[1]
-        if m_top['area'] < min_member_area or m_bot['area'] < min_member_area:
-            continue
-        col_bottom = c['y'] + c['h']
-        top_bottom = m_top['y'] + m_top['h']
-        bot_bottom = m_bot['y'] + m_bot['h']
-        if abs(bot_bottom - col_bottom) > bottom_tol_px:
-            continue
-        gap = col_bottom - top_bottom
-        if gap < min_gap_px:
-            continue
-        tall_h, short_h = m_top['h'], m_bot['h']
-        if short_h >= tall_h:
-            continue
-        ratio = short_h / tall_h if tall_h > 0 else 1.0
-        if ratio > (1 - min_ratio_drop):
-            continue
-        results.append({
-            "cx": c['cx'] * down_factor,
-            "x0": m_bot['x'] * down_factor, "y0": m_bot['y'] * down_factor,
-            "x1": (m_bot['x'] + m_bot['w']) * down_factor,
-            "y1": (m_bot['y'] + m_bot['h']) * down_factor,
-            "ratio": ratio, "tall_h": tall_h * down_factor, "short_h": short_h * down_factor,
-        })
-    return results
-
-
 # v25.46 NEW: "Orphaned Roof Detection" (หลังคาที่ไม่มีคอลัมน์ front-face รองรับ) - ตามที่ผู้ใช้
 # ยืนยันด้วยภาพจริง AC04-03: พบว่ากล่อง SNPR-AT (เทาม่วง) และ SHP1A-F2 (ส้ม) ในภาพ FRONT ถูกกอง
 # NTC1A-F1/F2 (เขียวทีล, แถวหลัง) ที่สูงกว่ามากบดบัง front-face จนเหลือน้อยเกินไป (area เพียง
@@ -2927,24 +2846,9 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
 
-        # v25.50 NEW: หา 'กล่องแถวหน้าที่เตี้ยกว่า' (front-row shorter box) ในแต่ละคอลัมน์ของทั้ง
-        # 2 view - ทำก่อน scale (members ยังเป็น hi-res raw coords ตรงกับ col x/y/w/h ที่ยังไม่
-        # scale เช่นกัน ณ จุดนี้ - สอดคล้องกัน) แล้วคืนพิกัดที่ scale เป็น main-scale local-region
-        # แล้ว (ฟังก์ชันเองจัดการ scale ให้) ดู docstring เต็มที่ _p1b_find_front_row_shorter_members
-        front_shorter = _p1b_find_front_row_shorter_members(front_cols, down_factor)
-        back_shorter = _p1b_find_front_row_shorter_members(back_cols, down_factor)
-        if front_shorter:
-            print(f"[P1B] FRONT front-row-shorter candidates: {len(front_shorter)}, "
-                  f"cx={[round(c['cx'],1) for c in front_shorter]}")
-        if back_shorter:
-            print(f"[P1B] BACK front-row-shorter candidates: {len(back_shorter)}, "
-                  f"cx={[round(c['cx'],1) for c in back_shorter]}")
-
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
-            "front_shorter": front_shorter,
-            "back_shorter": back_shorter,
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
@@ -3820,7 +3724,7 @@ def detect_step_down_pairwise(records, view_label):
     return risks
 
 
-def detect_step_down_hidden_behind(view_result, records, view_label, already_marked_idxs=None):
+def detect_step_down_hidden_behind(view_result, records, view_label):
     """v25.23 NEW: STEP_DOWN_RISK (hidden_behind) - ตรวจกล่องแถวหลัง (ข้ามความกว้างตู้) ที่
     ซ่อนอยู่หลังกล่องแถวหน้าในคอลัมน์เดียวกัน แต่สูงกว่าจนหลังคาโผล่พ้นขึ้นมา (top-face
     bleed-through) - คนละกลไกจาก pairwise/cross_view เดิม (ซึ่งเทียบระหว่างคอลัมน์ ไม่ใช่
@@ -3830,23 +3734,7 @@ def detect_step_down_hidden_behind(view_result, records, view_label, already_mar
 
     วาด marker เฉพาะ 'โซนที่กล่องซ่อนหลังโผล่ให้เห็น' (จาก split_x ถึงขอบคอลัมน์) ไม่ใช่ทั้ง
     คอลัมน์ เพื่อความแม่นยำของตำแหน่งกรอบ (คำนวณ abs_box ตรงที่นี่เลย แทนการพึ่ง
-    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)
-
-    v25.50 NEW (สำคัญ - พบจริงจาก AB03-02 ที่ผู้ใช้ระบุ "กรอบกากบาทเกินมา"): เดิมไม่เคยตรวจสอบ
-    ว่าคอลัมน์ (idx) นี้ถูก flag ไปแล้วจาก pairwise/cross_view (ซึ่งวาดกรอบรอบทั้งคอลัมน์) หรือไม่
-    ก่อนจะวาดกรอบ hidden_behind เพิ่ม (ซึ่งวาดเฉพาะบางส่วนของคอลัมน์เดียวกัน) - พบว่าไฟล์ AB03-02
-    (บรรทุก SBI1A เต็มคันแบบ "staircase" ที่ความสูงเพิ่มขึ้นทีละขั้นตามธรรมชาติ) มีคอลัมน์ idx1
-    ถูก flag ทั้งจาก pairwise (เทียบ idx0/idx1 - กรอบเต็มคอลัมน์ x=841-900) และจาก hidden_behind
-    (ตรวจพบ jump ที่ x=878-900 ซึ่งแท้จริงเป็นผลจากการที่ seam ระหว่าง idx1/idx2 คลาดเคลื่อน
-    เล็กน้อย ทำให้ขอบขวาสุดของ idx1 ไปทับกับหลังคาของ idx2 ที่สูงกว่าจริง - ไม่ใช่กล่องแถวหลังที่
-    ซ่อนอยู่จริงตามที่ฟังก์ชันนี้ออกแบบไว้) ทำให้เกิดกรอบแดง 2 กรอบซ้อนทับกันบางส่วนที่ตำแหน่ง
-    เดียวกัน (มองดูคล้ายกากบาท/เครื่องหมาย X จากมุมที่กรอบทั้ง 2 ตัดกัน) ทั้งที่ pairwise เพียงพอ
-    อยู่แล้วสำหรับแจ้งเตือนตำแหน่งนี้
-    FIX: รับ already_marked_idxs (set ของ idx ที่ถูก mark_stack_idx จาก pairwise/cross_view ไปแล้ว
-    ในมุมมองเดียวกันนี้) - ถ้า idx อยู่ใน set นี้แล้ว ให้ข้ามการวาดกรอบ hidden_behind ซ้ำซ้อน (ไม่ใช่
-    การปิดกลไกตรวจจับ - ยังคงตรวจพบ jump เหมือนเดิม แต่ไม่วาดกรอบซ้ำเมื่อคอลัมน์นั้นถูกแจ้งเตือน
-    ไปแล้วจากกลไกอื่น) - ถ้าไม่ระบุ (None) จะทำงานเหมือนเดิมทุกประการเพื่อความปลอดภัยของโค้ดที่
-    เรียกฟังก์ชันนี้แบบเก่า"""
+    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)"""
     risks = []
     hidden_behind = view_result.get("hidden_behind", {})
     ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
@@ -3856,8 +3744,6 @@ def detect_step_down_hidden_behind(view_result, records, view_label, already_mar
             continue
         parent = records[idx]
         if parent.get("is_corner_duplicate"):
-            continue
-        if already_marked_idxs is not None and idx in already_marked_idxs:
             continue
         split_x, x1 = info["split_x"], info["x1"]
         hidden_h = info["hidden_height"]
@@ -3873,58 +3759,6 @@ def detect_step_down_hidden_behind(view_result, records, view_label, already_mar
             "taller_height_px": hidden_h, "shorter_height_px": info["front_height"],
             "drop_ratio": 1 - (info["front_height"] / hidden_h) if hidden_h > 0 else 0,
             "jump_px": info["jump_px"], "abs_box": abs_box,
-        })
-    return risks
-
-
-def _match_candidate_to_idx(cx, records):
-    """v25.50 NEW: หา idx ของ record ที่ x_range ครอบคลุม cx (ตำแหน่งของ candidate front-row-
-    shorter) - ใช้จับคู่ candidate (จาก PHASE 1B, พิกัด local-region main-scale) เข้ากับ idx จริง
-    ใน records (ซึ่งมี x_range หน่วยเดียวกัน) คืนค่า idx หรือ None ถ้าไม่พบคอลัมน์ใดครอบคลุม cx นี้"""
-    for rec in records:
-        x0, x1 = rec["x_range"]
-        if x0 <= cx <= x1:
-            return rec["idx"]
-    return None
-
-
-def detect_step_down_front_row_shorter(candidates, records, view_result, view_label,
-                                        already_marked_idxs=None):
-    """v25.50 NEW: STEP_DOWN_RISK (front_row_shorter) - ตรวจ 'กล่องแถวหน้าที่เตี้ยกว่า' ซึ่งซ่อน
-    อยู่ด้านหน้า/ด้านล่างของกล่องแถวหลังที่สูงกว่าในคอลัมน์เดียวกัน (ตรงข้ามกับ hidden_behind ที่
-    ตรวจกล่องแถวหลังสูงกว่าโผล่พ้นขึ้นมา) - ดู docstring เต็มที่ _p1b_find_front_row_shorter_members
-    สำหรับหลักฐาน+เหตุผล (ยืนยันจาก AA02-01 BACK idx0: กล่อง IRC1A สีแดงเข้ม เตี้ยกว่า DSC1A สีเขียว
-    ถึง 63% สัมผัสพื้นตู้ อยู่หน้ากอง DSC1A ที่สูงกว่า)
-
-    candidates: list จาก phase1b.get('front_shorter'/'back_shorter', []) - พิกัด local-region
-    main-scale (ยังไม่บวก origin) - แปลงเป็นพิกัดสัมบูรณ์ (abs_box) ที่นี่โดยตรง (เหมือน
-    detect_step_down_hidden_behind) เพราะ 'กล่องเตี้ยกว่า' นี้ไม่ได้มี index ของตัวเองใน
-    stack_heights เช่นกัน (เป็น sub-region ภายในคอลัมน์เดียว ไม่ใช่คอลัมน์แยก)
-
-    ข้าม candidate ที่จับคู่กับคอลัมน์ (idx) ที่ is_corner_duplicate=True หรือถูก flag ไปแล้วจาก
-    pairwise/cross_view (already_marked_idxs) เพื่อไม่ให้ซ้ำซ้อน (เหตุผลเดียวกับที่เพิ่มใน
-    detect_step_down_hidden_behind - ยืนยันจาก AB03-04 BACK idx0 ที่ถูก cross_view flag ไปแล้ว
-    ควรไม่ต้องมีกรอบซ้ำจากกลไกนี้อีก)"""
-    risks = []
-    if not candidates:
-        return risks
-    ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
-    for cand in candidates:
-        idx = _match_candidate_to_idx(cand["cx"], records)
-        if idx is None or idx >= len(records):
-            continue
-        parent = records[idx]
-        if parent.get("is_corner_duplicate"):
-            continue
-        if already_marked_idxs is not None and idx in already_marked_idxs:
-            continue
-        abs_box = (ox + cand["x0"], oy + cand["y0"], ox + cand["x1"], oy + cand["y1"])
-        risks.append({
-            "risk_type": "STEP_DOWN_RISK", "subtype": "front_row_shorter", "view": view_label,
-            "mark_view": view_label, "mark_stack_idx": idx,
-            "mark_x_range": (cand["x0"], cand["x1"]),
-            "taller_height_px": cand["tall_h"], "shorter_height_px": cand["short_h"],
-            "drop_ratio": 1 - cand["ratio"], "abs_box": abs_box,
         })
     return risks
 
@@ -4048,6 +3882,29 @@ _ROOFLINE_MIN_POINTS = 5  # ต้องมีจุดที่เชื่อ�
 # ระบุด้วยช่วง R-B แคบรอบค่า 89 (wall panel วัดได้จริง) ทั้ง 2 ทิศทาง (R≈G และ G≈B) แทนช่วงกว้าง
 # 75-125 เดิมที่ออกแบบมาสำหรับ "กรองไม่ใช่กล่องสินค้า" (กว้างเกินไปสำหรับงาน roofline ที่ต้องการ
 # ความแม่นยำสูงเฉพาะพื้นผิวเดียว)
+# v25.49 NEW (สำคัญ - พบจริงจาก AA02-01 ที่ผู้ใช้แนบ): _robust_local_line_fit (MAD-based
+# outlier rejection) ออกแบบมาเพื่อกรอง "จุดส่วนน้อยที่เป็น noise" ออกจากจุดส่วนใหญ่ที่ถูกต้อง -
+# แต่พบว่าไฟล์ AA02-01 มี roofline เป็นรูปตัว "V" จริง (เพดานตู้แบบ isometric มี apex แล้วลาดลง
+# 2 ทิศทาง เหมือนปัญหาเดียวกับพื้นตู้ที่ compute_local_floor_y เคยแก้ไปแล้ว - แต่
+# _compute_local_roofline_fit ยังไม่เคยรองรับกรณีนี้) จุดข้อมูลทั้ง 2 กลุ่ม (ก่อน apex/หลัง apex)
+# ต่างก็เป็นจุดที่ถูกต้องจริง ไม่ใช่ minority-noise เลย (พบ 13 จุดฝั่งซ้าย + ~30 จุดฝั่งขวาที่เป็น
+# V-shape ชัดเจน) ทำให้ MAD-based rejection ไม่สามารถแยกออกได้ (ไม่มีฝั่งไหนเป็นส่วนน้อย) - fit
+# เส้นตรงเส้นเดียวข้าม 2 slope ที่ต่างกันจริงจึงให้ค่า resid_std=8.7px (แย่กว่า AC05-04's 0.35px
+# ถึง 25 เท่า) เส้นที่ fit ผิดนี้ทำให้ max_physical_height คำนวณผิดพลาด จนไปปฏิเสธค่าความสูงที่
+# ถูกต้องจริง (BACK idx0 วัดได้ 349.89px จาก direct-fit น่าเชื่อถือสูง n=82 จุด แต่ถูก Guard
+# ปฏิเสธเพราะ ratio คำนวณผิดเป็น 102.8% เกิน threshold ทั้งที่ container มี unused floor เหลือ
+# 51.2 นิ้ว - แสดงว่าไม่น่าเป็นไปได้ที่กล่องจะสูงชนเพดานจริง) ทำให้ระบบไปเชื่อค่า apex_fallback
+# ที่ไม่น่าเชื่อถือ (243.49px) แทน กลายเป็นซ่อนความแตกต่างของความสูงที่แท้จริงไว้ (มองด้วยตาจาก
+# ภาพจริงยืนยันว่า 2 คอลัมน์ที่ถูกลดค่าลงนี้สูงใกล้เคียงกันจริงตามที่วัดได้ก่อนถูก Guard ปฏิเสธ)
+# FIX: เพิ่มเกณฑ์ขั้นต่ำของคุณภาพ fit (resid_std) - ถ้า fit ที่ได้ (แม้จะผ่าน robust rejection
+# แล้ว) ยังมี resid_std สูงเกินไป แสดงว่าข้อมูลเป็น multi-modal จริง (V-shape หรือสีปนกันหลาย
+# พื้นผิว) ไม่ใช่แค่ noise ส่วนน้อย - เส้นตรงเส้นเดียวไม่เหมาะสมจะใช้แทนค่าจริงได้ -> คืนค่า None
+# (fail-safe, ปิด Guard สำหรับตำแหน่ง/ไฟล์นี้ไปเลย ดีกว่าใช้เส้นที่ fit ผิดมาปฏิเสธค่าที่ถูกต้อง)
+# เกณฑ์ที่ตั้งไว้ (3.0px) อ้างอิงจากหลักฐาน 2 จุดที่มี: AC05-04 (fit ดีจริง)=0.35px เทียบ AA02-01
+# (fit แย่จาก V-shape จริง)=8.7px - ให้ margin สูงกว่าค่าดีจริงมาก (~8 เท่า) แต่ยังต่ำกว่าค่าที่รู้
+# ว่าแย่มาก
+_ROOFLINE_MAX_RESID_STD = 3.0
+
 _ROOFLINE_RB_TARGET = 89   # ค่า R-B ของสี wall-panel จริง (179,179,90 หรือ 90,179,179)
 _ROOFLINE_RB_TOL = 15      # tolerance แคบ (74-104) แยกจาก rail(102)/floor(122)/rear-wall(80)
 # ได้เพียงพอ (rear-wall ที่ 80 อาจยังเหลื่อมบ้าง แต่ปริมาณจุดของ rear-wall ในภาพจริงน้อยกว่า
@@ -4103,6 +3960,11 @@ def _compute_local_roofline_fit(region, min_run=_ROOFLINE_MIN_RUN_PX,
     ys_arr = np.array(ys_pts, dtype=float)
     fit = _robust_local_line_fit(xs_arr, ys_arr)
     if fit is None:
+        return None
+    # v25.49 NEW: ดู docstring เต็มที่ _ROOFLINE_MAX_RESID_STD ด้านบนสำหรับหลักฐาน+เหตุผล
+    # (พบจริงจาก AA02-01 - roofline รูปตัว V ที่ robust rejection แก้ไม่ได้เพราะทั้ง 2 กลุ่ม
+    # จุดข้อมูลเป็นของจริงไม่ใช่ minority-noise)
+    if fit["resid_std"] > _ROOFLINE_MAX_RESID_STD:
         return None
     return fit["a"], fit["b"]
 
@@ -4276,13 +4138,6 @@ def reconcile_heights_cross_view(records_front, records_back,
             proposals[key] = (best_overlap, target, value, correction, conflict_mag)
 
     for _overlap, target, value, correction, conflict_mag in proposals.values():
-        # v25.49 NEW (สำคัญ - พบจริงจาก AB03-04): ถ้าความขัดแย้งเดิม (ก่อนแก้ไข) สูงเกินเพดานนี้
-        # ไม่น่าเป็น measurement noise ธรรมดาอีกต่อไป (สูงกว่าทุกเคส noise ที่เคยยืนยันแล้วมาก) -
-        # ข้ามการแก้ไขนี้ไปเลย คงค่าเดิมทั้ง 2 ฝั่งไว้ ปล่อยให้ detect_step_down_crossview/pairwise
-        # ตรวจจับความแตกต่างทางกายภาพจริงนี้ต่อไปตามปกติ (ดู docstring เต็มที่
-        # RECONCILE_MAX_CONFLICT_TO_APPLY ด้านบนสำหรับหลักฐาน+เหตุผล)
-        if conflict_mag > RECONCILE_MAX_CONFLICT_TO_APPLY:
-            continue
         target["height_px"] = value
         target["height_source"] = "cross_view_corrected"
         # v25.48 NEW: ดู docstring เต็มที่ STEP_DOWN_MAX_CORRECTION_RATIO (ด้านล่าง ใกล้
@@ -4446,23 +4301,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_pairwise(records_front, "FRONT")
     risks += detect_step_down_pairwise(records_back, "BACK")
     risks += detect_step_down_crossview(records_front, records_back)
-    # v25.50 NEW: เก็บ idx ที่ถูก flag ไปแล้วจาก pairwise/cross_view (แยกตาม view) - ใช้ dedup
-    # กัน hidden_behind และ front_row_shorter วาดกรอบซ้ำซ้อนที่คอลัมน์เดียวกัน (ดู docstring เต็ม
-    # ที่ detect_step_down_hidden_behind สำหรับหลักฐาน+เหตุผล - พบจริงจาก AB03-02)
-    marked_front_idxs = {r["mark_stack_idx"] for r in risks if r["mark_view"] == "FRONT"}
-    marked_back_idxs = {r["mark_stack_idx"] for r in risks if r["mark_view"] == "BACK"}
-    risks += detect_step_down_hidden_behind(front, records_front, "FRONT",
-                                             already_marked_idxs=marked_front_idxs)
-    risks += detect_step_down_hidden_behind(back, records_back, "BACK",
-                                             already_marked_idxs=marked_back_idxs)
-    # v25.50 NEW: STEP_DOWN_RISK (front_row_shorter) - ดู docstring เต็มที่
-    # detect_step_down_front_row_shorter / _p1b_find_front_row_shorter_members (ยืนยันจาก AA02-01)
-    risks += detect_step_down_front_row_shorter(
-        phase1b.get("front_shorter", []), records_front, front, "FRONT",
-        already_marked_idxs=marked_front_idxs)
-    risks += detect_step_down_front_row_shorter(
-        phase1b.get("back_shorter", []), records_back, back, "BACK",
-        already_marked_idxs=marked_back_idxs)
+    risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
+    risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -4613,8 +4453,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.50",
-            "benchmarkMode": "v25_50_front_row_shorter_and_hidden_behind_dedup",
+            "checkerVersion": "V25.49",
+            "benchmarkMode": "v25_49_roofline_v_shape_resid_std_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
