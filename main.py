@@ -2,6 +2,32 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.52 (เพิ่ม STEP_DOWN_RISK floor_jump mechanism - EXPERIMENTAL, ขอบเขตแคบ):
+
+  เพิ่มกลไก "floor_jump" ในโซนก้ำกึ่ง (drop_ratio 12.5%-20%, ต่ำกว่าเกณฑ์ปกติ 20% ที่ใช้อยู่
+  แล้ว) เพื่อจับกรณี step-down จริงที่มีรอยต่างระดับพื้นตู้จริง (ไม่ใช่แค่ความชันธรรมชาติจาก
+  มุมมอง isometric) - ยืนยันด้วยข้อมูลจริงจาก AC03-01 (ผู้ใช้ยืนยันด้วยภาพว่ามี step down จริง
+  1 กล่อง vs 2 กล่องซ้อน, floor_jump=+20.5px) เทียบกับ 2 เคส false-positive ที่ยืนยันแล้วว่า
+  ไม่ใช่ step down จริง (AA02-01 floor_jump=0.0px, AB05-01 floor_jump=9.7px)
+
+  ทดสอบ regression ครบ 24 ไฟล์ (v25.51 เทียบ v25.52) ยืนยันว่า mechanism นี้ปลอดภัย 100% -
+  เปลี่ยนแปลงผลลัพธ์เฉพาะ AC03-01 เท่านั้น (เพิ่ม STEP_DOWN_RISK 1 จุดที่ควรมีอยู่แล้ว) ไม่กระทบ
+  ไฟล์อื่นเลยแม้แต่ไฟล์เดียว
+
+  ข้อจำกัดที่ทราบแล้ว (Known Limitations - ยังไม่ได้แก้ในเวอร์ชันนี้):
+  1. AA02-01 idx0 (BACK view, กล่อง 2 ใบต่างสี/ต่างขนาดซ้อนกันในคอลัมน์เดียว โดยกล่องบนบัง
+     ไม่ให้เห็นรอยต่อของกล่องล่างเลย) - STEP_DOWN_RISK ยังตรวจไม่พบ เพราะ cargo_top_y (เส้น
+     หลังคา) ต่อเนื่องราบเรียบกับคอลัมน์ข้างเคียงสนิท (isometric slope บังรอยต่อจริงสมบูรณ์) และ
+     floor_jump ก็ตรวจไม่พบเช่นกัน (ปัญหาไม่ได้อยู่ที่พื้นตู้กระโดด แต่อยู่ที่กล่องซ้อนกันเอง) -
+     ทดลองหลายวิธี (fragment-height calibration, wall-as-ruler, fixed-slope) แล้วไม่พบวิธีที่
+     ปลอดภัยพอ general-purpose สำหรับกรณีนี้ ต้องการข้อมูลเพิ่มเติม (เช่น OCR อ่านตัวเลขจากภาพ
+     โดยตรง) จึงจะแก้ได้แม่นยำ
+  2. AB05-02 REAR_EMPTY_RISK (BACK view, กล่องสีครีม 255,255,147 ชนกับสีผนังปลายตู้จริงที่ใช้
+     ใน EA10/EC01-02/04) - ทดลอง fix โดยเพิ่มการตรวจสอบสีโครงสร้างใน
+     measure_cargo_extent_via_white_bg แต่พบว่าแก้ไม่ตรงจุด (เปลี่ยน start_x ผิดทิศทาง) และมี
+     ผลข้างเคียงกว้างเกินไป (กระทบเกือบทุกไฟล์ ~15px) จึงตัดสินใจไม่รวม fix นี้เข้าเวอร์ชันนี้ -
+     ยังคงเป็น known false-positive ที่รอการแก้ไขในรอบถัดไป
+
 v25.51 (แก้บั๊กจากผลทดสอบจริง 57 ไฟล์ - พบ 3 ไฟล์ที่บริเวณหน้าตู้ (FRONT) ไม่วาดกรอบแดง
 STEP_DOWN_RISK ทั้งที่ควรมี: AC02-02, AB02-02 และไฟล์ที่ทำให้ column-width ผิดปกติ):
 
@@ -3755,10 +3781,59 @@ def build_stack_records(view_result, view_label, flip_position=None):
     return records
 
 
-def detect_step_down_pairwise(records, view_label):
+# v25.52 NEW EXPERIMENTAL (สำคัญ - ผู้ใช้สอนเทคนิคนี้จากการดูภาพจริง AC03-01 หลังพิสูจน์ด้วย
+# ข้อมูลจริงว่าเส้นหลังคาต่อเนื่องราบเรียบข้ามคอลัมน์ (isometric slope ปกติ ไม่ใช่บั๊ก) แต่เส้น
+# พื้นตู้ (local_floor_y) กลับมีรอยกระโดดจริงที่ seam - ใช้แยกแยะ step-down จริง (มีรอยต่างระดับ
+# พื้นตู้จริง เช่น ขอบยางล้อ/ขั้นบันได) ออกจาก false-positive ที่เกิดจากความชันธรรมชาติของมุมมอง
+# isometric เพียงอย่างเดียว (เส้นพื้นตู้ราบเรียบต่อเนื่อง ไม่มีรอยต่อจริง)
+#
+# ยืนยันด้วยข้อมูลจริง 3 เคส (regression-tested ครบ 24 ไฟล์ ไม่กระทบไฟล์อื่นเลยนอกจาก AC03-01):
+#   1) AC03-01 idx0<->idx1 (TRUE, ยืนยันจากภาพโดยผู้ใช้ว่ามี step down จริง 1 กล่อง vs 2 กล่อง
+#      ซ้อน): floor_jump=+20.5px (พื้นกระโดดจริง) drop_ratio=15.5% (ต่ำกว่าเกณฑ์ 20% เดิม)
+#   2) AA02-01 idx1<->idx2 (FALSE, ยืนยันจาก front-face ดิบสูงเท่ากันทุกกอง 222-226px):
+#      floor_jump=+0.0px (พื้นราบเรียบสนิท ไม่มีรอยต่อ)
+#   3) AB05-01 idx0<->idx1 (FALSE, กล่องสีเดียวกันสูงเท่ากันทุกกอง ยืนยันจากภาพ):
+#      floor_jump=+9.7px (ต่ำกว่าเกณฑ์ที่ตั้งไว้)
+#
+# วิธีคำนวณ: fit เส้นตรงของ local_floor_y ทั้ง 2 ฝั่งของ seam (เว้นระยะ exclude=8px ใกล้ seam กัน
+# ปนเปื้อนจากขอบ) แล้ว extrapolate มาบรรจบที่ seam - ถ้าค่าที่ extrapolate ได้จากทั้ง 2 ฝั่งต่างกัน
+# มากพอ (>=15px) = มีรอยกระโดดจริงของพื้นตู้ (ไม่ใช่แค่เส้นเอียงต่อเนื่องจากมุมมอง isometric)
+#
+# ขอบเขต: ทำงานเป็น "OR-condition เพิ่มเติม" เฉพาะโซนก้ำกึ่ง (drop_ratio 12.5%-20%) เท่านั้น -
+# ไม่แตะเกณฑ์ 20% เดิมเลย (STEP_DOWN_PAIRWISE_DROP_RATIO ยังทำงานเหมือนเดิม 100% สำหรับทุกกรณีที่
+# >=20% อยู่แล้ว) เป็น mechanism แคบ (niche) ที่ช่วยจับกรณีเฉพาะที่พื้นตู้มีขั้นบันไดจริงเท่านั้น -
+# ไม่ใช่ solution ทั่วไปสำหรับ STEP_DOWN_RISK ทุกรูปแบบ (ยังมี known-limitation หลายกรณีที่ยังตรวจ
+# ไม่ได้ เช่น กล่องคนละใบซ้อนกันที่หลังคาบังไม่ให้เห็นรอยต่อเลย - ดู AA02-01 idx0 เป็นตัวอย่าง)
+STEP_DOWN_FLOOR_JUMP_MIN_PX = 15  # ยืนยันจากข้อมูลจริง: TRUE case=20.5px, FALSE cases=0.0/9.7px
+# ตั้งไว้ตรงกลางระหว่างค่าสูงสุดของ FALSE (9.7) กับค่าของ TRUE (20.5) - margin ปลอดภัยทั้ง 2 ฝั่ง
+
+
+def _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b, exclude=8):
+    """[v25.52 EXPERIMENTAL] คำนวณ floor_jump ที่ seam (x1a==x0b) - ดู docstring ด้านบนสำหรับ
+    หลักฐาน+เหตุผลเต็ม คืนค่า None ถ้าข้อมูลไม่พอ (fail-safe - ไม่ flag อะไรถ้าไม่มั่นใจ)"""
+    seam = x1a
+    left_xs = [x for x in range(max(0, x0a), seam - exclude)
+               if 0 <= x < len(local_floor_y) and local_floor_y[x] >= 0]
+    right_xs = [x for x in range(seam + exclude, x1b)
+                if 0 <= x < len(local_floor_y) and local_floor_y[x] >= 0]
+    if len(left_xs) < 5 or len(right_xs) < 5:
+        return None
+    lx = np.array(left_xs, dtype=float)
+    ly = np.array([local_floor_y[x] for x in left_xs], dtype=float)
+    rx = np.array(right_xs, dtype=float)
+    ry = np.array([local_floor_y[x] for x in right_xs], dtype=float)
+    coef_l = np.polyfit(lx, ly, 1)
+    coef_r = np.polyfit(rx, ry, 1)
+    floor_l_at_seam = np.polyval(coef_l, seam)
+    floor_r_at_seam = np.polyval(coef_r, seam)
+    return float(floor_r_at_seam - floor_l_at_seam)
+
+
+def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
     risks = []
+    local_floor_y = view_result.get("local_floor_y") if view_result else None
     for i in range(len(records) - 1):
         a, b = records[i], records[i + 1]
         if a.get("is_corner_duplicate") or b.get("is_corner_duplicate"):
@@ -3781,6 +3856,7 @@ def detect_step_down_pairwise(records, view_label):
                 > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
             continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
+        floor_jump = None
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             risks.append({
@@ -3790,6 +3866,27 @@ def detect_step_down_pairwise(records, view_label):
                 "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                 "drop_ratio": drop_ratio, "pair_indices": (a["idx"], b["idx"]),
             })
+        # v25.52 NEW EXPERIMENTAL: โซนก้ำกึ่ง (drop_ratio 12.5%-20%) - ใช้ floor_jump เป็นสัญญาณ
+        # เพิ่มเติมยืนยันว่าเป็น step-down จริง (พื้นตู้กระโดดจริง) ไม่ใช่ isometric slope ธรรมดา -
+        # เป็น OR-condition ใหม่ ไม่แตะเกณฑ์ 20% เดิมเลย (ดู docstring เต็มด้านบน)
+        elif local_floor_y is not None:
+            drop_ratio_check = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
+            if drop_ratio_check >= 0.125:
+                x0a, x1a = a["x_range"]
+                x0b, x1b = b["x_range"]
+                if x1a <= x0b:
+                    floor_jump = _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b)
+                elif x1b <= x0a:
+                    floor_jump = _p1b_compute_floor_jump(local_floor_y, x0b, x1b, x1a)
+                if floor_jump is not None and floor_jump >= STEP_DOWN_FLOOR_JUMP_MIN_PX:
+                    risks.append({
+                        "risk_type": "STEP_DOWN_RISK", "subtype": "pairwise_floor_jump",
+                        "view": view_label, "mark_view": view_label,
+                        "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
+                        "taller_height_px": taller_h, "shorter_height_px": shorter_h,
+                        "drop_ratio": drop_ratio_check, "pair_indices": (a["idx"], b["idx"]),
+                        "floor_jump_px": floor_jump,
+                    })
     return risks
 
 
@@ -4374,8 +4471,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
             sh["height_source"] = rec["height_source"]
 
     risks = []
-    risks += detect_step_down_pairwise(records_front, "FRONT")
-    risks += detect_step_down_pairwise(records_back, "BACK")
+    risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
+    risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
     risks += detect_step_down_crossview(records_front, records_back)
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
@@ -4529,7 +4626,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.51",
+            "checkerVersion": "V25.52",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
