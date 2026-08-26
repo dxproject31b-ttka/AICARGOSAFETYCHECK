@@ -3879,10 +3879,18 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 elif x1b <= x0a:
                     floor_jump = _p1b_compute_floor_jump(local_floor_y, x0b, x1b, x1a)
                 if floor_jump is not None and floor_jump >= STEP_DOWN_FLOOR_JUMP_MIN_PX:
+                    # v25.52 FIX (สำคัญ - พบจริงจาก AC03-01 ที่ผู้ใช้ตรวจสอบภาพจริง): เดิม mark
+                    # ที่ "taller_rec" (กองสูงกว่า) ตาม convention เดียวกับ pairwise เกณฑ์ 20% เดิม
+                    # (ซึ่งใช้งานถูกต้องอยู่แล้วในทุกไฟล์ที่ผ่าน regression มา - ไม่แตะส่วนนั้นเลย)
+                    # แต่ผู้ใช้ยืนยันว่าสำหรับ floor_jump mechanism นี้โดยเฉพาะ กรอบควรชี้ไปที่
+                    # "กองเตี้ยกว่า (shorter_rec)" ซึ่งเป็นกองที่มีปัญหาจริง (ถูกบังจนดูสูงเทียม
+                    # ทั้งที่จริงมีแค่ 1 กล่อง vs กองข้างเคียงที่มี 2 กล่อง) - FIX: เปลี่ยนเฉพาะจุดนี้
+                    # ให้ mark ที่ shorter_rec แทน ไม่กระทบ pairwise เกณฑ์ 20% เดิมที่ mark taller_rec
+                    # อยู่แล้ว (คนละ subtype กัน: 'pairwise' vs 'pairwise_floor_jump')
                     risks.append({
                         "risk_type": "STEP_DOWN_RISK", "subtype": "pairwise_floor_jump",
                         "view": view_label, "mark_view": view_label,
-                        "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
+                        "mark_stack_idx": shorter_rec["idx"], "mark_x_range": shorter_rec["x_range"],
                         "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                         "drop_ratio": drop_ratio_check, "pair_indices": (a["idx"], b["idx"]),
                         "floor_jump_px": floor_jump,
