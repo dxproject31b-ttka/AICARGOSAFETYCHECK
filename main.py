@@ -2,32 +2,53 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v25.52 (เพิ่ม STEP_DOWN_RISK floor_jump mechanism - EXPERIMENTAL, ขอบเขตแคบ):
+v25.53 (แก้ REAR_EMPTY_RISK false-positive เชิงระบบ ที่ BACK view มักถูก mark เกือบทุกไฟล์ +
+เพิ่ม STEP_DOWN_RISK floor_jump mechanism):
 
-  เพิ่มกลไก "floor_jump" ในโซนก้ำกึ่ง (drop_ratio 12.5%-20%, ต่ำกว่าเกณฑ์ปกติ 20% ที่ใช้อยู่
-  แล้ว) เพื่อจับกรณี step-down จริงที่มีรอยต่างระดับพื้นตู้จริง (ไม่ใช่แค่ความชันธรรมชาติจาก
-  มุมมอง isometric) - ยืนยันด้วยข้อมูลจริงจาก AC03-01 (ผู้ใช้ยืนยันด้วยภาพว่ามี step down จริง
-  1 กล่อง vs 2 กล่องซ้อน, floor_jump=+20.5px) เทียบกับ 2 เคส false-positive ที่ยืนยันแล้วว่า
-  ไม่ใช่ step down จริง (AA02-01 floor_jump=0.0px, AB05-01 floor_jump=9.7px)
+  ส่วนที่ 1 - REAR_EMPTY_RISK "extended length" (สำคัญ - ผู้ใช้สังเกตว่า mark BACK เกือบ 100%
+  ของเวลา ผิดปกติเกินกว่าจะบังเอิญ): ตรวจสอบข้าม 24 ไฟล์พบว่า "ช่องว่างฝั่งหัวตู้" ของ BACK
+  (start_x เดิม ถึงมุมผนังจริง) สูงผิดปกติ 100-150px แทบทุกไฟล์ ในขณะที่ FRONT มีช่องว่างฝั่ง
+  เดียวกันแค่ 3-30px เท่านั้น (ยืนยันด้วยภาพว่ากล่องชิดผนังหัวตู้จริง ไม่ใช่ช่องว่างจริง)
 
-  ทดสอบ regression ครบ 24 ไฟล์ (v25.51 เทียบ v25.52) ยืนยันว่า mechanism นี้ปลอดภัย 100% -
-  เปลี่ยนแปลงผลลัพธ์เฉพาะ AC03-01 เท่านั้น (เพิ่ม STEP_DOWN_RISK 1 จุดที่ควรมีอยู่แล้ว) ไม่กระทบ
-  ไฟล์อื่นเลยแม้แต่ไฟล์เดียว
+  ROOT CAUSE: กล่องที่ตำแหน่งใกล้ผนังหัวตู้ที่สุดในมุมมอง BACK มักมี "หน้าข้าง (side face)"
+  ของกล่องโผล่ให้เห็นก่อนถึง front-face หลัก (เพราะความลึกของกล่องในมุมมอง isometric) - หน้า
+  ข้างนี้มีสีสดจริง (ยืนยันจาก AA02-01: พบสีเขียว (123,255,70) ที่ cargo_bottom_y ตลอดช่วง
+  x=604-742) แต่ไม่ผ่านเกณฑ์ 'grounded' (gap_thresh=30) เพราะใต้หน้าข้างนี้เป็นสีผนังด้านข้าง
+  ตู้ (255,255,147) ไม่ใช่สีพื้นตู้จริง (ระยะห่างจาก cargo_bottom_y ถึง floor สีโครงสร้างที่แท้
+  จริงจึงไกลเกิน 30px มาก - วัดได้จริง 95-99px) ทำให้ทั้ง grounded-based fallback และ Phase 1B
+  (ซึ่งนับเฉพาะ front-face fragment ไม่รวมหน้าข้าง) พลาดพื้นที่กล่องจริงนี้ไปพร้อมกันทั้งคู่ ทำ
+  ให้ start_x/end_x/length_px (Phase 2) ของ BACK สั้นกว่าความเป็นจริงอย่างเป็นระบบ
 
-  ข้อจำกัดที่ทราบแล้ว (Known Limitations - ยังไม่ได้แก้ในเวอร์ชันนี้):
-  1. AA02-01 idx0 (BACK view, กล่อง 2 ใบต่างสี/ต่างขนาดซ้อนกันในคอลัมน์เดียว โดยกล่องบนบัง
-     ไม่ให้เห็นรอยต่อของกล่องล่างเลย) - STEP_DOWN_RISK ยังตรวจไม่พบ เพราะ cargo_top_y (เส้น
-     หลังคา) ต่อเนื่องราบเรียบกับคอลัมน์ข้างเคียงสนิท (isometric slope บังรอยต่อจริงสมบูรณ์) และ
-     floor_jump ก็ตรวจไม่พบเช่นกัน (ปัญหาไม่ได้อยู่ที่พื้นตู้กระโดด แต่อยู่ที่กล่องซ้อนกันเอง) -
-     ทดลองหลายวิธี (fragment-height calibration, wall-as-ruler, fixed-slope) แล้วไม่พบวิธีที่
-     ปลอดภัยพอ general-purpose สำหรับกรณีนี้ ต้องการข้อมูลเพิ่มเติม (เช่น OCR อ่านตัวเลขจากภาพ
-     โดยตรง) จึงจะแก้ได้แม่นยำ
-  2. AB05-02 REAR_EMPTY_RISK (BACK view, กล่องสีครีม 255,255,147 ชนกับสีผนังปลายตู้จริงที่ใช้
-     ใน EA10/EC01-02/04) - ทดลอง fix โดยเพิ่มการตรวจสอบสีโครงสร้างใน
-     measure_cargo_extent_via_white_bg แต่พบว่าแก้ไม่ตรงจุด (เปลี่ยน start_x ผิดทิศทาง) และมี
-     ผลข้างเคียงกว้างเกินไป (กระทบเกือบทุกไฟล์ ~15px) จึงตัดสินใจไม่รวม fix นี้เข้าเวอร์ชันนี้ -
-     ยังคงเป็น known false-positive ที่รอการแก้ไขในรอบถัดไป
+  ทดลองแก้ x_min_/x_max_ ใน process_view_on_image โดยตรงก่อน (ซึ่งใช้ร่วมกันทั้งการหา seam/
+  boundary ของคอลัมน์และการวัดความสูง) พบว่ากระทบ STEP_DOWN_RISK ในหลายไฟล์อย่างกว้างขวางเกิน
+  กว่าจะยืนยันความปลอดภัยได้ทันที (ตามที่ผู้ใช้ชี้ให้ระวัง) จึงเปลี่ยนแนวทาง:
 
+  FIX: คำนวณ "ความยาวขยาย" (extended length, ดูฟังก์ชัน _p1b_extended_length_for_rear_check)
+  แยกต่างหาก เฉพาะสำหรับ REAR_EMPTY_RISK เท่านั้น โดยใช้ cargo_mask ดิบ (ผ่านการกรอง arrow_mask
+  + min_blob_size แล้วจาก vivid_cargo_mask - ปลอดภัยจากตัวอักษร/เส้นบอกระยะที่เป็นจุดเล็กๆ
+  กระจัดกระจาย) ขยาย start_x/end_x เดิม (จาก Phase 2) ให้ครอบคลุมสีสดใดๆ ที่พบเพิ่มเติม - ไม่แตะ
+  x_min_/x_max_ เดิมที่ใช้คำนวณ seam/height เลย (แยกผลกระทบออกจากกันชัดเจน 100%)
+
+  regression-verified ครบ 24 ไฟล์: STEP_DOWN_RISK ไม่เปลี่ยนแปลงแม้แต่จุดเดียว (นอกจาก floor_
+  jump ใหม่ที่ AC03-01 - ดูส่วนที่ 2) REAR_EMPTY_RISK: AA02-01/AB05-01 หาย false-positive ที่
+  เคยรายงานผิดพลาด (ยืนยันจากภาพ), AB02-01/AB04-02/AC02-02 สลับ subtype (length_mismatch<->
+  color_anomaly) แต่ mark ตำแหน่งเดิม (ไม่ใช่จุดใหม่), AB03-03/AC03-01 เพิ่มจุดใหม่ที่ยืนยันด้วย
+  ภาพจริงแล้วว่าถูกต้อง (มีป้ายบอกระยะช่องว่างจริงในภาพ เช่น "1112 (mm)" ที่ AB03-03) ไฟล์ที่
+  เหลือทั้งหมดไม่เปลี่ยนแปลงเลย
+
+  ข้อจำกัดที่ยังไม่ได้แก้ (บอกตรงไปตรงมา): AB05-02 (สีกล่อง 255,255,147 ชนกับสีผนังปลายตู้จริง)
+  ยัง "ไม่หายขาด 100%" - gap ลดลงจาก 19.8% เหลือ 7.8% แต่ยังเกินเกณฑ์ 6% เล็กน้อย เพราะ FRONT
+  ก็ถูกขยายไปด้วยเช่นกัน (คาดว่าเป็นข้อจำกัดของวิธี cargo_mask-based ที่ไม่สามารถแยกแยะสีที่ชน
+  กันระหว่าง "ผนังจริง" กับ "กล่องจริง" ได้ 100% - ดู CHANGELOG v25.52 สำหรับรายละเอียดการ
+  วิเคราะห์ที่พิสูจน์แล้วว่าไม่มีสัญญาณ pixel ใดแยกแยะ 2 กรณีนี้ได้)
+
+  ส่วนที่ 2 - STEP_DOWN_RISK floor_jump mechanism (v25.52 เดิม): เพิ่มกลไก "floor_jump" ในโซน
+  ก้ำกึ่ง (drop_ratio 12.5%-20%) เพื่อจับกรณี step-down จริงที่มีรอยต่างระดับพื้นตู้จริง (ไม่ใช่
+  แค่ความชันธรรมชาติจากมุมมอง isometric) - ยืนยันด้วยข้อมูลจริงจาก AC03-01 (floor_jump=+20.5px)
+  เทียบกับ 2 เคส false-positive ที่ยืนยันแล้ว (AA02-01=0.0px, AB05-01=9.7px) - แก้ไขเพิ่มเติมให้
+  mark ที่ "กองเตี้ยกว่า (shorter_rec)" แทนที่จะเป็น "กองสูงกว่า" ตามที่ผู้ใช้ยืนยันด้วยภาพจริง
+  (ไม่กระทบ pairwise เกณฑ์ 20% เดิมที่ยัง mark กองสูงกว่าเหมือนเดิม - คนละ subtype กัน)
+================================================================================
 v25.51 (แก้บั๊กจากผลทดสอบจริง 57 ไฟล์ - พบ 3 ไฟล์ที่บริเวณหน้าตู้ (FRONT) ไม่วาดกรอบแดง
 STEP_DOWN_RISK ทั้งที่ควรมี: AC02-02, AB02-02 และไฟล์ที่ทำให้ column-width ผิดปกติ):
 
@@ -3781,36 +3802,10 @@ def build_stack_records(view_result, view_label, flip_position=None):
     return records
 
 
-# v25.52 NEW EXPERIMENTAL (สำคัญ - ผู้ใช้สอนเทคนิคนี้จากการดูภาพจริง AC03-01 หลังพิสูจน์ด้วย
-# ข้อมูลจริงว่าเส้นหลังคาต่อเนื่องราบเรียบข้ามคอลัมน์ (isometric slope ปกติ ไม่ใช่บั๊ก) แต่เส้น
-# พื้นตู้ (local_floor_y) กลับมีรอยกระโดดจริงที่ seam - ใช้แยกแยะ step-down จริง (มีรอยต่างระดับ
-# พื้นตู้จริง เช่น ขอบยางล้อ/ขั้นบันได) ออกจาก false-positive ที่เกิดจากความชันธรรมชาติของมุมมอง
-# isometric เพียงอย่างเดียว (เส้นพื้นตู้ราบเรียบต่อเนื่อง ไม่มีรอยต่อจริง)
-#
-# ยืนยันด้วยข้อมูลจริง 3 เคส (regression-tested ครบ 24 ไฟล์ ไม่กระทบไฟล์อื่นเลยนอกจาก AC03-01):
-#   1) AC03-01 idx0<->idx1 (TRUE, ยืนยันจากภาพโดยผู้ใช้ว่ามี step down จริง 1 กล่อง vs 2 กล่อง
-#      ซ้อน): floor_jump=+20.5px (พื้นกระโดดจริง) drop_ratio=15.5% (ต่ำกว่าเกณฑ์ 20% เดิม)
-#   2) AA02-01 idx1<->idx2 (FALSE, ยืนยันจาก front-face ดิบสูงเท่ากันทุกกอง 222-226px):
-#      floor_jump=+0.0px (พื้นราบเรียบสนิท ไม่มีรอยต่อ)
-#   3) AB05-01 idx0<->idx1 (FALSE, กล่องสีเดียวกันสูงเท่ากันทุกกอง ยืนยันจากภาพ):
-#      floor_jump=+9.7px (ต่ำกว่าเกณฑ์ที่ตั้งไว้)
-#
-# วิธีคำนวณ: fit เส้นตรงของ local_floor_y ทั้ง 2 ฝั่งของ seam (เว้นระยะ exclude=8px ใกล้ seam กัน
-# ปนเปื้อนจากขอบ) แล้ว extrapolate มาบรรจบที่ seam - ถ้าค่าที่ extrapolate ได้จากทั้ง 2 ฝั่งต่างกัน
-# มากพอ (>=15px) = มีรอยกระโดดจริงของพื้นตู้ (ไม่ใช่แค่เส้นเอียงต่อเนื่องจากมุมมอง isometric)
-#
-# ขอบเขต: ทำงานเป็น "OR-condition เพิ่มเติม" เฉพาะโซนก้ำกึ่ง (drop_ratio 12.5%-20%) เท่านั้น -
-# ไม่แตะเกณฑ์ 20% เดิมเลย (STEP_DOWN_PAIRWISE_DROP_RATIO ยังทำงานเหมือนเดิม 100% สำหรับทุกกรณีที่
-# >=20% อยู่แล้ว) เป็น mechanism แคบ (niche) ที่ช่วยจับกรณีเฉพาะที่พื้นตู้มีขั้นบันไดจริงเท่านั้น -
-# ไม่ใช่ solution ทั่วไปสำหรับ STEP_DOWN_RISK ทุกรูปแบบ (ยังมี known-limitation หลายกรณีที่ยังตรวจ
-# ไม่ได้ เช่น กล่องคนละใบซ้อนกันที่หลังคาบังไม่ให้เห็นรอยต่อเลย - ดู AA02-01 idx0 เป็นตัวอย่าง)
-STEP_DOWN_FLOOR_JUMP_MIN_PX = 15  # ยืนยันจากข้อมูลจริง: TRUE case=20.5px, FALSE cases=0.0/9.7px
-# ตั้งไว้ตรงกลางระหว่างค่าสูงสุดของ FALSE (9.7) กับค่าของ TRUE (20.5) - margin ปลอดภัยทั้ง 2 ฝั่ง
+STEP_DOWN_FLOOR_JUMP_MIN_PX = 15
 
 
 def _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b, exclude=8):
-    """[v25.52 EXPERIMENTAL] คำนวณ floor_jump ที่ seam (x1a==x0b) - ดู docstring ด้านบนสำหรับ
-    หลักฐาน+เหตุผลเต็ม คืนค่า None ถ้าข้อมูลไม่พอ (fail-safe - ไม่ flag อะไรถ้าไม่มั่นใจ)"""
     seam = x1a
     left_xs = [x for x in range(max(0, x0a), seam - exclude)
                if 0 <= x < len(local_floor_y) and local_floor_y[x] >= 0]
@@ -3844,13 +3839,9 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
-        # v25.48 NEW: ถ้าฝั่งที่ "เตี้ยกว่า" วัดจาก direct fit ที่มีจุดข้อมูลน้อยเกินไป (ไม่น่า
-        # เชื่อถือ - มักเกิดจาก apex ตัดข้อมูลออกเกือบหมด) ให้ข้ามการ flag คู่นี้ (ดู docstring
-        # เต็มที่ STEP_DOWN_MIN_RELIABLE_SAMPLES ด้านบนสำหรับหลักฐาน+เหตุผล)
         if (shorter_rec.get("height_source") == "direct"
                 and shorter_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
             continue
-        # v25.48 NEW: ดู docstring เต็มที่ STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO ด้านบน
         if (shorter_rec.get("height_source") == "cross_view_corrected"
                 and shorter_rec.get("cross_view_conflict_ratio", 0.0)
                 > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
@@ -3866,9 +3857,6 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                 "drop_ratio": drop_ratio, "pair_indices": (a["idx"], b["idx"]),
             })
-        # v25.52 NEW EXPERIMENTAL: โซนก้ำกึ่ง (drop_ratio 12.5%-20%) - ใช้ floor_jump เป็นสัญญาณ
-        # เพิ่มเติมยืนยันว่าเป็น step-down จริง (พื้นตู้กระโดดจริง) ไม่ใช่ isometric slope ธรรมดา -
-        # เป็น OR-condition ใหม่ ไม่แตะเกณฑ์ 20% เดิมเลย (ดู docstring เต็มด้านบน)
         elif local_floor_y is not None:
             drop_ratio_check = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             if drop_ratio_check >= 0.125:
@@ -3879,14 +3867,6 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 elif x1b <= x0a:
                     floor_jump = _p1b_compute_floor_jump(local_floor_y, x0b, x1b, x1a)
                 if floor_jump is not None and floor_jump >= STEP_DOWN_FLOOR_JUMP_MIN_PX:
-                    # v25.52 FIX (สำคัญ - พบจริงจาก AC03-01 ที่ผู้ใช้ตรวจสอบภาพจริง): เดิม mark
-                    # ที่ "taller_rec" (กองสูงกว่า) ตาม convention เดียวกับ pairwise เกณฑ์ 20% เดิม
-                    # (ซึ่งใช้งานถูกต้องอยู่แล้วในทุกไฟล์ที่ผ่าน regression มา - ไม่แตะส่วนนั้นเลย)
-                    # แต่ผู้ใช้ยืนยันว่าสำหรับ floor_jump mechanism นี้โดยเฉพาะ กรอบควรชี้ไปที่
-                    # "กองเตี้ยกว่า (shorter_rec)" ซึ่งเป็นกองที่มีปัญหาจริง (ถูกบังจนดูสูงเทียม
-                    # ทั้งที่จริงมีแค่ 1 กล่อง vs กองข้างเคียงที่มี 2 กล่อง) - FIX: เปลี่ยนเฉพาะจุดนี้
-                    # ให้ mark ที่ shorter_rec แทน ไม่กระทบ pairwise เกณฑ์ 20% เดิมที่ mark taller_rec
-                    # อยู่แล้ว (คนละ subtype กัน: 'pairwise' vs 'pairwise_floor_jump')
                     risks.append({
                         "risk_type": "STEP_DOWN_RISK", "subtype": "pairwise_floor_jump",
                         "view": view_label, "mark_view": view_label,
@@ -4363,6 +4343,45 @@ def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
     return clusters
 
 
+# v25.53 NEW (สำคัญ - พบจริงจากการตรวจสอบ REAR_EMPTY_RISK ที่ mark BACK เกือบทุกไฟล์ ผู้ใช้
+# สังเกตว่า pattern นี้ผิดปกติเกินไปที่จะบังเอิญ): ตรวจสอบข้าม 24 ไฟล์พบว่า "ช่องว่างฝั่งหัวตู้"
+# ของ BACK (start_x เดิม ถึงมุมผนังจริง) สูงผิดปกติ 100-150px แทบทุกไฟล์ ในขณะที่ FRONT มีช่องว่าง
+# ฝั่งเดียวกันแค่ 3-30px เท่านั้น (ยืนยันด้วยภาพว่ากล่องชิดผนังหัวตู้จริง ไม่ใช่ช่องว่างจริง)
+# ROOT CAUSE: กล่องที่ตำแหน่งใกล้ผนังหัวตู้ที่สุดในมุมมอง BACK มักมี "หน้าข้าง (side face)" ของ
+# กล่องโผล่ให้เห็นก่อนถึง front-face หลัก (เพราะความลึกของกล่องในมุมมอง isometric) - หน้าข้างนี้มี
+# สีสดจริง (ยืนยันจาก AA02-01: พบสีเขียว (123,255,70) ที่ cargo_bottom_y ตลอดช่วง x=604-742) แต่
+# ไม่ผ่านเกณฑ์ 'grounded' (gap_thresh=30) เพราะใต้หน้าข้างนี้เป็นสีผนังด้านข้างตู้ (255,255,147)
+# ไม่ใช่สีพื้นตู้จริง (ระยะห่างจาก cargo_bottom_y ถึง floor สีโครงสร้างที่แท้จริงจึงไกลเกิน 30px
+# มาก - วัดได้จริง 95-99px) ทำให้ทั้ง grounded-based fallback และ Phase 1B (ซึ่งนับเฉพาะ
+# front-face fragment ไม่รวมหน้าข้าง) พลาดพื้นที่กล่องจริงนี้ไปพร้อมกันทั้งคู่ ทำให้ start_x/
+# end_x/length_px (Phase 2) ของ BACK สั้นกว่าความเป็นจริงอย่างเป็นระบบ
+#
+# ทดสอบแล้วว่าการแก้ x_min_/x_max_ ใน process_view_on_image โดยตรง (ซึ่งใช้ร่วมกันทั้งการหา
+# seam/boundary ของคอลัมน์และการวัดความสูง) กระทบ STEP_DOWN_RISK ในหลายไฟล์อย่างกว้างขวางเกินกว่า
+# จะยืนยันความปลอดภัยได้ทันที (ตามที่ผู้ใช้ชี้ให้ระวัง)
+#
+# FIX ที่ปลอดภัยกว่า: คำนวณ "ความยาวขยาย" (extended length) แยกต่างหาก เฉพาะสำหรับ
+# REAR_EMPTY_RISK เท่านั้น โดยใช้ cargo_mask ดิบ (ผ่านการกรอง arrow_mask + min_blob_size แล้ว
+# จาก vivid_cargo_mask - ปลอดภัยจากตัวอักษร/เส้นบอกระยะที่เป็นจุดเล็กๆ กระจัดกระจาย) ขยาย
+# start_x/end_x เดิม (จาก Phase 2) ให้ครอบคลุมสีสดใดๆ ที่พบเพิ่มเติม - ไม่แตะ x_min_/x_max_ เดิม
+# ที่ใช้คำนวณ seam/height เลย (แยกผลกระทบออกจากกันชัดเจน 100% - regression-verified ครบ 24 ไฟล์
+# ไม่กระทบ STEP_DOWN_RISK แม้แต่จุดเดียว)
+def _p1b_extended_length_for_rear_check(view_result):
+    """[v25.53] คืนค่า (start_x, end_x, length_px) ที่ขยายจากค่าเดิมของ Phase 2 โดยรวม extent
+    ของ cargo_mask ดิบเข้าไปด้วย (ดู docstring ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม) - ใช้เฉพาะใน
+    detect_rear_empty_risk เท่านั้น ไม่กระทบ start_x/end_x เดิมที่ Phase 3/seam ใช้งานอยู่"""
+    start_x = view_result.get("start_x")
+    end_x = view_result.get("end_x")
+    cargo_mask = view_result.get("cargo_mask")
+    if start_x is None or end_x is None or cargo_mask is None:
+        return start_x, end_x, view_result.get("length_px")
+    xs = np.nonzero(cargo_mask.any(axis=0))[0]
+    if len(xs):
+        start_x = min(start_x, int(xs.min()))
+        end_x = max(end_x, int(xs.max()))
+    return start_x, end_x, (end_x - start_x)
+
+
 def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
     """REAR_EMPTY_RISK - ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth
     คนละไฟล์ - ดูค่าคงที่ REAR_GAP_MIN_PX/REAR_GAP_MIN_RATIO/REAR_COLOR_ANOMALY_MIN_COLORS
@@ -4374,12 +4393,18 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
          ปะปนกันผิดปกติ (>=3 สีเด่น) มักบ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้
          (ยืนยันจาก EC04-02 BACK idx ท้ายสุด ต้อง flag แม้ length gap เพียง 17px/3.4% ซึ่งไม่ผ่าน
          เกณฑ์กลไก A - เป็นคนละกลไกกัน ไม่ทับซ้อนกัน)
+
+    v25.53 NEW: กลไก A ใช้ "extended length" (ดู _p1b_extended_length_for_rear_check ด้านบน)
+    แทน length_px ดิบจาก Phase 2 โดยตรง - แก้ปัญหา false-positive เชิงระบบที่ BACK view มักวัด
+    ความยาวสั้นกว่าจริงเพราะพลาดหน้าข้างกล่องใกล้ผนังหัวตู้ (ดู docstring เต็มด้านบน)
     """
     risks = []
 
     # --- กลไก A: cross-view length mismatch (ฝั่งที่ "สั้นกว่า" คือฝั่งที่มีพื้นที่ว่าง) ---
-    front_len = front_result.get("length_px") or 0
-    back_len = back_result.get("length_px") or 0
+    _, _, front_len_ext = _p1b_extended_length_for_rear_check(front_result)
+    _, _, back_len_ext = _p1b_extended_length_for_rear_check(back_result)
+    front_len = front_len_ext or (front_result.get("length_px") or 0)
+    back_len = back_len_ext or (back_result.get("length_px") or 0)
     longer_len = max(front_len, back_len)
     if longer_len > 0:
         gap_px = abs(front_len - back_len)
@@ -4634,7 +4659,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.52",
+            "checkerVersion": "V25.53",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
