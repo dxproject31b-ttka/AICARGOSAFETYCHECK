@@ -4069,6 +4069,7 @@ RAW_CELL_DEPTH_BOTTOM_GAP_MIN = 18
 RAW_CELL_STRONG_TOP_GAP = 60
 RAW_CELL_STRONG_BOTTOM_GAP = 30
 RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN = 0.35
+RAW_CELL_PHYSICAL_DROP_MIN = 0.08
 
 
 def _raw_cell_record(cell, records):
@@ -4147,7 +4148,21 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
             if top_gap<RAW_CELL_DEPTH_TOP_GAP_MIN or bottom_gap<RAW_CELL_DEPTH_BOTTOM_GAP_MIN:
                 continue
             rec=_raw_cell_record(fg,records)
-            if rec is None or (view_label,rec["idx"]) in existing: continue
+            bg_rec=_raw_cell_record(bg,records)
+            if rec is None or bg_rec is None or (view_label,rec["idx"]) in existing:
+                continue
+            # v25.58 physical-stack guard: สี/หน้า raw ที่ซ้อนอยู่ใน physical stack เดียวกัน
+            # ห้ามสร้าง step-down และ foreground stack ต้องเตี้ยกว่า background stack จริง
+            # ตาม total height_px ของ record ก่อนจึงอนุญาตให้ depth score เข้าสู่ ranking
+            if rec.get("idx") == bg_rec.get("idx"):
+                continue
+            fg_h=rec.get("height_px")
+            bg_h=bg_rec.get("height_px")
+            if fg_h is None or bg_h is None or fg_h <= 0 or bg_h <= 0:
+                continue
+            physical_drop_ratio=1.0-(float(fg_h)/float(bg_h))
+            if physical_drop_ratio < RAW_CELL_PHYSICAL_DROP_MIN:
+                continue
             cross_ok=_crossview_raw_cell_support(fg,rec,other_cells,other_records)
             # cross-view เป็นหลัก; strong-depth override ใช้ได้เฉพาะ raw foreground ที่สัมผัส
             # local floor จริง เพื่อรองรับกรณีถูกบังหมดใน view ตรงข้าม โดยไม่รับ fragment ลอย
@@ -4166,6 +4181,8 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
                 "view":view_label,"mark_view":view_label,"mark_stack_idx":rec["idx"],"mark_x_range":rec["x_range"],
                 "mark_bbox_local":(fg["x"],fg["y"],fg["x"]+fg["w"],fg["y"]+fg["h"]),
                 "depth_separation_score":depth_separation_score,"raw_cell_color":fg.get("color"),"x_overlap_ratio":xov,
+                "physical_drop_ratio":physical_drop_ratio,"background_stack_idx":bg_rec.get("idx"),
+                "foreground_stack_height_px":float(fg_h),"background_stack_height_px":float(bg_h),
                 "depth_top_gap_px":top_gap,"depth_bottom_gap_px":bottom_gap,
                 "cross_view_confirmed":cross_ok,"strong_depth_override":strong,
                 "floor_contact_gap_px":floor_gap})
