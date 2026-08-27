@@ -4346,118 +4346,130 @@ TAIL_EDGE_RAW_MIN_AREA = 1800
 TAIL_EDGE_FLOOR_GAP_MAX = 22
 TAIL_EDGE_STACK_XOVERLAP_MIN = 0.70
 TAIL_EDGE_STACK_VERTICAL_GAP_MAX = 6
+TAIL_PHYSICAL_DEDUP_GAP_RATIO = 0.18
+RAW_CELL_INDEPENDENT_PHYSICAL_DROP_MIN = 0.18
+
+
+def _risk_record(risk, records_front, records_back):
+    label=risk.get("mark_view") or risk.get("view")
+    records=records_front if label=="FRONT" else records_back
+    idx=risk.get("mark_stack_idx")
+    return next((r for r in records if r.get("idx")==idx),None)
 
 
 def detect_tail_stepdown(records, view_label, existing_risks=None):
-    """Record-level rear-edge step-down detector."""
-    existing_risks = existing_risks or []
-    valid=[r for r in records if not r.get("is_corner_duplicate")
-           and r.get("height_px") is not None and float(r.get("height_px") or 0)>0]
-    if len(valid)<2:
-        return []
+    existing_risks=existing_risks or []
+    valid=[r for r in records if not r.get("is_corner_duplicate") and r.get("height_px") is not None and float(r.get("height_px") or 0)>0]
+    if len(valid)<2:return []
     valid=sorted(valid,key=lambda r:(r["pos_range"][0]+r["pos_range"][1])/2.0)
     tail=max(valid,key=lambda r:r["pos_range"][1])
-    if tail["pos_range"][1] < TAIL_STEPDOWN_REAR_POS_MIN:
-        return []
-    if any(r.get("risk_type")=="STEP_DOWN_RISK"
-           and (r.get("mark_view") or r.get("view"))==view_label
-           and r.get("mark_stack_idx")==tail["idx"] for r in existing_risks):
-        return []
+    if tail["pos_range"][1]<TAIL_STEPDOWN_REAR_POS_MIN:return []
     i=valid.index(tail)
-    if i==0:
-        return []
-    inner=valid[i-1]
-    th=float(tail["height_px"]); ih=float(inner["height_px"])
-    if ih<=0:
-        return []
+    if i==0:return []
+    inner=valid[i-1]; th=float(tail["height_px"]); ih=float(inner["height_px"])
+    if ih<=0:return []
     drop=(ih-th)/ih
-    if drop < TAIL_STEPDOWN_DROP_RATIO:
-        return []
-    return [{"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown",
-             "view":view_label,"mark_view":view_label,
-             "mark_stack_idx":tail["idx"],"mark_x_range":tail["x_range"],
-             "drop_ratio":float(drop),"tail_height_px":th,"inner_height_px":ih,
-             "tail_idx":tail["idx"],"inner_idx":inner["idx"],
+    if drop<TAIL_STEPDOWN_DROP_RATIO:return []
+    return [{"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown","view":view_label,"mark_view":view_label,
+             "mark_stack_idx":tail["idx"],"mark_x_range":tail["x_range"],"drop_ratio":float(drop),
+             "tail_height_px":th,"inner_height_px":ih,"tail_idx":tail["idx"],"inner_idx":inner["idx"],
              "tail_detection_path":"record_pair"}]
 
 
-def _tail_edge_raw_candidates(view_result, records, view_label):
-    """Build bottom-up multi-color stacks at both cargo edges.
-
-    A floor-contact raw face is the seed. Additional differently colored faces are merged only
-    when they strongly overlap in X and touch/overlap vertically. This joins EC04-01's green and
-    magenta stack, while keeping EC18-01's red low stack separate from the elevated green face.
-    """
+def _tail_edge_raw_candidates(view_result,records,view_label):
     floor=view_result.get("local_floor_y")
-    cells=[c for c in (view_result.get("raw_phase1b_cells") or [])
-           if c.get("kind")=="front" and c.get("area",0)>=TAIL_EDGE_RAW_MIN_AREA
-           and not _p1b_is_structural_container_color(c.get("color",(0,0,0)))]
-    if floor is None or not cells or not records:
-        return []
-    start=float(view_result.get("start_x",0)); end=float(view_result.get("end_x",0)); span=max(1.0,end-start)
-    edge_margin=TAIL_EDGE_ZONE_FRACTION*span
+    cells=[c for c in (view_result.get("raw_phase1b_cells") or []) if c.get("kind")=="front"
+           and c.get("area",0)>=TAIL_EDGE_RAW_MIN_AREA and not _p1b_is_structural_container_color(c.get("color",(0,0,0)))]
+    if floor is None or not cells or not records:return []
+    start=float(view_result.get("start_x",0));end=float(view_result.get("end_x",0));span=max(1.0,end-start);margin=TAIL_EDGE_ZONE_FRACTION*span
     enriched=[]
     for c in cells:
         cx=int(round(c["x"]+c["w"]/2.0))
-        if not (0<=cx<len(floor)) or floor[cx]<0:
-            continue
-        if not (cx <= start+edge_margin or cx >= end-edge_margin):
-            continue
+        if not(0<=cx<len(floor)) or floor[cx]<0:continue
+        if not(cx<=start+margin or cx>=end-margin):continue
         enriched.append((c,float(floor[cx]-(c["y"]+c["h"])),float(floor[cx])))
-    seeds=[z for z in enriched if abs(z[1])<=TAIL_EDGE_FLOOR_GAP_MAX]
     out=[]
-    for seed,seed_gap,seed_floor in seeds:
-        # Bottom-up stack assembly. Add at most the two nearest supporting faces above the
-        # floor seed. The cap prevents transitive bridging into a taller background column
-        # through an overlapping intermediate face (EC04-01 yellow -> magenta -> green chain).
+    for seed,seed_gap,seed_floor in [z for z in enriched if abs(z[1])<=TAIL_EDGE_FLOOR_GAP_MAX]:
         group=[seed]
-        while len(group) < 3:
-            choices=[]
-            group_top=min(g["y"] for g in group)
+        while len(group)<3:
+            choices=[];group_top=min(g["y"] for g in group)
             for c,_,_ in enriched:
-                if c in group: continue
-                xov=max(max(0,min(c["x"]+c["w"],g["x"]+g["w"])-max(c["x"],g["x"])) / max(1,min(c["w"],g["w"])) for g in group)
+                if c in group:continue
+                xov=max(max(0,min(c["x"]+c["w"],g["x"]+g["w"])-max(c["x"],g["x"]))/max(1,min(c["w"],g["w"])) for g in group)
                 vgap=max(0,group_top-(c["y"]+c["h"]))
-                # candidate must extend the current group upward, not merely overlap its side
-                if xov>=TAIL_EDGE_STACK_XOVERLAP_MIN and vgap<=TAIL_EDGE_STACK_VERTICAL_GAP_MAX and c["y"] < group_top:
-                    choices.append((vgap,abs((c["x"]+c["w"]/2.0)-(seed["x"]+seed["w"]/2.0)),c))
-            if not choices: break
+                if xov>=TAIL_EDGE_STACK_XOVERLAP_MIN and vgap<=TAIL_EDGE_STACK_VERTICAL_GAP_MAX and c["y"]<group_top:
+                    choices.append((vgap,abs((c["x"]+c["w"]/2)-(seed["x"]+seed["w"]/2)),c))
+            if not choices:break
             group.append(min(choices,key=lambda z:(z[0],z[1]))[2])
-        gx0=min(c["x"] for c in group); gx1=max(c["x"]+c["w"] for c in group)
-        gy0=min(c["y"] for c in group); gy1=max(c["y"]+c["h"] for c in group)
-        gcx=(gx0+gx1)/2.0
-        rec=min(records,key=lambda r:abs(((r["x_range"][0]+r["x_range"][1])/2.0)-gcx))
-        ref=float(rec.get("height_px") or 0)
-        visible=float(seed_floor-gy0)
-        if ref<=0 or visible<=0: continue
-        drop=1.0-visible/ref
-        if drop<TAIL_STEPDOWN_DROP_RATIO: continue
-        out.append({"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown_edge_raw_group",
-                    "view":view_label,"mark_view":view_label,"mark_stack_idx":rec["idx"],
-                    "mark_x_range":rec["x_range"],"mark_bbox_local":(gx0,gy0,gx1,gy1),
-                    "drop_ratio":float(drop),"tail_visible_height_px":visible,
-                    "reference_stack_height_px":ref,"floor_contact_gap_px":seed_gap,
-                    "tail_raw_colors":sorted({tuple(c.get("color",())) for c in group}),
-                    "tail_edge_side":"left" if gcx<(start+end)/2.0 else "right",
+        gx0=min(c["x"] for c in group);gx1=max(c["x"]+c["w"] for c in group);gy0=min(c["y"] for c in group);gy1=max(c["y"]+c["h"] for c in group)
+        gcx=(gx0+gx1)/2;rec=min(records,key=lambda r:abs(((r["x_range"][0]+r["x_range"][1])/2)-gcx));ref=float(rec.get("height_px") or 0);visible=float(seed_floor-gy0)
+        if ref<=0 or visible<=0:continue
+        drop=1-visible/ref
+        if drop<TAIL_STEPDOWN_DROP_RATIO:continue
+        out.append({"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown_edge_raw_group","view":view_label,"mark_view":view_label,
+                    "mark_stack_idx":rec["idx"],"mark_x_range":rec["x_range"],"mark_bbox_local":(gx0,gy0,gx1,gy1),
+                    "drop_ratio":float(drop),"tail_visible_height_px":visible,"reference_stack_height_px":ref,
+                    "floor_contact_gap_px":seed_gap,"tail_raw_colors":sorted({tuple(c.get("color",())) for c in group}),
                     "tail_detection_path":"floor_anchored_edge_raw_group"})
-    # same group may be reached from more than one seed
     best={}
     for r in out:
         b=tuple(round(float(v),1) for v in r["mark_bbox_local"])
-        if b not in best or r["drop_ratio"]>best[b]["drop_ratio"]: best[b]=r
+        if b not in best or r["drop_ratio"]>best[b]["drop_ratio"]:best[b]=r
     return list(best.values())
 
 
-def detect_tail_stepdown_edge_raw_group(front, records_front, back, records_back, existing_risks):
-    """Cross-view dedupe: add at most one edge-raw marker, only when record path found none."""
-    if any(r.get("subtype")=="tail_stepdown" for r in existing_risks):
-        return []
-    candidates=_tail_edge_raw_candidates(front,records_front,"FRONT")
-    candidates+=_tail_edge_raw_candidates(back,records_back,"BACK")
-    if not candidates:
-        return []
-    # Strongest physical cliff wins. Tie prefers smaller visible group, then FRONT.
+def detect_tail_stepdown_edge_raw_group(front,records_front,back,records_back,existing_risks):
+    candidates=_tail_edge_raw_candidates(front,records_front,"FRONT")+_tail_edge_raw_candidates(back,records_back,"BACK")
+    if not candidates:return []
     return [max(candidates,key=lambda r:(r["drop_ratio"],-r["tail_visible_height_px"],r["mark_view"]=="FRONT"))]
+
+
+def deduplicate_stepdown_physical(risks,records_front,records_back):
+    """General physical dedup. No filename, color, or fixed IDX rules.
+
+    Only tail-related candidates participate. pairwise_floor_jump is never removed. A raw-cell
+    candidate is merged only when its physical interval overlaps or is immediately adjacent to
+    the canonical rear interval. Risks farther away remain independent (EC04-04 guard).
+    """
+    tail=[r for r in risks if r.get("subtype") in ("tail_stepdown","tail_stepdown_edge_raw_group")]
+    if not tail:return risks
+    priority={"tail_stepdown_edge_raw_group":3,"tail_stepdown":2,"raw_cell_foreground_stepdown":1}
+    # one canonical tail marker per physical rear event; precise raw-group bbox wins
+    canonical=max(tail,key=lambda r:(priority[r.get("subtype")],float(r.get("drop_ratio") or 0)))
+    crec=_risk_record(canonical,records_front,records_back)
+    cint=crec.get("pos_range") if crec else (TAIL_STEPDOWN_REAR_POS_MIN,1.0)
+    kept=[];merged=[]
+    for r in risks:
+        st=r.get("subtype")
+        if st=="pairwise_floor_jump": kept.append(r);continue
+        if r is canonical: kept.append(r);continue
+        if st in ("tail_stepdown","tail_stepdown_edge_raw_group"):
+            merged.append(st);continue
+        if st=="raw_cell_foreground_stepdown":
+            rr=_risk_record(r,records_front,records_back)
+            if rr:
+                label=r.get("mark_view") or r.get("view")
+                same_records=records_front if label=="FRONT" else records_back
+                neighbors=[n for n in same_records if not n.get("is_corner_duplicate")
+                           and abs(int(n.get("idx"))-int(rr.get("idx")))==1
+                           and n.get("height_px") is not None]
+                parent_h=float(rr.get("height_px") or 0)
+                physical_cliff=max([max(0.0,1.0-parent_h/float(n["height_px"]))
+                                    for n in neighbors if float(n["height_px"])>0] or [0.0])
+                r["raw_parent_physical_cliff_ratio"]=physical_cliff
+                a0,a1=rr["pos_range"];b0,b1=cint
+                inter=max(0,min(a1,b1)-max(a0,b0));gap=max(0,max(a0,b0)-min(a1,b1))
+                near_rear=max(a1,b1)>=TAIL_STEPDOWN_REAR_POS_MIN
+                same_tail_event=near_rear and (inter>0 or gap<=TAIL_PHYSICAL_DEDUP_GAP_RATIO)
+                # A raw face is not an independent physical step-down unless its parent stack has
+                # a confirmed >=18% cliff to an adjacent physical stack. Color/depth alone cannot
+                # survive once a canonical tail event exists.
+                if same_tail_event or physical_cliff < RAW_CELL_INDEPENDENT_PHYSICAL_DROP_MIN:
+                    merged.append(st);continue
+        kept.append(r)
+    canonical["deduplicated_subtypes"]=sorted(set(merged))
+    canonical["physical_dedup_canonical"]=True
+    return kept
 
 
 def detect_step_down_crossview(records_front, records_back):
@@ -5106,8 +5118,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         raw_cell_risks, records_front, records_back)
     risks += detect_tail_stepdown(records_front, "FRONT", risks)
     risks += detect_tail_stepdown(records_back, "BACK", risks)
-    risks += detect_tail_stepdown_edge_raw_group(
-        front, records_front, back, records_back, risks)
+    risks += detect_tail_stepdown_edge_raw_group(front, records_front, back, records_back, risks)
+    risks = deduplicate_stepdown_physical(risks, records_front, records_back)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -5262,7 +5274,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.64",
+            "checkerVersion": "V25.66",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
