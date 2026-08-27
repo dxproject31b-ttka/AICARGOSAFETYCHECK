@@ -4022,6 +4022,34 @@ def detect_step_down_head_valley_consensus(records, view_label, existing_risks):
     }]
 
 
+
+def detect_intra_column_lateral_stepdown(view_result, records, view_label):
+    risks=[]
+    if view_label != "FRONT":
+        return risks
+    floor=view_result.get("local_floor_y")
+    cols=view_result.get("columns") or []
+    for rec in records:
+        h=rec.get("height_px") or 0
+        if h<=0 or rec.get("is_corner_duplicate"):
+            continue
+        idx=rec.get("idx")
+        if idx>=len(cols):
+            continue
+        for m in cols[idx].get("members",[]):
+            if m.get("kind")!='front':
+                continue
+            area=(m.get('area',0))
+            if area<4000: continue
+            x=int(round(m['x']+m['w']/2))
+            if x<0 or x>=len(floor) or floor[x]<0: continue
+            visible=floor[x]-m['y']
+            drop=1.0-(visible/max(h,1))
+            if drop>=0.30:
+                risks.append({'risk_type':'STEP_DOWN_RISK','subtype':'intra_column_lateral_stepdown','view':view_label,'mark_view':view_label,'mark_stack_idx':idx,'mark_x_range':rec['x_range'],'drop_ratio':drop})
+                break
+    return risks
+
 def detect_step_down_crossview(records_front, records_back):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
     record ที่ is_corner_duplicate=True เสมอ (ตรวจจากเส้น rail ทางเรขาคณิตจริง)"""
@@ -4655,6 +4683,7 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     # v25.54 isolated consensus detector: ทำหลัง STEP_DOWN mechanisms เดิมทั้งหมด เพื่อ dedupe
     risks += detect_step_down_head_valley_consensus(records_front, "FRONT", risks)
+    risks += detect_intra_column_lateral_stepdown(front, records_front, "FRONT")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -4805,7 +4834,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.54",
+            "checkerVersion": "V25.55",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
