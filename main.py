@@ -4970,6 +4970,11 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         back, records_back, "BACK", front, records_front, risks)
     risks += deduplicate_raw_cell_stepdown_markers(
         raw_cell_risks, records_front, records_back)
+
+    # v25.61 tail-stepdown detector
+    risks += detect_tail_stepdown(records_front, "FRONT")
+    risks += detect_tail_stepdown(records_back, "BACK")
+
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
