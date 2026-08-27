@@ -4070,8 +4070,6 @@ RAW_CELL_STRONG_TOP_GAP = 60
 RAW_CELL_STRONG_BOTTOM_GAP = 30
 RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN = 0.35
 RAW_CELL_PHYSICAL_DROP_MIN = 0.08
-RAW_CELL_TAIL_POS_MIN = 0.85
-RAW_CELL_TAIL_DEPTH_SCORE_MIN = 0.75
 
 
 def _raw_cell_record(cell, records):
@@ -4289,6 +4287,44 @@ def deduplicate_raw_cell_stepdown_markers(raw_risks, records_front, records_back
         final.append(best)
     return final
 
+
+
+TAIL_STEPDOWN_DROP_RATIO = 0.12
+TAIL_STEPDOWN_REAR_POS_MIN = 0.85
+
+def detect_tail_stepdown(records, view_label):
+    risks=[]
+    valid=[r for r in records if (not r.get("is_corner_duplicate") and r.get("height_px") is not None and (r.get("height_px") or 0)>0)]
+    if len(valid)<2:
+        return risks
+    valid=sorted(valid,key=lambda r:(r["pos_range"][0]+r["pos_range"][1])/2.0)
+    tail_rec=max(valid,key=lambda r:r["pos_range"][1])
+    if tail_rec["pos_range"][1] < TAIL_STEPDOWN_REAR_POS_MIN:
+        return risks
+    tail_idx=valid.index(tail_rec)
+    if tail_idx==0:
+        return risks
+    inner_rec=valid[tail_idx-1]
+    tail_h=float(tail_rec["height_px"])
+    inner_h=float(inner_rec["height_px"])
+    if inner_h<=0:
+        return risks
+    drop_ratio=(inner_h-tail_h)/inner_h
+    if drop_ratio < TAIL_STEPDOWN_DROP_RATIO:
+        return risks
+    risks.append({
+      "risk_type":"STEP_DOWN_RISK",
+      "subtype":"tail_stepdown",
+      "view":view_label,
+      "mark_view":view_label,
+      "mark_stack_idx":tail_rec["idx"],
+      "mark_x_range":tail_rec["x_range"],
+      "drop_ratio":float(drop_ratio),
+      "tail_height_px":tail_h,
+      "inner_height_px":inner_h,
+      "tail_idx":tail_rec["idx"],
+      "inner_idx":inner_rec["idx"]})
+    return risks
 
 def detect_step_down_crossview(records_front, records_back):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
