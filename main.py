@@ -4151,18 +4151,50 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
             bg_rec=_raw_cell_record(bg,records)
             if rec is None or bg_rec is None or (view_label,rec["idx"]) in existing:
                 continue
-            # v25.58 physical-stack guard: สี/หน้า raw ที่ซ้อนอยู่ใน physical stack เดียวกัน
-            # ห้ามสร้าง step-down และ foreground stack ต้องเตี้ยกว่า background stack จริง
-            # ตาม total height_px ของ record ก่อนจึงอนุญาตให้ depth score เข้าสู่ ranking
+            # v25.59 HYBRID GUARD
+            # 1) same-parent suppression: หลายสี/หลาย raw face ใน physical stack เดียวกัน
+            #    ไม่ใช่หลักฐาน step-down ไม่ว่ามีกี่สีซ้อนกัน
             if rec.get("idx") == bg_rec.get("idx"):
                 continue
+
             fg_h=rec.get("height_px")
             bg_h=bg_rec.get("height_px")
-            if fg_h is None or bg_h is None or fg_h <= 0 or bg_h <= 0:
-                continue
-            physical_drop_ratio=1.0-(float(fg_h)/float(bg_h))
-            if physical_drop_ratio < RAW_CELL_PHYSICAL_DROP_MIN:
-                continue
+
+            # ใช้ physical height เป็น hard validation เฉพาะเมื่อค่าทั้งคู่ valid จริง
+            # ค่า carry-forward, sample ต่ำ หรือ corrected ที่ conflict สูง ถือว่า unavailable
+            def _valid_physical_height(r, h):
+                if h is None:
+                    return False
+                try:
+                    if not np.isfinite(float(h)) or float(h) <= 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+                src=str(r.get("height_source") or "")
+                if src in ("carry_forward", "missing", "none"):
+                    return False
+                n=r.get("height_n_samples", r.get("n_samples"))
+                if n is not None and src in ("direct", "apex_fallback"):
+                    try:
+                        if int(n) < STEP_DOWN_MIN_RELIABLE_SAMPLES:
+                            return False
+                    except (TypeError, ValueError):
+                        return False
+                if src == "cross_view_corrected":
+                    conflict=r.get("cross_view_conflict_ratio")
+                    if conflict is not None and float(conflict) > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO:
+                        return False
+                return True
+
+            fg_height_valid=_valid_physical_height(rec,fg_h)
+            bg_height_valid=_valid_physical_height(bg_rec,bg_h)
+            physical_height_valid=fg_height_valid and bg_height_valid
+            physical_drop_ratio=None
+            if physical_height_valid:
+                physical_drop_ratio=1.0-(float(fg_h)/float(bg_h))
+                if physical_drop_ratio < RAW_CELL_PHYSICAL_DROP_MIN:
+                    continue
+
             cross_ok=_crossview_raw_cell_support(fg,rec,other_cells,other_records)
             # cross-view เป็นหลัก; strong-depth override ใช้ได้เฉพาะ raw foreground ที่สัมผัส
             # local floor จริง เพื่อรองรับกรณีถูกบังหมดใน view ตรงข้าม โดยไม่รับ fragment ลอย
@@ -4174,7 +4206,22 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
             strong = (top_gap >= RAW_CELL_STRONG_TOP_GAP
                       and bottom_gap >= RAW_CELL_STRONG_BOTTOM_GAP
                       and floor_gap is not None and abs(floor_gap) <= 22)
-            if not (cross_ok or strong):
+            # Tail fallback แยกจาก REAR_EMPTY_RISK โดยสิ้นเชิง:
+            # ใช้เฉพาะ raw stack ใน 10% ท้ายของ physical position และเฉพาะเมื่อ
+            # physical height unavailable. ต้องมี cross-view หรือ strong floor-contact evidence.
+            pr=rec.get("pos_range") or (0.0,0.0)
+            tail_zone=max(pr) >= 0.90
+            tail_fallback=(tail_zone and not physical_height_valid and (cross_ok or strong))
+
+            # โซนทั่วไปเมื่อ height unavailable ยัง fallback ได้ด้วยหลักฐานเดิมที่ยืนยันแล้ว
+            evidence_fallback=(not physical_height_valid and (cross_ok or strong))
+            if physical_height_valid:
+                accepted_by="physical_height"
+            elif tail_fallback:
+                accepted_by="tail_fallback"
+            elif evidence_fallback:
+                accepted_by="evidence_fallback"
+            else:
                 continue
             depth_separation_score=(top_gap+bottom_gap)/max(1,bg["h"]+fg["h"])
             candidates.append({"risk_type":"STEP_DOWN_RISK","subtype":"raw_cell_foreground_stepdown",
@@ -4182,7 +4229,10 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
                 "mark_bbox_local":(fg["x"],fg["y"],fg["x"]+fg["w"],fg["y"]+fg["h"]),
                 "depth_separation_score":depth_separation_score,"raw_cell_color":fg.get("color"),"x_overlap_ratio":xov,
                 "physical_drop_ratio":physical_drop_ratio,"background_stack_idx":bg_rec.get("idx"),
-                "foreground_stack_height_px":float(fg_h),"background_stack_height_px":float(bg_h),
+                "physical_height_valid":physical_height_valid,"hybrid_accepted_by":accepted_by,
+                "tail_zone_fallback":tail_fallback,
+                "foreground_stack_height_px":float(fg_h) if fg_h is not None else None,
+                "background_stack_height_px":float(bg_h) if bg_h is not None else None,
                 "depth_top_gap_px":top_gap,"depth_bottom_gap_px":bottom_gap,
                 "cross_view_confirmed":cross_ok,"strong_depth_override":strong,
                 "floor_contact_gap_px":floor_gap})
@@ -5086,7 +5136,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.56",
+            "checkerVersion": "V25.59",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
