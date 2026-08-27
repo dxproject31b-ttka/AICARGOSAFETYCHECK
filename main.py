@@ -2941,9 +2941,20 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
 
+        def _scale_raw_cell(c):
+            z = dict(c)
+            for k in ("x", "y", "w", "h", "cx", "cy"):
+                if k in z:
+                    z[k] = float(z[k]) * down_factor
+            if "area" in z:
+                z["area"] = float(z["area"]) * down_factor * down_factor
+            return z
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+            # v25.56: geometry ก่อน merge/reconcile สำหรับ raw-cell detector
+            "front_raw_cells": [_scale_raw_cell(c) for c in front_all],
+            "back_raw_cells": [_scale_raw_cell(c) for c in back_all],
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
@@ -4050,6 +4061,216 @@ def detect_intra_column_lateral_stepdown(view_result, records, view_label):
                 break
     return risks
 
+
+RAW_CELL_MIN_AREA = 1800
+RAW_CELL_MIN_X_OVERLAP = 0.55
+RAW_CELL_DEPTH_TOP_GAP_MIN = 25
+RAW_CELL_DEPTH_BOTTOM_GAP_MIN = 18
+RAW_CELL_STRONG_TOP_GAP = 60
+RAW_CELL_STRONG_BOTTOM_GAP = 30
+RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN = 0.35
+
+
+def _raw_cell_record(cell, records):
+    if not records:
+        return None
+    cx = cell["x"] + cell["w"] / 2.0
+    return min(records, key=lambda r: abs(((r["x_range"][0] + r["x_range"][1]) / 2.0) - cx))
+
+
+def _pos_overlap_ratio(a, b):
+    a0,a1=a; b0,b1=b
+    inter=max(0.0,min(a1,b1)-max(a0,b0))
+    return inter/max(1e-6,min(a1-a0,b1-b0))
+
+
+def _crossview_raw_cell_support(candidate, candidate_rec, other_cells, other_records):
+    """ยืนยันตำแหน่งกายภาพเดียวกันจากอีก view โดยไม่ hardcode สี/ชื่อไฟล์.
+    ยอมรับเมื่อพบ raw front cell สีเดียวกันที่ pos overlap กัน หรือพบ depth-pair
+    ต่างสีในตำแหน่งเดียวกันซึ่งมี top/bottom order เดียวกัน."""
+    same_color=False; depth_pair=False
+    for c in other_cells:
+        if c.get("kind") != "front" or c.get("area",0) < RAW_CELL_MIN_AREA:
+            continue
+        rec=_raw_cell_record(c,other_records)
+        if rec is None or _pos_overlap_ratio(candidate_rec["pos_range"],rec["pos_range"]) < RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN:
+            continue
+        if c.get("color") == candidate.get("color"):
+            same_color=True
+    # depth evidence in opposite view at same physical position, independent of color identity
+    zone=[c for c in other_cells if c.get("kind")=="front" and c.get("area",0)>=RAW_CELL_MIN_AREA
+          and (lambda r: r is not None and _pos_overlap_ratio(candidate_rec["pos_range"],r["pos_range"])>=RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN)(_raw_cell_record(c,other_records))]
+    for i,a in enumerate(zone):
+        for b in zone[i+1:]:
+            if a.get("color")==b.get("color"): continue
+            xov=max(0,min(a["x"]+a["w"],b["x"]+b["w"])-max(a["x"],b["x"]))/max(1,min(a["w"],b["w"]))
+            if xov < RAW_CELL_MIN_X_OVERLAP: continue
+            fa,ba=a["y"],a["y"]+a["h"]; fb,bb=b["y"],b["y"]+b["h"]
+            if (abs(fa-fb)>=RAW_CELL_DEPTH_TOP_GAP_MIN and abs(ba-bb)>=RAW_CELL_DEPTH_BOTTOM_GAP_MIN):
+                depth_pair=True
+    return same_color or depth_pair
+
+
+def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
+                                         other_view_result, other_records, existing_risks):
+    """v25.56 guarded raw-cell detector.
+
+    Depth-order guard: foreground cell must be lower on screen at both top and bottom than an
+    overlapping background cell. This follows isometric depth projection and avoids using raw
+    face height as physical stack height.
+
+    Cross-view guard: normally require corroboration at the same normalized physical position.
+    Exception only for very strong depth separation, allowing a foreground stack fully hidden
+    in the opposite view. No filename or color is hardcoded.
+    """
+    cells=[c for c in (view_result.get("raw_phase1b_cells") or []) if c.get("kind")=="front"
+           and c.get("area",0)>=RAW_CELL_MIN_AREA
+           and not _p1b_is_structural_container_color(c.get("color",(0,0,0)))]
+    other_cells=other_view_result.get("raw_phase1b_cells") or []
+    existing={(r.get("mark_view") or r.get("view"),r.get("mark_stack_idx")) for r in existing_risks
+              if r.get("risk_type")=="STEP_DOWN_RISK"}
+    candidates=[]
+    for i,a in enumerate(cells):
+        for b in cells[i+1:]:
+            if a.get("color")==b.get("color"): continue
+            xov=max(0,min(a["x"]+a["w"],b["x"]+b["w"])-max(a["x"],b["x"]))/max(1,min(a["w"],b["w"]))
+            if xov<RAW_CELL_MIN_X_OVERLAP: continue
+            # foreground = face whose top and bottom are both lower in the rendered view
+            if a["y"]>=b["y"] and a["y"]+a["h"]>=b["y"]+b["h"]:
+                fg,bg=a,b
+            elif b["y"]>=a["y"] and b["y"]+b["h"]>=a["y"]+a["h"]:
+                fg,bg=b,a
+            else:
+                continue
+            top_gap=fg["y"]-bg["y"]
+            bottom_gap=(fg["y"]+fg["h"])-(bg["y"]+bg["h"])
+            if top_gap<RAW_CELL_DEPTH_TOP_GAP_MIN or bottom_gap<RAW_CELL_DEPTH_BOTTOM_GAP_MIN:
+                continue
+            rec=_raw_cell_record(fg,records)
+            if rec is None or (view_label,rec["idx"]) in existing: continue
+            cross_ok=_crossview_raw_cell_support(fg,rec,other_cells,other_records)
+            # cross-view เป็นหลัก; strong-depth override ใช้ได้เฉพาะ raw foreground ที่สัมผัส
+            # local floor จริง เพื่อรองรับกรณีถูกบังหมดใน view ตรงข้าม โดยไม่รับ fragment ลอย
+            floor = view_result.get("local_floor_y")
+            fcx = int(round(fg["x"] + fg["w"] / 2.0))
+            floor_gap = None
+            if floor is not None and 0 <= fcx < len(floor) and floor[fcx] >= 0:
+                floor_gap = float(floor[fcx] - (fg["y"] + fg["h"]))
+            strong = (top_gap >= RAW_CELL_STRONG_TOP_GAP
+                      and bottom_gap >= RAW_CELL_STRONG_BOTTOM_GAP
+                      and floor_gap is not None and abs(floor_gap) <= 22)
+            if not (cross_ok or strong):
+                continue
+            depth_separation_score=(top_gap+bottom_gap)/max(1,bg["h"]+fg["h"])
+            candidates.append({"risk_type":"STEP_DOWN_RISK","subtype":"raw_cell_foreground_stepdown",
+                "view":view_label,"mark_view":view_label,"mark_stack_idx":rec["idx"],"mark_x_range":rec["x_range"],
+                "mark_bbox_local":(fg["x"],fg["y"],fg["x"]+fg["w"],fg["y"]+fg["h"]),
+                "depth_separation_score":depth_separation_score,"raw_cell_color":fg.get("color"),"x_overlap_ratio":xov,
+                "depth_top_gap_px":top_gap,"depth_bottom_gap_px":bottom_gap,
+                "cross_view_confirmed":cross_ok,"strong_depth_override":strong,
+                "floor_contact_gap_px":floor_gap})
+    best={}
+    for r in candidates:
+        k=(r["mark_view"],r["mark_stack_idx"])
+        if k not in best or r["depth_separation_score"]>best[k]["depth_separation_score"]: best[k]=r
+    return list(best.values())
+
+
+
+def deduplicate_raw_cell_stepdown_markers(raw_risks, records_front, records_back):
+    """v25.56: รวม raw-cell markers ให้เหลือหนึ่งกรอบต่อกองทางกายภาพ
+
+    Pass 1 ภายใน view:
+      - สีเดียวกัน
+      - idx ติดกัน
+      - bbox ต่อเนื่อง/แทบแตะกันตามแกน X
+      - แนวบนหรือล่างใกล้กันตาม isometric projection
+      -> รวม bbox เป็นกรอบเดียว
+
+    Pass 2 ข้าม FRONT/BACK:
+      - pos_range ทางกายภาพ overlap >= 50%
+      - สี foreground เดียวกัน หรือทั้งคู่ cross-view-confirmed
+      -> เลือกหลักฐานที่มี cross-view, floor contact และ depth separation ดีกว่า
+    """
+    recmap={
+        "FRONT": {r["idx"]:r for r in records_front},
+        "BACK": {r["idx"]:r for r in records_back},
+    }
+    def pos_of(r):
+        rec=recmap.get(r["mark_view"],{}).get(r["mark_stack_idx"])
+        return rec.get("pos_range") if rec else None
+    def quality(r):
+        floor_gap=r.get("floor_contact_gap_px")
+        floor_score=1.0 if floor_gap is not None and abs(floor_gap)<=22 else 0.0
+        return (2.0 if r.get("cross_view_confirmed") else 0.0) + floor_score + min(float(r.get("depth_separation_score",0)), 1.0)
+
+    # pass 1: iterative merge adjacent same-color markers within each view
+    pending=[dict(r) for r in raw_risks]
+    merged=[]
+    used=[False]*len(pending)
+    for i,a in enumerate(pending):
+        if used[i]: continue
+        group=[a]; used[i]=True; changed=True
+        while changed:
+            changed=False
+            gx0=min(r["mark_bbox_local"][0] for r in group)
+            gy0=min(r["mark_bbox_local"][1] for r in group)
+            gx1=max(r["mark_bbox_local"][2] for r in group)
+            gy1=max(r["mark_bbox_local"][3] for r in group)
+            gids=[r["mark_stack_idx"] for r in group]
+            for j,b in enumerate(pending):
+                if used[j] or b["mark_view"]!=a["mark_view"] or b.get("raw_cell_color")!=a.get("raw_cell_color"):
+                    continue
+                bx0,by0,bx1,by1=b["mark_bbox_local"]
+                xgap=max(0.0,bx0-gx1,gx0-bx1)
+                edge_close=min(abs(by0-gy0),abs(by1-gy1))
+                if min(abs(b["mark_stack_idx"]-k) for k in gids)<=1 and xgap<=12 and edge_close<=35:
+                    group.append(b); used[j]=True; changed=True
+        best=max(group,key=quality)
+        if len(group)>1:
+            best=dict(best)
+            best["mark_bbox_local"]=(
+                min(r["mark_bbox_local"][0] for r in group),
+                min(r["mark_bbox_local"][1] for r in group),
+                max(r["mark_bbox_local"][2] for r in group),
+                max(r["mark_bbox_local"][3] for r in group))
+            best["dedup_merged_indices"]=sorted({r["mark_stack_idx"] for r in group})
+        merged.append(best)
+
+    # pass 2: cross-view connected components using normalized physical position
+    n=len(merged); parent=list(range(n))
+    def find(x):
+        while parent[x]!=x:
+            parent[x]=parent[parent[x]]; x=parent[x]
+        return x
+    def union(a,b):
+        ra,rb=find(a),find(b)
+        if ra!=rb: parent[rb]=ra
+    for i,a in enumerate(merged):
+        pa=pos_of(a)
+        if pa is None: continue
+        for j in range(i+1,n):
+            b=merged[j]
+            if a["mark_view"]==b["mark_view"]: continue
+            pb=pos_of(b)
+            if pb is None: continue
+            ov=_pos_overlap_ratio(pa,pb)
+            color_match=a.get("raw_cell_color")==b.get("raw_cell_color")
+            corroborated=a.get("cross_view_confirmed") and b.get("cross_view_confirmed")
+            if ov>=0.50 and (color_match or corroborated): union(i,j)
+    groups={}
+    for i,r in enumerate(merged): groups.setdefault(find(i),[]).append(r)
+    final=[]
+    for g in groups.values():
+        best=max(g,key=quality)
+        best=dict(best)
+        if len(g)>1:
+            best["dedup_cross_view_count"]=len(g)
+            best["dedup_views"]=sorted({r["mark_view"] for r in g})
+        final.append(best)
+    return final
+
+
 def detect_step_down_crossview(records_front, records_back):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
     record ที่ is_corner_duplicate=True เสมอ (ตรวจจากเส้น rail ทางเรขาคณิตจริง)"""
@@ -4656,6 +4877,9 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     back = process_view_with_height_on_image(
         full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"),
         precrop=back_precrop)
+    # v25.56: attach raw Phase1B cells in main-scale coordinates without altering columns
+    front["raw_phase1b_cells"] = phase1b.get("front_raw_cells") or []
+    back["raw_phase1b_cells"] = phase1b.get("back_raw_cells") or []
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
     # v25.54: เก็บค่าความสูงดิบก่อน cross-view reconciliation สำหรับ detector แบบ consensus
@@ -4683,7 +4907,14 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     # v25.54 isolated consensus detector: ทำหลัง STEP_DOWN mechanisms เดิมทั้งหมด เพื่อ dedupe
     risks += detect_step_down_head_valley_consensus(records_front, "FRONT", risks)
-    risks += detect_intra_column_lateral_stepdown(front, records_front, "FRONT")
+    # v25.55 detector เดิมคงไว้แต่ไม่ใช้เป็นตัวหลัก; v25.56 ใช้ raw cells ที่พิกัดถูกต้อง
+    raw_cell_risks = []
+    raw_cell_risks += detect_raw_cell_foreground_stepdown(
+        front, records_front, "FRONT", back, records_back, risks)
+    raw_cell_risks += detect_raw_cell_foreground_stepdown(
+        back, records_back, "BACK", front, records_front, risks)
+    risks += deduplicate_raw_cell_stepdown_markers(
+        raw_cell_risks, records_front, records_back)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -4697,6 +4928,10 @@ def risk_abs_box(risk, result):
     """แปลง mark_x_range (พิกัด local) เป็นพิกัดภาพเต็มหน้า (absolute) สำหรับวาด marker"""
     view_label = risk.get("mark_view") or risk.get("view")
     v = result["front"] if view_label == "FRONT" else result["back"]
+    if risk.get("mark_bbox_local") is not None:
+        x0, y0, x1, y1 = risk["mark_bbox_local"]
+        ox, oy = v["crop_origin_x"], v["crop_origin_y"]
+        return (ox + x0, oy + y0, ox + x1, oy + y1)
     x0, x1 = risk["mark_x_range"]
     stack = v["stack_heights"][risk["mark_stack_idx"]]
     height_px = stack["height_px"]
@@ -4834,7 +5069,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.55",
+            "checkerVersion": "V25.56",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
