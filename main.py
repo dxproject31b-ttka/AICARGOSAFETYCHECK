@@ -4527,7 +4527,7 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     #   สีรองที่เหลือเป็น shading/shadow/outline ของกล่องใบนั้น ไม่ใช่ SKU อื่นจริง
     #   ยืนยัน EA07-01 BACK: (128,128,0)=71.5% → 1 SKU ครอบงำ สีรองเป็น shading → false-positive
     #   ยืนยัน EC04-02 BACK: TEM1A มี 4 สีต่างฝั่งต่างกัน ไม่มีสีใดครอบงำ >= 70%
-    REAR_COLOR_NEEDS_GAP_MIN_PX = 10     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
+    REAR_COLOR_NEEDS_GAP_MIN_PX = 5     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
     REAR_COLOR_MAX_DOMINANT_FRAC = 0.70  # ถ้า dominant > นี้ = 1 SKU + shading ไม่ใช่ multi-SKU
 
     # คำนวณ gap สำหรับ guard นี้ (ใช้ค่าเดิมที่คำนวณแล้ว)
