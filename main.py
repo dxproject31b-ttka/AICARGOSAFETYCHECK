@@ -3932,6 +3932,23 @@ def _overlapping_records(target_pos_range, other_records, min_overlap_ratio=CROS
     return matches
   
 def detect_tail_stepdown(records, view_label):
+    """ตรวจ step-down โซนท้ายตู้ (pos > TAIL_STEPDOWN_REAR_POS_MIN)
+
+    v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้เต็ม (EA07-01):
+
+    Guard 1 — min col width: tail_rec ต้องมีความกว้าง (x_range) >= TAIL_STEPDOWN_MIN_COL_WIDTH px
+    เพราะ col ที่แคบผิดปกติ (เช่น 57px ใน EA07-01 FRONT idx=0) มักเกิดจาก column boundary
+    ที่ phase1b ตัดผิด หรือ orphaned col ที่แทรกเข้ามา ค่าความสูงจึงไม่น่าเชื่อถือ
+    ยืนยัน: col ปกติในไฟล์ทดสอบกว้าง 80-130px, col ที่ผิดปกติ EA07-01 กว้าง 57px
+
+    Guard 2 — height source: ถ้า tail_rec มาจาก cross_view_corrected ให้ต้องการ
+    drop_ratio >= TAIL_STEPDOWN_DROP_RATIO_STRICT (เข้มกว่าปกติ) เพราะค่า cross_view_corrected
+    มีความไม่แน่นอนสูงกว่า direct measurement
+    ยืนยัน: EA07-01 BACK idx=6 เป็น cross_view_corrected, drop_ratio=22% ซึ่งในภาพจริงสูงเท่ากัน
+    """
+    TAIL_STEPDOWN_MIN_COL_WIDTH = 70      # px ขั้นต่ำของ tail col (ปกติ 80-130px)
+    TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.25  # เกณฑ์เข้มสำหรับ cross_view_corrected
+
     risks = []
     valid = [r for r in records if (not r.get("is_corner_duplicate")
              and r.get("height_px") is not None
@@ -3945,6 +3962,12 @@ def detect_tail_stepdown(records, view_label):
     tail_idx = valid.index(tail_rec)
     if tail_idx == 0:
         return risks
+
+    # v25.54 Guard 1: tail col ต้องกว้างพอ
+    x0t, x1t = tail_rec["x_range"]
+    if (x1t - x0t) < TAIL_STEPDOWN_MIN_COL_WIDTH:
+        return risks
+
     inner_rec = valid[tail_idx - 1]
     tail_h = float(tail_rec["height_px"])
     inner_h = float(inner_rec["height_px"])
@@ -3953,6 +3976,12 @@ def detect_tail_stepdown(records, view_label):
     drop_ratio = (inner_h - tail_h) / inner_h
     if drop_ratio < TAIL_STEPDOWN_DROP_RATIO:
         return risks
+
+    # v25.54 Guard 2: cross_view_corrected ต้อง drop_ratio สูงกว่า threshold ปกติ
+    if (tail_rec.get("height_source") == "cross_view_corrected"
+            and drop_ratio < TAIL_STEPDOWN_DROP_RATIO_STRICT):
+        return risks
+
     risks.append({
         "risk_type": "STEP_DOWN_RISK",
         "subtype": "tail_stepdown",
@@ -4357,8 +4386,15 @@ def _rearmost_record(records):
 def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
                               min_fraction=REAR_COLOR_MIN_FRACTION,
                               min_pixels=REAR_COLOR_MIN_PIXELS):
-    """หาชุดสีเด่น (quantized 32-level) ภายในช่วง x_range ของ 1 ตั้ง - ใช้ตรวจว่ามี SKU
-    ปะปนกันผิดปกติหรือไม่ (กลไก B ของ REAR_EMPTY_RISK) คืนค่า list[(color, count)]"""
+    """หาชุดสีเด่น (quantized 64-level) ภายในช่วง x_range ของ 1 ตั้ง - ใช้ตรวจว่ามี SKU
+    ปะปนกันผิดปกติหรือไม่ (กลไก B ของ REAR_EMPTY_RISK) คืนค่า list[(color, count)]
+
+    v25.54 FIX: เปลี่ยน quantize จาก 32-level → 64-level เพื่อป้องกัน 1 SKU (สีเดียว)
+    ถูกแตกเป็น 3+ bins จาก shading/gradient ของมุมมอง isometric เช่น olive (128,128,0)
+    ถูกแตกเป็น (128,128,0)+(96,96,0)+(64,64,0) ทั้งที่เป็นกล่องใบเดียวกัน
+    ยืนยันจาก EA07-01 BACK rear_col: 3 bins ทั้งหมดเป็นเฉด olive เดียวกัน → false-positive
+    64-level (step=64) ทำให้ bins ที่เป็นเฉดเดียวกัน merge เป็น 1 bin เดียว
+    """
     x0, x1 = x_range
     x0 = max(0, x0 + margin)
     x1 = max(x0, x1 - margin)
@@ -4369,7 +4405,8 @@ def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
     pixels = sub_region[sub_mask]
     if len(pixels) < 50:
         return []
-    quant = (pixels // 32 * 32).astype(np.int32)
+    # v25.54 FIX: 64-level quantize (step=64 แทน 32) ลด false split ของสีเดียวกัน
+    quant = (pixels // 64 * 64).astype(np.int32)
     uniq, counts = np.unique(quant.reshape(-1, 3), axis=0, return_counts=True)
     total = len(pixels)
     order = np.argsort(-counts)
@@ -4406,7 +4443,17 @@ def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
 def _p1b_extended_length_for_rear_check(view_result):
     """[v25.53] คืนค่า (start_x, end_x, length_px) ที่ขยายจากค่าเดิมของ Phase 2 โดยรวม extent
     ของ cargo_mask ดิบเข้าไปด้วย (ดู docstring ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม) - ใช้เฉพาะใน
-    detect_rear_empty_risk เท่านั้น ไม่กระทบ start_x/end_x เดิมที่ Phase 3/seam ใช้งานอยู่"""
+    detect_rear_empty_risk เท่านั้น ไม่กระทบ start_x/end_x เดิมที่ Phase 3/seam ใช้งานอยู่
+
+    v25.54 FIX: จำกัด extend ของ start_x ไม่ให้เกิน REAR_EXTEND_MAX_PX=60px จากค่าเดิม
+    เพื่อป้องกัน cargo_mask ที่มี side-face/roof ของกล่องโผล่ไกลฝั่งหัวตู้ดึง start_x ออกไป
+    จนทำให้ FRONT ดูยาวกว่า BACK อย่างผิดปกติ ยืนยันจาก EA07-01:
+    FRONT start_x ดิบ=661px แต่ extended=568px (ขยาย 93px >> BACK ขยาย 48px)
+    → gap พอง 42px/6.3% ทั้งที่ตู้เต็มจริง 92.7%
+    60px เพียงพอสำหรับ side-face ปกติ (ยืนยันจาก AA02-01: side-face = 95-99px แต่ผ่านกรอง
+    blob_size แล้ว ส่วนที่เหลือไม่ควรเกิน 60px) และยังรองรับ AB03-03 gap=46px ได้ปกติ
+    """
+    REAR_EXTEND_MAX_PX = 60  # จำกัดการขยาย start_x/end_x ฝั่งละไม่เกินนี้
     start_x = view_result.get("start_x")
     end_x = view_result.get("end_x")
     cargo_mask = view_result.get("cargo_mask")
@@ -4414,8 +4461,11 @@ def _p1b_extended_length_for_rear_check(view_result):
         return start_x, end_x, view_result.get("length_px")
     xs = np.nonzero(cargo_mask.any(axis=0))[0]
     if len(xs):
-        start_x = min(start_x, int(xs.min()))
-        end_x = max(end_x, int(xs.max()))
+        # v25.54 FIX: clamp การขยาย start_x/end_x ให้ไม่เกิน REAR_EXTEND_MAX_PX
+        new_start = int(xs.min())
+        new_end   = int(xs.max())
+        start_x = max(new_start, start_x - REAR_EXTEND_MAX_PX)
+        end_x   = min(new_end,   end_x   + REAR_EXTEND_MAX_PX)
     return start_x, end_x, (end_x - start_x)
 
 
@@ -4463,6 +4513,26 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
                 })
 
     # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view (อิสระจากกลไก A) ---
+    # v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้ที่กล่อง SKU ต่างชนิดวางชิดกัน
+    # ตามปกติ (เช่น EA07-01 ที่มีหลาย SKU ในคอลัมน์ท้าย แต่ไม่มีช่องว่างจริง):
+    #
+    # Guard 1 — ต้องมี partial length gap ยืนยัน: กลไก B จะ flag ก็ต่อเมื่อมีช่องว่างความยาว
+    #   >= REAR_COLOR_NEEDS_GAP_MIN_PX (แม้ไม่ถึงเกณฑ์เต็มของกลไก A ก็ตาม) เพราะ
+    #   color_anomaly เพียงอย่างเดียวไม่เพียงพอ — ไฟล์ที่กล่องเต็มตู้ก็อาจมี SKU หลายสีใน
+    #   คอลัมน์ท้ายตามธรรมชาติ ยืนยันจาก EC04-02: gap=17px ยังเข้าเกณฑ์นี้ได้ (>15px)
+    #   ในขณะที่ EA07-01 หลัง fix: gap=9px ไม่เข้าเกณฑ์ → ไม่ flag ถูกต้อง
+    #
+    # Guard 2 — dominant color ต้องไม่ครอบงำมากเกิน (REAR_COLOR_MAX_DOMINANT_FRAC):
+    #   ถ้า 1 สีมี fraction >= 0.70 ของ pixel ทั้งหมด แสดงว่า col นั้นเป็นกล่องใบเดียวเป็นหลัก
+    #   สีรองที่เหลือเป็น shading/shadow/outline ของกล่องใบนั้น ไม่ใช่ SKU อื่นจริง
+    #   ยืนยัน EA07-01 BACK: (128,128,0)=71.5% → 1 SKU ครอบงำ สีรองเป็น shading → false-positive
+    #   ยืนยัน EC04-02 BACK: TEM1A มี 4 สีต่างฝั่งต่างกัน ไม่มีสีใดครอบงำ >= 70%
+    REAR_COLOR_NEEDS_GAP_MIN_PX = 15     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
+    REAR_COLOR_MAX_DOMINANT_FRAC = 0.70  # ถ้า dominant > นี้ = 1 SKU + shading ไม่ใช่ multi-SKU
+
+    # คำนวณ gap สำหรับ guard นี้ (ใช้ค่าเดิมที่คำนวณแล้ว)
+    _partial_gap_px = abs(front_len - back_len) if (front_len and back_len) else 0
+
     for records, result, label in [(records_front, front_result, "FRONT"),
                                     (records_back, back_result, "BACK")]:
         rear_rec = _rearmost_record(records)
@@ -4472,15 +4542,28 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
         if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
             continue
         clusters = _dominant_color_clusters(result["region"], result["cargo_mask"], rear_rec["x_range"])
-        if len(clusters) >= REAR_COLOR_ANOMALY_MIN_COLORS:
-            risks.append({
-                "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
-                "mark_view": label,
-                "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
-                "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกัน {len(clusters)} สี "
-                           f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
-            })
+        if len(clusters) < REAR_COLOR_ANOMALY_MIN_COLORS:
+            continue
+
+        # v25.54 Guard 1: ต้องมี partial length gap ยืนยัน
+        if _partial_gap_px < REAR_COLOR_NEEDS_GAP_MIN_PX:
+            continue
+
+        # v25.54 Guard 2: dominant color ต้องไม่ครอบงำมากเกิน
+        total_pixels = sum(cnt for _, cnt in clusters)
+        if total_pixels > 0:
+            dominant_frac = clusters[0][1] / total_pixels
+            if dominant_frac >= REAR_COLOR_MAX_DOMINANT_FRAC:
+                continue
+
+        risks.append({
+            "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
+            "mark_view": label,
+            "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
+            "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
+            "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกัน {len(clusters)} สี "
+                       f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
+        })
 
     return risks
 
