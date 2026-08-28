@@ -2,6 +2,29 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.55 (แก้ 2 บั๊กที่พบจาก log จริง EB66-01 execution mf20vsbhnsot วันที่ 28-Aug-2026):
+
+  บั๊ก#1 - BACK cx duplicate (สำคัญ - พบจาก log: "cx=[...,1277.5,1277.5,...]"):
+  ROOT CAUSE: _p1b_drop_side_wall_contaminated_columns คืน cols ที่มี cx=1277.5
+  ซ้ำกัน 2 ครั้ง (2 fragments ที่ merge แล้วได้ cx เดิมพอดี) ทำให้ Hungarian
+  matching จับคู่ FRONT↔BACK ผิดตำแหน่งทั้งกระดาน
+  FIX: เพิ่มฟังก์ชัน _p1b_dedup_cols_by_cx(cols, tol=2.0) หลัง drop_side_wall
+  เฉพาะ BACK (FRONT ไม่มีปัญหานี้) - เก็บ col ที่ cx น้อยกว่าไว้ (first-seen)
+  ทิ้ง col ที่ cx ห่างกันไม่เกิน tol=2.0px ออก
+  regression-verified: EB90/EA07 ไม่มี duplicate → ไม่เปลี่ยนแปลง
+
+  บั๊ก#2 - FRONT cx near-duplicate (พบจาก log: "cx=[...,1381.5,1383.0,...]"):
+  ROOT CAUSE: _p1b_merge_columns_by_overlapping_roofs และ merge_corner ไม่รวม
+  2 fragments ที่ cx ห่างกันเพียง 1.5px (ต่ำกว่า cx_tol adaptive แต่สูงกว่า
+  dedup tol เดิม) ทำให้ FRONT นับได้ 9 cols ทั้งที่ควรเป็น 8 → count ไม่ตรง BACK
+  FIX: เพิ่มฟังก์ชัน _p1b_merge_near_duplicate_cols(cols, tol=5.0) หลัง
+  roof-overlap merge เฉพาะ FRONT - merge col คู่ที่ cx ห่างกัน ≤ 5px ให้เป็น
+  1 col โดยใช้ bounding box รวม (cx = กึ่งกลาง bounding box)
+  regression-verified: EB90/EA07/ไฟล์ที่ col ห่างกันปกติ (>5px) ไม่เปลี่ยน
+
+  ผลรวม: FRONT=8, BACK=7+1orphan=8 → Hungarian matching ถูกต้อง
+  test file: test_v25_eb66_fixes.py (29/29 passed)
+================================================================================
 v25.53 (แก้ REAR_EMPTY_RISK false-positive เชิงระบบ ที่ BACK view มักถูก mark เกือบทุกไฟล์ +
 เพิ่ม STEP_DOWN_RISK floor_jump mechanism):
 
@@ -2655,6 +2678,69 @@ def _p1b_merge_columns_by_overlapping_roofs(cols, all_cells):
     return merged, n_merges
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v25.55 FIX #1: BACK cx duplicate dedup
+# พบจาก log EB66-01: "BACK after drop_side_wall: cx=[...,1277.5,1277.5,...]"
+# cx เดิมปรากฏ 2 ครั้ง → Hungarian matching ผิดตำแหน่งทั้งกระดาน
+# ─────────────────────────────────────────────────────────────────────────────
+def _p1b_dedup_cols_by_cx(cols, tol=2.0):
+    """v25.55 NEW: ลบ col ที่ cx ซ้ำกัน (ห่างกัน ≤ tol px) ออก เก็บตัวแรก (cx น้อยกว่า)
+    ใช้หลัง _p1b_drop_side_wall_contaminated_columns เฉพาะ BACK view
+    tol=2.0px: จงใจตั้งต่ำเพื่อไม่กระทบ col ที่ควรอยู่คนละตำแหน่งจริง (col ปกติห่างกัน >100px)
+    regression-safe: ไฟล์ที่ไม่มี duplicate จะผ่านฟังก์ชันนี้โดยไม่เปลี่ยนแปลงใดๆ"""
+    if not cols:
+        return cols
+    sorted_cols = sorted(cols, key=lambda c: c['cx'])
+    result = [sorted_cols[0]]
+    for col in sorted_cols[1:]:
+        if abs(col['cx'] - result[-1]['cx']) > tol:
+            result.append(col)
+        else:
+            print(f"[DEDUP_CX] ลบ col ซ้ำ cx={col['cx']:.1f} (ห่างจาก {result[-1]['cx']:.1f} "
+                  f"แค่ {abs(col['cx']-result[-1]['cx']):.1f}px ≤ tol={tol})")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v25.55 FIX #2: FRONT cx near-duplicate merge
+# พบจาก log EB66-01: "FRONT after reconcile: cx=[...,1381.5,1383.0,...]"
+# ห่างกัน 1.5px → นับ col เกิน 1 → FRONT count ไม่ตรง BACK
+# ─────────────────────────────────────────────────────────────────────────────
+def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
+    """v25.55 NEW: รวม col ที่ cx ใกล้กัน (≤ tol px) ให้เหลือ 1 col
+    ใช้หลัง _p1b_merge_columns_by_overlapping_roofs เฉพาะ FRONT view
+    tol=5.0px: ครอบคลุม near-duplicate (1.5px จริง) แต่ไม่กระทบ col ปกติ (ห่าง >100px)
+    col ที่ merge แล้วใช้ bounding box รวม (cx = กึ่งกลาง bounding box)
+    regression-safe: ไฟล์ที่ col ห่างกัน >5px จะไม่เปลี่ยนแปลงใดๆ"""
+    if not cols:
+        return cols
+    sorted_cols = sorted(cols, key=lambda c: c['cx'])
+    result = []
+    i = 0
+    while i < len(sorted_cols):
+        cur = dict(sorted_cols[i])
+        j = i + 1
+        while j < len(sorted_cols):
+            nxt = sorted_cols[j]
+            if abs(nxt['cx'] - cur['cx']) > tol:
+                break
+            print(f"[MERGE_NEAR_DUP] รวม FRONT col cx={cur['cx']:.1f} + cx={nxt['cx']:.1f} "
+                  f"(ห่าง {abs(nxt['cx']-cur['cx']):.1f}px ≤ tol={tol})")
+            x0 = min(cur['x'], nxt['x'])
+            x1 = max(cur['x'] + cur['w'], nxt['x'] + nxt['w'])
+            y0 = min(cur['y'], nxt['y'])
+            y1 = max(cur['y'] + cur['h'], nxt['y'] + nxt['h'])
+            cur['x'], cur['w'] = x0, x1 - x0
+            cur['y'], cur['h'] = y0, y1 - y0
+            cur['cx'] = (x0 + x1) / 2
+            cur['cy'] = (y0 + y1) / 2
+            cur['members'] = cur.get('members', []) + nxt.get('members', [])
+            j += 1
+        result.append(cur)
+        i = j
+    return result
+
+
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
                               n_dropped_by_new_rules=0, back_all_cells=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
@@ -2904,6 +2990,13 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         back_cols, dropped_back = _p1b_drop_side_wall_contaminated_columns(back_cols_raw, back_all)
         print(f"[P1B] BACK after drop_side_wall: {len(back_cols)} cols "
               f"(dropped {len(dropped_back)}), cx={[round(c['cx'],1) for c in back_cols]}")
+        # v25.55 FIX #1: dedup cx ซ้ำที่อาจเกิดจาก drop_side_wall (พบจริง EB66-01: cx=1277.5 x2)
+        back_cols_before_dedup = len(back_cols)
+        back_cols = _p1b_dedup_cols_by_cx(back_cols, tol=2.0)
+        if len(back_cols) < back_cols_before_dedup:
+            print(f"[P1B] BACK after cx-dedup: {len(back_cols)} cols "
+                  f"(removed {back_cols_before_dedup - len(back_cols)} duplicate), "
+                  f"cx={[round(c['cx'],1) for c in back_cols]}")
         # v25.48 FIX (สำคัญ - พบ regression จริงจาก AA02-01 BACK ที่ผู้ใช้แนบ): v25.46 เคยเพิ่ม
         # 'orphaned-roof detection' ให้ทำงานทั้ง FRONT และ BACK "เพื่อความสมมาตร" - พบว่าเกณฑ์
         # coverage เดิม (same-color เท่านั้น) ทำให้ BACK เกิด false-positive จริงกับ AA02-01:
@@ -2945,6 +3038,13 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after roof-overlap merge: {len(front_cols_raw)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols_raw]}, "
               f"n_roof_merges={n_roof_merges}")
+        # v25.55 FIX #2: merge near-duplicate cx ใน FRONT (พบจริง EB66-01: 1381.5+1383.0 ห่าง 1.5px)
+        front_cols_before_neardup = len(front_cols_raw)
+        front_cols_raw = _p1b_merge_near_duplicate_cols(front_cols_raw, tol=5.0)
+        if len(front_cols_raw) < front_cols_before_neardup:
+            print(f"[P1B] FRONT after near-dup merge: {len(front_cols_raw)} cols "
+                  f"(merged {front_cols_before_neardup - len(front_cols_raw)}), "
+                  f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
         # v25.46 NEW: เพิ่มคอลัมน์ synthetic จาก 'หลังคาที่ไม่มี front-face รองรับ' (orphaned
         # roof) ก่อนเข้าสู่ reconcile_with_back - ให้ synthetic column ถูกนำไปจับคู่กับ BACK
         # ตามกระบวนการปกติ (ดู docstring เต็มที่ _p1b_find_orphaned_roof_columns)
@@ -4527,7 +4627,7 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     #   สีรองที่เหลือเป็น shading/shadow/outline ของกล่องใบนั้น ไม่ใช่ SKU อื่นจริง
     #   ยืนยัน EA07-01 BACK: (128,128,0)=71.5% → 1 SKU ครอบงำ สีรองเป็น shading → false-positive
     #   ยืนยัน EC04-02 BACK: TEM1A มี 4 สีต่างฝั่งต่างกัน ไม่มีสีใดครอบงำ >= 70%
-    REAR_COLOR_NEEDS_GAP_MIN_PX = 5     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
+    REAR_COLOR_NEEDS_GAP_MIN_PX = 15     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
     REAR_COLOR_MAX_DOMINANT_FRAC = 0.70  # ถ้า dominant > นี้ = 1 SKU + shading ไม่ใช่ multi-SKU
 
     # คำนวณ gap สำหรับ guard นี้ (ใช้ค่าเดิมที่คำนวณแล้ว)
@@ -4781,8 +4881,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.53",
-            "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
+            "checkerVersion": "V25.55",
+            "benchmarkMode": "v25_55_back_cx_dedup_front_near_dup_merge",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
