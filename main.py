@@ -551,107 +551,6 @@ REAR_COLOR_ANOMALY_MIN_COLORS = 3
 REAR_COLOR_MIN_FRACTION = 0.03
 REAR_COLOR_MIN_PIXELS = 80
 
-# --- v25.53-PATCH v3 (verified): rear color-anomaly แบบ "spatial blob analysis" ---
-# regression-verified 20 ไฟล์จริง: ลบ false-positive 17/17 จุด, ไม่มี false-positive ใหม่,
-# synthetic sensitivity test ยืนยันยังตรวจจับกรณีกระจัดกระจายจริงได้ปกติ
-REAR_BLOB_MIN_AREA = 200
-REAR_BLOB_COLOR_MERGE_DIST = 45
-REAR_ANOMALY_MIN_COLOR_GROUPS = 3
-REAR_ANOMALY_MIN_FRAGMENTATION = 1.8
-REAR_ANOMALY_NARROW_WIDTH_FRAC = 0.4
-REAR_ANOMALY_MIN_NARROW_BLOBS = 2
-REAR_ANOMALY_ROOF_ASPECT_MAX = 0.85
-REAR_ANOMALY_ROOF_Y_GAP_MAX = 15
-REAR_BLOB_MIN_WIDTH = 15
-
-
-def _rear_color_blob_analysis(region, cargo_mask, x_range, margin=6,
-                               min_pixels=REAR_COLOR_MIN_PIXELS,
-                               min_fraction=REAR_COLOR_MIN_FRACTION,
-                               merge_dist=REAR_BLOB_COLOR_MERGE_DIST,
-                               blob_min_area=REAR_BLOB_MIN_AREA):
-    """[v25.53-PATCH v3] spatial blob analysis แทนการนับสีจาก histogram ล้วนๆ - ดู session
-    ก่อนหน้าสำหรับหลักฐานเต็ม (regression 20 ไฟล์ + synthetic sensitivity test)"""
-    x0, x1 = x_range
-    x0 = max(0, x0 + margin)
-    x1 = max(x0, x1 - margin)
-    col_width = x1 - x0
-    if col_width <= 0:
-        return None
-    sub_mask = cargo_mask[:, x0:x1]
-    sub_region = region[:, x0:x1]
-    pixels = sub_region[sub_mask]
-    if len(pixels) < 50:
-        return None
-
-    quant = (pixels // 32 * 32).astype(np.int32)
-    uniq, counts = np.unique(quant.reshape(-1, 3), axis=0, return_counts=True)
-    total = len(pixels)
-    order = np.argsort(-counts)
-    dominant_colors = []
-    for i in order:
-        if counts[i] < min_pixels or (counts[i] / total) < min_fraction:
-            continue
-        c = uniq[i]
-        merged = False
-        for existing in dominant_colors:
-            if np.sqrt(np.sum((c.astype(int) - np.array(existing, dtype=int)) ** 2)) < merge_dist:
-                merged = True
-                break
-        if not merged:
-            dominant_colors.append(tuple(int(v) for v in c))
-
-    n_color_groups = len(dominant_colors)
-    if n_color_groups == 0:
-        return {"n_color_groups": 0, "n_blobs": 0, "fragmentation_ratio": 0.0,
-                "n_narrow_blobs": 0, "blobs": []}
-
-    tol = max(6, merge_dist // 2)
-    all_blobs = []
-    for color in dominant_colors:
-        diff = np.abs(sub_region.astype(int) - np.array(color, dtype=int))
-        color_mask = ((diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) &
-                      (diff[:, :, 2] <= tol) & sub_mask)
-        labeled, num = ndimage.label(color_mask, structure=np.ones((3, 3), dtype=int))
-        if num == 0:
-            continue
-        objects = ndimage.find_objects(labeled)
-        for i, sl in enumerate(objects, start=1):
-            if sl is None:
-                continue
-            y_slice, x_slice = sl
-            area = int((labeled[sl] == i).sum())
-            if area < blob_min_area:
-                continue
-            blob_w = x_slice.stop - x_slice.start
-            blob_h = y_slice.stop - y_slice.start
-            all_blobs.append({"color": color, "area": area, "width": blob_w, "height": blob_h,
-                               "width_frac": blob_w / max(1, col_width),
-                               "y0": y_slice.start, "y1": y_slice.stop,
-                               "aspect": blob_h / max(1, blob_w)})
-
-    for b in all_blobs:
-        b["is_roof_like"] = False
-        if b["aspect"] >= REAR_ANOMALY_ROOF_ASPECT_MAX:
-            continue
-        for other in all_blobs:
-            if other is b or other["color"] == b["color"]:
-                continue
-            if other["width"] >= b["width"] * 1.3 and b["y1"] <= other["y0"] + REAR_ANOMALY_ROOF_Y_GAP_MAX:
-                b["is_roof_like"] = True
-                break
-
-    genuine_blobs = [b for b in all_blobs if not b["is_roof_like"] and b["width"] >= REAR_BLOB_MIN_WIDTH]
-    n_blobs = len(genuine_blobs)
-    fragmentation_ratio = n_blobs / max(1, n_color_groups)
-    n_narrow_blobs = sum(1 for b in genuine_blobs if b["width_frac"] < REAR_ANOMALY_NARROW_WIDTH_FRAC)
-
-    return {
-        "n_color_groups": n_color_groups, "n_blobs": n_blobs,
-        "fragmentation_ratio": fragmentation_ratio, "n_narrow_blobs": n_narrow_blobs,
-        "blobs": all_blobs,
-    }
-
 
 def generate_action_report(case_type, description="", sku_list=""):
     """ข้อความแนะนำแก้ไขภาษาไทย (คงไว้จาก v24.36 เดิม เฉพาะ 2 risk types ที่เหลือ)"""
@@ -4535,26 +4434,15 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
         # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
         if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
             continue
-        analysis = _rear_color_blob_analysis(result["region"], result["cargo_mask"], rear_rec["x_range"])
-        if analysis is None:
-            continue
-        is_anomaly = (
-            analysis["n_color_groups"] >= REAR_ANOMALY_MIN_COLOR_GROUPS
-            and (analysis["fragmentation_ratio"] >= REAR_ANOMALY_MIN_FRAGMENTATION
-                 or analysis["n_narrow_blobs"] >= REAR_ANOMALY_MIN_NARROW_BLOBS)
-        )
-        if is_anomaly:
+        clusters = _dominant_color_clusters(result["region"], result["cargo_mask"], rear_rec["x_range"])
+        if len(clusters) >= REAR_COLOR_ANOMALY_MIN_COLORS:
             risks.append({
                 "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
                 "mark_view": label,
                 "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                "pos_range": rear_rec["pos_range"], "n_colors": analysis["n_color_groups"],
-                "fragmentation_ratio": analysis["fragmentation_ratio"],
-                "n_narrow_blobs": analysis["n_narrow_blobs"],
-                "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกันกระจัดกระจาย "
-                           f"{analysis['n_color_groups']} สี (fragmentation={analysis['fragmentation_ratio']:.2f}, "
-                           f"narrow_blobs={analysis['n_narrow_blobs']}) บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/"
-                           f"มีช่องว่างใกล้ประตูท้ายตู้"),
+                "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
+                "reason": (f"ตั้งสุดท้ายก่อนประตูท้ายตู้ฝั่ง {label} พบสี SKU ปะปนกัน {len(clusters)} สี "
+                           f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
             })
 
     return risks
@@ -4619,27 +4507,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
     risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
     risks += detect_step_down_crossview(records_front, records_back)
-    # v25.53-PATCH v4 (สำคัญ - DISABLED): detect_step_down_hidden_behind ถูกปิดใช้งานทั้งหมด
-    # หลังตรวจสอบภาพจริง 20 ไฟล์ (7/17 จุดที่ตรวจสอบด้วยตา = 100% false positive) พบว่ากลไกนี้
-    # (calibrate จากไฟล์เดียว AE02-01 ตั้งแต่ v25.23) สับสนสัญญาณ "jump ของ cargo_top_y ภายใน
-    # 1 คอลัมน์" กับปรากฏการณ์ที่ไม่เกี่ยวกับความเสี่ยงเลยอย่างน้อย 5 แบบที่ต่างกัน:
-    #   1. รอยต่อ (seam) ระหว่างคอลัมน์ที่ต่างกันจริง (EC01-02: กรอบวางตรงรอยต่อ 2 SKU)
-    #   2. corner/wall panel artifact ที่ front_height วัดได้แค่ 10-12.5px (EC07-02, EC09-03)
-    #   3. isometric depth perspective ของ SKU เดียวกัน (EC09-03 idx2: กล่อง KAP1A-B5 ทุกใบ
-    #      เป็นสินค้าเดียวกัน แค่อยู่คนละความลึกในตู้ ไม่ใช่คนละความสูงจริง)
-    #   4. การซ้อนกล่อง 2 SKU ขึ้นบนตามปกติ (EC07-01 idx2: HOW1A-BU+TGT1C-BU ซ้อนกันปกติ
-    #      ไม่ใช่กล่องซ่อนอยู่แถวหลัง)
-    #   5. แผงผนังตู้/มุมกล้อง (EC05-01 idx0)
-    # ROOT CAUSE: สาเหตุที่ 3-4 (isometric depth ของ SKU เดียวกัน / การซ้อนขึ้นบนปกติ) สามารถมี
-    # jump_px/drop_ratio สูงแค่ไหนก็ได้ - ไม่มี threshold ตัวเลขใดที่จะแยกแยะออกจากกรณีอันตรายจริง
-    # ได้ เพราะมองจาก pixel-level signature เหมือนกันทุกประการ (ต้องใช้ 3D depth reasoning/
-    # cross-view triangulation เต็มรูปแบบจึงจะแยกได้ - งานใหญ่กว่าการปรับ threshold มาก)
-    # การตัดสินใจ: ปิดกลไกนี้ทั้งหมดแทนการปรับ threshold เพราะ evidence แสดงว่าไม่ใช่ปัญหา
-    # threshold ผิด แต่เป็นปัญหาการออกแบบสัญญาณพื้นฐานที่ไม่น่าเชื่อถือ - regression-verified
-    # ครบ 20 ไฟล์: ลบ hidden_behind ออกทั้งหมด (17 จุด) ไม่กระทบ risk อื่นเลย (pairwise/
-    # cross_view/REAR_EMPTY ไม่เปลี่ยนแปลง)
-    # risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
-    # risks += detect_step_down_hidden_behind(back, records_back, "BACK")
+    risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
+    risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
