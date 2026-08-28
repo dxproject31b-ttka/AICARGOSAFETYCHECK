@@ -455,7 +455,8 @@ VALID_RISK_TYPES = set(RISK_COLORS.keys())
 # ทั้ง 3 กฎ ข้าม record ที่ is_corner_duplicate=True เสมอ (ตรวจจาก pixel/เรขาคณิตจริง ไม่ hardcode ชื่อ view)
 STEP_DOWN_CROSSVIEW_DROP_RATIO = 0.20
 STEP_DOWN_PAIRWISE_DROP_RATIO = 0.20
-
+TAIL_STEPDOWN_DROP_RATIO = 0.12
+TAIL_STEPDOWN_REAR_POS_MIN = 0.85
 # v25.48 NEW (สำคัญ - พบจริงจาก AA05-03 ที่ผู้ใช้แนบ): STEP_DOWN_RISK (ทั้ง pairwise และ
 # cross_view) เดิมเชื่อค่า height_px ที่มาจาก "direct" fit เสมอ โดยไม่สนใจว่า fit นั้นมีจุดข้อมูล
 # (n_samples) มากพอจะเชื่อถือได้หรือไม่ - พบว่าไฟล์ AA05-03 BACK idx4 (คอลัมน์ขวาสุด) วัดความสูงได้
@@ -3929,7 +3930,43 @@ def _overlapping_records(target_pos_range, other_records, min_overlap_ratio=CROS
         if smaller > 0 and (inter / smaller) >= min_overlap_ratio:
             matches.append(rec)
     return matches
-
+  
+def detect_tail_stepdown(records, view_label):
+    risks = []
+    valid = [r for r in records if (not r.get("is_corner_duplicate")
+             and r.get("height_px") is not None
+             and (r.get("height_px") or 0) > 0)]
+    if len(valid) < 2:
+        return risks
+    valid = sorted(valid, key=lambda r: (r["pos_range"][0] + r["pos_range"][1]) / 2.0)
+    tail_rec = max(valid, key=lambda r: r["pos_range"][1])
+    if tail_rec["pos_range"][1] < TAIL_STEPDOWN_REAR_POS_MIN:
+        return risks
+    tail_idx = valid.index(tail_rec)
+    if tail_idx == 0:
+        return risks
+    inner_rec = valid[tail_idx - 1]
+    tail_h = float(tail_rec["height_px"])
+    inner_h = float(inner_rec["height_px"])
+    if inner_h <= 0:
+        return risks
+    drop_ratio = (inner_h - tail_h) / inner_h
+    if drop_ratio < TAIL_STEPDOWN_DROP_RATIO:
+        return risks
+    risks.append({
+        "risk_type": "STEP_DOWN_RISK",
+        "subtype": "tail_stepdown",
+        "view": view_label,
+        "mark_view": view_label,
+        "mark_stack_idx": tail_rec["idx"],
+        "mark_x_range": tail_rec["x_range"],
+        "drop_ratio": float(drop_ratio),
+        "tail_height_px": tail_h,
+        "inner_height_px": inner_h,
+        "tail_idx": tail_rec["idx"],
+        "inner_idx": inner_rec["idx"],
+    })
+    return risks
 
 def detect_step_down_crossview(records_front, records_back):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
@@ -4507,6 +4544,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
     risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
     risks += detect_step_down_crossview(records_front, records_back)
+    risks += detect_tail_stepdown(records_front, "FRONT")
+    risks += detect_tail_stepdown(records_back, "BACK")
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
