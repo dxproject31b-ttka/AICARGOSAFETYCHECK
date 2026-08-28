@@ -4839,8 +4839,8 @@ def process_request(request):
         risk_type_counts = {}
         risk_type_order = []  # รักษาลำดับการพบครั้งแรกของแต่ละประเภท
         print(f"[RISK] {risk['risk_type']}/{risk.get('subtype')} view={risk.get('mark_view')} "
-        f"idx={risk.get('mark_stack_idx')} pos={risk.get('pos_range')} "
-        f"drop_ratio={risk.get('drop_ratio')} height_source={risk.get('height_source')}") 
+              f"idx={risk.get('mark_stack_idx')} pos={risk.get('pos_range')} "
+              f"drop_ratio={risk.get('drop_ratio')} height_source={risk.get('height_source')}") 
         for risk in risks:
             risk_type = risk["risk_type"]
             outline_color = RISK_COLORS.get(risk_type, "red")
