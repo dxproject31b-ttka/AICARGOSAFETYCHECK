@@ -4838,11 +4838,12 @@ def process_request(request):
         all_hazard_points = []
         risk_type_counts = {}
         risk_type_order = []  # รักษาลำดับการพบครั้งแรกของแต่ละประเภท
-        print(f"[RISK] {risk['risk_type']}/{risk.get('subtype')} view={risk.get('mark_view')} "
-              f"idx={risk.get('mark_stack_idx')} pos={risk.get('pos_range')} "
-              f"drop_ratio={risk.get('drop_ratio')} height_source={risk.get('height_source')}") 
+         
         for risk in risks:
             risk_type = risk["risk_type"]
+            print(f"[RISK] {risk['risk_type']}/{risk.get('subtype')} view={risk.get('mark_view')} "
+              f"idx={risk.get('mark_stack_idx')} pos={risk.get('pos_range')} "
+              f"drop_ratio={risk.get('drop_ratio')} height_source={risk.get('height_source')}")
             outline_color = RISK_COLORS.get(risk_type, "red")
             # v25.23 FIX: risk บาง subtype (hidden_behind) คำนวณ abs_box ไว้ตรงจุดตรวจจับเลย
             # (ไม่ได้ผูกกับ stack_heights index ปกติ) ใช้ค่านี้ก่อนถ้ามี ไม่งั้น fallback ไป
