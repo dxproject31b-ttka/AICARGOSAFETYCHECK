@@ -3947,7 +3947,7 @@ def detect_tail_stepdown(records, view_label):
     ยืนยัน: EA07-01 BACK idx=6 เป็น cross_view_corrected, drop_ratio=22% ซึ่งในภาพจริงสูงเท่ากัน
     """
     TAIL_STEPDOWN_MIN_COL_WIDTH = 70      # px ขั้นต่ำของ tail col (ปกติ 80-130px)
-    TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.25  # เกณฑ์เข้มสำหรับ cross_view_corrected
+    TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.18  # เกณฑ์เข้มสำหรับ cross_view_corrected
 
     risks = []
     valid = [r for r in records if (not r.get("is_corner_duplicate")
@@ -4453,7 +4453,7 @@ def _p1b_extended_length_for_rear_check(view_result):
     60px เพียงพอสำหรับ side-face ปกติ (ยืนยันจาก AA02-01: side-face = 95-99px แต่ผ่านกรอง
     blob_size แล้ว ส่วนที่เหลือไม่ควรเกิน 60px) และยังรองรับ AB03-03 gap=46px ได้ปกติ
     """
-    REAR_EXTEND_MAX_PX = 55  # จำกัดการขยาย start_x/end_x ฝั่งละไม่เกินนี้
+    REAR_EXTEND_MAX_PX = 60  # จำกัดการขยาย start_x/end_x ฝั่งละไม่เกินนี้
     start_x = view_result.get("start_x")
     end_x = view_result.get("end_x")
     cargo_mask = view_result.get("cargo_mask")
