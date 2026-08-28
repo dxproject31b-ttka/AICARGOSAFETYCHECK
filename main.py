@@ -4069,13 +4069,6 @@ RAW_CELL_DEPTH_BOTTOM_GAP_MIN = 18
 RAW_CELL_STRONG_TOP_GAP = 60
 RAW_CELL_STRONG_BOTTOM_GAP = 30
 RAW_CELL_CROSSVIEW_POS_OVERLAP_MIN = 0.35
-RAW_CELL_PHYSICAL_DROP_MIN = 0.08
-
-# v25.68: raw-cell มีสิทธิ์สร้าง marker ได้ก็ต่อเมื่อ "กองแม่" (physical stack ที่ raw face สังกัด)
-# เตี้ยกว่ากองข้างเคียงจริงถึงเกณฑ์นี้ - สีต่างกันหรือ depth เหลื่อมกันเพียงอย่างเดียวไม่ใช่หลักฐาน
-# step-down (ยืนยันจากภาพจริง: EE02-03 parent cliff 1.08%, EC10-02 16.39% = จุดปลอดภัย ไม่ควรมีกรอบ
-# ส่วน EC04-04 18.37% = step-down จริง ต้องคงไว้)
-RAW_CELL_PARENT_CLIFF_MIN = 0.18
 
 
 def _raw_cell_record(cell, records):
@@ -4118,36 +4111,6 @@ def _crossview_raw_cell_support(candidate, candidate_rec, other_cells, other_rec
     return same_color or depth_pair
 
 
-def _parent_physical_cliff(rec, records):
-    """สัดส่วนที่ 'กองแม่' ของ raw face เตี้ยกว่ากองข้างเคียงที่ติดกันจริง (0.0 = ไม่เตี้ยกว่าเลย).
-
-    ใช้ physical stack height เท่านั้น ไม่ใช้สี ไม่ใช้ raw face height ไม่ใช้ depth score
-    และไม่ผูกกับชื่อไฟล์/idx ตายตัว - คืน 0.0 เมื่อไม่มีข้อมูลพอ (fail-safe ฝั่งไม่สร้าง marker)
-    """
-    if not rec:
-        return 0.0
-    try:
-        h = float(rec.get("height_px") or 0)
-        cur_idx = int(rec.get("idx"))
-    except (TypeError, ValueError):
-        return 0.0
-    if h <= 0:
-        return 0.0
-    cliffs = []
-    for n in records or []:
-        if n is rec or n.get("is_corner_duplicate"):
-            continue
-        try:
-            if abs(int(n.get("idx")) - cur_idx) != 1:
-                continue
-            nh = float(n.get("height_px") or 0)
-        except (TypeError, ValueError):
-            continue
-        if nh > 0:
-            cliffs.append(max(0.0, 1.0 - h / nh))
-    return max(cliffs) if cliffs else 0.0
-
-
 def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
                                          other_view_result, other_records, existing_risks):
     """v25.56 guarded raw-cell detector.
@@ -4184,59 +4147,7 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
             if top_gap<RAW_CELL_DEPTH_TOP_GAP_MIN or bottom_gap<RAW_CELL_DEPTH_BOTTOM_GAP_MIN:
                 continue
             rec=_raw_cell_record(fg,records)
-            bg_rec=_raw_cell_record(bg,records)
-            if rec is None or bg_rec is None or (view_label,rec["idx"]) in existing:
-                continue
-            # v25.68 PARENT-CLIFF GUARD (จุดเดียวที่แก้): raw face จะสร้าง marker ได้ก็ต่อเมื่อ
-            # กองแม่ของมันเตี้ยกว่ากองข้างเคียงจริงถึงเกณฑ์ - ตัด false positive ที่กองสูงเท่ากัน
-            # ทั้งบริเวณ (จุดที่ผู้ใช้ชี้ว่าปลอดภัย) โดยไม่แตะ/ไม่ย้าย marker ของกลไกอื่นเลย
-            parent_cliff = _parent_physical_cliff(rec, records)
-            if parent_cliff < RAW_CELL_PARENT_CLIFF_MIN:
-                continue
-            # v25.59 HYBRID GUARD
-            # 1) same-parent suppression: หลายสี/หลาย raw face ใน physical stack เดียวกัน
-            #    ไม่ใช่หลักฐาน step-down ไม่ว่ามีกี่สีซ้อนกัน
-            if rec.get("idx") == bg_rec.get("idx"):
-                continue
-
-            fg_h=rec.get("height_px")
-            bg_h=bg_rec.get("height_px")
-
-            # ใช้ physical height เป็น hard validation เฉพาะเมื่อค่าทั้งคู่ valid จริง
-            # ค่า carry-forward, sample ต่ำ หรือ corrected ที่ conflict สูง ถือว่า unavailable
-            def _valid_physical_height(r, h):
-                if h is None:
-                    return False
-                try:
-                    if not np.isfinite(float(h)) or float(h) <= 0:
-                        return False
-                except (TypeError, ValueError):
-                    return False
-                src=str(r.get("height_source") or "")
-                if src in ("carry_forward", "missing", "none"):
-                    return False
-                n=r.get("height_n_samples", r.get("n_samples"))
-                if n is not None and src in ("direct", "apex_fallback"):
-                    try:
-                        if int(n) < STEP_DOWN_MIN_RELIABLE_SAMPLES:
-                            return False
-                    except (TypeError, ValueError):
-                        return False
-                if src == "cross_view_corrected":
-                    conflict=r.get("cross_view_conflict_ratio")
-                    if conflict is not None and float(conflict) > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO:
-                        return False
-                return True
-
-            fg_height_valid=_valid_physical_height(rec,fg_h)
-            bg_height_valid=_valid_physical_height(bg_rec,bg_h)
-            physical_height_valid=fg_height_valid and bg_height_valid
-            physical_drop_ratio=None
-            if physical_height_valid:
-                physical_drop_ratio=1.0-(float(fg_h)/float(bg_h))
-                if physical_drop_ratio < RAW_CELL_PHYSICAL_DROP_MIN:
-                    continue
-
+            if rec is None or (view_label,rec["idx"]) in existing: continue
             cross_ok=_crossview_raw_cell_support(fg,rec,other_cells,other_records)
             # cross-view เป็นหลัก; strong-depth override ใช้ได้เฉพาะ raw foreground ที่สัมผัส
             # local floor จริง เพื่อรองรับกรณีถูกบังหมดใน view ตรงข้าม โดยไม่รับ fragment ลอย
@@ -4248,34 +4159,13 @@ def detect_raw_cell_foreground_stepdown(view_result, records, view_label,
             strong = (top_gap >= RAW_CELL_STRONG_TOP_GAP
                       and bottom_gap >= RAW_CELL_STRONG_BOTTOM_GAP
                       and floor_gap is not None and abs(floor_gap) <= 22)
-            # Tail fallback แยกจาก REAR_EMPTY_RISK โดยสิ้นเชิง:
-            # ใช้เฉพาะ raw stack ใน 10% ท้ายของ physical position และเฉพาะเมื่อ
-            # physical height unavailable. ต้องมี cross-view หรือ strong floor-contact evidence.
-            pr=rec.get("pos_range") or (0.0,0.0)
-            tail_zone=max(pr) >= 0.90
-            tail_fallback=(tail_zone and not physical_height_valid and (cross_ok or strong))
-
-            # โซนทั่วไปเมื่อ height unavailable ยัง fallback ได้ด้วยหลักฐานเดิมที่ยืนยันแล้ว
-            evidence_fallback=(not physical_height_valid and (cross_ok or strong))
-            if physical_height_valid:
-                accepted_by="physical_height"
-            elif tail_fallback:
-                accepted_by="tail_fallback"
-            elif evidence_fallback:
-                accepted_by="evidence_fallback"
-            else:
+            if not (cross_ok or strong):
                 continue
             depth_separation_score=(top_gap+bottom_gap)/max(1,bg["h"]+fg["h"])
             candidates.append({"risk_type":"STEP_DOWN_RISK","subtype":"raw_cell_foreground_stepdown",
                 "view":view_label,"mark_view":view_label,"mark_stack_idx":rec["idx"],"mark_x_range":rec["x_range"],
                 "mark_bbox_local":(fg["x"],fg["y"],fg["x"]+fg["w"],fg["y"]+fg["h"]),
                 "depth_separation_score":depth_separation_score,"raw_cell_color":fg.get("color"),"x_overlap_ratio":xov,
-                "physical_drop_ratio":physical_drop_ratio,"background_stack_idx":bg_rec.get("idx"),
-                "parent_physical_cliff_ratio":parent_cliff,
-                "physical_height_valid":physical_height_valid,"hybrid_accepted_by":accepted_by,
-                "tail_zone_fallback":tail_fallback,
-                "foreground_stack_height_px":float(fg_h) if fg_h is not None else None,
-                "background_stack_height_px":float(bg_h) if bg_h is not None else None,
                 "depth_top_gap_px":top_gap,"depth_bottom_gap_px":bottom_gap,
                 "cross_view_confirmed":cross_ok,"strong_depth_override":strong,
                 "floor_contact_gap_px":floor_gap})
@@ -4379,128 +4269,6 @@ def deduplicate_raw_cell_stepdown_markers(raw_risks, records_front, records_back
             best["dedup_views"]=sorted({r["mark_view"] for r in g})
         final.append(best)
     return final
-
-
-
-TAIL_STEPDOWN_DROP_RATIO = 0.12
-TAIL_STEPDOWN_REAR_POS_MIN = 0.85
-TAIL_EDGE_ZONE_FRACTION = 0.22
-TAIL_EDGE_RAW_MIN_AREA = 1800
-TAIL_EDGE_FLOOR_GAP_MAX = 22
-TAIL_EDGE_STACK_XOVERLAP_MIN = 0.70
-TAIL_EDGE_STACK_VERTICAL_GAP_MAX = 6
-
-
-def detect_tail_stepdown(records, view_label, existing_risks=None):
-    """Record-level rear-edge step-down detector."""
-    existing_risks = existing_risks or []
-    valid=[r for r in records if not r.get("is_corner_duplicate")
-           and r.get("height_px") is not None and float(r.get("height_px") or 0)>0]
-    if len(valid)<2:
-        return []
-    valid=sorted(valid,key=lambda r:(r["pos_range"][0]+r["pos_range"][1])/2.0)
-    tail=max(valid,key=lambda r:r["pos_range"][1])
-    if tail["pos_range"][1] < TAIL_STEPDOWN_REAR_POS_MIN:
-        return []
-    if any(r.get("risk_type")=="STEP_DOWN_RISK"
-           and (r.get("mark_view") or r.get("view"))==view_label
-           and r.get("mark_stack_idx")==tail["idx"] for r in existing_risks):
-        return []
-    i=valid.index(tail)
-    if i==0:
-        return []
-    inner=valid[i-1]
-    th=float(tail["height_px"]); ih=float(inner["height_px"])
-    if ih<=0:
-        return []
-    drop=(ih-th)/ih
-    if drop < TAIL_STEPDOWN_DROP_RATIO:
-        return []
-    return [{"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown",
-             "view":view_label,"mark_view":view_label,
-             "mark_stack_idx":tail["idx"],"mark_x_range":tail["x_range"],
-             "drop_ratio":float(drop),"tail_height_px":th,"inner_height_px":ih,
-             "tail_idx":tail["idx"],"inner_idx":inner["idx"],
-             "tail_detection_path":"record_pair"}]
-
-
-def _tail_edge_raw_candidates(view_result, records, view_label):
-    """Build bottom-up multi-color stacks at both cargo edges.
-
-    A floor-contact raw face is the seed. Additional differently colored faces are merged only
-    when they strongly overlap in X and touch/overlap vertically. This joins EC04-01's green and
-    magenta stack, while keeping EC18-01's red low stack separate from the elevated green face.
-    """
-    floor=view_result.get("local_floor_y")
-    cells=[c for c in (view_result.get("raw_phase1b_cells") or [])
-           if c.get("kind")=="front" and c.get("area",0)>=TAIL_EDGE_RAW_MIN_AREA
-           and not _p1b_is_structural_container_color(c.get("color",(0,0,0)))]
-    if floor is None or not cells or not records:
-        return []
-    start=float(view_result.get("start_x",0)); end=float(view_result.get("end_x",0)); span=max(1.0,end-start)
-    edge_margin=TAIL_EDGE_ZONE_FRACTION*span
-    enriched=[]
-    for c in cells:
-        cx=int(round(c["x"]+c["w"]/2.0))
-        if not (0<=cx<len(floor)) or floor[cx]<0:
-            continue
-        if not (cx <= start+edge_margin or cx >= end-edge_margin):
-            continue
-        enriched.append((c,float(floor[cx]-(c["y"]+c["h"])),float(floor[cx])))
-    seeds=[z for z in enriched if abs(z[1])<=TAIL_EDGE_FLOOR_GAP_MAX]
-    out=[]
-    for seed,seed_gap,seed_floor in seeds:
-        # Bottom-up stack assembly. Add at most the two nearest supporting faces above the
-        # floor seed. The cap prevents transitive bridging into a taller background column
-        # through an overlapping intermediate face (EC04-01 yellow -> magenta -> green chain).
-        group=[seed]
-        while len(group) < 3:
-            choices=[]
-            group_top=min(g["y"] for g in group)
-            for c,_,_ in enriched:
-                if c in group: continue
-                xov=max(max(0,min(c["x"]+c["w"],g["x"]+g["w"])-max(c["x"],g["x"])) / max(1,min(c["w"],g["w"])) for g in group)
-                vgap=max(0,group_top-(c["y"]+c["h"]))
-                # candidate must extend the current group upward, not merely overlap its side
-                if xov>=TAIL_EDGE_STACK_XOVERLAP_MIN and vgap<=TAIL_EDGE_STACK_VERTICAL_GAP_MAX and c["y"] < group_top:
-                    choices.append((vgap,abs((c["x"]+c["w"]/2.0)-(seed["x"]+seed["w"]/2.0)),c))
-            if not choices: break
-            group.append(min(choices,key=lambda z:(z[0],z[1]))[2])
-        gx0=min(c["x"] for c in group); gx1=max(c["x"]+c["w"] for c in group)
-        gy0=min(c["y"] for c in group); gy1=max(c["y"]+c["h"] for c in group)
-        gcx=(gx0+gx1)/2.0
-        rec=min(records,key=lambda r:abs(((r["x_range"][0]+r["x_range"][1])/2.0)-gcx))
-        ref=float(rec.get("height_px") or 0)
-        visible=float(seed_floor-gy0)
-        if ref<=0 or visible<=0: continue
-        drop=1.0-visible/ref
-        if drop<TAIL_STEPDOWN_DROP_RATIO: continue
-        out.append({"risk_type":"STEP_DOWN_RISK","subtype":"tail_stepdown_edge_raw_group",
-                    "view":view_label,"mark_view":view_label,"mark_stack_idx":rec["idx"],
-                    "mark_x_range":rec["x_range"],"mark_bbox_local":(gx0,gy0,gx1,gy1),
-                    "drop_ratio":float(drop),"tail_visible_height_px":visible,
-                    "reference_stack_height_px":ref,"floor_contact_gap_px":seed_gap,
-                    "tail_raw_colors":sorted({tuple(c.get("color",())) for c in group}),
-                    "tail_edge_side":"left" if gcx<(start+end)/2.0 else "right",
-                    "tail_detection_path":"floor_anchored_edge_raw_group"})
-    # same group may be reached from more than one seed
-    best={}
-    for r in out:
-        b=tuple(round(float(v),1) for v in r["mark_bbox_local"])
-        if b not in best or r["drop_ratio"]>best[b]["drop_ratio"]: best[b]=r
-    return list(best.values())
-
-
-def detect_tail_stepdown_edge_raw_group(front, records_front, back, records_back, existing_risks):
-    """Cross-view dedupe: add at most one edge-raw marker, only when record path found none."""
-    if any(r.get("subtype")=="tail_stepdown" for r in existing_risks):
-        return []
-    candidates=_tail_edge_raw_candidates(front,records_front,"FRONT")
-    candidates+=_tail_edge_raw_candidates(back,records_back,"BACK")
-    if not candidates:
-        return []
-    # Strongest physical cliff wins. Tie prefers smaller visible group, then FRONT.
-    return [max(candidates,key=lambda r:(r["drop_ratio"],-r["tail_visible_height_px"],r["mark_view"]=="FRONT"))]
 
 
 def detect_step_down_crossview(records_front, records_back):
@@ -5147,10 +4915,6 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         back, records_back, "BACK", front, records_front, risks)
     risks += deduplicate_raw_cell_stepdown_markers(
         raw_cell_risks, records_front, records_back)
-    risks += detect_tail_stepdown(records_front, "FRONT", risks)
-    risks += detect_tail_stepdown(records_back, "BACK", risks)
-    risks += detect_tail_stepdown_edge_raw_group(
-        front, records_front, back, records_back, risks)
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
 
     return {
@@ -5305,7 +5069,7 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.68",
+            "checkerVersion": "V25.56",
             "benchmarkMode": "v25_51_roof_to_front_reclassify_merged_aspect_guard",
         }, 200, headers)
     except Exception as e:
