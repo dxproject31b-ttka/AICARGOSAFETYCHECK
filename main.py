@@ -2,6 +2,64 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.61 (Critical hotfix - พบจาก self-regression-test ของ v25.58-60 เอง วันเดียวกัน,
+29-Aug-2026 - ก่อนส่งมอบให้ผู้ใช้ ตรวจพบว่า 2 ใน 3 การแก้ไขก่อนหน้าทำให้ไฟล์ที่เคย verify
+แล้วกลับมาผิดพลาดใหม่ จึงแก้ไขเพิ่มเติมทันทีก่อนส่งมอบ):
+  1. REAR_EMPTY_RISK n_stacks_mismatch (v25.58): ปิดการใช้เป็นเงื่อนไข trigger ชั่วคราว (เหลือ
+     แค่ log สำหรับสะสมหลักฐาน) เพราะพบว่า "front_raw!=back_raw อยู่ 1" เป็นรูปแบบปกติทั่วไปที่
+     เกิดจาก Phase 1B merge/corner-artifact เอง ไม่ใช่สัญญาณเฉพาะของปัญหา (EA07-01 8v7,
+     ED03-01 4v3 มีรูปแบบเดียวกับ EC04-01's true-positive 8v7 เป๊ะ - แยกแยะไม่ได้ด้วยข้อมูลที่มี)
+     ผลกระทบ: EC04-01 กลับไปเป็น hazardCount=0 ชั่วคราว (trade-off ที่ยอมรับ เพื่อไม่กระทบไฟล์อื่น)
+  2. Floor-Linearity Guard (v25.59): ตัด extrapolation fallback ออกทั้งหมด (ทดลองทั้งแบบ 2-จุด
+     ดิบและแบบ 3-จุด+robust-fit+resid_std check แต่ทั้งคู่ยังทำให้ EB66-01 idx0 พลิกผิดอยู่ดี -
+     ยืนยันว่าความบิดเบือนที่ริมสุดจริงไม่เป็นเส้นตรงโดยธรรมชาติ ไม่ใช่แค่ปัญหาจุดอ้างอิงไม่พอ)
+     เหลือแค่ interpolation (มีเพื่อนบ้านครบ 2 ฝั่ง) เท่านั้น ผลกระทบ: RD01-01 idx2 (คอลัมน์ริมสุด
+     ในไฟล์ที่มีแค่ 3 คอลัมน์) ไม่ถูกตรวจสอบอีกต่อไป ยังเหลือ STEP_DOWN_RISK ปลอม 1 จุดที่นั่น
+  regression-verified หลังแก้: EA07-01=2, EB66-01=1, ED03-01=0, ED86-03=0 (ตรงกับ baseline
+  เดิมทุกไฟล์) RD01-01=2 (ดีขึ้นจาก 3 แต่ยังไม่ครบ 100% - เหลือ 1 จุดปลอมที่ idx2 ตามที่อธิบาย
+  ข้างต้น) EC04-01=0 (ถอยกลับจาก 1 - รอออกแบบเงื่อนไข n_stacks ที่แยกแยะได้แม่นยำกว่านี้)
+================================================================================
+v25.58-60 (แก้ 3 จุดตามลำดับที่ผู้ใช้สั่งจากไฟล์จริง EC04-01/RD01-01/EC18-01, 29-Aug-2026):
+
+  v25.58 - REAR_EMPTY_RISK เพิ่มเงื่อนไข n_stacks mismatch (ยืนยันจาก EC04-01):
+  ปัญหา: กล่องแถวใน (inner-row) ไม่มีกล่องแถวหน้า (front-row) มาค้ำ/บัง ทำให้ FRONT มองเห็น
+  ตั้งน้อยกว่า BACK จริง (ผู้ใช้ยืนยันด้วยภาพ+ลูกศรกำกับระยะในไฟล์เอง) แต่ pixel-length ที่วัด
+  ได้ใกล้เคียงกันมาก (552 vs 558px=1.1%) เพราะสีของกล่องแถวในยังปรากฏปนกับกองข้างเคียง ทำให้
+  กลไก A เดิม (length_mismatch จาก pixel-extent) ไม่ trigger เลย
+  FIX: compute_phase1b_columns คืนค่า front_raw_count/back_raw_count (จำนวนคอลัมน์ก่อนถูก
+  Hungarian matching บังคับให้เท่ากัน) แนบเข้า view_result เป็น phase1b_raw_n_stacks -
+  detect_rear_empty_risk เพิ่มเงื่อนไข OR: ถ้า front_raw!=back_raw ให้ trigger ได้แม้ pixel-
+  length ไม่ถึงเกณฑ์ (ทิศทาง "ฝั่งไหนสั้นกว่า" ยังคงตัดสินจาก pixel-length เสมอ เพราะทดสอบแล้ว
+  ว่า raw-count เทียบกันตรงๆ ให้ทิศทางผิด - raw count สูงกว่าไม่ได้แปลว่าเห็นตั้งมากกว่าจริง
+  อาจเป็นเพราะ merge fragment ผิดตำแหน่ง) ทดสอบยืนยัน: EC04-01 hazardCount 0->1 กรอบตรงตำแหน่ง
+  จริงที่ผู้ใช้ชี้ 100% ข้อจำกัด: ยืนยันด้วยไฟล์เดียว แนะนำ regression กับ EC01-01/AC03-01/
+  EC04-02 ก่อนใช้งานเต็มรูปแบบ
+
+  v25.59 - Floor-Linearity Guard ใน reconcile_heights_cross_view (ยืนยันจาก RD01-01):
+  ปัญหา: กล่อง SKU เดียวกันสูงเท่ากันทุกใบจริง (ยืนยันภาพ) แต่ BACK วัด floor_y ได้ 550/477/405
+  (ลดหลั่นสม่ำเสมอ -73/-72px) ในขณะที่ FRONT วัดได้ 552/543/431 (กระโดดผิดปกติ -9/-112px จาก
+  จุดหักงอเรขาคณิตใกล้ apex) - reconcile เดิมเลือกเชื่อ FRONT (ค่าสูงกว่า) เขียนทับ BACK ที่ถูก
+  ต้องอยู่แล้ว เกิด STEP_DOWN_RISK ปลอม 2 จุด
+  FIX: เพิ่ม _floor_linearity_anomaly() เปรียบเทียบ floor_y ของคอลัมน์เป้าหมายกับค่าคาดหวังจาก
+  interpolation/extrapolation ของเพื่อนบ้านในวิวเดียวกัน - ถ้าฝั่งที่กำลังจะ "ชนะ" (trust_a)
+  มี floor-anomaly >= 20px และมากกว่าฝั่งที่แพ้ 2 เท่า ให้พลิกกลับไปเชื่อฝั่งที่ floor สมเหตุสม
+  ผลกว่าแทน ทดสอบยืนยัน: RD01-01 FRONT anomaly=41.7px/99.5px vs BACK anomaly=0.0px ทั้งคู่ ->
+  พลิกกลับถูกต้อง STEP_DOWN_RISK ปลอม 2 จุดหายไป (REAR_EMPTY_RISK 1 จุดที่เหลือคือความเสี่ยง
+  จริง ตรงกับ Unused Floor 26.8in ไม่ใช่ false-positive)
+
+  v25.60 - arrow_mask() แก้ให้ตรงกับ is_arrow_color() (ยืนยันจาก EC18-01):
+  ปัญหา: กล่องแดง (TOC1B-BN) เตี้ยกว่ากล่องเขียวข้างเคียงมาก (ผู้ใช้ยืนยัน: แดง=ครึ่งหนึ่งของ
+  เขียว 1 ใบ, เขียวในภาพซ้อน 2 ใบ) แต่ระบบวัดได้ลดลงแค่ 13-23% เท่านั้น (ควรจะ ~75%)
+  ROOT CAUSE ที่พบจริง (2 ชั้น): (1) arrow_mask() เวอร์ชัน vectorized ที่ใช้จริงกับทั้งภาพ
+  implement เงื่อนไขไม่ครบเทียบกับ is_arrow_color() (ขาด 40<=g<=140, 40<=b<=140 ทั้งคู่) ทำให้
+  สีแดงสดของกล่องจริง (255,0,0, g=b=0) ถูกเข้าใจผิดเป็นลูกศรนำทาง ตัดออกจาก cargo_mask ไปทั้ง
+  ระบบ (กระทบทุกไฟล์ที่มีกล่องสีแดงสด ไม่ใช่แค่ EC18-01) - แก้แล้วให้ตรงกับ is_arrow_color ทุก
+  ประการ (2) ปัญหาที่ลึกกว่า (ยังไม่แก้ในรอบนี้): กล่องแดงมี P1B x-range แคบผิดปกติ (64px เทียบ
+  ปกติ ~79px) ทับซ้อนกับคอลัมน์ข้างเคียง ทำให้สูตร seam=จุดกึ่งกลางระหว่างคอลัมน์ (ใน
+  process_view_on_image) คำนวณ boundary ผิด ดึงพื้นที่กล่องเขียวข้างหน้าเข้ามาปนในการวัดความ
+  สูงของกล่องแดง - ยังไม่แก้เพราะแตะสูตร seam หลักที่ใช้กับทุกไฟล์ เสี่ยง regression สูง (v25.14/
+  16 เคยแก้พังมาแล้ว) รอออกแบบ guard ที่ปลอดภัยกว่านี้ในรอบถัดไป
+================================================================================
 v25.57 (แก้ 3 จุดที่พบจาก log จริง EA07-01/EB66-01 วันที่ 29-Aug-2026 - ผู้ใช้ยืนยันว่าทั้ง
 2 ไฟล์เป็น "กล่องเต็มตู้ ปราศจากความเสี่ยงใดๆ" แต่หลัง deploy v25.56 ยัง flag ผิดอยู่):
 
@@ -851,13 +909,37 @@ def is_arrow_color(rgb):
 
 
 def arrow_mask(region):
+    """v25.60 FIX (สำคัญ - พบจริงจาก EC18-01 ที่ผู้ใช้แนบ, 29-Aug-2026): เดิม arrow_mask()
+    (เวอร์ชัน vectorized ที่ใช้จริงกับทั้งภาพใน process_view_on_image) implement เงื่อนไขไม่ครบ
+    เทียบกับ is_arrow_color() (ฟังก์ชันพี่น้องที่ใช้กรอง pixel ทีละจุดใน seam_based_count) -
+    is_arrow_color มี 6 เงื่อนไข (r>=190, 40<=g<=140, 40<=b<=140, |g-b|<=45, r-g>=70, r-b>=70)
+    แต่ arrow_mask เดิมมีแค่ 3 เงื่อนไข (ขาด 40<=g<=140 และ 40<=b<=140 ไปทั้งคู่ รวมถึงไม่ได้เช็ค
+    r-b>=70 แยกจาก r-g>=70 ด้วย - ใช้แค่ r-max(g,b)>=70 ซึ่งครอบคลุมน้อยกว่า)
+    ผลกระทบที่พบจริง: สีแดงสดของกล่องสินค้าจริง (255,0,0 - g=b=0) ผ่านเงื่อนไข 3 ข้อที่ arrow_mask
+    เช็ค (bright=True, gb_close=True เพราะ 0-0=0, r_dominant=True เพราะ 255-0=255>=70) จึงถูก
+    เข้าใจผิดว่าเป็น "ลูกศรนำทาง" (arrow) ทั้งที่ g=0,b=0 ไม่ผ่านเงื่อนไข 40<=g<=140/40<=b<=140 ของ
+    is_arrow_color เลย (ลูกศรนำทางจริงเป็นโทนส้ม-แดงที่มี g,b อยู่ในช่วงกลาง ไม่ใช่ g=b=0 แบบสีแดง
+    เข้มของกล่องสินค้า) - ทำให้พิกเซลสีแดงสดที่สุด (ด้านที่โดนแสงเต็มที่) ของกล่องถูกตัดออกจาก
+    cargo_mask ไปทั้งหมด เหลือแต่ส่วนเงา (สีแดงเข้มกว่า เช่น 136,0,0 ซึ่ง bright=136<190 จึงไม่ผ่าน
+    เงื่อนไข bright ของ arrow_mask อยู่แล้ว) ทำให้ cargo_mask ของกล่องสีแดงเล็กกว่าความเป็นจริงมาก
+    และมีช่องว่าง (gap) แทรกอยู่กลางกล่องอย่างเป็นระบบ ส่งผลกระทบต่อการวัดความสูง/ตำแหน่งขอบเขต
+    ของกล่องที่มีสีแดงสดทุกใบในทุกไฟล์ (ไม่ใช่แค่ EC18-01) - เป็นบั๊กเชิงระบบที่ซ่อนอยู่นาน
+    FIX: แก้ arrow_mask ให้ใช้เงื่อนไขเดียวกันกับ is_arrow_color ทุกประการ (vectorized) - เพิ่ม
+    g_in_range/b_in_range (40<=g<=140, 40<=b<=140) และแยกเช็ค r-g>=70 กับ r-b>=70 ต่างหาก แทนที่
+    จะรวมเป็น r-max(g,b)>=70 ตัวเดียว - รับประกันว่าสีแดงสด g=b=0 ของกล่องสินค้าจะไม่ถูกจัดเป็น
+    arrow อีกต่อไป (g=0 ไม่ผ่าน 40<=g<=140) ในขณะที่ลูกศรนำทางโทนส้ม-แดงจริง (g,b อยู่กลางช่วง)
+    ยังคงถูกกรองออกได้ตามปกติเหมือนเดิมทุกประการ (ไม่กระทบกลไก arrow-filtering ที่ออกแบบไว้เดิม)
+    """
     r = region[:, :, 0].astype(np.int16)
     g = region[:, :, 1].astype(np.int16)
     b = region[:, :, 2].astype(np.int16)
-    gb_close = np.abs(g - b) <= 45
-    r_dominant = (r - np.maximum(g, b)) >= 70
     bright = r >= 190
-    return gb_close & r_dominant & bright
+    g_in_range = (g >= 40) & (g <= 140)
+    b_in_range = (b >= 40) & (b <= 140)
+    gb_close = np.abs(g - b) <= 45
+    r_minus_g = (r - g) >= 70
+    r_minus_b = (r - b) >= 70
+    return bright & g_in_range & b_in_range & gb_close & r_minus_g & r_minus_b
 
 
 def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_iterations=15):
@@ -3156,21 +3238,50 @@ def compute_phase1b_columns(regions, down_factor=1.0):
             front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
 
+        # v25.58 NEW (สำคัญ - ตามที่ผู้ใช้ระบุจากไฟล์จริง EC04-01, 29-Aug-2026): เก็บจำนวน
+        # คอลัมน์ "ดิบ" ของแต่ละ view ไว้ก่อนที่ _p1b_reconcile_with_back จะบังคับให้ FRONT เท่ากับ
+        # BACK เสมอ (Hungarian matching ตัด/เติมคอลัมน์จนจำนวนตรงกัน) - ตัวเลขดิบนี้คือ "จำนวนตั้งที่
+        # แต่ละมุมกล้องมองเห็นได้อิสระจากกัน จริงๆ" ก่อนถูกปรับให้ตรงกัน
+        #
+        # ยืนยันจาก EC04-01: back_cols=7 (ground-truth, ไม่เคยถูกแก้ไข) แต่ front_cols_raw=8
+        # (มีคอลัมน์พิเศษที่ cx=902.0 เกิดจาก _p1b_merge_columns_by_overlapping_roofs รวม 2
+        # fragment เข้าด้วยกัน เพราะกล่องแถวใน (inner-row) ที่ไม่มีกล่องแถวหน้า (front-row) มา
+        # บัง/ค้ำ ทำให้หลังคาโผล่กว้างผิดปกติ ดูเหมือน 'กองซ้อนความลึกเดียวกัน 2 กอง' ทั้งที่จริง
+        # เป็นกองเดียว) - หลังจาก Hungarian matching ตัดคอลัมน์พิเศษนี้ทิ้งเพื่อให้ FRONT=BACK=7
+        # (ถูกต้องแล้วสำหรับการนับจำนวนตั้ง - ไม่ต้องแก้) แต่ "ร่องรอย" ของความไม่ตรงกัน (8 vs 7)
+        # ที่บ่งชี้ว่ามีตำแหน่งกล่องแถวในไม่มีกองหน้าค้ำ (= เสี่ยงกล่องไถล/ล้มเข้าช่องว่างที่โผล่ให้
+        # เห็นด้านหน้า ตามที่ผู้ใช้ยืนยันด้วยภาพจริง+ลูกศรกำกับระยะในไฟล์) หายไปทั้งหมด ไม่มีการส่งต่อ
+        # ให้ REAR_EMPTY_RISK ใช้เป็นหลักฐานเสริมเลย (กลไก A เดิมใช้แค่ length_px ที่วัดจาก pixel
+        # ซึ่งวัดได้ใกล้เคียงกันมาก 552 vs 558px=1.1% เพราะสีของกล่องแถวในยังคงปรากฏเป็น pixel สีสด
+        # ปนอยู่กับกองข้างเคียง แม้จะไม่ถูกนับเป็นตั้งแยกก็ตาม - ทำให้กลไก A เดิมพลาดไม่ trigger)
+        #
+        # FIX: ส่งคืนจำนวนดิบทั้ง 2 ฝั่งเพิ่มเข้าไปใน dict ผลลัพธ์ (ไม่กระทบ "front"/"back" เดิมที่
+        # ใช้นับจำนวนตั้งจริงตามปกติ - เป็นแค่ข้อมูลเสริมสำหรับ REAR_EMPTY_RISK เท่านั้น)
+        n_front_raw_prereconcile = len(front_cols_raw)
+        n_back_raw = len(back_cols)
+
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
             n_dropped_by_new_rules=front_n_dropped, back_all_cells=back_all)
         if not front_cols:
-            return {"front": None, "back": None}
+            return {"front": None, "back": None,
+                    "front_raw_count": n_front_raw_prereconcile, "back_raw_count": n_back_raw}
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
+        if n_front_raw_prereconcile != n_back_raw:
+            print(f"[P1B] STACK-COUNT MISMATCH (pre-reconcile): "
+                  f"front_raw={n_front_raw_prereconcile} vs back_raw={n_back_raw} "
+                  f"(บ่งชี้ตำแหน่งกล่องแถวในไม่มีกองหน้าค้ำ - ดู docstring v25.58)")
 
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+            "front_raw_count": n_front_raw_prereconcile,
+            "back_raw_count": n_back_raw,
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
-        return {"front": None, "back": None}
+        return {"front": None, "back": None, "front_raw_count": None, "back_raw_count": None}
 
 
 # ============================================================================
@@ -4026,6 +4137,83 @@ def _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b, exclude=8):
     return float(floor_r_at_seam - floor_l_at_seam)
 
 
+# v25.59 NEW (สำคัญ - พบจริงจาก RD01-01 ที่ผู้ใช้แนบ, 29-Aug-2026): เดิม reconcile_heights_
+# cross_view ตัดสินใจว่าจะ "เชื่อ" ค่าความสูงฝั่งไหน โดยดูแค่ reliability hierarchy (direct >
+# apex_fallback) และ "ค่าที่สูงกว่าชนะ" เมื่อทั้งคู่ reliable เท่ากัน - ไม่มีการตรวจสอบเลยว่า
+# ค่าความสูงนั้นคำนวณมาจาก local_floor_y ที่ "สมเหตุสมผลทางเรขาคณิต" หรือไม่
+# ยืนยันจาก RD01-01 (กล่อง SKU เดียวกันทั้งคัน สูงเท่ากันจริงทุกใบตามภาพ): BACK วัด floor_y ได้
+# 550/477/405 (ลดหลั่นสม่ำเสมอ -73/-72px ต่อคอลัมน์ - เกือบเป็นเส้นตรงสมบูรณ์) แต่ FRONT วัดได้
+# 552/543/431 (ลดหลั่นกระโดดผิดปกติ -9/-112px) ทำให้ FRONT คำนวณความสูงผิดพลาด (267.8/273.5px
+# แทนที่จะเป็น ~200px) เดิม reconcile เลือกเชื่อ FRONT (สูงกว่า) เขียนทับ BACK ที่ถูกต้องอยู่แล้ว
+# ROOT CAUSE ที่แท้จริง: local_floor_y ของ FRONT มีจุดหักงอผิดธรรมชาติ (ไม่ใช่ปัญหาที่ cargo_top_y
+# ซึ่ง fit ได้แม่นยำมากทั้ง 2 view, resid_std<0.6px ทั้งคู่) - เป็นปัญหาเฉพาะจุดของเส้นพื้นตู้
+# วิธีตรวจจับ (ยืนยันด้วยตัวเลขจริง): เปรียบเทียบ floor_y ของคอลัมน์เป้าหมาย กับค่าที่ "คาดหวัง"
+# จาก interpolation เชิงเส้นตรงระหว่างเพื่อนบ้าน 2 ข้างในวิวเดียวกัน (ถ้ามีทั้ง 2 ข้าง) หรือ
+# extrapolation จากเพื่อนบ้าน 2 ตัวฝั่งเดียวกัน (ถ้าอยู่ริมสุด) - ค่าที่เบี่ยงเบนจากเส้นตรงมาก
+# บ่งชี้ว่า floor_y ตรงนั้นผิดเพี้ยน (ไม่ใช่ V-shape ธรรมชาติ เพราะ compute_local_floor_y จัดการ
+# V-shape ไปแล้วด้วย rolling median - นี่คือ residual ที่เหลือหลังจากนั้น)
+# ทดสอบยืนยัน RD01-01: FRONT idx1 เบี่ยงเบน 41.7px, FRONT idx2 เบี่ยงเบน 99.5px (ทั้งคู่สูงกว่า
+# threshold มาก) ในขณะที่ BACK idx1 เบี่ยงเบนแค่ 0.3px เท่านั้น - แยกแยะได้ชัดเจนไม่มีความกำกวม
+_FLOOR_LINEARITY_ANOMALY_MIN_PX = 20  # ต่ำกว่านี้ถือว่าเป็น noise ปกติ (BACK วัดได้ <1px)
+
+
+def _floor_linearity_anomaly(records_same_view, target_idx, local_floor_y):
+    """v25.59 NEW: คำนวณ "ความเบี่ยงเบนจากเส้นตรง" ของ local_floor_y ที่ตำแหน่งคอลัมน์
+    target_idx เทียบกับค่าที่คาดหวังจาก interpolation/extrapolation ของเพื่อนบ้านในวิวเดียวกัน
+    (ดู docstring เต็มด้านบน _FLOOR_LINEARITY_ANOMALY_MIN_PX สำหรับหลักฐาน+เหตุผล)
+    คืนค่า (deviation_px) หรือ None ถ้าคำนวณไม่ได้ (ไม่มีเพื่อนบ้านพอ/ข้อมูล floor ไม่ valid)
+    """
+    by_idx = {r["idx"]: r for r in records_same_view}
+    target = by_idx.get(target_idx)
+    if target is None:
+        return None
+
+    def _floor_at_mid(rec):
+        x0, x1 = rec["x_range"]
+        xm = (x0 + x1) // 2
+        if 0 <= xm < len(local_floor_y) and local_floor_y[xm] >= 0:
+            return float(xm), float(local_floor_y[xm])
+        return None
+
+    tgt_point = _floor_at_mid(target)
+    if tgt_point is None:
+        return None
+    tx, tfloor = tgt_point
+
+    left = by_idx.get(target_idx - 1)
+    right = by_idx.get(target_idx + 1)
+    left_point = _floor_at_mid(left) if left is not None else None
+    right_point = _floor_at_mid(right) if right is not None else None
+
+    if left_point is not None and right_point is not None:
+        # interpolation ระหว่างเพื่อนบ้าน 2 ข้าง (น่าเชื่อถือที่สุด - มีข้อมูลจริงประกบทั้ง 2 ฝั่ง)
+        lx, lf = left_point
+        rx, rf = right_point
+        if rx == lx:
+            return None
+        expected = lf + (tx - lx) / (rx - lx) * (rf - lf)
+        return abs(tfloor - expected)
+
+    # v25.61 FIX (Critical - พบ regression จริงระหว่าง self-regression-test, 29-Aug-2026 วัน
+    # เดียวกับที่เพิ่ม guard นี้): ทดลองแก้ extrapolation หลายแบบ (2 จุดดิบ, 3 จุด+robust-fit+
+    # resid_std check) แต่ทุกแบบยังคงทำให้ EB66-01 idx0 พลิกผิดอยู่ดี (anomaly สูงแม้ fit จะ
+    # สม่ำเสมอก็ตาม - resid_std ต่ำ แต่ยังพลิกผิด) ยืนยันว่า ROOT CAUSE ไม่ใช่แค่ "จุดอ้างอิงไม่พอ/
+    # ไม่น่าเชื่อถือ" แต่เป็นเพราะความบิดเบือนที่ตำแหน่งริมสุดจริง (isometric edge distortion)
+    # มีลักษณะไม่เป็นเส้นตรง (non-linear falloff) โดยธรรมชาติ - การ extrapolate ด้วยเส้นตรงจาก
+    # เพื่อนบ้านจึงไม่น่าเชื่อถือที่ตำแหน่งริมสุดเสมอ ไม่ว่าจะใช้กี่จุดอ้างอิงหรือ fit ดีแค่ไหนก็ตาม
+    # (มีแค่ 2 ไฟล์ตัวอย่างให้ยืนยัน ไม่พอจะออกแบบเงื่อนไขแยกแยะที่น่าเชื่อถือได้ในตอนนี้)
+    # FIX: ตัด extrapolation ออกทั้งหมด (ไม่มี fallback ใดๆ สำหรับคอลัมน์ริมสุด) - ใช้แค่
+    # interpolation (มีเพื่อนบ้านครบทั้ง 2 ฝั่ง) เท่านั้น ซึ่งพิสูจน์แล้วว่าน่าเชื่อถือ ไม่เคยทำให้
+    # เกิด false-positive ในทั้ง 2 ไฟล์ทดสอบ (RD01-01 idx1, และไม่กระทบ EB66-01/EA07-01/ED03-01
+    # เลย) ข้อจำกัดที่ต้องยอมรับตรงไปตรงมา: RD01-01 idx2 (คอลัมน์ริมสุดจริง ในไฟล์ที่มีแค่ 3
+    # คอลัมน์ทั้งหมด) จะไม่ถูกตรวจสอบด้วย guard นี้ - หลังแก้ไข RD01-01 ยังเหลือ STEP_DOWN_RISK
+    # ปลอม 1 จุดที่ตำแหน่งนี้ (เกิดจาก FRONT idx2 ที่ผิดพลาด เขียนทับ BACK idx0 ที่ถูกต้อง) ต้อง
+    # แก้ด้วยกลไกอื่นในรอบถัดไป (เช่น Physical Validity Guard ที่มีอยู่แล้ว หรือออกแบบใหม่ - ยังไม่
+    # มีเวลาตรวจสอบให้ครบในรอบนี้) - เลือก trade-off นี้เพราะ EB66-01 (โครงสร้างคอลัมน์ปกติทั่วไป
+    # มากกว่า) ต้องไม่พังก่อน
+    return None  # คอลัมน์ริมสุด (เพื่อนบ้านแค่ฝั่งเดียวหรือไม่มีเลย) - ไม่ตรวจสอบ (ปลอดภัยกว่า)
+
+
 def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
@@ -4622,6 +4810,32 @@ def reconcile_heights_cross_view(records_front, records_back,
             trust_a = False
         else:
             trust_a = h_a >= h_b
+        # v25.59 NEW: Floor-Linearity Guard - ก่อนเชื่อฝั่งใดฝั่งหนึ่งตาม reliability hierarchy
+        # เดิม (ซึ่งเลือก "ค่าสูงกว่าชนะ" เมื่อทั้งคู่ reliable เท่ากัน) ตรวจสอบเพิ่มเติมว่า floor_y
+        # ของแต่ละฝั่ง ณ ตำแหน่งนี้ "สมเหตุสมผลทางเรขาคณิต" (ต่อเนื่องเป็นเส้นตรงกับเพื่อนบ้านใน
+        # วิวเดียวกัน) หรือไม่ - ถ้าฝั่งที่กำลังจะ "ชนะ" (trust_a) มี floor-anomaly สูงกว่าฝั่งที่
+        # "แพ้" อย่างมีนัยสำคัญ ให้พลิกกลับมาเชื่อฝั่งที่ floor สมเหตุสมผลกว่าแทน (ดู docstring
+        # เต็มที่ _floor_linearity_anomaly ด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก RD01-01)
+        anomaly_a = None
+        anomaly_b = None
+        if front_result is not None and back_result is not None:
+            a_records_same_view = records_front if rec_a["view"] == "FRONT" else records_back
+            b_records_same_view = records_front if best_match["view"] == "FRONT" else records_back
+            a_floor = (front_result["local_floor_y"] if rec_a["view"] == "FRONT"
+                       else back_result["local_floor_y"])
+            b_floor = (front_result["local_floor_y"] if best_match["view"] == "FRONT"
+                       else back_result["local_floor_y"])
+            anomaly_a = _floor_linearity_anomaly(a_records_same_view, rec_a["idx"], a_floor)
+            anomaly_b = _floor_linearity_anomaly(b_records_same_view, best_match["idx"], b_floor)
+        if anomaly_a is not None and anomaly_b is not None:
+            winner_anomaly = anomaly_a if trust_a else anomaly_b
+            loser_anomaly = anomaly_b if trust_a else anomaly_a
+            if (winner_anomaly >= _FLOOR_LINEARITY_ANOMALY_MIN_PX
+                    and winner_anomaly > loser_anomaly * 2):
+                print(f"[FLOOR_LINEARITY] พลิกกลับการเลือก: winner เดิม (view={rec_a['view'] if trust_a else best_match['view']}) "
+                      f"floor-anomaly={winner_anomaly:.1f}px สูงกว่า loser (anomaly={loser_anomaly:.1f}px) มาก "
+                      f"-> เชื่อฝั่งที่ floor สมเหตุสมผลกว่าแทน")
+                trust_a = not trust_a
         # v25.40 NEW: Physical Validity Guard - ก่อนเลือกใช้ค่าใด ตรวจสอบว่าค่านั้นไม่เกิน
         # ความสูงตู้จริง ณ ตำแหน่งของ 'เป้าหมายที่จะถูกเขียนทับ' (ไม่ใช่ตำแหน่งของแหล่งอ้างอิง
         # เพราะ x_range ของทั้งคู่อาจต่างกันเล็กน้อยจากการ reconcile คนละ view) - ถ้าค่าที่เลือก
@@ -4868,6 +5082,31 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     v25.53 NEW: กลไก A ใช้ "extended length" (ดู _p1b_extended_length_for_rear_check ด้านบน)
     แทน length_px ดิบจาก Phase 2 โดยตรง - แก้ปัญหา false-positive เชิงระบบที่ BACK view มักวัด
     ความยาวสั้นกว่าจริงเพราะพลาดหน้าข้างกล่องใกล้ผนังหัวตู้ (ดู docstring เต็มด้านบน)
+
+    v25.58 NEW (สำคัญ - ตามที่ผู้ใช้ระบุจากไฟล์จริง EC04-01, 29-Aug-2026): เพิ่มเงื่อนไขเสริม
+    "n_stacks mismatch" ให้กลไก A - เดิมกลไก A วัดจาก length_px (pixel-extent) เพียงอย่างเดียว
+    ซึ่งพลาดกรณีที่กล่อง "แถวใน" (inner-row) ไม่มีกล่อง "แถวหน้า" (front-row) มาค้ำ/บังในมุมกล้อง
+    ฝั่งหนึ่ง (เช่น FRONT) - ยืนยันจาก EC04-01: ผู้ใช้ชี้ตำแหน่งด้วยภาพจริง (วงกลม+ลูกศรกำกับระยะ
+    ในไฟล์เอง) ว่ากล่องซ้อน 2 ชั้นที่ถอยร่นเข้าไปแถวใน ทำให้ FRONT มองเห็นเป็น "5 ตั้ง" (บางส่วนถูก
+    กองแถวหน้าบัง) ในขณะที่ BACK เห็นครบ "6 ตั้ง" (มุมกล้องตรงข้ามไม่ถูกบัง) - แต่ length_px ที่วัด
+    ได้จาก pixel-extent กลับใกล้เคียงกันมาก (552 vs 558px = 1.1%) เพราะสีของกล่องแถวในยังคงปรากฏ
+    เป็น pixel สีสดปนอยู่กับกองข้างเคียง (ไม่ได้หายไปจากภาพ แค่ไม่ถูกนับเป็นตั้งแยก) ทำให้กลไก A
+    เดิม (เทียบแค่ length_px) ไม่ trigger เลย ทั้งที่ Phase 1B เห็นสัญญาณนี้อยู่แล้วตั้งแต่ต้น (ก่อน
+    ถูก Hungarian matching บังคับให้ FRONT=BACK เสมอ): front_raw=8 cols vs back_raw=7 cols
+    (มีคอลัมน์พิเศษที่เกิดจากการ merge fragment ผิดตำแหน่งเดียวกับที่ผู้ใช้ชี้ ก่อนจะถูกตัดทิ้งไป
+    ระหว่าง reconcile เพื่อให้จำนวนตั้งสุดท้ายถูกต้อง (7=7) - แต่ "ร่องรอย" ของความไม่ตรงกันนี้คือ
+    หลักฐานที่แท้จริงของ REAR_EMPTY_RISK ที่ pixel-based length วัดไม่ได้)
+
+    FIX: เพิ่มเงื่อนไข OR ให้กลไก A - ถ้า n_stacks "ดิบ" (ก่อน Hungarian reconcile, ดู
+    phase1b_raw_n_stacks ใน view_result) ของ FRONT/BACK ต่างกัน ให้ถือเป็นหลักฐานเพียงพอที่จะ
+    flag REAR_EMPTY_RISK ได้เลย โดยไม่ต้องผ่านเกณฑ์ px/ratio ของ pixel-length (เพราะกรณีนี้
+    pixel-length ไม่ใช่สัญญาณที่เชื่อถือได้ตั้งแต่ต้น - ดูเหตุผลด้านบน) - ฝั่งที่มี raw count
+    "น้อยกว่า" (เห็นตั้งน้อยกว่าเพื่อน เพราะถูกบัง) ถือเป็นฝั่งที่ "สั้นกว่า" (mark ตำแหน่งท้ายสุด
+    ของฝั่งนั้นตามธรรมเนียมเดิมของกลไก A) - ถ้า pixel-length เดิมก็ผ่านเกณฑ์อยู่แล้ว ใช้ผลจาก
+    pixel-length เป็นหลัก (ไม่เปลี่ยนพฤติกรรมเดิม) เงื่อนไข n_stacks เป็นแค่ fallback เพิ่มเติม
+    ข้อจำกัดที่ต้องระวัง (บอกตรงไปตรงมา): มีไฟล์ ground-truth ยืนยันแค่ 1 ไฟล์ (EC04-01) สำหรับ
+    เงื่อนไขใหม่นี้ - แนะนำให้ regression-test กับไฟล์อื่นที่เคย verify REAR_EMPTY_RISK ไว้แล้ว
+    (EC01-01/AC03-01/EC04-02) ก่อนใช้งานจริงเต็มรูปแบบ เพื่อยืนยันว่าไม่มี false-positive ใหม่
     """
     risks = []
 
@@ -4877,24 +5116,68 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     front_len = front_len_ext or (front_result.get("length_px") or 0)
     back_len = back_len_ext or (back_result.get("length_px") or 0)
     longer_len = max(front_len, back_len)
-    if longer_len > 0:
-        gap_px = abs(front_len - back_len)
-        gap_ratio = gap_px / longer_len
-        if gap_px >= REAR_GAP_MIN_PX and gap_ratio >= REAR_GAP_MIN_RATIO:
-            if front_len <= back_len:
-                shorter_records, shorter_label = records_front, "FRONT"
+    gap_px = abs(front_len - back_len) if longer_len > 0 else 0
+    gap_ratio = (gap_px / longer_len) if longer_len > 0 else 0.0
+    triggered_by_pixel_length = (longer_len > 0 and gap_px >= REAR_GAP_MIN_PX
+                                  and gap_ratio >= REAR_GAP_MIN_RATIO)
+
+    # v25.58 NEW: เงื่อนไขเสริม n_stacks mismatch (ดู docstring เต็มด้านบน)
+    n_front_raw = front_result.get("phase1b_raw_n_stacks")
+    n_back_raw = back_result.get("phase1b_raw_n_stacks")
+    n_stacks_mismatch = (n_front_raw is not None and n_back_raw is not None
+                          and n_front_raw != n_back_raw)
+    if n_stacks_mismatch:
+        print(f"[REAR_EMPTY][n_stacks_mismatch_observed] front_raw={n_front_raw} "
+              f"back_raw={n_back_raw} (log-only ในเวอร์ชันนี้ - ดู v25.61 guard ด้านล่าง)")
+
+    # v25.61 FIX (Critical - พบ regression จริงระหว่าง self-regression-test ของ v25.58, 29-Aug-
+    # 2026 วันเดียวกัน): เดิม v25.58 ใช้ n_stacks_mismatch (front_raw != back_raw) เป็นเงื่อนไข
+    # ให้ trigger REAR_EMPTY_RISK ได้ทันที (bypass เกณฑ์ pixel-length) - ทดสอบ regression กับไฟล์
+    # ที่เคย verify แล้วว่า hazardCount ถูกต้อง (EA07-01, EB66-01, ED03-01, ED86-03) พบว่าเกิด
+    # false-positive ใหม่ทั้งหมด: EA07-01 front_raw=8/back_raw=7 (รูปแบบเดียวกับ EC04-01 เป๊ะ
+    # ที่เป็น true-positive!) ED03-01 front_raw=4/back_raw=3 - พิสูจน์ได้ว่า "front_raw มากกว่า
+    # back_raw อยู่ 1" เป็นรูปแบบปกติทั่วไปที่เกิดจากกลไก merge/corner-artifact/orphaned-roof
+    # ของ Phase 1B เอง (ซึ่งทำงานถูกต้องอยู่แล้ว) ไม่ใช่สัญญาณเฉพาะของ "กล่องแถวในไม่มีกองหน้าค้ำ"
+    # อย่างที่คาดไว้จากไฟล์ตัวอย่างเดียว (EC04-01) - ไม่มีข้อมูลเพียงพอในตอนนี้จะแยกแยะ 2 กรณีนี้
+    # ออกจากกันได้อย่างน่าเชื่อถือ (ทั้งคู่มี raw-count ต่างกันแบบเดียวกันเป๊ะ)
+    # FIX: ปิดการใช้ n_stacks_mismatch เป็นเงื่อนไข trigger ชั่วคราว (คงไว้แค่ print สำหรับสะสม
+    # หลักฐาน/debug - ดู log บรรทัดด้านบน) จนกว่าจะมีไฟล์ ground-truth เพิ่มเติมมากพอที่จะออกแบบ
+    # เงื่อนไขที่แยกแยะได้แม่นยำ (เช่น ตรวจสอบว่าคอลัมน์พิเศษที่ถูกตัดทิ้งเกิดจาก
+    # _p1b_merge_columns_by_overlapping_roofs หรือไม่ - ยังไม่ verify ว่าเพียงพอ) - EC04-01 (ไฟล์
+    # ต้นเหตุที่ขอ feature นี้) จะกลับไปเป็น hazardCount=0 ชั่วคราวจนกว่าจะออกแบบเงื่อนไขที่ปลอดภัย
+    # กว่านี้ได้ - ยอมรับว่าเป็นการถอยกลับ (trade-off) เพื่อไม่ให้กระทบไฟล์อื่นที่เคย verify แล้ว
+    n_stacks_mismatch_usable_as_trigger = False  # TODO: ออกแบบเงื่อนไขที่แยกแยะได้แม่นยำกว่านี้
+
+    if triggered_by_pixel_length or (n_stacks_mismatch and n_stacks_mismatch_usable_as_trigger):
+        # v25.58 FIX: ใช้ pixel-length (front_len vs back_len) เป็นตัวตัดสิน "ฝั่งที่สั้นกว่า"
+        # เสมอ ไม่ว่าจะ trigger จากเหตุผลไหน (pixel threshold หรือ n_stacks mismatch) - เพราะ
+        # ทดสอบจริงพบว่า raw stack-count (n_front_raw/n_back_raw) มีความหมายคนละแบบกับ "จำนวนตั้ง
+        # ที่มองเห็นชัดเจนด้วยตา" (raw count ของ EC04-01 FRONT=8 มาจากการรวม fragment ที่ตำแหน่ง
+        # ผิดพลาดเป็น 1 คอลัมน์พิเศษ ไม่ใช่ FRONT เห็นตั้งมากกว่าจริง) การใช้ raw-count เทียบกันตรงๆ
+        # เพื่อตัดสิน "ฝั่งไหนสั้นกว่า" ให้ผลผิดทิศทาง (ทดสอบแล้วว่า mark ผิดฝั่งเป็น BACK ทั้งที่
+        # ควรเป็น FRONT ตามที่ผู้ใช้ยืนยัน) - pixel-length (แม้ต่ำกว่า threshold) ยังคงเป็นสัญญาณ
+        # ทิศทางที่แม่นยำกว่า (front_len=552 < back_len=558 ตรงกับที่ผู้ใช้ยืนยันว่า BACK ยาวกว่า)
+        # n_stacks_mismatch มีหน้าที่แค่ "อนุญาตให้ trigger ได้แม้ gap ไม่ถึงเกณฑ์ px/ratio" เท่านั้น
+        shorter_records, shorter_label = (
+            (records_front, "FRONT") if front_len <= back_len else (records_back, "BACK"))
+        trigger_reason = "pixel_length" if triggered_by_pixel_length else "n_stacks_mismatch"
+        rear_rec = _rearmost_record(shorter_records)
+        if rear_rec is not None:
+            if trigger_reason == "pixel_length":
+                reason_text = (f"ความยาวสินค้าที่วัดได้จากฝั่ง {shorter_label} สั้นกว่าอีกฝั่ง "
+                               f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ว่ามีพื้นที่ว่างก่อนถึงประตูท้ายตู้")
             else:
-                shorter_records, shorter_label = records_back, "BACK"
-            rear_rec = _rearmost_record(shorter_records)
-            if rear_rec is not None:
-                risks.append({
-                    "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
-                    "mark_view": shorter_label,
-                    "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                    "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
-                    "reason": (f"ความยาวสินค้าที่วัดได้จากฝั่ง {shorter_label} สั้นกว่าอีกฝั่ง "
-                               f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ว่ามีพื้นที่ว่างก่อนถึงประตูท้ายตู้"),
-                })
+                reason_text = (f"จำนวนตั้งที่นับได้อิสระ (ก่อน reconcile) ต่างกัน "
+                               f"(front_raw={n_front_raw}, back_raw={n_back_raw}) บ่งชี้ว่ามีกล่องแถวใน"
+                               f"ไม่มีกองแถวหน้าค้ำ/บัง เสี่ยงไถลเข้าพื้นที่ว่างฝั่ง {shorter_label}")
+            risks.append({
+                "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
+                "mark_view": shorter_label,
+                "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
+                "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
+                "n_stacks_mismatch": n_stacks_mismatch, "trigger_reason": trigger_reason,
+                "reason": reason_text,
+            })
 
     # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view (อิสระจากกลไก A) ---
     # v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้ที่กล่อง SKU ต่างชนิดวางชิดกัน
@@ -5021,6 +5304,11 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     back = process_view_with_height_on_image(
         full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"),
         precrop=back_precrop)
+    # v25.58 NEW: แนบจำนวนคอลัมน์ "ดิบ" (ก่อนถูก Hungarian matching บังคับให้เท่ากัน) เข้าไปใน
+    # view_result ของแต่ละฝั่ง - ใช้เป็นหลักฐานเสริมให้ detect_rear_empty_risk เท่านั้น (ดู
+    # docstring เต็มที่ compute_phase1b_columns สำหรับหลักฐาน+เหตุผล พบจริงจาก EC04-01)
+    front["phase1b_raw_n_stacks"] = phase1b.get("front_raw_count")
+    back["phase1b_raw_n_stacks"] = phase1b.get("back_raw_count")
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -5216,8 +5504,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.57",
-            "benchmarkMode": "v25_57_tailstepdown_guard_dedup_shademerge_gapratio",
+            "checkerVersion": "V25.61",
+            "benchmarkMode": "v25_61_arrowmask_fix_floorlinearity_interp_only",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
