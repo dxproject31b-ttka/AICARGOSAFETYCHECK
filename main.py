@@ -2,6 +2,37 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.56 (แก้ 3 จุดเสี่ยงที่วิเคราะห์จาก log EB66-01 + EA07-01 วันที่ 28-Aug-2026):
+
+  จุดเสี่ยงที่ 1 - STEP_DOWN pairwise/tail drop_ratio เหมือนกันเป๊ะ (height_source=None):
+  ROOT CAUSE: fill_missing_heights carry-forward ค่าจากตั้งก่อนหน้าให้หลายตั้ง ทำให้
+  height_px เหมือนกัน → drop_ratio ที่คำนวณได้ก็เหมือนกันทุกหลักทั้งที่ไม่ได้วัดแยกกัน
+  (ยืนยันจาก log: pairwise idx=1 และ tail_stepdown idx=0 ได้ drop_ratio=0.23156868...
+  เหมือนกันเป๊ะ พร้อม height_source=None ทั้งคู่)
+  FIX: ใน detect_step_down_pairwise เพิ่ม guard: ถ้า height_source ของทั้งคู่ใน pair
+  อยู่ในกลุ่ม "unreliable" (None หรือ "carried_forward_same_view") → skip คู่นั้น
+  ไม่ flag เพราะไม่มีการวัดอิสระ 2 ครั้งจริง
+
+  จุดเสี่ยงที่ 2 - REAR_EMPTY_RISK ทั้ง FRONT และ BACK ชนกันพร้อมกัน subtype ต่างกัน:
+  ROOT CAUSE: กลไก A (length_mismatch) flag BACK ขณะที่กลไก B (color_anomaly) flag FRONT
+  พร้อมกัน — เป็นสัญญาณที่ 2 กลไกขัดแย้งกันเอง มักเกิดจาก structural limitation
+  (สีผนัง 255,255,147 ชนกับสีกล่อง ยืนยันจาก CHANGELOG v25.53 limitation ที่รู้แล้ว)
+  FIX: หลัง detect_rear_empty_risk เพิ่ม cross-view voting:
+  - ถ้า FRONT+BACK ทั้งคู่ถูก flag และ subtype ต่างกัน → เก็บเฉพาะ length_mismatch
+    (หลักฐานที่วัดได้โดยตรง น่าเชื่อถือกว่า color_anomaly ซึ่งเป็นการอนุมาน)
+  - ถ้า FRONT+BACK ทั้งคู่ถูก flag ด้วย color_anomaly เท่านั้น (ไม่มี length_mismatch)
+    → ตัดออกทั้งหมด (หลักฐานขัดแย้งกันโดยไม่มี ground-truth ยืนยัน)
+  regression-safe: ถ้า flag view เดียว หรือ subtype เหมือนกัน → ผ่านตามปกติ
+
+  จุดเสี่ยงที่ 3 - near-dup merge tol=5.0px ตายตัวอาจกว้างเกินไปในบางไฟล์:
+  ROOT CAUSE: 5px ถูก calibrate กับ col กว้าง ~100px ณ scale=3 แต่ถ้า col แคบกว่า
+  (เช่น 40px) 5px = 12.5% ของความกว้าง ซึ่งอาจ merge col ที่ควรเป็นคนละตำแหน่งจริง
+  FIX: เปลี่ยนเป็น adaptive_tol = max(1.0, min(5.0, median_col_width * 0.05))
+  ยืนยัน: EB66-01 (col กว้าง ~107px) → adaptive_tol ≈ 5.0px (ไม่เปลี่ยน)
+  ไฟล์ที่ col แคบ (40px) → adaptive_tol = 2.0px (ปลอดภัยขึ้น)
+  regression-safe: ไฟล์ที่ col ปกติ adaptive_tol ยังคง ~5px เหมือนเดิม
+
+================================================================================
 v25.55 (แก้ 2 บั๊กที่พบจาก log จริง EB66-01 execution mf20vsbhnsot วันที่ 28-Aug-2026):
 
   บั๊ก#1 - BACK cx duplicate (สำคัญ - พบจาก log: "cx=[...,1277.5,1277.5,...]"):
@@ -2709,11 +2740,24 @@ def _p1b_dedup_cols_by_cx(cols, tol=2.0):
 def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
     """v25.55 NEW: รวม col ที่ cx ใกล้กัน (≤ tol px) ให้เหลือ 1 col
     ใช้หลัง _p1b_merge_columns_by_overlapping_roofs เฉพาะ FRONT view
-    tol=5.0px: ครอบคลุม near-duplicate (1.5px จริง) แต่ไม่กระทบ col ปกติ (ห่าง >100px)
     col ที่ merge แล้วใช้ bounding box รวม (cx = กึ่งกลาง bounding box)
-    regression-safe: ไฟล์ที่ col ห่างกัน >5px จะไม่เปลี่ยนแปลงใดๆ"""
+    regression-safe: ไฟล์ที่ col ห่างกัน >tol จะไม่เปลี่ยนแปลงใดๆ
+
+    v25.55 FIX#3 (จุดเสี่ยงที่ 3): เปลี่ยน tol จาก fixed 5.0px เป็น adaptive
+    tol = min(5.0, median_col_width * 0.05) เพื่อให้สัดส่วนกับขนาดกล่องจริง
+    ในภาพที่ scale=3 (จาก PDF render) col กว้าง ~100px → tol สูงสุด 5.0px ยังปลอดภัย
+    แต่ถ้า col แคบกว่า (e.g. 40px) → tol จะถูกจำกัดที่ 2px เพื่อกัน false-merge
+    tol ขั้นต่ำ 1.0px เพื่อยังคงจับ near-duplicate จริงที่ห่างกัน <1px ได้เสมอ"""
     if not cols:
         return cols
+    # คำนวณ adaptive tol จาก median col width
+    import statistics
+    widths = [c['w'] for c in cols if c.get('w', 0) > 0]
+    if widths:
+        median_w = statistics.median(widths)
+        adaptive_tol = max(1.0, min(tol, median_w * 0.05))
+    else:
+        adaptive_tol = tol
     sorted_cols = sorted(cols, key=lambda c: c['cx'])
     result = []
     i = 0
@@ -2722,10 +2766,11 @@ def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
         j = i + 1
         while j < len(sorted_cols):
             nxt = sorted_cols[j]
-            if abs(nxt['cx'] - cur['cx']) > tol:
+            if abs(nxt['cx'] - cur['cx']) > adaptive_tol:
                 break
             print(f"[MERGE_NEAR_DUP] รวม FRONT col cx={cur['cx']:.1f} + cx={nxt['cx']:.1f} "
-                  f"(ห่าง {abs(nxt['cx']-cur['cx']):.1f}px ≤ tol={tol})")
+                  f"(ห่าง {abs(nxt['cx']-cur['cx']):.1f}px ≤ adaptive_tol={adaptive_tol:.1f}px "
+                  f"[median_w={median_w:.0f}px])")
             x0 = min(cur['x'], nxt['x'])
             x1 = max(cur['x'] + cur['w'], nxt['x'] + nxt['w'])
             y0 = min(cur['y'], nxt['y'])
@@ -3940,6 +3985,17 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
+        # v25.55 FIX#3 (จุดเสี่ยงที่ 1): ถ้าทั้งคู่ได้ค่าจาก carry-forward (height_source=None
+        # หลัง fill_missing_heights หรือ "carried_forward_same_view") แสดงว่าค่าที่เปรียบ
+        # เทียบกันเป็นค่าเดียวกันที่ propagate มาจากตั้งเดียว ไม่ใช่การวัดอิสระ 2 ครั้ง -
+        # drop_ratio ที่ได้จะเหมือนกันหรือใกล้กันมากผิดธรรมชาติ (ยืนยันจาก log EB66-01:
+        # pairwise idx=1 และ tail_stepdown idx=0 มี drop_ratio=0.23156868... เหมือนกันทุกหลัก
+        # พร้อม height_source=None ทั้งคู่) → ไม่ flag ทั้งคู่เพราะไม่มีหลักฐานที่น่าเชื่อถือ
+        src_a = a.get("height_source")
+        src_b = b.get("height_source")
+        _unreliable_sources = (None, "carried_forward_same_view")
+        if src_a in _unreliable_sources and src_b in _unreliable_sources:
+            continue
         if (shorter_rec.get("height_source") == "direct"
                 and shorter_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
             continue
@@ -4665,6 +4721,34 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
                        f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
         })
 
+    # v25.55 FIX#3 (จุดเสี่ยงที่ 2): cross-view voting สำหรับ REAR_EMPTY_RISK
+    # ถ้าพบ REAR_EMPTY_RISK ทั้ง FRONT และ BACK พร้อมกัน และเป็น subtype ต่างกัน
+    # (length_mismatch vs color_anomaly) — เป็นสัญญาณว่าระบบ 2 กลไกขัดแย้งกันเอง:
+    # length_mismatch บอกว่า view A สั้นกว่า แต่ color_anomaly ก็ชี้ไปที่อีก view
+    # หนึ่งด้วย — กรณีนี้มักเกิดจาก structural limitation (สีผนังชนกับสีกล่อง หรือ
+    # side-face bleed) ไม่ใช่ช่องว่างจริง ให้เก็บเฉพาะ length_mismatch (หลักฐานที่วัด
+    # ได้จากค่าตัวเลขโดยตรง น่าเชื่อถือกว่า color_anomaly ซึ่งเป็นการอนุมาน)
+    # ถ้า subtype เหมือนกันทั้งคู่ (เช่น length_mismatch ทั้งคู่) ให้ผ่านตามปกติ
+    # เพราะ 2 view เห็นตรงกัน = หลักฐานแข็งแกร่งขึ้น
+    if len(risks) >= 2:
+        rear_risks = [r for r in risks if r["risk_type"] == "REAR_EMPTY_RISK"]
+        views_flagged = {r["mark_view"] for r in rear_risks}
+        if "FRONT" in views_flagged and "BACK" in views_flagged:
+            subtypes = {r["subtype"] for r in rear_risks}
+            if len(subtypes) > 1 and "length_mismatch" in subtypes:
+                # subtypes ต่างกัน: เก็บเฉพาะ length_mismatch ทิ้ง color_anomaly
+                print("[REAR_EMPTY] cross-view conflict detected (different subtypes) "
+                      "→ keeping length_mismatch only, dropping color_anomaly")
+                risks = [r for r in risks
+                         if not (r["risk_type"] == "REAR_EMPTY_RISK"
+                                 and r["subtype"] == "color_anomaly")]
+            elif len(subtypes) > 1:
+                # ทั้งคู่เป็น color_anomaly แต่ flag คนละ view — หลักฐานขัดแย้งกัน
+                # ไม่มี length_mismatch ยืนยัน → ตัดออกทั้งหมดเพื่อความปลอดภัย
+                print("[REAR_EMPTY] cross-view color_anomaly conflict (both views, no "
+                      "length_mismatch) → dropping all REAR_EMPTY_RISK")
+                risks = [r for r in risks if r["risk_type"] != "REAR_EMPTY_RISK"]
+
     return risks
 
 
@@ -4885,8 +4969,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.55",
-            "benchmarkMode": "v25_55_back_cx_dedup_front_near_dup_merge",
+            "checkerVersion": "V25.56",
+            "benchmarkMode": "v25_56_carry_forward_guard_rear_voting_adaptive_tol",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
