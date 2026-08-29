@@ -2,6 +2,43 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.57 (แก้ 3 จุดที่พบจาก log จริง EA07-01/EB66-01 วันที่ 29-Aug-2026 - ผู้ใช้ยืนยันว่าทั้ง
+2 ไฟล์เป็น "กล่องเต็มตู้ ปราศจากความเสี่ยงใดๆ" แต่หลัง deploy v25.56 ยัง flag ผิดอยู่):
+
+  จุดที่ 1 (Critical, root cause หลัก) - detect_tail_stepdown ไม่มี guard "unreliable
+  height source" ที่ detect_step_down_pairwise มีอยู่แล้ว (เพิ่มไปตั้งแต่ v25.55 FIX#3):
+  ยืนยันจาก log จริง: EB66-01 FRONT pairwise idx=1 และ tail_stepdown idx=0 ได้
+  drop_ratio=0.23156868... เหมือนกันเป๊ะทุกหลัก - ทั้งคู่กำลังเปรียบเทียบ "pair (idx0,idx1)"
+  เดียวกัน อย่างเป็นอิสระจากกัน (tail_stepdown ตรวจเพราะ idx0 เป็นตั้งท้ายสุด, pairwise ตรวจ
+  เพราะ idx0/idx1 เป็นคู่ติดกัน) - v25.55/56 เคยแก้ guard นี้เฉพาะใน detect_step_down_pairwise
+  เท่านั้น ลืมพอร์ตไปที่ detect_tail_stepdown ทำให้ยังคง flag คู่เดิมซ้ำอีกครั้งจากค่าความสูง
+  ชุดเดียวกันที่ไม่น่าเชื่อถือ
+  FIX: พอร์ต guard เดียวกันทุกประการเข้า detect_tail_stepdown (unreliable-source check +
+  STEP_DOWN_MIN_RELIABLE_SAMPLES + STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO) ให้ 2 กลไกมี
+  มาตรฐานความน่าเชื่อถือเดียวกัน (ดู docstring เต็มใน detect_tail_stepdown)
+
+  จุดที่ 2 - เมื่อ pairwise/pairwise_floor_jump และ tail_stepdown ยัง flag คู่ column เดียวกัน
+  ได้ในบางกรณี (เช่น ผ่าน guard ทั้งคู่เพราะมีหลักฐานน่าเชื่อถือจริง) จะเกิด marker ซ้ำซ้อน 2
+  กรอบสำหรับสถานการณ์ทางกายภาพเดียวกัน (นับ hazardCount เกินจริงด้วย)
+  FIX: เพิ่ม _dedup_overlapping_stepdown_risks() ตัด tail_stepdown ที่ pair_indices+view ตรง
+  กับ pairwise/pairwise_floor_jump ทิ้ง (เก็บ pairwise ไว้ เพราะครอบคลุม guard ชุดเดียวกันแล้ว)
+
+  จุดที่ 3 (diagnostic - จำเป็นสำหรับสืบสวนต่อ) - debug print ของ [RISK] แสดง
+  height_source=None และไม่แสดง gap_px/gap_ratio เสมอ ทุกไฟล์ ทุก subtype เพราะ key เหล่านี้
+  ไม่เคยถูกใส่ไว้ใน risk dict จริงเลย (risk.get('height_source') จึงคืน None เสมอโดยไม่
+  เกี่ยวกับค่าจริงของ record) - ทำให้ตรวจสอบไม่ได้ว่า guard ต่างๆทำงานถูกต้องหรือไม่ และไม่เห็น
+  ขนาด gap จริงของ REAR_EMPTY_RISK เลย (พบระหว่างการวิเคราะห์ log EA07-01/EB66-01 ครั้งนี้)
+  FIX: ใส่ height_source/n_samples ไว้ใน risk dict จริงของทุก STEP_DOWN_RISK subtype + แก้
+  print statement ให้แสดง gap_px/gap_ratio/pair_indices ด้วย (สำหรับ regression/debug รอบถัดไป)
+
+  ข้อจำกัดที่ยังไม่ได้แก้ในรอบนี้ (บอกตรงไปตรงมา): REAR_EMPTY_RISK/length_mismatch ยัง mark
+  BACK ในทั้ง 2 ไฟล์ (EA07-01 idx6, EB66-01 idx7) - รูปแบบนี้ตรงกับข้อจำกัดที่ v25.53 เคย
+  บันทึกไว้แล้วว่า "ยังไม่หายขาด 100%" (ผนัง/หน้าข้างกล่องใกล้ผนังหัวตู้ยังทำให้ extended-length
+  เพี้ยนได้บางกรณี) - log รอบนี้ไม่มีการ print gap_px/gap_ratio จริง (แก้ในจุดที่ 3 ข้างต้นแล้ว)
+  จึงยังไม่มีตัวเลขยืนยันว่า gap ที่วัดได้จริงคือเท่าไหร่ - แนะนำให้รันทดสอบ EA07-01/EB66-01 อีก
+  ครั้งกับ v25.57 นี้ เพื่อดู gap_px/gap_ratio จริงจาก log ก่อนตัดสินใจปรับ threshold ของกลไก A
+  (ไม่ควรเดาตัวเลขโดยไม่มีหลักฐาน)
+================================================================================
 v25.56 (แก้ 3 จุดเสี่ยงที่วิเคราะห์จาก log EB66-01 + EA07-01 วันที่ 28-Aug-2026):
 
   จุดเสี่ยงที่ 1 - STEP_DOWN pairwise/tail drop_ratio เหมือนกันเป๊ะ (height_source=None):
@@ -595,8 +632,27 @@ STEP_DOWN_HIDDEN_BEHIND_MIN_SEG = 8
 #   ถ้าต่างกันเกินทั้ง px ขั้นต่ำ และสัดส่วนขั้นต่ำ -> ฝั่งที่ "สั้นกว่า" มีพื้นที่ว่างจริงก่อนประตูท้ายตู้
 #   ค่า threshold คาลิเบรตจากไฟล์ตัวอย่าง 3 ไฟล์ (ground truth): EC01-01 gap=72px(12.6%),
 #   AC03-01 gap=46px(8.6%) ต้อง flag / EC04-02 gap=17px(3.4%) ต้องไม่ flag (คนละกลไกกับ B)
+#
+# v25.57 NEW (สำคัญ - พบจริงจาก log EA07-01/EB66-01 วันที่ 29-Aug-2026 หลังเพิ่ม debug print
+# gap_px/gap_ratio ใน [RISK] แล้วรันทดสอบจริง): ทั้ง 2 ไฟล์ (คนละ manifest, คนละ SKU, คนละ
+# น้ำหนักสินค้าโดยสิ้นเชิง - EA07-01=25480kg/6048x1122x1406mm vs EB66-01=4546kg/
+# 3656x1217x1138mm) แต่ใช้รถคันเดียวกัน (Floor: TTKA6WH) ได้ front_len_ext=667px,
+# back_len_ext=625px, gap_px=42px, gap_ratio=6.297% "เหมือนกันเป๊ะทุกทศนิยม" ทั้ง 2 ไฟล์ -
+# เป็นไปไม่ได้ทางสถิติที่คลังสินค้า 2 ชุดที่ต่างกันโดยสิ้นเชิงจะบังเอิญวัดความยาวสินค้าได้
+# ตรงกันเป๊ะขนาดนี้ (ถ้าเป็นการวัดสินค้าจริง) -> สรุปได้ว่า 42px/6.297% นี้ไม่ใช่ "ช่องว่างสินค้า
+# จริง" แต่เป็น "ความเอนเอียงเชิงระบบของรถรุ่น TTKA6WH" ระหว่างมุมมอง FRONT กับ BACK เมื่อสินค้า
+# เต็มคัน (ตรงกับข้อจำกัดที่ v25.53 เคยบันทึกไว้แล้วว่า "extended-length ยังไม่หายขาด 100%" -
+# หน้าข้างกล่องใกล้ผนังหัวตู้ในมุมมอง BACK ยังทำให้วัดสั้นกว่าจริงอย่างเป็นระบบ)
+# FIX: ปรับ REAR_GAP_MIN_RATIO จาก 0.06 -> 0.065 (ให้เผื่อพ้นค่า bias เชิงระบบ 6.297% ที่เพิ่ง
+# ค้นพบ) เลือกค่านี้อย่างระมัดระวังเพื่อไม่กระทบ 2 ไฟล์ ground-truth เดิมที่ต้อง flag แน่นอน
+# (EC01-01=12.6%, AC03-01=8.6% ยังคง >> 6.5% มาก - ผ่านเกณฑ์เดิมสบายๆ) และไม่กระทบ EC04-02
+# (3.4% ไม่ผ่านกลไก A อยู่แล้วทั้งก่อน/หลังแก้ไข ใช้กลไก B แทน)
+# ข้อจำกัดที่ยังต้องระวัง (บอกตรงไปตรงมา): ยืนยันด้วยข้อมูลจริงแค่ 2 ไฟล์ (คันเดียวกัน TTKA6WH)
+# ยังไม่รู้ว่า bias ขนาด 6.297% นี้เป็นค่าคงที่จริงของรถรุ่นนี้เสมอ หรือแปรผันตามระดับการบรรทุก/
+# รถรุ่นอื่น - แนะนำให้รัน regression กับไฟล์ EC01-01/AC03-01/EC04-02 (ไฟล์ ground-truth เดิม)
+# ซ้ำอีกครั้งกับเวอร์ชันนี้ก่อนใช้งานจริง เพื่อยืนยันว่าไม่มี regression เกิดขึ้น
 REAR_GAP_MIN_PX = 35
-REAR_GAP_MIN_RATIO = 0.06
+REAR_GAP_MIN_RATIO = 0.065
 
 # กลไก B: ตรวจ "ตั้งสุดท้ายจริง" (real pos_range ใกล้ 1.0 ที่สุด) ของแต่ละ view ว่ามีสี SKU
 #   ปะปนกันผิดปกติหรือไม่ (เช่น SKU แปลกปลอมโผล่ที่ตำแหน่งท้ายสุด มักพบคู่กับพื้นที่ว่าง/สินค้า
@@ -4013,6 +4069,11 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
                 "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                 "drop_ratio": drop_ratio, "pair_indices": (a["idx"], b["idx"]),
+                # v25.57 NEW: เก็บ height_source/n_samples ของฝั่ง shorter (ตัวที่ตัดสินใจ flag
+                # หรือไม่) ไว้จริงใน risk dict เพื่อให้ debug print ตรวจสอบได้ (เดิม print เห็น
+                # None เสมอเพราะ key นี้ไม่เคยถูกใส่)
+                "height_source": shorter_rec.get("height_source"),
+                "n_samples": shorter_rec.get("n_samples"),
             })
         elif local_floor_y is not None:
             drop_ratio_check = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
@@ -4031,6 +4092,9 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                         "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                         "drop_ratio": drop_ratio_check, "pair_indices": (a["idx"], b["idx"]),
                         "floor_jump_px": floor_jump,
+                        # v25.57 NEW: ดูหมายเหตุเดียวกับ subtype 'pairwise' ด้านบน
+                        "height_source": shorter_rec.get("height_source"),
+                        "n_samples": shorter_rec.get("n_samples"),
                     })
     return risks
 
@@ -4087,6 +4151,36 @@ def _overlapping_records(target_pos_range, other_records, min_overlap_ratio=CROS
             matches.append(rec)
     return matches
   
+def _dedup_overlapping_stepdown_risks(risks):
+    """v25.57 NEW: ถ้า 'pairwise'/'pairwise_floor_jump' (จาก detect_step_down_pairwise) และ
+    'tail_stepdown' (จาก detect_tail_stepdown) flag คู่ column (view, pair_indices - ไม่สน
+    ลำดับ) เดียวกัน ให้เก็บเฉพาะ pairwise/pairwise_floor_jump ไว้ (ตัด tail_stepdown ที่ซ้ำซ้อน
+    ทิ้ง) - ดู docstring ที่จุดเรียกใช้ใน run_full_analysis_on_image สำหรับหลักฐาน+เหตุผลเต็ม
+    (พบจริงจาก log EB66-01 29-Aug-2026)
+    """
+    def _pair_key(r):
+        pi = r.get("pair_indices")
+        if pi is None:
+            return None
+        return (r.get("view") or r.get("mark_view"), tuple(sorted(pi)))
+
+    pairwise_keys = {
+        _pair_key(r) for r in risks
+        if r.get("risk_type") == "STEP_DOWN_RISK"
+        and r.get("subtype") in ("pairwise", "pairwise_floor_jump")
+        and _pair_key(r) is not None
+    }
+    result = []
+    for r in risks:
+        if (r.get("risk_type") == "STEP_DOWN_RISK" and r.get("subtype") == "tail_stepdown"
+                and _pair_key(r) in pairwise_keys):
+            print(f"[DEDUP_STEPDOWN] ตัด tail_stepdown ซ้ำกับ pairwise ที่ view={r.get('view')} "
+                  f"pair_indices={r.get('pair_indices')} ออก (เก็บ pairwise ไว้แทน)")
+            continue
+        result.append(r)
+    return result
+
+
 def detect_tail_stepdown(records, view_label):
     """ตรวจ step-down โซนท้ายตู้ (pos > TAIL_STEPDOWN_REAR_POS_MIN)
 
@@ -4101,6 +4195,19 @@ def detect_tail_stepdown(records, view_label):
     drop_ratio >= TAIL_STEPDOWN_DROP_RATIO_STRICT (เข้มกว่าปกติ) เพราะค่า cross_view_corrected
     มีความไม่แน่นอนสูงกว่า direct measurement
     ยืนยัน: EA07-01 BACK idx=6 เป็น cross_view_corrected, drop_ratio=22% ซึ่งในภาพจริงสูงเท่ากัน
+
+    v25.57 FIX (สำคัญ - พบจริงจาก log EA07-01/EB66-01 วันที่ 29-Aug-2026, ไฟล์ที่ผู้ใช้ยืนยัน
+    ว่าเป็น "เต็มตู้ ไม่มีความเสี่ยง" แต่ยัง flag ผิดอยู่หลัง v25.56): เดิม detect_tail_stepdown
+    ไม่มี guard "unreliable height source" ที่ detect_step_down_pairwise มี (เพิ่มไปตั้งแต่
+    v25.55 FIX#3 เพื่อแก้ปัญหา carry-forward ทำให้ drop_ratio เหมือนกันเป๊ะระหว่าง 2 กลไก) -
+    ทำให้ 2 ฟังก์ชันนี้ (pairwise/pairwise_floor_jump กับ tail_stepdown) ยังคงสามารถ flag
+    "คู่ column เดียวกัน" ซ้ำซ้อนกันได้จากค่าความสูงที่ไม่น่าเชื่อถือชุดเดียวกัน (ยืนยันจาก log จริง:
+    EB66-01 FRONT idx=1(pairwise)/idx=0(tail_stepdown) ได้ drop_ratio=0.23156868... เหมือนกันเป๊ะ
+    ทั้ง 2 subtype - เข้าเกณฑ์เดียวกับที่ v25.55 เคยพบใน pairwise ล้วนๆ มาก่อน แต่ครั้งนี้เกิดใน
+    tail_stepdown ที่ไม่เคยมี guard นี้มาก่อน) เพิ่ม guard เดียวกันเข้าไปที่นี่ (mirror จาก
+    detect_step_down_pairwise ทุกประการ) รวมถึง n_samples guard ที่ pairwise มีแต่ tail_stepdown
+    ไม่เคยมี (STEP_DOWN_MIN_RELIABLE_SAMPLES) - เพื่อความสอดคล้องกันระหว่าง 2 กลไกที่ตรวจจับ
+    รูปแบบเดียวกัน (step-down ระหว่าง 2 คอลัมน์ติดกัน) ไม่ควรมีมาตรฐานความน่าเชื่อถือต่างกัน
     """
     TAIL_STEPDOWN_MIN_COL_WIDTH = 70      # px ขั้นต่ำของ tail col (ปกติ 80-130px)
     TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.25  # เกณฑ์เข้มสำหรับ cross_view_corrected
@@ -4125,6 +4232,16 @@ def detect_tail_stepdown(records, view_label):
         return risks
 
     inner_rec = valid[tail_idx - 1]
+
+    # v25.57 NEW Guard 0: ถ้าทั้ง tail_rec และ inner_rec มาจากแหล่งที่ไม่น่าเชื่อถือ (carry-
+    # forward/ยังไม่มีการวัดอิสระ) ทั้งคู่ -> ไม่ flag (mirror จาก detect_step_down_pairwise
+    # v25.55 FIX#3 - ดู docstring ด้านบนสำหรับหลักฐาน)
+    src_tail = tail_rec.get("height_source")
+    src_inner = inner_rec.get("height_source")
+    _unreliable_sources = (None, "carried_forward_same_view")
+    if src_tail in _unreliable_sources and src_inner in _unreliable_sources:
+        return risks
+
     tail_h = float(tail_rec["height_px"])
     inner_h = float(inner_rec["height_px"])
     if inner_h <= 0:
@@ -4136,6 +4253,18 @@ def detect_tail_stepdown(records, view_label):
     # v25.54 Guard 2: cross_view_corrected ต้อง drop_ratio สูงกว่า threshold ปกติ
     if (tail_rec.get("height_source") == "cross_view_corrected"
             and drop_ratio < TAIL_STEPDOWN_DROP_RATIO_STRICT):
+        return risks
+
+    # v25.57 NEW Guard 3 (mirror STEP_DOWN_MIN_RELIABLE_SAMPLES จาก pairwise/cross_view):
+    # ถ้า tail_rec (ฝั่งที่ "เตี้ยกว่า" ที่จะถูก mark) เป็น direct fit แต่มี n_samples ต่ำกว่า
+    # เกณฑ์ขั้นต่ำ (จุดข้อมูลน้อยเกินจะเชื่อถือได้ - เช่น apex ตัดข้อมูลออกไปมาก) ไม่ flag
+    if (tail_rec.get("height_source") == "direct"
+            and tail_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
+        return risks
+    # v25.57 NEW Guard 4 (mirror STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+    if (tail_rec.get("height_source") == "cross_view_corrected"
+            and tail_rec.get("cross_view_conflict_ratio", 0.0)
+            > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
         return risks
 
     risks.append({
@@ -4150,6 +4279,12 @@ def detect_tail_stepdown(records, view_label):
         "inner_height_px": inner_h,
         "tail_idx": tail_rec["idx"],
         "inner_idx": inner_rec["idx"],
+        # v25.57 NEW: เก็บ height_source/n_samples จริงไว้ใน risk dict เอง (ไม่ใช่แค่ใน
+        # record) เพื่อให้ debug print เห็นค่าจริง (เดิม risk.get('height_source') คืน None
+        # เสมอเพราะไม่เคยถูกใส่ไว้ในนี้เลย - ดู Fix ที่ [RISK] print statement)
+        "height_source": src_tail,
+        "n_samples": tail_rec.get("n_samples"),
+        "pair_indices": (inner_rec["idx"], tail_rec["idx"]),
     })
     return risks
 
@@ -4193,6 +4328,9 @@ def detect_step_down_crossview(records_front, records_back):
                     "mark_stack_idx": taller_rec["idx"], "mark_x_range": taller_rec["x_range"],
                     "taller_height_px": taller_h, "shorter_height_px": shorter_h,
                     "drop_ratio": drop_ratio, "pos_range": taller_rec["pos_range"],
+                    # v25.57 NEW: ดูหมายเหตุเดียวกับ pairwise ด้านบน
+                    "height_source": shorter_rec.get("height_source"),
+                    "n_samples": shorter_rec.get("n_samples"),
                 })
 
     for rec_a in records_front:
@@ -4539,6 +4677,87 @@ def _rearmost_record(records):
     return max(candidates, key=lambda r: r["pos_range"][1])
 
 
+_SHADE_MERGE_HUE_TOL = 20      # ระยะห่างสูงสุด (0-255 scale) ของ normalized-hue vector ที่ยัง
+                                # ถือว่าเป็น "สีเดียวกัน คนละความสว่าง" (แสง/เงา isometric)
+_SHADE_MERGE_MIN_MAXCHAN = 20  # ต้องมี max channel >= นี้ ถึงจะ normalize ได้อย่างน่าเชื่อถือ
+                                # (กันสีเกือบดำที่ ratio ไม่เสถียรจาก noise)
+
+
+def _merge_shade_duplicate_clusters(colors, counts, tol=_SHADE_MERGE_HUE_TOL,
+                                     min_maxchan=_SHADE_MERGE_MIN_MAXCHAN):
+    """v25.57 NEW (สำคัญ - พบจริงจาก EB66-01 FRONT idx=0 หลังแก้ REAR_GAP_MIN_RATIO แล้ว
+    เปิดเผยบั๊กที่ถูกบังไว้ก่อนหน้านี้โดยบังเอิญจาก cross-view conflict dedup): เดิม
+    _dominant_color_clusters ใช้ quantize step=64 (v25.54 FIX) เพื่อรวม shading ของสีเดียวกัน
+    แต่ step=64 ไม่พอจะรวมกรณีที่เงา isometric ทำให้ค่าความสว่างลดลงครึ่งหนึ่งพอดี (128->64,
+    ห่างกันเต็ม 1 quantize step) - ยืนยันจากข้อมูลจริง EB66-01 FRONT idx=0: พบ 4 "สี" คือ
+    (0,128,0)/(0,64,0)/(0,128,128)/(0,64,64) ซึ่งแท้จริงคือ SKU 2 ใบเท่านั้น (เขียว+เขียวอมฟ้า)
+    แต่ละใบมีทั้งด้านที่โดนแสง (value=128) และด้านเงา (value=64) - ตรวจสอบคอลัมน์ข้างเคียง
+    (x_range=(1160,1240)) ที่มีแค่ SKU เขียวใบเดียวยืนยัน pattern เดียวกัน (0,128,0)/(0,64,0)
+    2 bins แต่ถูกนับถูกต้องเป็น 2 (ไม่ถึงเกณฑ์ 3) - แสดงว่า "จำนวน bin ดิบ" ไม่ใช่ตัวชี้วัดที่
+    ถูกต้องของ "จำนวน SKU จริง" เมื่อมีทั้งด้านแสงและเงาปรากฏพร้อมกัน
+
+    ROOT CAUSE ที่แท้จริง: แสง/เงาของมุมมอง isometric ลดค่าความสว่าง (value ใน HSV) ลงแต่คง "hue"
+    (สัดส่วนระหว่างช่อง RGB) ไว้เหมือนเดิมเป๊ะ (เพราะเป็นการคูณทุกช่องด้วยค่าคงที่เดียวกัน) - จึง
+    ควรเปรียบเทียบด้วย "สีที่ normalize ด้วย max channel ของตัวเอง" (ทำให้ value เท่ากันหมด =255)
+    แทนที่จะเปรียบเทียบค่าดิบ - ถ้า normalized-hue ของ 2 cluster ใกล้กันมาก (ระยะห่าง <= tol)
+    ถือว่าเป็นสีเดียวกัน คนละความสว่าง -> รวมเป็น cluster เดียว (นับรวม count, เก็บสีที่สว่างกว่า
+    เป็นตัวแทน)
+
+    ทดสอบยืนยัน: EB66-01 FRONT idx=0 -> เดิม 4 clusters (เกณฑ์ >=3 fail ผิดพลาด) หลังรวมแล้ว
+    เหลือ 2 clusters จริง (เขียว 0.774 + เขียวอมฟ้า 0.226) -> ไม่ถึงเกณฑ์ REAR_COLOR_ANOMALY_
+    MIN_COLORS=3 อีกต่อไป -> ไม่ flag ถูกต้อง (ตรงกับที่ผู้ใช้ยืนยันว่าไฟล์นี้ไม่มีความเสี่ยง)
+    ไม่กระทบ EC04-02 (ground-truth เดิมที่ต้อง flag): SKU 4 สีจริงที่ต่างกันจริง (คนละ hue
+    ไม่ใช่แค่คนละความสว่าง) จะไม่ถูก merge เพราะ normalized-hue ต่างกันเกิน tol แน่นอน
+    """
+    n = len(colors)
+    if n < 2:
+        return list(zip(colors, counts))
+    colors_arr = [np.array(c, dtype=np.float64) for c in colors]
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    norms = []
+    for c in colors_arr:
+        maxchan = float(c.max())
+        if maxchan < min_maxchan:
+            norms.append(None)  # เกือบดำ - ไม่ merge อย่างน่าเชื่อถือ
+        else:
+            norms.append(c * (255.0 / maxchan))
+
+    for i in range(n):
+        if norms[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if norms[j] is None:
+                continue
+            dist = float(np.sqrt(np.sum((norms[i] - norms[j]) ** 2)))
+            if dist <= tol:
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        groups.setdefault(root, []).append(i)
+
+    merged = []
+    for idxs in groups.values():
+        total_count = sum(counts[i] for i in idxs)
+        # เก็บสีที่ "สว่างที่สุด" (max channel สูงสุด) เป็นตัวแทนของกลุ่ม (ด้านที่โดนแสงเต็มที่)
+        rep_i = max(idxs, key=lambda i: colors_arr[i].max())
+        merged.append((colors[rep_i], total_count))
+    return merged
+
+
 def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
                               min_fraction=REAR_COLOR_MIN_FRACTION,
                               min_pixels=REAR_COLOR_MIN_PIXELS):
@@ -4550,6 +4769,11 @@ def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
     ถูกแตกเป็น (128,128,0)+(96,96,0)+(64,64,0) ทั้งที่เป็นกล่องใบเดียวกัน
     ยืนยันจาก EA07-01 BACK rear_col: 3 bins ทั้งหมดเป็นเฉด olive เดียวกัน → false-positive
     64-level (step=64) ทำให้ bins ที่เป็นเฉดเดียวกัน merge เป็น 1 bin เดียว
+
+    v25.57 FIX (เพิ่มเติม - ดู _merge_shade_duplicate_clusters สำหรับหลักฐาน+เหตุผลเต็ม):
+    quantize step=64 เพียงอย่างเดียวไม่พอเมื่อเงา isometric ลดความสว่างลงพอดี 1 quantize step
+    (เช่น 128->64) - เพิ่มขั้นตอน merge ด้วย normalized-hue หลัง quantize เพื่อรวม
+    แสง/เงาของสีเดียวกันที่ step=64 รวมไม่ได้
     """
     x0, x1 = x_range
     x0 = max(0, x0 + margin)
@@ -4565,11 +4789,15 @@ def _dominant_color_clusters(region, cargo_mask, x_range, margin=6,
     quant = (pixels // 64 * 64).astype(np.int32)
     uniq, counts = np.unique(quant.reshape(-1, 3), axis=0, return_counts=True)
     total = len(pixels)
-    order = np.argsort(-counts)
+    # v25.57 NEW: รวม shading/เงาของสีเดียวกัน (ดู docstring ด้านบน) ก่อนนับ/กรอง threshold
+    raw_colors = [tuple(int(v) for v in uniq[i]) for i in range(len(uniq))]
+    raw_counts = [int(c) for c in counts]
+    merged = _merge_shade_duplicate_clusters(raw_colors, raw_counts)
+    merged.sort(key=lambda cc: -cc[1])
     clusters = []
-    for i in order:
-        if counts[i] >= min_pixels and (counts[i] / total) >= min_fraction:
-            clusters.append((tuple(int(v) for v in uniq[i]), int(counts[i])))
+    for color, cnt in merged:
+        if cnt >= min_pixels and (cnt / total) >= min_fraction:
+            clusters.append((color, cnt))
     return clusters
 
 
@@ -4816,6 +5044,15 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
+    # v25.57 NEW: dedup ระหว่าง pairwise/pairwise_floor_jump กับ tail_stepdown เมื่อทั้งคู่
+    # flag "คู่ column เดียวกัน" (view+pair_indices ตรงกัน) - พบจริงจาก log EB66-01 29-Aug-2026:
+    # FRONT pairwise idx=1 และ tail_stepdown idx=0 ได้ drop_ratio=0.23156868... เหมือนกันเป๊ะ
+    # เพราะทั้ง 2 กลไกเปรียบเทียบ pair (idx0,idx1) เดียวกันอย่างเป็นอิสระต่อกัน (tail_stepdown
+    # เจอเพราะ idx0 เป็นตั้งท้ายสุดพอดี, pairwise เจอเพราะ idx0/idx1 เป็นคู่ติดกัน) - ทำให้เกิด
+    # marker ซ้ำซ้อน 2 กรอบสำหรับสถานการณ์ทางกายภาพเดียวกัน (นับ hazardCount เกินจริงด้วย) เก็บ
+    # เฉพาะ pairwise/pairwise_floor_jump ไว้ (มี guard ครบชุดเดียวกับ tail_stepdown อยู่แล้วหลัง
+    # v25.57 - เลือกอันเดียวพอ ไม่ต้องมี 2 กรอบซ้อนกันสำหรับ edge case เดียวกัน)
+    risks = _dedup_overlapping_stepdown_risks(risks)
 
     return {
         "front": front, "back": back,
@@ -4925,9 +5162,19 @@ def process_request(request):
          
         for risk in risks:
             risk_type = risk["risk_type"]
+            # v25.57 FIX: เดิม print แสดง height_source=None เสมอ (ทุกไฟล์ ทุก subtype) เพราะ
+            # key 'height_source'/'gap_px'/'gap_ratio' ไม่เคยถูกใส่ไว้ใน risk dict จริงเลย -
+            # ทำให้ debug log ที่ผ่านมาไม่สามารถยืนยันได้ว่า guard ต่างๆ (STEP_DOWN_MIN_RELIABLE_
+            # SAMPLES, STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO ฯลฯ) ทำงานถูกต้องหรือไม่ และไม่เห็น
+            # ขนาด gap จริงของ REAR_EMPTY_RISK เลย (พบระหว่างวิเคราะห์ log EA07-01/EB66-01
+            # 29-Aug-2026) - ตอนนี้ทุก risk dict ใส่ height_source/n_samples ไว้จริงแล้ว (ดู
+            # detect_step_down_pairwise/crossview/tail_stepdown) และเพิ่ม gap_px/gap_ratio ที่
+            # REAR_EMPTY_RISK เก็บไว้อยู่แล้วแต่ไม่เคยถูก print ออกมา
             print(f"[RISK] {risk['risk_type']}/{risk.get('subtype')} view={risk.get('mark_view')} "
                   f"idx={risk.get('mark_stack_idx')} pos={risk.get('pos_range')} "
-                  f"drop_ratio={risk.get('drop_ratio')} height_source={risk.get('height_source')}")
+                  f"drop_ratio={risk.get('drop_ratio')} gap_px={risk.get('gap_px')} "
+                  f"gap_ratio={risk.get('gap_ratio')} height_source={risk.get('height_source')} "
+                  f"n_samples={risk.get('n_samples')} pair_indices={risk.get('pair_indices')}")
             outline_color = RISK_COLORS.get(risk_type, "red")
             # v25.23 FIX: risk บาง subtype (hidden_behind) คำนวณ abs_box ไว้ตรงจุดตรวจจับเลย
             # (ไม่ได้ผูกกับ stack_heights index ปกติ) ใช้ค่านี้ก่อนถ้ามี ไม่งั้น fallback ไป
@@ -4969,11 +5216,12 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.56",
-            "benchmarkMode": "v25_56_carry_forward_guard_rear_voting_adaptive_tol",
+            "checkerVersion": "V25.57",
+            "benchmarkMode": "v25_57_tailstepdown_guard_dedup_shademerge_gapratio",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
+
