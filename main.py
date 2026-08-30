@@ -2,67 +2,6 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v25.64 (Silhouette-Notch Detection - NEW risk mechanism ตามไอเดียผู้ใช้ 29-Aug-2026:
-"ลากเส้น 2 เส้นตัดกัน พื้นที่ล่างจุดตัดภายในตู้ พบสีขาว = พื้นที่ว่างจากกล่องสูงต่ำ/ไม่มีกล่อง"):
-
-  แปลไอเดียเป็นอัลกอริทึมที่ตรวจสอบได้จริง: ถ้าโหลดเต็มสม่ำเสมอ เส้นขอบบนกองสินค้า (cargo_top_y)
-  ควรมีรูปร่าง "V เดียว" (isometric apex - ไล่สูงขึ้นถึงจุดสูงสุดแล้วไล่ลง ทิศทางเดียว) - ถ้ามี
-  "รอยบากที่สอง" แทรกกลางแถว (local peak ที่ไม่ใช่ apex จริง) นั่นคือกล่องเตี้ยกว่าที่ไม่ถูกกอง
-  ข้างเคียงบังจนมิด เผยพื้นหลัง/ผนังตู้
-
-  ยืนยันด้วย pixel-level กับ 2 ไฟล์จริงที่ผู้ใช้ชี้ตำแหน่งด้วยภาพ+วาดกากบาท (EC18-01, EC04-01):
-  พบรอยบาก sample สีในรอยบากได้ 100% เป็นพื้นหลังขาว/สีโครงสร้างตู้ (wall panel/roof color จาก
-  _STRUCTURAL_CONTAINER_COLORS ที่มีอยู่แล้ว) ไม่ใช่สีกล่องสินค้าเลยแม้แต่จุดเดียว - ยืนยันตำแหน่ง
-  marker ที่วาดได้ตรงกับตำแหน่งที่ผู้ใช้ชี้ (วงกลม/กากบาท) ทั้ง 3 จุด (FRONT x2, BACK x1)
-
-  Regression-tested กับ 8 ไฟล์ก่อนหน้า (EA07-01/EB66-01/ED03-01/ED86-03/RD01-01/EC10-03/
-  EC19-01/EC05-02): hazardCount ตรงกับ baseline เดิมทุกไฟล์ 100% ไม่มี silhouette_notch
-  false-positive แม้แต่จุดเดียว - เพราะเป็นกลไกอิสระใหม่ (ไม่แตะ compute_stack_heights_px/
-  reconcile_heights_cross_view/process_view_on_image ที่เปราะบางและเคยทำให้เกิด regression
-  มาก่อนหน้านี้) เพิ่มเป็น REAR_EMPTY_RISK subtype ใหม่ "silhouette_notch" แยกจาก
-  "length_mismatch"/"color_anomaly" เดิม
-
-  Implementation: detect_silhouette_notch_risk() ใช้ scipy.signal.find_peaks หา local maxima
-  ของ cargo_top_y (prominence>=15px, distance>=20px) แล้ว sample สีระหว่าง baseline (เพื่อนบ้าน
-  ต่ำกว่า) กับจุดรอยบาก - ถ้า >=60% เป็นพื้นหลัง/สีโครงสร้างตู้ -> flag พร้อม abs_box (พิกัดตรง
-  ตำแหน่งรอยบากจริง ไม่ผูกกับ mark_stack_idx เพราะรอยบากอยู่ระหว่างคอลัมน์ ไม่ใช่ตำแหน่งคอลัมน์ใด
-  คอลัมน์หนึ่ง)
-
-  ข้อจำกัดที่ต้องระวัง (บอกตรงไปตรงมา): ยืนยันด้วยไฟล์ ground-truth แค่ 2 ไฟล์ (EC18-01/EC04-01
-  เป็นไฟล์ต้นเหตุที่ให้ไอเดียนี้มา) แม้ regression กับ 8 ไฟล์อื่นจะสะอาด แนะนำให้ทดสอบกับไฟล์ชุด
-  ใหญ่กว่านี้ (103/164 ไฟล์) เพื่อยืนยันความแม่นยำก่อนใช้งานจริงเต็มรูปแบบ - พบด้วยว่า EC18-01
-  ยังคงมี STEP_DOWN_RISK/pairwise (BACK idx=4) หลงเหลืออยู่คู่กับ silhouette_notch ใหม่ ซึ่งอาจ
-  เป็น false-positive ที่ยังไม่ได้แก้ (มาร์กคอลัมน์ที่ดูปกติในภาพ) - ยังไม่ตัดออกในรอบนี้เพราะ
-  ไม่มีหลักฐานเพียงพอจะยืนยันว่าควรตัดทิ้งหรือไม่ (อาจต้องรอ dedup เพิ่มเติมระหว่าง silhouette_
-  notch กับ pairwise ที่ชี้ตำแหน่งใกล้เคียงกันในรอบถัดไป)
-================================================================================
-v25.63 (RD01-01 แก้ครบสมบูรณ์ + สืบสวน EC18-01 เชิงลึกตามที่ผู้ใช้สั่ง "เข้าเคส cross_view/
-rear_empty พิจารณาถี่ถ้วน ไม่แหวกแนว" - 29-Aug-2026):
-
-  1. Global-Consensus Guard แก้จาก elif เป็นเช็คอิสระ (ยืนยันจาก RD01-01 idx2 ที่ยังเหลือ):
-  เดิม (v25.62) Global-Consensus ทำงานเฉพาะเมื่อ Floor-Linearity คำนวณ anomaly ไม่ได้เลยทั้งคู่
-  (anomaly_a/b เป็น None ทั้งคู่) - พบว่า RD01-01's FRONT idx2 vs BACK idx0 คู่นี้ Floor-
-  Linearity คำนวณ anomaly ได้ (ไม่ None) แต่ไม่ถึงเกณฑ์พลิก ทำให้ Global-Consensus ไม่มีโอกาสได้
-  ทำงานเลย (ถูกบล็อกด้วย elif) FIX: เปลี่ยนเป็นเช็คอิสระ - รัน Global-Consensus เสมอเมื่อ
-  Floor-Linearity ยังไม่ตัดสินใจพลิก (ไม่ว่า anomaly จะเป็น None หรือมีค่าแต่ไม่ถึง threshold)
-  ผลทดสอบ: RD01-01 ไม่มี STEP_DOWN_RISK ปลอมเหลือเลย (ทั้ง idx1,idx2 ถูกแก้) เหลือแค่
-  REAR_EMPTY_RISK 1 จุดซึ่งเป็นความเสี่ยงจริง (ตรงกับ Unused Floor 26.8in) - RD01-01 แก้ครบแล้ว
-
-  2. EC18-01 - สืบสวนเชิงลึกตามคำสั่งผู้ใช้ (ไม่ใช้ color-filter ใน compute_stack_heights_px
-  ที่เคยลองแล้วพัง EB66-01): ยืนยันด้วยภาพจริงว่า BACK view เห็นกล่องเขียว 2 ชั้นสม่ำเสมอทั้งหมด
-  (ไม่มี dip จริง) - แปลว่าค่า BACK ที่วัดได้ต่ำในบางคอลัมน์เป็น artifact ไม่ใช่หลักฐานความจริง
-  ตรวจสอบ Phase 1B พบว่ากล่องแดง (TOC1B-BN) ไม่ได้ถูกตัดทิ้งจริง (รอดเป็น idx0) แต่ root cause
-  คือ x_min_ (boundary ซ้ายสุด) ขยายเกินจริง 80px ไปทับพื้นที่กล่องเขียวข้างเคียง (ยืนยัน:
-  โซนที่ขยาย x=655-735 เป็นสีเขียวล้วน ไม่ใช่พื้นตู้เปล่า) ทดลองแก้ 2 ชั้น (guard ที่ seam-
-  computation + guard ที่ start_x/end_x) แก้ EC18-01 ได้จริง (REAR_EMPTY_RISK trigger ถูกต้อง
-  ตามกลไก rear_empty ที่มีอยู่แล้ว ไม่ต้องเพิ่มกฎใหม่) แต่ regression-test พบว่าทำให้เกิด false-
-  positive ใหม่ใน EA07-01 (2->3 hazards) และ EB66-01 (1->2 hazards) - จึง REVERT ทั้ง 2 guard
-  นี้ออกไปแล้ว (EC18-01 กลับไปเหลือ 1 hazard ผิดตำแหน่งเหมือนเดิม) เพื่อความปลอดภัยของไฟล์อื่น
-  ข้อสรุปสำหรับรอบถัดไป: root cause ของ EC18-01 (x_min_ extension ผิด) ยืนยันชัดเจนแล้ว แต่การ
-  ตรวจสอบสี (color-matching) ที่ใช้แยกแยะ "ขยายถูก" กับ "ขยายผิด" ยังไม่แม่นยำพอ (threshold
-  tol=60/min_frac=0.5 หลวมเกินไป ทำให้ false-positive ในไฟล์อื่นที่มีสีใกล้เคียงกันตามธรรมชาติ
-  บริเวณขอบภาพ) ต้องการไฟล์ตัวอย่างเพิ่มเติมและ threshold ที่แม่นยำกว่านี้ก่อนจะลองแก้อีกครั้ง
-================================================================================
 v25.57 (แก้ 3 จุดที่พบจาก log จริง EA07-01/EB66-01 วันที่ 29-Aug-2026 - ผู้ใช้ยืนยันว่าทั้ง
 2 ไฟล์เป็น "กล่องเต็มตู้ ปราศจากความเสี่ยงใดๆ" แต่หลัง deploy v25.56 ยัง flag ผิดอยู่):
 
@@ -588,8 +527,6 @@ import fitz  # PyMuPDF
 import functions_framework
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
-from scipy.signal import find_peaks
-from scipy.ndimage import median_filter
 
 
 # ============================================================================
@@ -914,27 +851,13 @@ def is_arrow_color(rgb):
 
 
 def arrow_mask(region):
-    """v25.60 FIX (สำคัญ - พบจริงจาก EC18-01, 29-Aug-2026): เดิม arrow_mask() (เวอร์ชัน
-    vectorized ที่ใช้จริงกับทั้งภาพใน process_view_on_image) implement เงื่อนไขไม่ครบเทียบกับ
-    is_arrow_color() (ฟังก์ชันพี่น้องที่ใช้กรอง pixel ทีละจุดใน seam_based_count) - is_arrow_color
-    มี 6 เงื่อนไข (r>=190, 40<=g<=140, 40<=b<=140, |g-b|<=45, r-g>=70, r-b>=70) แต่ arrow_mask เดิม
-    มีแค่ 3 เงื่อนไข (ขาด 40<=g<=140 และ 40<=b<=140 ไปทั้งคู่ ใช้แค่ r-max(g,b)>=70 แทน r-g/r-b
-    แยกกัน) ผลกระทบที่พบจริง: สีแดงสดของกล่องสินค้าจริง (255,0,0 - g=b=0) ผ่านเงื่อนไข 3 ข้อของ
-    arrow_mask (bright/gb_close/r_dominant ล้วนเป็น True) จึงถูกเข้าใจผิดว่าเป็นลูกศรนำทาง ทั้งที่
-    g=0,b=0 ไม่ผ่านเงื่อนไข 40<=g<=140/40<=b<=140 ของ is_arrow_color เลย (ลูกศรจริงเป็นโทนส้ม-แดง
-    ที่มี g,b อยู่ช่วงกลาง ไม่ใช่ g=b=0) ทำให้พิกเซลแดงสดที่สุดถูกตัดออกจาก cargo_mask เป็นระบบ
-    กระทบกล่องสีแดงสดทุกใบในทุกไฟล์ ไม่ใช่แค่ EC18-01
-    FIX: แก้ arrow_mask ให้ใช้เงื่อนไขเดียวกับ is_arrow_color ทุกประการ (vectorized)"""
     r = region[:, :, 0].astype(np.int16)
     g = region[:, :, 1].astype(np.int16)
     b = region[:, :, 2].astype(np.int16)
-    bright = r >= 190
-    g_in_range = (g >= 40) & (g <= 140)
-    b_in_range = (b >= 40) & (b <= 140)
     gb_close = np.abs(g - b) <= 45
-    r_minus_g = (r - g) >= 70
-    r_minus_b = (r - b) >= 70
-    return bright & g_in_range & b_in_range & gb_close & r_minus_g & r_minus_b
+    r_dominant = (r - np.maximum(g, b)) >= 70
+    bright = r >= 190
+    return gb_close & r_dominant & bright
 
 
 def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_iterations=15):
@@ -1472,20 +1395,6 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         n_stacks = len(cols_sorted)
         cols_x_min = cols_sorted[0]["x"]
         cols_x_max = cols_sorted[-1]["x"] + cols_sorted[-1]["w"]
-        # v25.62 NEW (สำคัญ - พบจริงจาก EC18-01, 29-Aug-2026): เก็บ "สีที่ Phase 1B รู้อยู่แล้วว่า
-        # เป็นสีแท้จริงของคอลัมน์นี้" (จาก members ของแต่ละ P1B column) ไว้ต่อ 1 stack - ใช้เป็น
-        # ข้อมูลเสริมให้ compute_stack_heights_px กรอง "สีที่ทะลุปนมาจากคอลัมน์ข้างเคียง" ออกได้
-        # (ดู docstring เต็มที่ _color_matched_top_y สำหรับหลักฐาน+เหตุผล) - จำกัดเฉพาะคอลัมน์ที่มี
-        # "สีเดียวจริง" เท่านั้น (len(distinct colors)==1) เพื่อไม่กระทบคอลัมน์ที่มีหลายสีซ้อนกัน
-        # โดยตั้งใจ (multi-color-per-idx genuine stacking - ดู CLUSTER_DIFF_COLOR_MIN_XOVERLAP)
-        stack_expected_colors = []
-        for c in cols_sorted:
-            member_colors = [mm["color"] for mm in c.get("members", []) if mm.get("color")]
-            distinct = set(member_colors)
-            if len(distinct) == 1:
-                stack_expected_colors.append(next(iter(distinct)))
-            else:
-                stack_expected_colors.append(None)
         # v25.16 FIX (Critical): เดิมเชื่อ fallback_xrange (grounded, จาก floor-profile) เป็นหลัก
         # เสมอเมื่อมีค่า - แต่พบจริงจาก AC03-06 FRONT (ไฟล์โหลดไม่เต็มคัน, Unused Floor 11.8in)
         # ว่า grounded zone บางไฟล์แคบผิดปกติมาก (พบจริง: กว้างแค่ 92px ขณะที่คอลัมน์จริงจาก
@@ -1539,7 +1448,6 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
     else:
         # fallback: PHASE 1B ไม่สำเร็จ (เช่น หา front-face สีเด่นไม่เจอ) - ใช้ seam-based เดิม
         n_stacks, seams, xrange_ = seam_based_count(region, grounded, cargo_bottom_y, cargo_mask, struct_mask_raw)
-        stack_expected_colors = [None] * n_stacks  # v25.62: ไม่มีข้อมูลสีจาก P1B ในเส้นทาง fallback
 
     # v25.10 - ตรวจ 'corner artifact' (idx0 ที่เป็นภาพซ้ำ/หน้าด้านข้างของกล่องมุม หรือผนังหัวตู้
     # ที่โผล่มาก่อนเส้นขอบฐานตู้จริงเริ่มต้น) ด้วยเส้น rail ทางเรขาคณิต (ไม่ hardcode ชื่อ view)
@@ -1598,7 +1506,6 @@ def process_view_on_image(full_img, y0_frac, y1_frac, x0_frac, x1_frac, gap_thre
         "crop_origin_x": safe_x0, "crop_origin_y": safe_y0,
         "full_page_width": W, "full_page_height": H,
         "idx0_is_corner_duplicate": idx0_is_corner_duplicate,
-        "stack_expected_colors": stack_expected_colors,  # v25.62 NEW
     }
 
 
@@ -3105,10 +3012,32 @@ def get_view_region(full_img, doc, view_name, page_idx=1, margin=30):
 PHASE1B_HI_SCALE = 4.0  # scale ที่ calibrate threshold ต่างๆ ของ PHASE 1B ไว้ (ดู render_hires_crop)
 
 
+def _p1b_scale_cell(cell, factor):
+    """แปลงพิกัด P1B cell จาก hi-scale เป็น main-scale แบบ recursive-safe.
+
+    v25.67 FIX: ก่อนหน้านี้ _p1b_scale_col แปลงเฉพาะกรอบคอลัมน์ชั้นนอก แต่ปล่อย
+    col['members'] ค้างอยู่ในพิกัด hi-scale ทำให้การนำ front-face member ไปเทียบกับ
+    local_floor_y/cargo_bottom_y ของ pipeline หลักผิดระบบพิกัด 4:3 โดยตรง.
+    """
+    out = dict(cell)
+    for key in ('x', 'y', 'w', 'h'):
+        if out.get(key) is not None:
+            out[key] = int(round(float(out[key]) * factor))
+    for key in ('cx', 'cy'):
+        if out.get(key) is not None:
+            out[key] = float(out[key]) * factor
+    return out
+
+
 def _p1b_scale_col(c, factor):
-    return dict(c, x=int(round(c['x'] * factor)), y=int(round(c['y'] * factor)),
-                w=int(round(c['w'] * factor)), h=int(round(c['h'] * factor)),
-                cx=c['cx'] * factor, cy=c['cy'] * factor)
+    """แปลงคอลัมน์และสมาชิกทุกชิ้นจาก P1B hi-scale เป็น main-scale.
+
+    สำคัญ: members ต้องถูกแปลงด้วย factor เดียวกับ parent column มิฉะนั้นค่า y/h/bottom
+    ของ front-face จะเทียบกับ local_floor_y และ cargo_bottom_y ไม่ได้.
+    """
+    out = _p1b_scale_cell(c, factor)
+    out['members'] = [_p1b_scale_cell(m, factor) for m in c.get('members', [])]
+    return out
 
 
 def render_hires_crop(page, origin_box, main_scale, hi_scale=PHASE1B_HI_SCALE):
@@ -3249,34 +3178,21 @@ def compute_phase1b_columns(regions, down_factor=1.0):
             front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
 
-        # v25.58 NEW: เก็บจำนวนคอลัมน์ "ดิบ" ของแต่ละ view ไว้ก่อนที่ _p1b_reconcile_with_back
-        # จะบังคับให้ FRONT เท่ากับ BACK เสมอ - ใช้เป็นข้อมูลเสริม/debug สำหรับ REAR_EMPTY_RISK
-        # (ดู docstring เต็มที่ detect_rear_empty_risk - v25.61 ปิดการใช้เป็นเงื่อนไข trigger
-        # ไปแล้วเพราะพิสูจน์ว่าแยกแยะเคสจริงจากปกติไม่ได้ด้วยข้อมูลที่มี เหลือไว้แค่ log)
-        n_front_raw_prereconcile = len(front_cols_raw)
-        n_back_raw = len(back_cols)
-
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
             n_dropped_by_new_rules=front_n_dropped, back_all_cells=back_all)
         if not front_cols:
-            return {"front": None, "back": None,
-                    "front_raw_count": n_front_raw_prereconcile, "back_raw_count": n_back_raw}
+            return {"front": None, "back": None}
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
-        if n_front_raw_prereconcile != n_back_raw:
-            print(f"[P1B] STACK-COUNT MISMATCH (pre-reconcile, log-only v25.61): "
-                  f"front_raw={n_front_raw_prereconcile} vs back_raw={n_back_raw}")
 
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
-            "front_raw_count": n_front_raw_prereconcile,
-            "back_raw_count": n_back_raw,
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
-        return {"front": None, "back": None, "front_raw_count": None, "back_raw_count": None}
+        return {"front": None, "back": None}
 
 
 # ============================================================================
@@ -3884,76 +3800,14 @@ def detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x, search_mar
     return int(xs_v[best_idx])
 
 
-# v25.62 NEW (สำคัญ - พบจริงจาก EC18-01, 29-Aug-2026): เมื่อ Phase 1B ตรวจพบว่า 2 คอลัมน์ที่
-# ติดกันมี x-range "ทับซ้อนกันจริง" (เช่น กล่องแคบผิดปกติ 1 ใบ ถูกกล่องข้างเคียงที่กว้างกว่า
-# บดบัง/ทะลุปนบางส่วนในมุมมอง isometric) สูตร seam=จุดกึ่งกลางระหว่างคอลัมน์ (ใน
-# process_view_on_image) จะคำนวณ boundary ผิด ทำให้คอลัมน์หนึ่งได้รับพื้นที่ที่แท้จริงเป็นของ
-# คอลัมน์ข้างเคียงปนเข้ามา (ยืนยันจาก EC18-01: กล่องแดง P1B วัดได้ x=(735,799) กว้าง 64px แต่ถูก
-# มอบหมายพื้นที่จริง x=(655,778) กว้างถึง 123px - ทับซ้อนกับกล่องเขียวข้างเคียงและได้พื้นที่ว่าง/
-# สีอื่นปนเข้ามาทางซ้าย) ทำให้ cargo_top_y (ซึ่งหาแค่ "จุดสีสดบนสุดโดยไม่สนสี") จับสีของกล่อง
-# ข้างเคียงที่สูงกว่าไปแทน ทำให้วัดความสูงกล่องแดงผิดพลาดมาก (ลดลงจริงแค่ 13-23% ทั้งที่ควรจะ
-# ~75% ตามที่ผู้ใช้ยืนยัน)
-# FIX: ใช้ "สีที่ Phase 1B รู้อยู่แล้วว่าเป็นสีแท้จริงของคอลัมน์นี้" (stack_expected_colors จาก
-# process_view_on_image) เป็นตัวกรอง - สำหรับแต่ละ x ในช่วงคอลัมน์ ค้นหาเฉพาะจุดที่มีสีตรงกับสี
-# ที่คาดหวัง (ด้วย normalized-hue เพื่อทนทานต่อความสว่าง/เงา isometric - เทคนิคเดียวกับที่ใช้แก้
-# REAR_EMPTY_RISK color-shading มาก่อน) แล้วใช้ตำแหน่งบนสุดที่พบสีนั้นแทน cargo_top_y เดิม - x ที่
-# ไม่พบสีที่คาดหวังเลย (บ่งชี้ว่าเป็นพื้นที่ที่ปนมาจากคอลัมน์อื่นทั้งแท่ง) จะถูกตัดออกจากการคำนวณ
-# ไปเลย (ไม่ใช้ top ที่ผิดสี) - ยืนยันด้วยข้อมูลจริง EC18-01: หลังกรองสี เหลือจุดข้อมูลที่ถูกต้อง
-# 38 จุด (x=734-771 ตรงกับขอบเขตกล่องแดงจริงเป๊ะ) resid_std=0.92px (แม่นยำมาก) height=70.6px
-# (ใกล้เคียงกับที่คาดไว้ ~75-90px มาก ต่างจากค่าเดิมที่ผิดพลาด 267-301px อย่างสิ้นเชิง)
-# Safety: จำกัดเฉพาะคอลัมน์ที่มี "สีเดียวจริง" เท่านั้น (ดู process_view_on_image) และถ้าจำนวน
-# จุดที่กรองได้น้อยเกินไป (<3) จะ fallback กลับไปใช้ cargo_top_y เดิมทั้งหมด (ไม่กรองสี) เพื่อ
-# ไม่เสี่ยงทำให้แย่ลงกว่าเดิมในกรณีที่ตรวจจับสีไม่สำเร็จ
-_STACK_COLOR_MATCH_HUE_TOL = 60      # ระยะห่าง normalized-hue สูงสุดที่ยังถือว่าเป็นสีเดียวกัน
-                                     # (คนละความสว่าง/เงา isometric) - กว้างกว่า _SHADE_MERGE_
-                                     # HUE_TOL (20) เพราะที่นี่ต้องทนทานต่อ anti-alias/เส้นขอบและ
-                                     # เฉดเงาเข้มมากด้วย (ยืนยันด้วยข้อมูลจริง EC18-01 ว่ายังคง
-                                     # แยกแดง(255,0,0)ออกจากเขียว(0,255,0)ได้ชัดเจน ไม่มีความกำกวม
-                                     # เพราะ 2 สีนี้ต่างกันในเชิง hue มาก)
-_STACK_COLOR_MATCH_MIN_MAXCHAN = 15  # ต่ำกว่านี้มืดเกินจะ normalize hue ได้น่าเชื่อถือ - ข้าม
-_STACK_COLOR_MATCH_MIN_POINTS = 3    # จำนวนจุดขั้นต่ำหลังกรองสี ต่ำกว่านี้ fallback กลับไปใช้
-                                     # cargo_top_y เดิมทั้งหมด (ปลอดภัยกว่าการเชื่อข้อมูลน้อยไป)
-
-
-def _stack_color_normalize(rgb, min_maxchan=_STACK_COLOR_MATCH_MIN_MAXCHAN):
-    maxchan = float(np.max(rgb))
-    if maxchan < min_maxchan:
-        return None
-    return np.asarray(rgb, dtype=np.float64) * (255.0 / maxchan)
-
-
-def _color_matched_top_y(x, cargo_mask, region, expected_norm, hue_tol=_STACK_COLOR_MATCH_HUE_TOL):
-    """หาตำแหน่ง y บนสุด (ค่าน้อยสุด) ในคอลัมน์ x ที่มีสีตรงกับ expected_norm (normalized-hue,
-    ทนทานต่อความสว่าง/เงา) - คืนค่า None ถ้าไม่พบสีนี้เลยในคอลัมน์ x นั้น (บ่งชี้ว่า x นี้ไม่ใช่
-    ส่วนหนึ่งของวัตถุที่คาดหวัง อาจเป็นพื้นที่ที่ปนมาจากคอลัมน์ข้างเคียง)"""
-    ys = np.nonzero(cargo_mask[:, x])[0]
-    if len(ys) == 0:
-        return None
-    best_y = None
-    for y in ys:
-        cur = _stack_color_normalize(region[y, x])
-        if cur is None:
-            continue
-        dist = float(np.sqrt(np.sum((cur - expected_norm) ** 2)))
-        if dist <= hue_tol:
-            if best_y is None or y < best_y:
-                best_y = int(y)
-    return best_y
-
-
-def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local_floor_y=None,
-                              region=None, cargo_mask=None, stack_expected_colors=None):
+def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local_floor_y=None):
     """คำนวณความสูง (px) ต่อ 1 ตั้ง โดย fit เส้นตรงทนทาน (robust local line) ให้กับ
     cargo_top_y ภายในแต่ละตั้งเอง (แก้บั๊กความชันธรรมชาติจากมุมมอง isometric) แล้วประเมิน
     ความสูงที่ตำแหน่งกึ่งกลางตั้ง เทียบกับ local floor (แก้บั๊กพื้นตู้รูปตัว V)
 
     v25.2 FIX: ตัดข้อมูลที่อยู่ "หลังจุดยอด isometric" (apex) ออกจากการคำนวณ - สำหรับตั้งที่
     อยู่หลัง apex ทั้งตั้ง (วัดเองไม่ได้เลย) จะคืนค่า height_px=None ก่อน ให้ cross-view
-    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย
-
-    v25.62 NEW: รับ region/cargo_mask/stack_expected_colors (optional) - ถ้ามีครบและคอลัมน์นั้น
-    มีสีคาดหวังชัดเจน จะกรองจุดข้อมูลด้วยสีก่อนใช้ fit (ดู docstring เต็มด้านบน) - ถ้าไม่ส่งมา
-    (backward-compat) จะทำงานเหมือนเดิมทุกประการ"""
+    reconciliation เติมค่าจากอีกมุมมองก่อน แล้วค่อย carry-forward เป็นทางเลือกสุดท้าย"""
     boundaries = [start_x] + sorted(seams) + [end_x]
     results = []
 
@@ -3963,8 +3817,6 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
         return None
 
     apex_x = detect_isometric_apex(cargo_top_y, local_floor_y, start_x, end_x)
-    can_color_filter = (region is not None and cargo_mask is not None
-                         and stack_expected_colors is not None)
 
     for i in range(len(boundaries) - 1):
         b0 = boundaries[i] + margin
@@ -3978,23 +3830,6 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
             if x < len(cargo_top_y) and cargo_top_y[x] >= 0:
                 xs_top.append(x)
                 ys_top.append(cargo_top_y[x])
-
-        # v25.62 NEW: ถ้ามีสีคาดหวังของคอลัมน์นี้ ลองกรองจุดข้อมูลด้วยสีก่อน - ใช้แทนที่ xs_top/
-        # ys_top เดิม เฉพาะเมื่อได้จุดที่ผ่านเกณฑ์เพียงพอ (>=_STACK_COLOR_MATCH_MIN_POINTS) เท่านั้น
-        # (ไม่งั้น fallback กลับไปใช้ค่าเดิมที่คำนวณไว้แล้วด้านบน ปลอดภัยกว่า)
-        if can_color_filter and i < len(stack_expected_colors) and stack_expected_colors[i] is not None:
-            expected_norm = _stack_color_normalize(np.array(stack_expected_colors[i], dtype=np.float64))
-            if expected_norm is not None:
-                xs_color, ys_color = [], []
-                for x in range(max(0, b0), max(0, eff_b1)):
-                    if x >= region.shape[1]:
-                        continue
-                    ty = _color_matched_top_y(x, cargo_mask, region, expected_norm)
-                    if ty is not None:
-                        xs_color.append(x)
-                        ys_color.append(ty)
-                if len(xs_color) >= _STACK_COLOR_MATCH_MIN_POINTS:
-                    xs_top, ys_top = xs_color, ys_color
 
         # v25.21 FIX: ถ้า apex-cut ทำให้ xs_top=[] (eff_b1 <= b0 เพราะ apex_x น้อยกว่า b0)
         # -> fallback ใช้ cargo_top_y ทั้ง stack โดยไม่ตัด apex (ยอมรับ noise จาก isometric
@@ -4133,14 +3968,6 @@ def process_view_with_height_on_image(full_img, doc, view_name, page_idx=1, marg
                                            override_cols=override_cols, precrop=precrop)
     cargo_top_y = compute_cargo_top_profile(r["cargo_mask"])
     local_floor_y = compute_local_floor_y(r["floor_y"], r["grounded"])
-    # v25.62 EXPERIMENTAL (ปิดใช้งานชั่วคราว - ดู CHANGELOG หัวไฟล์): เดิมทดลองส่ง region/
-    # cargo_mask/stack_expected_colors เข้าไปด้วย เพื่อกรอง "สีที่ทะลุปนมาจากคอลัมน์ข้างเคียง"
-    # เมื่อ Phase 1B ตรวจพบคอลัมน์ทับซ้อนกัน - แก้ EC18-01 ได้ถูกต้อง (กล่องแดง 70.6px ตรงตามที่
-    # ผู้ใช้ยืนยัน) แต่พบว่า EB66-01 มีรูปแบบทับซ้อนแบบเดียวกันจริง (กล่องเขียวเข้ม MCT1B-BN ถูก
-    # กล่องเขียวอมฟ้า MCT1C-D1 บดบัง) ทำให้ hazardCount เพิ่มจาก 1->4 ซึ่งขัดแย้งกับที่ผู้ใช้เคย
-    # ยืนยันชัดเจนไว้ก่อนหน้าว่าไฟล์นี้ "ปราศจากความเสี่ยงใดๆ" - ปิดใช้งานไว้ก่อนจนกว่าจะได้รับ
-    # การยืนยันจากผู้ใช้ว่าควรเปิดใช้หรือไม่ (ฟังก์ชัน compute_stack_heights_px ยังคงรองรับ
-    # พารามิเตอร์เหล่านี้อยู่ - พร้อมเปิดใช้ทันทีถ้าผู้ใช้ยืนยัน)
     stack_heights = compute_stack_heights_px(
         r["seams"], r["start_x"], r["end_x"], cargo_top_y, margin=margin, local_floor_y=local_floor_y)
     view_result = {**r, "cargo_top_y": cargo_top_y, "local_floor_y": local_floor_y,
@@ -4219,58 +4046,6 @@ def _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b, exclude=8):
     floor_l_at_seam = np.polyval(coef_l, seam)
     floor_r_at_seam = np.polyval(coef_r, seam)
     return float(floor_r_at_seam - floor_l_at_seam)
-
-
-# v25.59/61 NEW (สำคัญ - พบจริงจาก RD01-01, 29-Aug-2026): เดิม reconcile_heights_cross_view
-# ตัดสินใจเชื่อค่าความสูงฝั่งไหนโดยดูแค่ reliability hierarchy + "ค่าสูงกว่าชนะ" เมื่อทั้งคู่
-# reliable เท่ากัน - ไม่ตรวจสอบว่า local_floor_y ที่ตำแหน่งนั้น "สมเหตุสมผลทางเรขาคณิต" หรือไม่
-# ยืนยันจาก RD01-01 (กล่อง SKU เดียวกันสูงเท่ากันทุกใบจริง): BACK floor_y=550/477/405 (ลดหลั่น
-# สม่ำเสมอ -73/-72px) แต่ FRONT floor_y=552/543/431 (กระโดดผิดปกติ -9/-112px) ทำให้ FRONT คำนวณ
-# ความสูงผิด (267.8/273.5px แทน ~200px) reconcile เดิมเลือกเชื่อ FRONT (สูงกว่า) เขียนทับ BACK
-# ที่ถูกต้อง เกิด STEP_DOWN_RISK ปลอม
-# FIX: เปรียบเทียบ floor_y ของคอลัมน์เป้าหมายกับค่าคาดหวังจาก interpolation ของเพื่อนบ้าน 2 ข้าง
-# ในวิวเดียวกัน (v25.61: จำกัดเฉพาะ interpolation เท่านั้น - ทดลอง extrapolation สำหรับคอลัมน์
-# ริมสุดหลายแบบแล้วพบว่าทำให้เกิด false-positive ใหม่กับ EB66-01 idx0 เสมอ เพราะความบิดเบือนที่
-# ริมสุดจริงไม่เป็นเส้นตรงโดยธรรมชาติ - ปลอดภัยกว่าให้คอลัมน์ริมสุดไม่ถูกตรวจสอบเลย)
-_FLOOR_LINEARITY_ANOMALY_MIN_PX = 20
-
-
-def _floor_linearity_anomaly(records_same_view, target_idx, local_floor_y):
-    """คำนวณความเบี่ยงเบนจากเส้นตรงของ local_floor_y ที่ตำแหน่ง target_idx เทียบกับค่าคาดหวัง
-    จาก interpolation ของเพื่อนบ้าน 2 ข้าง (ต้องมีครบทั้ง 2 ฝั่งเท่านั้น - v25.61) คืนค่า
-    deviation_px หรือ None ถ้าตรวจสอบไม่ได้"""
-    by_idx = {r["idx"]: r for r in records_same_view}
-    target = by_idx.get(target_idx)
-    if target is None:
-        return None
-
-    def _floor_at_mid(rec):
-        x0, x1 = rec["x_range"]
-        xm = (x0 + x1) // 2
-        if 0 <= xm < len(local_floor_y) and local_floor_y[xm] >= 0:
-            return float(xm), float(local_floor_y[xm])
-        return None
-
-    tgt_point = _floor_at_mid(target)
-    if tgt_point is None:
-        return None
-    tx, tfloor = tgt_point
-
-    left = by_idx.get(target_idx - 1)
-    right = by_idx.get(target_idx + 1)
-    left_point = _floor_at_mid(left) if left is not None else None
-    right_point = _floor_at_mid(right) if right is not None else None
-
-    if left_point is not None and right_point is not None:
-        lx, lf = left_point
-        rx, rf = right_point
-        if rx == lx:
-            return None
-        expected = lf + (tx - lx) / (rx - lx) * (rf - lf)
-        return abs(tfloor - expected)
-    # v25.61: คอลัมน์ริมสุด (เพื่อนบ้านแค่ฝั่งเดียวหรือไม่มีเลย) - ไม่ตรวจสอบ (ดู docstring
-    # ด้านบนสำหรับเหตุผลที่ตัด extrapolation ออกทั้งหมด - พิสูจน์แล้วว่าไม่น่าเชื่อถือ)
-    return None
 
 
 def detect_step_down_pairwise(records, view_label, view_result=None):
@@ -4869,75 +4644,6 @@ def reconcile_heights_cross_view(records_front, records_back,
             trust_a = False
         else:
             trust_a = h_a >= h_b
-        # v25.59/61 NEW: Floor-Linearity Guard - ก่อนเชื่อฝั่งใดฝั่งหนึ่งตาม reliability
-        # hierarchy เดิม ตรวจสอบว่า floor_y ของแต่ละฝั่ง ณ ตำแหน่งนี้สมเหตุสมผลทางเรขาคณิต
-        # (ต่อเนื่องเป็นเส้นตรงกับเพื่อนบ้านในวิวเดียวกัน) หรือไม่ - ถ้าฝั่งที่กำลังจะ "ชนะ" มี
-        # floor-anomaly สูงกว่าฝั่งที่ "แพ้" มาก ให้พลิกกลับมาเชื่อฝั่งที่ floor สมเหตุสมผลกว่า
-        # แทน (ดู docstring เต็มที่ _floor_linearity_anomaly ด้านบน - พบจริงจาก RD01-01)
-        anomaly_a = None
-        anomaly_b = None
-        if front_result is not None and back_result is not None:
-            a_records_same_view = records_front if rec_a["view"] == "FRONT" else records_back
-            b_records_same_view = records_front if best_match["view"] == "FRONT" else records_back
-            a_floor = (front_result["local_floor_y"] if rec_a["view"] == "FRONT"
-                       else back_result["local_floor_y"])
-            b_floor = (front_result["local_floor_y"] if best_match["view"] == "FRONT"
-                       else back_result["local_floor_y"])
-            anomaly_a = _floor_linearity_anomaly(a_records_same_view, rec_a["idx"], a_floor)
-            anomaly_b = _floor_linearity_anomaly(b_records_same_view, best_match["idx"], b_floor)
-        should_flip = False
-        flip_reason = None
-        if anomaly_a is not None and anomaly_b is not None:
-            winner_anomaly = anomaly_a if trust_a else anomaly_b
-            loser_anomaly = anomaly_b if trust_a else anomaly_a
-            if (winner_anomaly >= _FLOOR_LINEARITY_ANOMALY_MIN_PX
-                    and winner_anomaly > loser_anomaly * 2):
-                should_flip = True
-                flip_reason = (f"[FLOOR_LINEARITY] anomaly={winner_anomaly:.1f}px vs "
-                                f"loser anomaly={loser_anomaly:.1f}px")
-        # v25.63 FIX (Critical - พบจริงจาก EC18-01, 29-Aug-2026, ตามที่ผู้ใช้สั่งให้พิจารณาผ่าน
-        # กลไก cross_view/rear_empty ที่มีอยู่แล้วอย่างถี่ถ้วน ไม่แหวกแนว): เดิม (v25.62) Global
-        # Consensus Guard ถูกเขียนเป็น "elif" ที่ทำงานเฉพาะเมื่อ Floor-Linearity คำนวณ anomaly
-        # ไม่ได้เลยทั้งคู่ (anomaly_a/b เป็น None ทั้งคู่ - เฉพาะกรณีคอลัมน์ริมสุด) - พบว่ากรณี
-        # EC18-01 (กล่องแดงเตี้ยถูกกล่องเขียวข้างเคียงทะลุปนสี "ยอด" (cargo_top_y) ไม่ใช่ "พื้น"
-        # (floor_y)) Floor-Linearity Guard คำนวณ anomaly ได้ค่าที่ต่ำ (ไม่ None) เพราะ floor_y  
-        # เองไม่ได้ผิดเลย (ปัญหาอยู่ที่ top ไม่ใช่ floor) ทำให้เข้าเงื่อนไข "if" (มี anomaly ทั้งคู่)
-        # แต่ไม่ผ่าน threshold ให้พลิก (เพราะ floor ปกติจริง) - ผลคือ Global-Consensus (elif)
-        # ไม่มีโอกาสได้ทำงานเลย ทั้งที่ควรจะช่วยตรวจจับได้ (ยืนยัน: FRONT idx2=346.8 vs BACK
-        # idx4=269.0 ที่ BACK's ค่าใกล้เคียงกับกลุ่มคอลัมน์ dip ทั้ง 3 ตำแหน่งที่สอดคล้องกันเอง
-        # มาก (269.5/269.0/269.4) ในขณะที่ FRONT's plateau (346-353) แม้จะสอดคล้องกันเองเช่นกัน
-        # แต่เป็นผลจากสีทะลุปนจากกล่องเขียวข้างเคียงที่สูงกว่า)
-        # FIX: เปลี่ยนจาก elif เป็นการเช็คอิสระ - รัน Global-Consensus Guard เสมอเมื่อ Floor-
-        # Linearity ยังไม่ตัดสินใจพลิก (ไม่ว่า anomaly จะเป็น None หรือมีค่าแต่ไม่ถึง threshold
-        # ก็ตาม) เพื่อให้เป็นเกราะป้องกันชั้นที่ 2 อิสระจากกัน (ไม่ compound กับ floor-linearity -
-        # ถ้า floor-linearity ตัดสินใจพลิกแล้ว จะไม่รัน global-consensus ซ้ำอีก กันการพลิกซ้อนกัน
-        # จนกลับไปผิดอีกที)
-        if not should_flip:
-            other_reliable = []
-            for rec_list in (records_front, records_back):
-                for r in rec_list:
-                    if r is rec_a or r is best_match:
-                        continue
-                    rh, rsrc = snapshot[id(r)]
-                    if rh is not None and rsrc in ("direct", "cross_view_filled"):
-                        other_reliable.append(rh)
-            if len(other_reliable) >= 2:
-                median_h = float(np.median(other_reliable))
-                if median_h > 0:
-                    dev_a = abs(h_a - median_h) / median_h
-                    dev_b = abs(h_b - median_h) / median_h
-                    winner_dev = dev_a if trust_a else dev_b
-                    loser_dev = dev_b if trust_a else dev_a
-                    if winner_dev >= 0.15 and winner_dev > loser_dev * 3:
-                        should_flip = True
-                        flip_reason = (f"[GLOBAL_CONSENSUS] เบี่ยงเบนจาก median กลุ่ม"
-                                        f"({median_h:.1f}px, n={len(other_reliable)}) "
-                                        f"{winner_dev:.1%} vs loser {loser_dev:.1%}")
-        if should_flip:
-            print(f"พลิกกลับการเลือก: winner เดิม (view="
-                  f"{rec_a['view'] if trust_a else best_match['view']}) {flip_reason} "
-                  f"-> เชื่อฝั่งที่สอดคล้องกับหลักฐานมากกว่าแทน")
-            trust_a = not trust_a
         # v25.40 NEW: Physical Validity Guard - ก่อนเลือกใช้ค่าใด ตรวจสอบว่าค่านั้นไม่เกิน
         # ความสูงตู้จริง ณ ตำแหน่งของ 'เป้าหมายที่จะถูกเขียนทับ' (ไม่ใช่ตำแหน่งของแหล่งอ้างอิง
         # เพราะ x_range ของทั้งคู่อาจต่างกันเล็กน้อยจากการ reconcile คนละ view) - ถ้าค่าที่เลือก
@@ -5169,94 +4875,6 @@ def _p1b_extended_length_for_rear_check(view_result):
     return start_x, end_x, (end_x - start_x)
 
 
-# v25.64 NEW (สำคัญ - ตามไอเดียผู้ใช้ 29-Aug-2026: "ลากเส้น 2 เส้นตัดกัน พื้นที่ล่างจุดตัด
-# ภายในตู้สินค้า พบสีขาว หมายถึงพื้นที่ว่าง อันเกิดจากกล่องสูงต่ำหรือไม่มีกล่องวางตรงนั้น"):
-#
-# ยืนยันด้วยข้อมูลจริง 2 ไฟล์ (EC18-01, EC04-01) ระดับ pixel: เมื่อคำนวณ cargo_top_y (เส้นขอบ
-# บนสุดของกองสินค้า) ตลอดความกว้างทั้งวิว พบว่าปกติ (ไฟล์ที่โหลดเต็มสม่ำเสมอ - regression-tested
-# กับ EA07-01/EB66-01/ED03-01/ED86-03/RD01-01 ไม่พบเลยแม้แต่จุดเดียว) เส้นนี้จะมีรูปร่าง "V เดียว"
-# (isometric apex) คือไล่สูงขึ้นจากปลายด้านหนึ่งถึงจุดสูงสุดจุดเดียว แล้วไล่ลงจนจบอีกด้าน (ทิศทาง
-# เดียว ไม่สลับกลับ) - ถ้ามี "รอยบากที่สอง" (local peak ที่ไม่ใช่ apex จริง) แทรกอยู่กลางแถว
-# (ไม่ใช่ปลายสุด) นั่นคือสัญญาณทางเรขาคณิตของกล่องเตี้ยกว่าเพื่อนบ้านที่ไม่ถูกกองข้างเคียงบังจนมิด
-# เผยให้เห็นพื้นหลัง/ผนังตู้ - ยืนยันด้วยการ sample สีจริงในรอยบาก: EC18-01 back x=919 (prominence
-# 37px) พบสีขาวล้วน (255,255,255) 100% / EC04-01 front x=1048,1109 (prominence 23px) พบสี
-# โครงสร้างตู้ (179,179,90)="แผงผนังตู้", (255,255,175)="ผนังหลัง/หลังคาตู้" (ตรงกับ
-# _STRUCTURAL_CONTAINER_COLORS ที่มีอยู่แล้วในระบบ) 100% - ไม่ใช่สีกล่องสินค้าเลยแม้แต่จุดเดียว
-# ยืนยันว่าเป็นพื้นที่ว่างจริง ไม่ใช่กล่องสีต่างที่ถูกต้อง
-#
-# วิธีทำงาน: (1) หา local maxima ของ cargo_top_y (จุดที่ความสูงลดฮวบกลางแถว) ด้วย prominence
-# (ความลึกของรอยบากเทียบกับพื้นฐานรอบข้าง) >= เกณฑ์ขั้นต่ำ (2) กรองด้วยระยะห่างขั้นต่ำจากรอยบาก
-# อื่น กันนับซ้ำจากรอยเดียวกัน (3) sample สีในช่วง y ระหว่าง baseline (ระดับเพื่อนบ้านที่ต่ำกว่า)
-# กับจุดรอยบาก (4) ถ้าสัดส่วนที่เป็นพื้นหลัง/สีโครงสร้างตู้สูงพอ -> ยืนยันว่าเป็นรอยบากว่างจริง
-# ไม่ใช่ noise/เส้นขอบ/สีกล่องอื่น -> flag REAR_EMPTY_RISK subtype "silhouette_notch"
-#
-# Safety: threshold ทั้งหมด (prominence>=15px, distance>=20px, empty_fraction>=0.6) คาลิเบรต
-# จากไฟล์ ground-truth ที่มีอยู่ - ยืนยัน regression-clean กับ 5 ไฟล์ก่อนหน้า (ไม่มี false-
-# positive แม้แต่จุดเดียว) ก่อนเปิดใช้งานจริง
-_NOTCH_MIN_PROMINENCE_PX = 15
-_NOTCH_MIN_DISTANCE_PX = 20
-_NOTCH_MIN_EMPTY_FRACTION = 0.6
-
-
-def detect_silhouette_notch_risk(view_result, view_label):
-    """ตรวจจับรอยบากในเส้นขอบบนกองสินค้า (cargo_top_y) ที่เผยพื้นหลัง/สีโครงสร้างตู้กลางแถว
-    (ไม่ใช่ปลายสุด) - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EC18-01/EC04-01)"""
-    cty = view_result.get("cargo_top_y")
-    region = view_result.get("region")
-    sx, ex = view_result.get("start_x"), view_result.get("end_x")
-    if cty is None or region is None or sx is None or ex is None or (ex - sx) < 40:
-        return []
-    xs = np.arange(sx, ex)
-    vals = np.array([float(cty[x]) if 0 <= x < len(cty) and cty[x] >= 0 else np.nan for x in xs])
-    valid_mask = ~np.isnan(vals)
-    if valid_mask.sum() < 20:
-        return []
-    if not np.all(valid_mask):
-        vals = np.interp(np.arange(len(vals)), np.where(valid_mask)[0], vals[valid_mask])
-    smoothed = median_filter(vals, size=9)
-    peaks, props = find_peaks(smoothed, prominence=_NOTCH_MIN_PROMINENCE_PX,
-                               distance=_NOTCH_MIN_DISTANCE_PX)
-    risks = []
-    for i, p in enumerate(peaks):
-        prom = float(props["prominences"][i])
-        left_base_idx = int(props["left_bases"][i])
-        right_base_idx = int(props["right_bases"][i])
-        x_notch = int(xs[p])
-        y_notch = int(round(smoothed[p]))
-        baseline_y = int(min(vals[left_base_idx], vals[right_base_idx]))
-        if y_notch <= baseline_y:
-            continue
-        colors_sampled = []
-        for yy in range(baseline_y, y_notch, 3):
-            if 0 <= yy < region.shape[0] and 0 <= x_notch < region.shape[1]:
-                colors_sampled.append(region[yy, x_notch])
-        if not colors_sampled:
-            continue
-        n_empty = sum(
-            1 for c in colors_sampled
-            if (int(c[0]) > 230 and int(c[1]) > 230 and int(c[2]) > 230)
-            or _p1b_is_structural_container_color(c)
-        )
-        frac_empty = n_empty / len(colors_sampled)
-        if frac_empty < _NOTCH_MIN_EMPTY_FRACTION:
-            continue
-        x0_mark = max(sx, x_notch - 20)
-        x1_mark = min(ex, x_notch + 20)
-        ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
-        abs_box = (ox + x0_mark, oy + baseline_y, ox + x1_mark, oy + y_notch)
-        risks.append({
-            "risk_type": "REAR_EMPTY_RISK", "subtype": "silhouette_notch",
-            "mark_view": view_label, "mark_stack_idx": None,
-            "mark_x_range": (x0_mark, x1_mark), "pos_range": None,
-            "abs_box": abs_box,
-            "notch_x": x_notch, "prominence_px": prom, "empty_fraction": frac_empty,
-            "reason": (f"พบรอยบากในเส้นขอบบนกองสินค้าที่ x={x_notch} (ลึก {prom:.0f}px) "
-                       f"เผยพื้นหลัง/สีโครงสร้างตู้ {frac_empty:.0%} บ่งชี้กล่องเตี้ยกว่า/ไม่มี"
-                       f"กล่องแถวหน้ามาบัง เสี่ยงพื้นที่ว่างกลางคัน"),
-        })
-    return risks
-
-
 def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
     """REAR_EMPTY_RISK - ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth
     คนละไฟล์ - ดูค่าคงที่ REAR_GAP_MIN_PX/REAR_GAP_MIN_RATIO/REAR_COLOR_ANOMALY_MIN_COLORS
@@ -5274,19 +4892,6 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     ความยาวสั้นกว่าจริงเพราะพลาดหน้าข้างกล่องใกล้ผนังหัวตู้ (ดู docstring เต็มด้านบน)
     """
     risks = []
-
-    # v25.58 NEW (log-only, ปิดใช้เป็น trigger ตั้งแต่ v25.61 - ดู CHANGELOG หัวไฟล์): เดิม
-    # ทดลองใช้ n_stacks mismatch (front_raw!=back_raw ก่อน Hungarian reconcile) เป็นเงื่อนไข
-    # เสริมให้ REAR_EMPTY_RISK trigger ได้แม้ pixel-length ไม่ถึงเกณฑ์ - แต่ regression-test พบว่า
-    # "front_raw!=back_raw อยู่ 1" เป็นรูปแบบปกติทั่วไป (เกิดจาก Phase1B merge/corner-artifact เอง)
-    # ไม่ใช่สัญญาณเฉพาะของปัญหา (EA07-01 8v7, ED03-01 4v3 มีรูปแบบเดียวกับ EC04-01's true-positive
-    # 8v7 เป๊ะ - แยกแยะไม่ได้ด้วยข้อมูลที่มีตอนนี้) จึงปิดการใช้เป็น trigger ไว้ก่อน เก็บไว้แค่ log
-    # เพื่อสะสมหลักฐานเพิ่มเติมสำหรับออกแบบเงื่อนไขที่แม่นยำกว่านี้ในอนาคต
-    n_front_raw = front_result.get("phase1b_raw_n_stacks")
-    n_back_raw = back_result.get("phase1b_raw_n_stacks")
-    if n_front_raw is not None and n_back_raw is not None and n_front_raw != n_back_raw:
-        print(f"[REAR_EMPTY][n_stacks_mismatch_observed] front_raw={n_front_raw} "
-              f"back_raw={n_back_raw} (log-only - ไม่ได้ใช้เป็นเงื่อนไข trigger ในเวอร์ชันนี้)")
 
     # --- กลไก A: cross-view length mismatch (ฝั่งที่ "สั้นกว่า" คือฝั่งที่มีพื้นที่ว่าง) ---
     _, _, front_len_ext = _p1b_extended_length_for_rear_check(front_result)
@@ -5438,11 +5043,6 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     back = process_view_with_height_on_image(
         full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"),
         precrop=back_precrop)
-    # v25.58 NEW: แนบจำนวนคอลัมน์ "ดิบ" (ก่อน Hungarian matching บังคับให้เท่ากัน) เข้า
-    # view_result - ใช้เป็น debug/log สำหรับ REAR_EMPTY_RISK (ดู docstring ที่ compute_phase1b_
-    # columns และ detect_rear_empty_risk)
-    front["phase1b_raw_n_stacks"] = phase1b.get("front_raw_count")
-    back["phase1b_raw_n_stacks"] = phase1b.get("back_raw_count")
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -5466,9 +5066,6 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
-    # v25.64 NEW: silhouette-notch detection (ดู docstring เต็มที่ detect_silhouette_notch_risk)
-    risks += detect_silhouette_notch_risk(front, "FRONT")
-    risks += detect_silhouette_notch_risk(back, "BACK")
     # v25.57 NEW: dedup ระหว่าง pairwise/pairwise_floor_jump กับ tail_stepdown เมื่อทั้งคู่
     # flag "คู่ column เดียวกัน" (view+pair_indices ตรงกัน) - พบจริงจาก log EB66-01 29-Aug-2026:
     # FRONT pairwise idx=1 และ tail_stepdown idx=0 ได้ drop_ratio=0.23156868... เหมือนกันเป๊ะ
@@ -5641,8 +5238,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.64",
-            "benchmarkMode": "v25_64_silhouette_notch_detection",
+            "checkerVersion": "V25.67",
+            "benchmarkMode": "v25_67_recursive_p1b_scale_fix",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
