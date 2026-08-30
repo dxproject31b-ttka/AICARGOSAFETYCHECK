@@ -2,6 +2,67 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.64 (Silhouette-Notch Detection - NEW risk mechanism ตามไอเดียผู้ใช้ 29-Aug-2026:
+"ลากเส้น 2 เส้นตัดกัน พื้นที่ล่างจุดตัดภายในตู้ พบสีขาว = พื้นที่ว่างจากกล่องสูงต่ำ/ไม่มีกล่อง"):
+
+  แปลไอเดียเป็นอัลกอริทึมที่ตรวจสอบได้จริง: ถ้าโหลดเต็มสม่ำเสมอ เส้นขอบบนกองสินค้า (cargo_top_y)
+  ควรมีรูปร่าง "V เดียว" (isometric apex - ไล่สูงขึ้นถึงจุดสูงสุดแล้วไล่ลง ทิศทางเดียว) - ถ้ามี
+  "รอยบากที่สอง" แทรกกลางแถว (local peak ที่ไม่ใช่ apex จริง) นั่นคือกล่องเตี้ยกว่าที่ไม่ถูกกอง
+  ข้างเคียงบังจนมิด เผยพื้นหลัง/ผนังตู้
+
+  ยืนยันด้วย pixel-level กับ 2 ไฟล์จริงที่ผู้ใช้ชี้ตำแหน่งด้วยภาพ+วาดกากบาท (EC18-01, EC04-01):
+  พบรอยบาก sample สีในรอยบากได้ 100% เป็นพื้นหลังขาว/สีโครงสร้างตู้ (wall panel/roof color จาก
+  _STRUCTURAL_CONTAINER_COLORS ที่มีอยู่แล้ว) ไม่ใช่สีกล่องสินค้าเลยแม้แต่จุดเดียว - ยืนยันตำแหน่ง
+  marker ที่วาดได้ตรงกับตำแหน่งที่ผู้ใช้ชี้ (วงกลม/กากบาท) ทั้ง 3 จุด (FRONT x2, BACK x1)
+
+  Regression-tested กับ 8 ไฟล์ก่อนหน้า (EA07-01/EB66-01/ED03-01/ED86-03/RD01-01/EC10-03/
+  EC19-01/EC05-02): hazardCount ตรงกับ baseline เดิมทุกไฟล์ 100% ไม่มี silhouette_notch
+  false-positive แม้แต่จุดเดียว - เพราะเป็นกลไกอิสระใหม่ (ไม่แตะ compute_stack_heights_px/
+  reconcile_heights_cross_view/process_view_on_image ที่เปราะบางและเคยทำให้เกิด regression
+  มาก่อนหน้านี้) เพิ่มเป็น REAR_EMPTY_RISK subtype ใหม่ "silhouette_notch" แยกจาก
+  "length_mismatch"/"color_anomaly" เดิม
+
+  Implementation: detect_silhouette_notch_risk() ใช้ scipy.signal.find_peaks หา local maxima
+  ของ cargo_top_y (prominence>=15px, distance>=20px) แล้ว sample สีระหว่าง baseline (เพื่อนบ้าน
+  ต่ำกว่า) กับจุดรอยบาก - ถ้า >=60% เป็นพื้นหลัง/สีโครงสร้างตู้ -> flag พร้อม abs_box (พิกัดตรง
+  ตำแหน่งรอยบากจริง ไม่ผูกกับ mark_stack_idx เพราะรอยบากอยู่ระหว่างคอลัมน์ ไม่ใช่ตำแหน่งคอลัมน์ใด
+  คอลัมน์หนึ่ง)
+
+  ข้อจำกัดที่ต้องระวัง (บอกตรงไปตรงมา): ยืนยันด้วยไฟล์ ground-truth แค่ 2 ไฟล์ (EC18-01/EC04-01
+  เป็นไฟล์ต้นเหตุที่ให้ไอเดียนี้มา) แม้ regression กับ 8 ไฟล์อื่นจะสะอาด แนะนำให้ทดสอบกับไฟล์ชุด
+  ใหญ่กว่านี้ (103/164 ไฟล์) เพื่อยืนยันความแม่นยำก่อนใช้งานจริงเต็มรูปแบบ - พบด้วยว่า EC18-01
+  ยังคงมี STEP_DOWN_RISK/pairwise (BACK idx=4) หลงเหลืออยู่คู่กับ silhouette_notch ใหม่ ซึ่งอาจ
+  เป็น false-positive ที่ยังไม่ได้แก้ (มาร์กคอลัมน์ที่ดูปกติในภาพ) - ยังไม่ตัดออกในรอบนี้เพราะ
+  ไม่มีหลักฐานเพียงพอจะยืนยันว่าควรตัดทิ้งหรือไม่ (อาจต้องรอ dedup เพิ่มเติมระหว่าง silhouette_
+  notch กับ pairwise ที่ชี้ตำแหน่งใกล้เคียงกันในรอบถัดไป)
+================================================================================
+v25.63 (RD01-01 แก้ครบสมบูรณ์ + สืบสวน EC18-01 เชิงลึกตามที่ผู้ใช้สั่ง "เข้าเคส cross_view/
+rear_empty พิจารณาถี่ถ้วน ไม่แหวกแนว" - 29-Aug-2026):
+
+  1. Global-Consensus Guard แก้จาก elif เป็นเช็คอิสระ (ยืนยันจาก RD01-01 idx2 ที่ยังเหลือ):
+  เดิม (v25.62) Global-Consensus ทำงานเฉพาะเมื่อ Floor-Linearity คำนวณ anomaly ไม่ได้เลยทั้งคู่
+  (anomaly_a/b เป็น None ทั้งคู่) - พบว่า RD01-01's FRONT idx2 vs BACK idx0 คู่นี้ Floor-
+  Linearity คำนวณ anomaly ได้ (ไม่ None) แต่ไม่ถึงเกณฑ์พลิก ทำให้ Global-Consensus ไม่มีโอกาสได้
+  ทำงานเลย (ถูกบล็อกด้วย elif) FIX: เปลี่ยนเป็นเช็คอิสระ - รัน Global-Consensus เสมอเมื่อ
+  Floor-Linearity ยังไม่ตัดสินใจพลิก (ไม่ว่า anomaly จะเป็น None หรือมีค่าแต่ไม่ถึง threshold)
+  ผลทดสอบ: RD01-01 ไม่มี STEP_DOWN_RISK ปลอมเหลือเลย (ทั้ง idx1,idx2 ถูกแก้) เหลือแค่
+  REAR_EMPTY_RISK 1 จุดซึ่งเป็นความเสี่ยงจริง (ตรงกับ Unused Floor 26.8in) - RD01-01 แก้ครบแล้ว
+
+  2. EC18-01 - สืบสวนเชิงลึกตามคำสั่งผู้ใช้ (ไม่ใช้ color-filter ใน compute_stack_heights_px
+  ที่เคยลองแล้วพัง EB66-01): ยืนยันด้วยภาพจริงว่า BACK view เห็นกล่องเขียว 2 ชั้นสม่ำเสมอทั้งหมด
+  (ไม่มี dip จริง) - แปลว่าค่า BACK ที่วัดได้ต่ำในบางคอลัมน์เป็น artifact ไม่ใช่หลักฐานความจริง
+  ตรวจสอบ Phase 1B พบว่ากล่องแดง (TOC1B-BN) ไม่ได้ถูกตัดทิ้งจริง (รอดเป็น idx0) แต่ root cause
+  คือ x_min_ (boundary ซ้ายสุด) ขยายเกินจริง 80px ไปทับพื้นที่กล่องเขียวข้างเคียง (ยืนยัน:
+  โซนที่ขยาย x=655-735 เป็นสีเขียวล้วน ไม่ใช่พื้นตู้เปล่า) ทดลองแก้ 2 ชั้น (guard ที่ seam-
+  computation + guard ที่ start_x/end_x) แก้ EC18-01 ได้จริง (REAR_EMPTY_RISK trigger ถูกต้อง
+  ตามกลไก rear_empty ที่มีอยู่แล้ว ไม่ต้องเพิ่มกฎใหม่) แต่ regression-test พบว่าทำให้เกิด false-
+  positive ใหม่ใน EA07-01 (2->3 hazards) และ EB66-01 (1->2 hazards) - จึง REVERT ทั้ง 2 guard
+  นี้ออกไปแล้ว (EC18-01 กลับไปเหลือ 1 hazard ผิดตำแหน่งเหมือนเดิม) เพื่อความปลอดภัยของไฟล์อื่น
+  ข้อสรุปสำหรับรอบถัดไป: root cause ของ EC18-01 (x_min_ extension ผิด) ยืนยันชัดเจนแล้ว แต่การ
+  ตรวจสอบสี (color-matching) ที่ใช้แยกแยะ "ขยายถูก" กับ "ขยายผิด" ยังไม่แม่นยำพอ (threshold
+  tol=60/min_frac=0.5 หลวมเกินไป ทำให้ false-positive ในไฟล์อื่นที่มีสีใกล้เคียงกันตามธรรมชาติ
+  บริเวณขอบภาพ) ต้องการไฟล์ตัวอย่างเพิ่มเติมและ threshold ที่แม่นยำกว่านี้ก่อนจะลองแก้อีกครั้ง
+================================================================================
 v25.57 (แก้ 3 จุดที่พบจาก log จริง EA07-01/EB66-01 วันที่ 29-Aug-2026 - ผู้ใช้ยืนยันว่าทั้ง
 2 ไฟล์เป็น "กล่องเต็มตู้ ปราศจากความเสี่ยงใดๆ" แต่หลัง deploy v25.56 ยัง flag ผิดอยู่):
 
@@ -527,6 +588,8 @@ import fitz  # PyMuPDF
 import functions_framework
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
+from scipy.signal import find_peaks
+from scipy.ndimage import median_filter
 
 
 # ============================================================================
@@ -4822,34 +4885,34 @@ def reconcile_heights_cross_view(records_front, records_back,
                        else back_result["local_floor_y"])
             anomaly_a = _floor_linearity_anomaly(a_records_same_view, rec_a["idx"], a_floor)
             anomaly_b = _floor_linearity_anomaly(b_records_same_view, best_match["idx"], b_floor)
+        should_flip = False
+        flip_reason = None
         if anomaly_a is not None and anomaly_b is not None:
             winner_anomaly = anomaly_a if trust_a else anomaly_b
             loser_anomaly = anomaly_b if trust_a else anomaly_a
             if (winner_anomaly >= _FLOOR_LINEARITY_ANOMALY_MIN_PX
                     and winner_anomaly > loser_anomaly * 2):
-                print(f"[FLOOR_LINEARITY] พลิกกลับการเลือก: winner เดิม (view="
-                      f"{rec_a['view'] if trust_a else best_match['view']}) "
-                      f"anomaly={winner_anomaly:.1f}px vs loser anomaly={loser_anomaly:.1f}px "
-                      f"-> เชื่อฝั่งที่ floor สมเหตุสมผลกว่าแทน")
-                trust_a = not trust_a
-        elif anomaly_a is None and anomaly_b is None:
-            # v25.62 NEW (สำคัญ - พบจริงจาก RD01-01 idx2, 29-Aug-2026): เดิม Floor-Linearity
-            # Guard (v25.61) ต้องการเพื่อนบ้านครบ 2 ฝั่ง (interpolation) จึงจะตรวจสอบได้ - พบว่า
-            # กรณีที่ "ทั้งคู่ในคู่เปรียบเทียบอยู่ริมสุดของฝั่งตัวเองพร้อมกัน" (เช่น FRONT idx สุดท้าย
-            # จับคู่กับ BACK idx0 ซึ่งเป็นตำแหน่งจริงเดียวกัน - หัวตู้ - แต่เป็นริมสุดของทั้ง 2 view
-            # เพราะทิศทาง flip ตรงข้ามกัน) ทำให้ anomaly_a และ anomaly_b เป็น None ทั้งคู่ Guard
-            # จึงใช้ไม่ได้เลย ปล่อยให้ reliability hierarchy เดิม (h_a>=h_b ชนะ) ตัดสินใจแทน ซึ่ง
-            # ยืนยันจาก RD01-01 ว่ายังคงเลือกผิด (FRONT idx2=273.5px ชนะ เขียนทับ BACK idx0=200.7px
-            # ที่ถูกต้อง ทั้งที่ทุกคอลัมน์อื่นในทั้ง 2 view วัดได้ตรงกันที่ ~200px)
-            # FIX: เพิ่ม "Global Consensus Guard" เป็นทางเลือกสำรอง (fallback) เมื่อ Floor-
-            # Linearity Guard ใช้ไม่ได้ - เปรียบเทียบ h_a/h_b กับค่ามัธยฐาน (median) ของความสูงที่
-            # วัดได้ "อย่างน่าเชื่อถือ" (direct/cross_view_filled) จากคอลัมน์อื่นๆ ทั้งหมดในทั้ง 2
-            # view (ไม่รวม rec_a/best_match เอง) - ถ้ามีข้อมูลอ้างอิงเพียงพอ (>=2 จุด) และฝั่งที่
-            # กำลังจะ "ชนะ" เบี่ยงเบนจาก median มากกว่าฝั่งที่ "แพ้" อย่างมีนัยสำคัญ ให้พลิกกลับ
-            # เหตุผลที่ปลอดภัยกว่า extrapolation: ใช้ข้อมูลจริงจากทั้งภาพ (ไม่ใช่การประมาณค่านอก
-            # ช่วงจากเส้นตรงสมมติ) - ยืนยันจาก RD01-01: median ของ FRONT idx0(198.6)+BACK idx1
-            # (200.0)+BACK idx2(200.4) = 200.0 - FRONT idx2(273.5) เบี่ยงเบน 36.75% ในขณะที่
-            # BACK idx0 เดิม(200.7) เบี่ยงเบนแค่ 0.35% เท่านั้น - แยกแยะได้ชัดเจนไม่มีความกำกวม
+                should_flip = True
+                flip_reason = (f"[FLOOR_LINEARITY] anomaly={winner_anomaly:.1f}px vs "
+                                f"loser anomaly={loser_anomaly:.1f}px")
+        # v25.63 FIX (Critical - พบจริงจาก EC18-01, 29-Aug-2026, ตามที่ผู้ใช้สั่งให้พิจารณาผ่าน
+        # กลไก cross_view/rear_empty ที่มีอยู่แล้วอย่างถี่ถ้วน ไม่แหวกแนว): เดิม (v25.62) Global
+        # Consensus Guard ถูกเขียนเป็น "elif" ที่ทำงานเฉพาะเมื่อ Floor-Linearity คำนวณ anomaly
+        # ไม่ได้เลยทั้งคู่ (anomaly_a/b เป็น None ทั้งคู่ - เฉพาะกรณีคอลัมน์ริมสุด) - พบว่ากรณี
+        # EC18-01 (กล่องแดงเตี้ยถูกกล่องเขียวข้างเคียงทะลุปนสี "ยอด" (cargo_top_y) ไม่ใช่ "พื้น"
+        # (floor_y)) Floor-Linearity Guard คำนวณ anomaly ได้ค่าที่ต่ำ (ไม่ None) เพราะ floor_y  
+        # เองไม่ได้ผิดเลย (ปัญหาอยู่ที่ top ไม่ใช่ floor) ทำให้เข้าเงื่อนไข "if" (มี anomaly ทั้งคู่)
+        # แต่ไม่ผ่าน threshold ให้พลิก (เพราะ floor ปกติจริง) - ผลคือ Global-Consensus (elif)
+        # ไม่มีโอกาสได้ทำงานเลย ทั้งที่ควรจะช่วยตรวจจับได้ (ยืนยัน: FRONT idx2=346.8 vs BACK
+        # idx4=269.0 ที่ BACK's ค่าใกล้เคียงกับกลุ่มคอลัมน์ dip ทั้ง 3 ตำแหน่งที่สอดคล้องกันเอง
+        # มาก (269.5/269.0/269.4) ในขณะที่ FRONT's plateau (346-353) แม้จะสอดคล้องกันเองเช่นกัน
+        # แต่เป็นผลจากสีทะลุปนจากกล่องเขียวข้างเคียงที่สูงกว่า)
+        # FIX: เปลี่ยนจาก elif เป็นการเช็คอิสระ - รัน Global-Consensus Guard เสมอเมื่อ Floor-
+        # Linearity ยังไม่ตัดสินใจพลิก (ไม่ว่า anomaly จะเป็น None หรือมีค่าแต่ไม่ถึง threshold
+        # ก็ตาม) เพื่อให้เป็นเกราะป้องกันชั้นที่ 2 อิสระจากกัน (ไม่ compound กับ floor-linearity -
+        # ถ้า floor-linearity ตัดสินใจพลิกแล้ว จะไม่รัน global-consensus ซ้ำอีก กันการพลิกซ้อนกัน
+        # จนกลับไปผิดอีกที)
+        if not should_flip:
             other_reliable = []
             for rec_list in (records_front, records_back):
                 for r in rec_list:
@@ -4866,12 +4929,15 @@ def reconcile_heights_cross_view(records_front, records_back,
                     winner_dev = dev_a if trust_a else dev_b
                     loser_dev = dev_b if trust_a else dev_a
                     if winner_dev >= 0.15 and winner_dev > loser_dev * 3:
-                        print(f"[GLOBAL_CONSENSUS] พลิกกลับการเลือก: winner เดิม (view="
-                              f"{rec_a['view'] if trust_a else best_match['view']}) "
-                              f"เบี่ยงเบนจาก median กลุ่ม({median_h:.1f}px, n={len(other_reliable)}) "
-                              f"{winner_dev:.1%} vs loser {loser_dev:.1%} -> เชื่อฝั่งที่ตรงกับ "
-                              f"ฉันทามติทั้งภาพมากกว่าแทน")
-                        trust_a = not trust_a
+                        should_flip = True
+                        flip_reason = (f"[GLOBAL_CONSENSUS] เบี่ยงเบนจาก median กลุ่ม"
+                                        f"({median_h:.1f}px, n={len(other_reliable)}) "
+                                        f"{winner_dev:.1%} vs loser {loser_dev:.1%}")
+        if should_flip:
+            print(f"พลิกกลับการเลือก: winner เดิม (view="
+                  f"{rec_a['view'] if trust_a else best_match['view']}) {flip_reason} "
+                  f"-> เชื่อฝั่งที่สอดคล้องกับหลักฐานมากกว่าแทน")
+            trust_a = not trust_a
         # v25.40 NEW: Physical Validity Guard - ก่อนเลือกใช้ค่าใด ตรวจสอบว่าค่านั้นไม่เกิน
         # ความสูงตู้จริง ณ ตำแหน่งของ 'เป้าหมายที่จะถูกเขียนทับ' (ไม่ใช่ตำแหน่งของแหล่งอ้างอิง
         # เพราะ x_range ของทั้งคู่อาจต่างกันเล็กน้อยจากการ reconcile คนละ view) - ถ้าค่าที่เลือก
@@ -5103,6 +5169,94 @@ def _p1b_extended_length_for_rear_check(view_result):
     return start_x, end_x, (end_x - start_x)
 
 
+# v25.64 NEW (สำคัญ - ตามไอเดียผู้ใช้ 29-Aug-2026: "ลากเส้น 2 เส้นตัดกัน พื้นที่ล่างจุดตัด
+# ภายในตู้สินค้า พบสีขาว หมายถึงพื้นที่ว่าง อันเกิดจากกล่องสูงต่ำหรือไม่มีกล่องวางตรงนั้น"):
+#
+# ยืนยันด้วยข้อมูลจริง 2 ไฟล์ (EC18-01, EC04-01) ระดับ pixel: เมื่อคำนวณ cargo_top_y (เส้นขอบ
+# บนสุดของกองสินค้า) ตลอดความกว้างทั้งวิว พบว่าปกติ (ไฟล์ที่โหลดเต็มสม่ำเสมอ - regression-tested
+# กับ EA07-01/EB66-01/ED03-01/ED86-03/RD01-01 ไม่พบเลยแม้แต่จุดเดียว) เส้นนี้จะมีรูปร่าง "V เดียว"
+# (isometric apex) คือไล่สูงขึ้นจากปลายด้านหนึ่งถึงจุดสูงสุดจุดเดียว แล้วไล่ลงจนจบอีกด้าน (ทิศทาง
+# เดียว ไม่สลับกลับ) - ถ้ามี "รอยบากที่สอง" (local peak ที่ไม่ใช่ apex จริง) แทรกอยู่กลางแถว
+# (ไม่ใช่ปลายสุด) นั่นคือสัญญาณทางเรขาคณิตของกล่องเตี้ยกว่าเพื่อนบ้านที่ไม่ถูกกองข้างเคียงบังจนมิด
+# เผยให้เห็นพื้นหลัง/ผนังตู้ - ยืนยันด้วยการ sample สีจริงในรอยบาก: EC18-01 back x=919 (prominence
+# 37px) พบสีขาวล้วน (255,255,255) 100% / EC04-01 front x=1048,1109 (prominence 23px) พบสี
+# โครงสร้างตู้ (179,179,90)="แผงผนังตู้", (255,255,175)="ผนังหลัง/หลังคาตู้" (ตรงกับ
+# _STRUCTURAL_CONTAINER_COLORS ที่มีอยู่แล้วในระบบ) 100% - ไม่ใช่สีกล่องสินค้าเลยแม้แต่จุดเดียว
+# ยืนยันว่าเป็นพื้นที่ว่างจริง ไม่ใช่กล่องสีต่างที่ถูกต้อง
+#
+# วิธีทำงาน: (1) หา local maxima ของ cargo_top_y (จุดที่ความสูงลดฮวบกลางแถว) ด้วย prominence
+# (ความลึกของรอยบากเทียบกับพื้นฐานรอบข้าง) >= เกณฑ์ขั้นต่ำ (2) กรองด้วยระยะห่างขั้นต่ำจากรอยบาก
+# อื่น กันนับซ้ำจากรอยเดียวกัน (3) sample สีในช่วง y ระหว่าง baseline (ระดับเพื่อนบ้านที่ต่ำกว่า)
+# กับจุดรอยบาก (4) ถ้าสัดส่วนที่เป็นพื้นหลัง/สีโครงสร้างตู้สูงพอ -> ยืนยันว่าเป็นรอยบากว่างจริง
+# ไม่ใช่ noise/เส้นขอบ/สีกล่องอื่น -> flag REAR_EMPTY_RISK subtype "silhouette_notch"
+#
+# Safety: threshold ทั้งหมด (prominence>=15px, distance>=20px, empty_fraction>=0.6) คาลิเบรต
+# จากไฟล์ ground-truth ที่มีอยู่ - ยืนยัน regression-clean กับ 5 ไฟล์ก่อนหน้า (ไม่มี false-
+# positive แม้แต่จุดเดียว) ก่อนเปิดใช้งานจริง
+_NOTCH_MIN_PROMINENCE_PX = 15
+_NOTCH_MIN_DISTANCE_PX = 20
+_NOTCH_MIN_EMPTY_FRACTION = 0.6
+
+
+def detect_silhouette_notch_risk(view_result, view_label):
+    """ตรวจจับรอยบากในเส้นขอบบนกองสินค้า (cargo_top_y) ที่เผยพื้นหลัง/สีโครงสร้างตู้กลางแถว
+    (ไม่ใช่ปลายสุด) - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EC18-01/EC04-01)"""
+    cty = view_result.get("cargo_top_y")
+    region = view_result.get("region")
+    sx, ex = view_result.get("start_x"), view_result.get("end_x")
+    if cty is None or region is None or sx is None or ex is None or (ex - sx) < 40:
+        return []
+    xs = np.arange(sx, ex)
+    vals = np.array([float(cty[x]) if 0 <= x < len(cty) and cty[x] >= 0 else np.nan for x in xs])
+    valid_mask = ~np.isnan(vals)
+    if valid_mask.sum() < 20:
+        return []
+    if not np.all(valid_mask):
+        vals = np.interp(np.arange(len(vals)), np.where(valid_mask)[0], vals[valid_mask])
+    smoothed = median_filter(vals, size=9)
+    peaks, props = find_peaks(smoothed, prominence=_NOTCH_MIN_PROMINENCE_PX,
+                               distance=_NOTCH_MIN_DISTANCE_PX)
+    risks = []
+    for i, p in enumerate(peaks):
+        prom = float(props["prominences"][i])
+        left_base_idx = int(props["left_bases"][i])
+        right_base_idx = int(props["right_bases"][i])
+        x_notch = int(xs[p])
+        y_notch = int(round(smoothed[p]))
+        baseline_y = int(min(vals[left_base_idx], vals[right_base_idx]))
+        if y_notch <= baseline_y:
+            continue
+        colors_sampled = []
+        for yy in range(baseline_y, y_notch, 3):
+            if 0 <= yy < region.shape[0] and 0 <= x_notch < region.shape[1]:
+                colors_sampled.append(region[yy, x_notch])
+        if not colors_sampled:
+            continue
+        n_empty = sum(
+            1 for c in colors_sampled
+            if (int(c[0]) > 230 and int(c[1]) > 230 and int(c[2]) > 230)
+            or _p1b_is_structural_container_color(c)
+        )
+        frac_empty = n_empty / len(colors_sampled)
+        if frac_empty < _NOTCH_MIN_EMPTY_FRACTION:
+            continue
+        x0_mark = max(sx, x_notch - 20)
+        x1_mark = min(ex, x_notch + 20)
+        ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
+        abs_box = (ox + x0_mark, oy + baseline_y, ox + x1_mark, oy + y_notch)
+        risks.append({
+            "risk_type": "REAR_EMPTY_RISK", "subtype": "silhouette_notch",
+            "mark_view": view_label, "mark_stack_idx": None,
+            "mark_x_range": (x0_mark, x1_mark), "pos_range": None,
+            "abs_box": abs_box,
+            "notch_x": x_notch, "prominence_px": prom, "empty_fraction": frac_empty,
+            "reason": (f"พบรอยบากในเส้นขอบบนกองสินค้าที่ x={x_notch} (ลึก {prom:.0f}px) "
+                       f"เผยพื้นหลัง/สีโครงสร้างตู้ {frac_empty:.0%} บ่งชี้กล่องเตี้ยกว่า/ไม่มี"
+                       f"กล่องแถวหน้ามาบัง เสี่ยงพื้นที่ว่างกลางคัน"),
+        })
+    return risks
+
+
 def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
     """REAR_EMPTY_RISK - ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth
     คนละไฟล์ - ดูค่าคงที่ REAR_GAP_MIN_PX/REAR_GAP_MIN_RATIO/REAR_COLOR_ANOMALY_MIN_COLORS
@@ -5312,6 +5466,9 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
+    # v25.64 NEW: silhouette-notch detection (ดู docstring เต็มที่ detect_silhouette_notch_risk)
+    risks += detect_silhouette_notch_risk(front, "FRONT")
+    risks += detect_silhouette_notch_risk(back, "BACK")
     # v25.57 NEW: dedup ระหว่าง pairwise/pairwise_floor_jump กับ tail_stepdown เมื่อทั้งคู่
     # flag "คู่ column เดียวกัน" (view+pair_indices ตรงกัน) - พบจริงจาก log EB66-01 29-Aug-2026:
     # FRONT pairwise idx=1 และ tail_stepdown idx=0 ได้ drop_ratio=0.23156868... เหมือนกันเป๊ะ
@@ -5484,8 +5641,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.62",
-            "benchmarkMode": "v25_62_rd0101_fixed_ec18_colorfilter_disabled_pending_review",
+            "checkerVersion": "V25.64",
+            "benchmarkMode": "v25_64_silhouette_notch_detection",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
