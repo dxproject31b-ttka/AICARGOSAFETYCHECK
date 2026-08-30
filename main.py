@@ -2,6 +2,46 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.71 (แก้ ED84/ED85-01/02/03 ที่ผู้ใช้ระบุ "กล่องสีฟ้า/สีม่วง วาดกรอบเกินมา", 30-Aug-2026):
+
+  ROOT CAUSE #1 (สำคัญ - ช่องโหว่ระบบ): height_source="apex_fallback" (ค่าที่วัดจากช่วง "หลัง
+  จุดยอด isometric" ซึ่ง docstring ของ compute_stack_heights_px เองระบุไว้แล้วว่า "เอียงคนละทิศ,
+  height ผิดเพี้ยนเป็นระบบ") ไม่เคยมี reliability guard ใดๆ เลยในกลไก pairwise/cross_view/
+  tail_stepdown (guard เดิมเช็คแค่ n_samples เมื่อ height_source=="direct" เท่านั้น) ยืนยันด้วย
+  ข้อมูลจริงข้าม 4 ไฟล์ไม่เกี่ยวข้องกัน (ED84, ED85-01/02/03): ทุกไฟล์มี apex_fallback ที่คอลัมน์
+  ริมสุดได้ n_samples=67 "เหมือนกันเป๊ะ" (ต่าง SKU/ขนาดกล่องคนละไฟล์ - เป็นไปไม่ได้ทางสถิติถ้าเป็น
+  การวัดจริง) พิสูจน์ว่าเป็น geometric artifact ที่ผูกกับตำแหน่ง apex คงที่ของ container ไม่ใช่
+  ความสูงกล่องจริง
+  FIX: ถ้าฝั่งที่ "เตี้ยกว่า/ถูก flag" มี height_source=="apex_fallback" ให้ไม่ flag เลย - wire
+  เข้า detect_step_down_pairwise (subtype='pairwise' เท่านั้น ไม่กระทบ 'pairwise_floor_jump' ซึ่ง
+  มีหลักฐานอิสระคนละตัว), detect_step_down_crossview, detect_tail_stepdown
+  ผลทดสอบ: ED84 FRONT pairwise (กล่องสีฟ้า STT1A) หายไป, ED85-01/02/03 cross_view หายไปทั้ง 3 ไฟล์
+
+  ROOT CAUSE #2: Edge-Column Global Consensus Guard (v25.68) เดิมคำนวณ plateau spread จาก
+  min-max ดิบ - พบว่าคอลัมน์ที่ "ติดกับ" คอลัมน์ริมสุด (ไม่ใช่ตัวริมสุดเอง) อาจได้รับผลกระทบจาก
+  isometric distortion เบาๆ เช่นกัน ทำให้ raw spread สูงเกิน threshold แม้ "แกนหลัก" ของ plateau
+  จะนิ่งมากจริง - ยืนยันจาก ED85-01/02/03: คอลัมน์ idx=1 มีความสูง 308.1-308.3px "เหมือนกันเป๊ะ"
+  ข้าม 3 ไฟล์ (สัญญาณเดียวกับ apex_fallback n=67)
+  FIX: เปลี่ยนจาก min-max ดิบ เป็น median+MAD-based iterative outlier rejection (เทคนิคเดียวกับ
+  _robust_local_line_fit ที่ใช้ทั่วระบบ) ก่อนคำนวณ spread - แยกเกณฑ์ขั้นต่ำเป็น 2 ระดับ (ก่อน/
+  หลัง trim) เพื่อรองรับไฟล์ที่มีคอลัมน์น้อย (ED85-01 มีแค่ 3 จุดใน plateau)
+  ผลทดสอบ: ED85 ทั้ง 3 ไฟล์ tail_stepdown (กล่องสีม่วง TGT1G) หายไปหมด
+
+  ข้อสังเกตสำคัญระหว่าง regression: EA07-01 hazardCount ลดจาก 2->1 (tail_stepdown ที่เคยมีถูก
+  apex_fallback guard ใหม่กรองออก) - ตรวจสอบประวัติ CHANGELOG v25.57 พบว่าผู้ใช้เคยยืนยันไว้ว่า
+  ไฟล์นี้ "กล่องเต็มตู้ ปราศจากความเสี่ยงใดๆ" (ควรเป็น 0) - การเปลี่ยนแปลงนี้จึงสอดคล้องกับเป้าหมาย
+  เดิม ไม่ใช่ regression (ยังเหลือ pairwise_floor_jump อีก 1 จุดที่อาจต้องแก้ต่อในรอบถัดไป - คนละ
+  กลไกกับที่แก้วันนี้ ใช้ floor_jump เป็นหลักฐานอิสระ)
+
+  ข้อจำกัดที่ยังไม่ได้แก้ในรอบนี้: ED85 ทั้ง 3 ไฟล์ยังเหลือ hidden_behind (BACK idx=0,
+  drop_ratio~0.17) ที่ยังไม่ได้ตรวจสอบว่าเป็น false-positive จากกลไกเดียวกันหรือไม่ - รอ
+  หลักฐานเพิ่มเติมก่อนแก้ไขในรอบถัดไป
+
+  regression-verified ครบ 13 ไฟล์เดิม + 4 ไฟล์ใหม่: EC04-01=3, RD01-01=0, EA07-01=1(ดูหมายเหตุ
+  ด้านบน), EB66-01=0, ED03-01=0, ED86-03=0, EC18-01=2, EC05-02=0, EB73-01=0, EC10-03=0,
+  EC19-01=0, EE03-01=1, ED84=2, ED85-01=1, ED85-02=2, ED85-03=2 - ไม่มี regression ที่ไม่มี
+  คำอธิบายเหลืออยู่เลย
+================================================================================
 v25.70 (แก้ปัญหา EE03-01 ที่ผู้ใช้ระบุ "silhouette_notch/step_down จับไม่เจออะไรเลย",
 30-Aug-2026):
 
@@ -4685,7 +4725,12 @@ def detect_step_down_topface_jump(records, view_label, view_result):
 # นี้จะทำงาน - ถ้า plateau ไม่นิ่ง (มีความแตกต่างจริงระหว่างคอลัมน์กลาง) guard นี้จะไม่ทำงานเลย
 # ปล่อยให้ logic เดิมตัดสินใจตามปกติ)
 _EDGE_OUTLIER_MIN_PLATEAU_SIZE = 3
-_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10
+_EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM = 2  # v25.71 NEW: ดู docstring เต็มใน
+# _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01)
+_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10  # คงค่าเดิมไว้ (well-tested) - ดู v25.71 FIX
+# ด้านล่าง (median/MAD-based robust trimming) แทนการขยับ threshold ตรงๆ ซึ่งพิสูจน์แล้วว่าไม่
+# generalizable พอ (ED85-01/02 spread=12.5% แก้ได้ด้วย threshold=0.13 แต่ ED85-03 spread=13.75%
+# ยังไม่พอ - "whack-a-mole" ที่ไม่มีจุดจบชัดเจน)
 _EDGE_OUTLIER_DEVIATION_THRESHOLD = 0.10
 
 
@@ -4718,7 +4763,37 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
         plateau_heights.append(r["height_px"])
     if len(plateau_heights) < min_plateau_size:
         return False
+    # v25.71 NEW (สำคัญ - พบจริงจาก ED85-01/02/03 ที่ผู้ใช้ระบุ, 30-Aug-2026): เดิมคำนวณ
+    # p_spread จาก min-max ดิบของ plateau_heights ทั้งหมด - พบว่าคอลัมน์ที่ "ติดกับ" คอลัมน์ริมสุด
+    # (idx=1, ไม่ใช่ตัวริมสุดเอง) อาจได้รับผลกระทบจาก isometric distortion ในทิศทางเดียวกัน
+    # (เบากว่า) ทำให้ raw min-max spread สูงเกิน threshold แม้ "แกนหลัก" ของ plateau (คอลัมน์ที่
+    # เหลือ ไม่รวม idx=1) จะนิ่งมากจริง (spread แค่ 2.7% ในไฟล์ทดสอบ) - ยืนยันด้วยข้อมูลจริง
+    # ED85-01/02/03: idx=1 มีความสูง 308.1-308.3px "เหมือนกันเป๊ะ" ข้าม 3 ไฟล์ (สัญญาณเดียวกับ
+    # apex_fallback n=67 ที่เคยพิสูจน์แล้วว่าเป็น geometric artifact ไม่ใช่ความสูงจริง)
+    # FIX: ใช้ median + MAD-based iterative outlier rejection (เทคนิคเดียวกับ
+    # _robust_local_line_fit ที่ใช้ทั่วระบบอยู่แล้ว) ตัด "แกนนอก" (ค่าที่เบี่ยงเบนจาก median มาก)
+    # ออกก่อนคำนวณ spread - ทำให้ guard ตรวจจับ "แกนหลักที่นิ่งจริง" ได้แม่นยำขึ้น โดยไม่ต้องขยับ
+    # threshold ไปเรื่อยๆ แบบไม่มีจุดจบ (ยืนยันว่าไม่กระทบไฟล์เดิมที่ plateau นิ่งอยู่แล้วเพราะการ
+    # trim จะไม่ตัดอะไรออกเลยถ้าไม่มี outlier จริง)
+    # v25.71 NEW: แยกเกณฑ์ขั้นต่ำเป็น 2 ระดับ - min_plateau_size (=3 เดิม) ใช้เป็นเงื่อนไข "ก่อน
+    # เริ่ม trim" (ต้องมีจุดดิบเพียงพอก่อนถึงจะลองใช้ guard นี้เลย - ไม่ลดมาตรฐานเดิม) ส่วน
+    # _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM (=2) ใช้เป็นเกณฑ์ขั้นต่ำ "หลัง trim" เท่านั้น -
+    # อนุญาตให้ trim เหลือน้อยกว่าเดิมได้ถ้าจุดที่เหลือ "นิ่งจริง" (ยืนยันจาก ED85-01: มีแค่ 3 จุด
+    # ดิบ trim ออกได้ 1 จุด (outlier) เหลือ 2 จุดที่นิ่งมาก - ต้องอนุญาตให้ trim ลงมาที่ 2 ได้ ไม่งั้น
+    # จะติดเงื่อนไข "keep.sum()<min_plateau_size" เดิมที่บล็อกไม่ให้ trim เมื่อไฟล์มีคอลัมน์น้อย)
     arr = np.array(plateau_heights, dtype=float)
+    for _ in range(3):  # iterative trimming (เหมือน _robust_local_line_fit, n_iter=3)
+        if len(arr) < _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM:
+            break
+        med = np.median(arr)
+        mad = np.median(np.abs(arr - med))
+        mad = max(mad, 2.0)  # mad_floor กันกรณีข้อมูลเรียบสมบูรณ์แบบ (MAD~0)
+        keep = np.abs(arr - med) < 2.5 * mad
+        if keep.sum() < _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM or keep.sum() == len(arr):
+            break
+        arr = arr[keep]
+    if len(arr) < _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM:
+        return False
     p_median = float(np.median(arr))
     if p_median <= 0:
         return False
@@ -4768,6 +4843,24 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
+        # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
+        # guard ใดๆ เลยสำหรับ height_source="apex_fallback" (guard ที่มีอยู่เดิมเช็คแค่ n_samples
+        # เมื่อ height_source=="direct" เท่านั้น) ทั้งที่ docstring ของ compute_stack_heights_px
+        # เองระบุไว้ชัดเจนแล้วว่า apex_fallback คือค่าที่วัดจากช่วง "หลังจุดยอด isometric" ซึ่ง
+        # "เอียงคนละทิศ, height ผิดเพี้ยนเป็นระบบ" (ไม่ใช่แค่ noise สุ่ม แต่เป็น bias ที่รู้ทิศทาง
+        # อยู่แล้ว) - ยืนยันด้วยข้อมูลจริงข้าม 4 ไฟล์ที่ไม่เกี่ยวข้องกันเลย (ED84, ED85-01/02/03):
+        # ทุกไฟล์มี apex_fallback ที่คอลัมน์ริมสุดของ view ได้ n_samples=67 "เหมือนกันเป๊ะ" (ต่าง
+        # SKU/ขนาดกล่องกันคนละไฟล์ - เป็นไปไม่ได้ทางสถิติที่จะบังเอิญเท่ากันขนาดนี้ถ้าเป็นการวัด
+        # กล่องจริง) พิสูจน์ว่าเป็น artifact ทางเรขาคณิตที่ผูกกับตำแหน่ง apex คงที่ของ container
+        # (scale/มุมกล้องเดียวกัน) ไม่ใช่ความสูงกล่องจริง - เกิดปัญหาซ้ำในทั้ง detect_step_down_
+        # pairwise, detect_step_down_crossview, และ detect_tail_stepdown (ทุกกลไกที่ไม่เคยตรวจ
+        # source นี้มาก่อน)
+        # FIX: ถ้าฝั่งที่ "เตี้ยกว่า" (จะถูกใช้เป็นหลักฐาน flag ความเสี่ยง) เป็น apex_fallback ให้
+        # ไม่ flag เลย (เฉพาะ subtype='pairwise' ที่ใช้ threshold เทียบความสูงตรงๆ เท่านั้น -
+        # ไม่กระทบ subtype='pairwise_floor_jump' ด้านล่างซึ่งมีหลักฐานอิสระคนละตัว คือ floor_jump
+        # ที่วัดจากพื้นตู้ ไม่ใช่ยอดกล่อง จึงไม่ได้รับผลกระทบจาก apex bias นี้)
+        if shorter_rec.get("height_source") == "apex_fallback":
+            continue
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             risks.append({
@@ -5005,6 +5098,13 @@ def detect_tail_stepdown(records, view_label):
     if _is_edge_measurement_outlier(records, tail_rec["idx"]):
         return risks
 
+    # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
+    # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03) - เพิ่มไว้
+    # เพื่อความสอดคล้องกันทั้ง 3 กลไก แม้กรณี ED85 ที่พบจริงจะไม่ได้เกิดจาก apex_fallback ที่นี่
+    # โดยตรงก็ตาม (tail_rec ที่นั่นเป็น direct source - ยังเป็นข้อจำกัดที่เหลืออยู่ - ดู CHANGELOG)
+    if tail_rec.get("height_source") == "apex_fallback":
+        return risks
+
     risks.append({
         "risk_type": "STEP_DOWN_RISK",
         "subtype": "tail_stepdown",
@@ -5056,6 +5156,10 @@ def detect_step_down_crossview(records_front, records_back):
             if (shorter_rec.get("height_source") == "cross_view_corrected"
                     and shorter_rec.get("cross_view_conflict_ratio", 0.0)
                     > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+                continue
+            # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
+            # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03)
+            if shorter_rec.get("height_source") == "apex_fallback":
                 continue
             threshold = taller_h * (1 - STEP_DOWN_CROSSVIEW_DROP_RATIO)
             if shorter_h < threshold:
@@ -6080,8 +6184,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.70",
-            "benchmarkMode": "v25_70_hidden_behind_bidirectional_with_snr_floor_guards",
+            "checkerVersion": "V25.71",
+            "benchmarkMode": "v25_71_apex_fallback_guard_robust_plateau_trim",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
