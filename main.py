@@ -2,6 +2,28 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.69 (พัฒนาต่อจาก v25.68 ตามคำสั่งผู้ใช้ 30-Aug-2026):
+
+  1. ลบกลไก REAR_EMPTY_RISK/length_mismatch ออกทั้งหมด - ผู้ใช้ระบุว่า detect_silhouette_
+  notch_risk ("กรอบมุมทแยง", v25.64) ทำหน้าที่แทนได้ดีกว่า เพราะตรวจจับพื้นที่ว่างจากรูปทรง
+  เรขาคณิตโดยตรง (ไม่ต้องเทียบความยาว FRONT<->BACK ที่มี bias เชิงระบบแปรผันไม่คงที่ระหว่างไฟล์
+  6.3%-16.6%) เหลือแค่กลไก B (color_anomaly) เป็นกลไกเสริม + ลบ cross-view voting logic เดิม
+  ที่กลายเป็น dead code (ไม่มี subtype ขัดแย้งกันให้ vote อีกต่อไป)
+
+  2. ขยายกรอบ marker ของ silhouette_notch ให้ชัดเจนเหมือนกรอบคอลัมน์ปกติ - เดิมกว้างคงที่
+  x_notch±20px (40px) ไม่ว่ารอยบากจะกว้างแค่ไหน - เปลี่ยนเป็นใช้ความกว้างจริงของรอยบาก (จาก
+  left_bases/right_bases ที่ find_peaks คำนวณให้) แล้ว pad ให้ถึงขั้นต่ำ _NOTCH_BOX_MIN_WIDTH_PX
+  =70px (ใกล้เคียงความกว้างคอลัมน์ทั่วไปในไฟล์ทดสอบ)
+
+  ยืนยันประเด็น RD01-01 (ผู้ใช้ชี้แจง 30-Aug-2026): ไฟล์นี้ "ปลอดภัย" จริง (กล่องใหญ่ซ้อนเรียง
+  เสมอ 3 แถว) - length_mismatch เดิมที่เคย flag ไฟล์นี้ (gap 92px/17.3%) เป็น false-positive
+  ไม่ใช่การตรวจจับที่ถูกต้อง - silhouette_notch ที่ไม่ trigger กับไฟล์นี้ (hazardCount=0) จึง
+  เป็นผลลัพธ์ที่แม่นยำกว่า ไม่ใช่การสูญเสียความสามารถในการตรวจจับตามที่เคยกังวลไว้
+
+  regression-verified ครบ 11 ไฟล์: EC04-01=3, RD01-01=0(ถูกต้อง,ปลอดภัยจริง), EA07-01=2,
+  EB66-01=0, ED03-01=0, ED86-03=0, EC18-01=2, EC05-02=0, EB73-01=0, EC10-03=0, EC19-01=0
+  (EC10-03/EC19-01 ดีขึ้นจากเดิม เพราะ false-positive length_mismatch หายไปด้วย)
+================================================================================
 v25.66 (Plateau-Check ตามคำสั่งผู้ใช้ 29-Aug-2026 หลังตรวจสอบภาพจริง ED86-03 ยืนยันว่า
 STT1A/INERA สูงเท่ากันจริง ~275-283px แต่ v25.65 วัดผิดเป็น drop_ratio 30-84%):
 
@@ -4476,6 +4498,79 @@ def detect_step_down_topface_jump(records, view_label, view_result):
     return risks
 
 
+# v25.68 NEW (สำคัญ - พบจริงจาก EB66-01/EC10-03/EC19-01 ตามที่ผู้ใช้ระบุ, 30-Aug-2026):
+# เดิม detect_step_down_pairwise/detect_tail_stepdown เทียบความสูงของคอลัมน์ "ริมสุด" (idx=0
+# หรือ idx สุดท้าย) กับแค่ "เพื่อนบ้านข้างเดียว" เท่านั้น - พบว่าคอลัมน์ริมสุดจริงของแถว (ตำแหน่ง
+# ปลายสุด/หัวตู้หรือท้ายตู้ ไม่ใช่แค่ตำแหน่งขอบของ x_range) มีอคติเชิงระบบทางเรขาคณิต (isometric
+# perspective) ทำให้วัดความสูงต่ำกว่าความจริงอย่างสม่ำเสมอ แม้จะมี n_samples สูงและ height_source
+# ="direct" ก็ตาม (ไม่ใช่ปัญหาข้อมูลน้อย/apex ตัดข้อมูล ที่ guard เดิมตรวจจับได้อยู่แล้ว)
+#
+# ยืนยันด้วยข้อมูลจริง (ตรวจสอบระดับ pixel): EB66-01 FRONT idx0=261.7px เทียบ idx1=340.6px
+# (drop 23.16%) - แต่เมื่อตรวจสอบ cargo_top_y/local_floor_y ดิบ พบว่าเส้นทั้ง 2 เพิ่มขึ้นอย่าง
+# ต่อเนื่องราบเรียบตลอดช่วง x=600-790 (จาก h=232 ที่ x=600 ไปจนถึง h=343 ที่ x=790) ไม่มีรอยหัก/
+# jump ที่ตำแหน่ง seam (x=718) เลยแม้แต่น้อย - พิสูจน์ว่าไม่ใช่ "กล่องเตี้ยกว่าจริง" แต่เป็นเพราะ
+# วิธี fit เส้นตรงต่อคอลัมน์แล้วประเมินค่าที่จุดกึ่งกลางคอลัมน์ จับค่าที่ตำแหน่ง x ต่างกันบนเส้นโค้ง
+# ต่อเนื่องเดียวกัน (ความชันจากมุมกล้อง isometric ใกล้ปลายแถว) มาคำนวณเป็น "ความสูง" ที่ต่างกัน
+# ทั้งที่ความสูงจริงทางกายภาพเท่ากันหมด - ยืนยันซ้ำจาก EC10-03 (idx0=308.5 เทียบ plateau
+# idx1-4=~352-357, deviation 12.6%) และ EC19-01 (idx0=303.0 เทียบ plateau idx2-4=~340-356,
+# deviation 14.2%) - ทั้ง 3 ไฟล์แสดง pattern เดียวกันทุกประการ: คอลัมน์ริมสุดจริง (idx=0) ต่ำกว่า
+# "plateau" ของคอลัมน์อื่นทั้งหมดที่รวมกันแล้วนิ่งมาก (ต่างกัน <2-4% เท่านั้น) ไม่ใช่แค่ต่ำกว่า
+# เพื่อนบ้านตัวเดียว
+#
+# FIX: เพิ่ม Edge-Column Global Consensus Guard - ก่อนจะ flag ว่าคอลัมน์ริมสุดจริงของแถว
+# (idx==0 หรือ idx==max_idx ในวิวเดียวกัน) "เตี้ยกว่า" ให้ตรวจสอบก่อนว่าคอลัมน์อื่นที่เหลือ
+# (ไม่รวมตัวมันเอง, เฉพาะที่ reliable คือ height_source in direct/cross_view_filled) มีอย่างน้อย
+# 3 คอลัมน์ และรวมกันแล้วนิ่งมาก (max-min <= 10% ของ median) หรือไม่ - ถ้าใช่ ให้เทียบคอลัมน์ริมสุด
+# กับ "median ของ plateau ทั้งหมด" แทนที่จะเทียบกับเพื่อนบ้านตัวเดียว - ถ้า deviation ยังคง >= 10%
+# (เกณฑ์เดียวกับ plateau spread) ให้ถือว่าเป็น "isometric edge-measurement bias" ที่ทราบสาเหตุ
+# แน่ชัดแล้ว ไม่ flag เป็นความเสี่ยง (ปลอดภัยกว่าเพราะต้องมี plateau ที่นิ่งมากจริงๆ ก่อน guard
+# นี้จะทำงาน - ถ้า plateau ไม่นิ่ง (มีความแตกต่างจริงระหว่างคอลัมน์กลาง) guard นี้จะไม่ทำงานเลย
+# ปล่อยให้ logic เดิมตัดสินใจตามปกติ)
+_EDGE_OUTLIER_MIN_PLATEAU_SIZE = 3
+_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10
+_EDGE_OUTLIER_DEVIATION_THRESHOLD = 0.10
+
+
+def _is_edge_measurement_outlier(records_same_view, target_idx,
+                                  min_plateau_size=_EDGE_OUTLIER_MIN_PLATEAU_SIZE,
+                                  plateau_max_spread_ratio=_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO,
+                                  deviation_threshold=_EDGE_OUTLIER_DEVIATION_THRESHOLD):
+    """True ถ้า target_idx เป็นคอลัมน์ริมสุดจริงของแถว (idx==0 หรือ idx==max) และความสูงของมัน
+    เบี่ยงเบนจาก 'plateau' ของคอลัมน์อื่นที่นิ่งมาก (เชื่อถือได้ + spread ต่ำ) เกิน threshold -
+    ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)"""
+    valid = [r for r in records_same_view if not r.get("is_corner_duplicate")]
+    if not valid:
+        return False
+    all_idxs = [r["idx"] for r in valid]
+    min_idx, max_idx = min(all_idxs), max(all_idxs)
+    if target_idx != min_idx and target_idx != max_idx:
+        return False  # ไม่ใช่คอลัมน์ริมสุดจริง - guard นี้ใช้ไม่ได้
+    by_idx = {r["idx"]: r for r in valid}
+    target = by_idx.get(target_idx)
+    if target is None or target.get("height_px") is None:
+        return False
+    plateau_heights = []
+    for r in valid:
+        if r["idx"] == target_idx:
+            continue
+        if r.get("height_px") is None:
+            continue
+        if r.get("height_source") not in ("direct", "cross_view_filled"):
+            continue
+        plateau_heights.append(r["height_px"])
+    if len(plateau_heights) < min_plateau_size:
+        return False
+    arr = np.array(plateau_heights, dtype=float)
+    p_median = float(np.median(arr))
+    if p_median <= 0:
+        return False
+    p_spread = (arr.max() - arr.min()) / p_median
+    if p_spread > plateau_max_spread_ratio:
+        return False  # plateau ไม่นิ่งพอจะเป็นหลักฐานอ้างอิงได้ - ปลอดภัยไว้ก่อน ไม่ suppress
+    deviation = abs(target["height_px"] - p_median) / p_median
+    return deviation >= deviation_threshold
+
+
 def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
@@ -4508,6 +4603,10 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         if (shorter_rec.get("height_source") == "cross_view_corrected"
                 and shorter_rec.get("cross_view_conflict_ratio", 0.0)
                 > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+            continue
+        # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มด้านบนสำหรับ
+        # หลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)
+        if _is_edge_measurement_outlier(records, shorter_rec["idx"]):
             continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
@@ -4715,6 +4814,11 @@ def detect_tail_stepdown(records, view_label):
     if (tail_rec.get("height_source") == "cross_view_corrected"
             and tail_rec.get("cross_view_conflict_ratio", 0.0)
             > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
+        return risks
+
+    # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มที่
+    # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC10-03/EB66-01)
+    if _is_edge_measurement_outlier(records, tail_rec["idx"]):
         return risks
 
     risks.append({
@@ -5368,6 +5472,20 @@ _NOTCH_MIN_PROMINENCE_PX = 15
 _NOTCH_MIN_DISTANCE_PX = 20
 _NOTCH_MIN_EMPTY_FRACTION = 0.6
 
+# v25.69 NEW (สำคัญ - ตามคำสั่งผู้ใช้ 30-Aug-2026 หลังตัดสินใจให้ silhouette_notch มาแทนที่
+# REAR_EMPTY_RISK/length_mismatch ทั้งหมด): เดิมกรอบ marker ของ silhouette_notch แคบมาก
+# (กว้างคงที่ 40px = x_notch±20 โดยไม่สนใจความกว้างจริงของรอยบากที่ตรวจพบ) ทำให้ดูเป็นเส้นบางๆ
+# ไม่ชัดเจนเทียบกับกรอบคอลัมน์ปกติ (STEP_DOWN_RISK) ที่กว้างเท่าคอลัมน์จริง (~80-150px ในภาพ
+# ทดสอบทั้งหมด) - ผู้ใช้ระบุให้ปรับกรอบให้ "มองเห็นได้ชัดเหมือนกรอบคอลัมน์"
+# FIX: ใช้ความกว้างจริงของรอยบาก (จาก left_bases/right_bases ที่ scipy.signal.find_peaks คำนวณ
+# ให้แล้ว - คือขอบเขตจริงของ "หุบเขา" ในกราฟก่อนจะกลับสู่ระดับ baseline ทั้ง 2 ฝั่ง) แทนความกว้าง
+# คงที่ 40px เดิม - ถ้าความกว้างจริงยังแคบกว่าเกณฑ์ขั้นต่ำ (_NOTCH_BOX_MIN_WIDTH_PX) ให้ pad
+# เพิ่มสมมาตรทั้ง 2 ฝั่งจนถึงเกณฑ์นี้ (ให้ใกล้เคียงขนาดกรอบคอลัมน์ทั่วไป ไม่เล็กจนสังเกตยาก) - ไม่
+# เปลี่ยนแนวตั้ง (baseline_y ถึง y_notch) เพราะเป็นขอบเขตที่ยืนยันแล้วด้วยการ sample สีจริงว่าเป็น
+# พื้นที่ว่าง/โครงสร้างตู้ 100% (ขยายลงต่ำกว่า y_notch จะไปทับกับกล่องสินค้าจริงที่มีอยู่ - ไม่ใช่
+# พื้นที่เสี่ยง ควรหลีกเลี่ยง)
+_NOTCH_BOX_MIN_WIDTH_PX = 70  # ใกล้เคียงความกว้างคอลัมน์ขั้นต่ำที่พบจริงในไฟล์ทดสอบ (~80px)
+
 
 def detect_silhouette_notch_risk(view_result, view_label):
     """ตรวจจับรอยบากในเส้นขอบบนกองสินค้า (cargo_top_y) ที่เผยพื้นหลัง/สีโครงสร้างตู้กลางแถว
@@ -5411,8 +5529,19 @@ def detect_silhouette_notch_risk(view_result, view_label):
         frac_empty = n_empty / len(colors_sampled)
         if frac_empty < _NOTCH_MIN_EMPTY_FRACTION:
             continue
-        x0_mark = max(sx, x_notch - 20)
-        x1_mark = min(ex, x_notch + 20)
+        # v25.69 NEW: ใช้ความกว้างจริงของรอยบาก (left_base ถึง right_base) แทน x_notch±20 เดิม
+        # แล้ว pad ให้ถึงขั้นต่ำ _NOTCH_BOX_MIN_WIDTH_PX ถ้ายังแคบกว่า - ทำให้กรอบชัดเจนเหมือน
+        # กรอบคอลัมน์ปกติ (ดู docstring เต็มด้านบน)
+        x_left_natural = int(xs[left_base_idx])
+        x_right_natural = int(xs[right_base_idx])
+        natural_width = x_right_natural - x_left_natural
+        if natural_width < _NOTCH_BOX_MIN_WIDTH_PX:
+            pad = (_NOTCH_BOX_MIN_WIDTH_PX - natural_width) / 2.0
+            x0_mark = max(sx, int(round(x_left_natural - pad)))
+            x1_mark = min(ex, int(round(x_right_natural + pad)))
+        else:
+            x0_mark = max(sx, x_left_natural)
+            x1_mark = min(ex, x_right_natural)
         ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
         abs_box = (ox + x0_mark, oy + baseline_y, ox + x1_mark, oy + y_notch)
         risks.append({
@@ -5429,57 +5558,43 @@ def detect_silhouette_notch_risk(view_result, view_label):
 
 
 def detect_rear_empty_risk(records_front, records_back, front_result, back_result):
-    """REAR_EMPTY_RISK - ใช้ 2 กลไกที่เป็นอิสระต่อกัน (แต่ละกลไกคาลิเบรตจากไฟล์ ground-truth
-    คนละไฟล์ - ดูค่าคงที่ REAR_GAP_MIN_PX/REAR_GAP_MIN_RATIO/REAR_COLOR_ANOMALY_MIN_COLORS
-    ด้านบนของไฟล์สำหรับตัวเลขคาลิเบรตจริง):
-      A) เทียบ length_px จริง (Phase 2, หน่วย px ไม่ normalize) ระหว่าง FRONT<->BACK ถ้าต่างกัน
-         เกินทั้ง px ขั้นต่ำ และสัดส่วนขั้นต่ำ -> ฝั่งที่ "สั้นกว่า" มีพื้นที่ว่างจริงก่อนประตูท้ายตู้
-         (ยืนยันจาก EC01-01 gap=72px/12.6% ต้อง flag, AC03-01 gap=46px/8.6% ต้อง flag)
-      B) ตรวจสีของ "ตั้งท้ายสุดจริง" ของแต่ละ view (ข้าม corner_duplicate เสมอ) - ถ้ามี SKU
-         ปะปนกันผิดปกติ (>=3 สีเด่น) มักบ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้
-         (ยืนยันจาก EC04-02 BACK idx ท้ายสุด ต้อง flag แม้ length gap เพียง 17px/3.4% ซึ่งไม่ผ่าน
-         เกณฑ์กลไก A - เป็นคนละกลไกกัน ไม่ทับซ้อนกัน)
+    """REAR_EMPTY_RISK - ตรวจสีของ "ตั้งท้ายสุดจริง" ของแต่ละ view (ข้าม corner_duplicate
+    เสมอ) - ถ้ามี SKU ปะปนกันผิดปกติ (>=3 สีเด่น) มักบ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่าง
+    ใกล้ประตูท้ายตู้ (ยืนยันจาก EC04-02 BACK idx ท้ายสุด ต้อง flag)
 
-    v25.53 NEW: กลไก A ใช้ "extended length" (ดู _p1b_extended_length_for_rear_check ด้านบน)
-    แทน length_px ดิบจาก Phase 2 โดยตรง - แก้ปัญหา false-positive เชิงระบบที่ BACK view มักวัด
-    ความยาวสั้นกว่าจริงเพราะพลาดหน้าข้างกล่องใกล้ผนังหัวตู้ (ดู docstring เต็มด้านบน)
+    v25.69 REMOVED (สำคัญ - ตามคำสั่งผู้ใช้ 30-Aug-2026): เดิมมีกลไก A (length_mismatch -
+    เทียบ length_px/extended-length ระหว่าง FRONT<->BACK) เป็นกลไกหลักคู่กับกลไก B
+    (color_anomaly) - ผู้ใช้ระบุว่า detect_silhouette_notch_risk (v25.64, "กรอบมุมทแยง")
+    ทำหน้าที่แทนกลไก A ได้ดีกว่า เพราะ:
+      1) ตรวจจับพื้นที่ว่างได้จริงจากรูปทรงเรขาคณิต (รอยบากในเส้นขอบบนกองสินค้า) โดยตรง
+         ไม่ต้องอาศัยการเปรียบเทียบความยาวรวมทาง pixel ที่มีความไม่แน่นอนสูง (bias เชิงระบบที่
+         แปรผันตามรุ่นรถ/ระดับบรรทุก - ยืนยันจาก EA07-01/EB66-01=6.3%, EC10-03=10.4%,
+         EC19-01=12.2%, EB73-01=16.6% - ไม่มีค่าคงที่ให้ calibrate ได้แม่นยำ)
+      2) ครอบคลุมกว้างกว่า - ตรวจพื้นที่ว่างได้ "ทุกตำแหน่งภายใน FRONT/BACK view" ไม่จำกัดแค่
+         โซนท้ายรถ (ตำแหน่งตั้งสุดท้ายก่อนประตู) เหมือนกลไก A/B เดิม
+      3) วาง marker ตรงตำแหน่งพื้นที่ว่างจริงโดยตรง (จาก notch_x ที่ตรวจพบ) แม่นยำกว่าการ mark
+         ทั้งคอลัมน์ท้ายสุด (ซึ่งอาจไม่ใช่ตำแหน่งที่มีปัญหาจริงเป๊ะ)
+    ลบกลไก A (length_mismatch) และ _p1b_extended_length_for_rear_check ที่เกี่ยวข้องออก
+    ทั้งหมด (เก็บ REAR_GAP_MIN_PX/REAR_GAP_MIN_RATIO ไว้เป็น dead-constant เพื่อลด diff -
+    ไม่ได้ใช้งานแล้ว) - เหลือกลไก B (color_anomaly) ไว้เป็นกลไกเสริมที่ตรวจจากสัญญาณคนละมิติ
+    (SKU สีปะปนกัน ไม่ใช่ความยาว) และปรับ Guard 1 เดิม (ที่เคยพึ่งพา _partial_gap_px จากกลไก A
+    เพื่อยืนยันว่ามี partial length gap จริง) ให้ยังคงทำงานได้อิสระโดยคำนวณ gap จาก length_px
+    ดิบ (Phase 2, ไม่ผ่าน extended-length) โดยตรงแทน - ไม่กระทบผลลัพธ์เดิมของกลไก B เพราะใช้
+    เกณฑ์ตัวเลขเดียวกัน (>=15px) เพียงแต่เปลี่ยนแหล่งข้อมูลจาก extended เป็น raw
     """
     risks = []
 
-    # --- กลไก A: cross-view length mismatch (ฝั่งที่ "สั้นกว่า" คือฝั่งที่มีพื้นที่ว่าง) ---
-    _, _, front_len_ext = _p1b_extended_length_for_rear_check(front_result)
-    _, _, back_len_ext = _p1b_extended_length_for_rear_check(back_result)
-    front_len = front_len_ext or (front_result.get("length_px") or 0)
-    back_len = back_len_ext or (back_result.get("length_px") or 0)
-    longer_len = max(front_len, back_len)
-    if longer_len > 0:
-        gap_px = abs(front_len - back_len)
-        gap_ratio = gap_px / longer_len
-        if gap_px >= REAR_GAP_MIN_PX and gap_ratio >= REAR_GAP_MIN_RATIO:
-            if front_len <= back_len:
-                shorter_records, shorter_label = records_front, "FRONT"
-            else:
-                shorter_records, shorter_label = records_back, "BACK"
-            rear_rec = _rearmost_record(shorter_records)
-            if rear_rec is not None:
-                risks.append({
-                    "risk_type": "REAR_EMPTY_RISK", "subtype": "length_mismatch",
-                    "mark_view": shorter_label,
-                    "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
-                    "pos_range": rear_rec["pos_range"], "gap_px": gap_px, "gap_ratio": gap_ratio,
-                    "reason": (f"ความยาวสินค้าที่วัดได้จากฝั่ง {shorter_label} สั้นกว่าอีกฝั่ง "
-                               f"{gap_px:.0f}px ({gap_ratio:.1%}) บ่งชี้ว่ามีพื้นที่ว่างก่อนถึงประตูท้ายตู้"),
-                })
-
-    # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view (อิสระจากกลไก A) ---
+    # --- กลไก B: color-anomaly ที่ตั้งท้ายสุดจริงของแต่ละ view ---
     # v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้ที่กล่อง SKU ต่างชนิดวางชิดกัน
     # ตามปกติ (เช่น EA07-01 ที่มีหลาย SKU ในคอลัมน์ท้าย แต่ไม่มีช่องว่างจริง):
     #
     # Guard 1 — ต้องมี partial length gap ยืนยัน: กลไก B จะ flag ก็ต่อเมื่อมีช่องว่างความยาว
-    #   >= REAR_COLOR_NEEDS_GAP_MIN_PX (แม้ไม่ถึงเกณฑ์เต็มของกลไก A ก็ตาม) เพราะ
-    #   color_anomaly เพียงอย่างเดียวไม่เพียงพอ — ไฟล์ที่กล่องเต็มตู้ก็อาจมี SKU หลายสีใน
-    #   คอลัมน์ท้ายตามธรรมชาติ ยืนยันจาก EC04-02: gap=17px ยังเข้าเกณฑ์นี้ได้ (>15px)
-    #   ในขณะที่ EA07-01 หลัง fix: gap=9px ไม่เข้าเกณฑ์ → ไม่ flag ถูกต้อง
+    #   >= REAR_COLOR_NEEDS_GAP_MIN_PX เพราะ color_anomaly เพียงอย่างเดียวไม่เพียงพอ — ไฟล์ที่
+    #   กล่องเต็มตู้ก็อาจมี SKU หลายสีในคอลัมน์ท้ายตามธรรมชาติ ยืนยันจาก EC04-02: gap=17px
+    #   ยังเข้าเกณฑ์นี้ได้ (>15px) ในขณะที่ EA07-01: gap=9px ไม่เข้าเกณฑ์ → ไม่ flag ถูกต้อง
+    #   v25.69: เปลี่ยนแหล่งข้อมูล gap จาก extended-length (กลไก A ที่ถูกลบ) เป็น length_px
+    #   ดิบจาก Phase 2 โดยตรง (ไม่กระทบตัวเลขที่เคย verify ไว้ - ทั้ง 2 ไฟล์ ground-truth
+    #   (EC04-02=17px, EA07-01=9px) วัดจาก raw length_px ได้ค่าเดียวกันกับที่เคย verify ไว้)
     #
     # Guard 2 — dominant color ต้องไม่ครอบงำมากเกิน (REAR_COLOR_MAX_DOMINANT_FRAC):
     #   ถ้า 1 สีมี fraction >= 0.70 ของ pixel ทั้งหมด แสดงว่า col นั้นเป็นกล่องใบเดียวเป็นหลัก
@@ -5489,16 +5604,14 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     REAR_COLOR_NEEDS_GAP_MIN_PX = 15     # gap ขั้นต่ำ (px) ที่กลไก B ต้องการ
     REAR_COLOR_MAX_DOMINANT_FRAC = 0.70  # ถ้า dominant > นี้ = 1 SKU + shading ไม่ใช่ multi-SKU
 
-    # คำนวณ gap สำหรับ guard นี้ (ใช้ค่าเดิมที่คำนวณแล้ว)
-    _partial_gap_px = abs(front_len - back_len) if (front_len and back_len) else 0
+    front_len_raw = front_result.get("length_px") or 0
+    back_len_raw = back_result.get("length_px") or 0
+    _partial_gap_px = abs(front_len_raw - back_len_raw) if (front_len_raw and back_len_raw) else 0
 
     for records, result, label in [(records_front, front_result, "FRONT"),
                                     (records_back, back_result, "BACK")]:
         rear_rec = _rearmost_record(records)
         if rear_rec is None:
-            continue
-        # ข้ามถ้าตั้งนี้ถูก flag จากกลไก A ไปแล้ว (กันซ้ำซ้อน)
-        if any(r["mark_view"] == label and r["mark_stack_idx"] == rear_rec["idx"] for r in risks):
             continue
         clusters = _dominant_color_clusters(result["region"], result["cargo_mask"], rear_rec["x_range"])
         if len(clusters) < REAR_COLOR_ANOMALY_MIN_COLORS:
@@ -5524,33 +5637,10 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
                        f"บ่งชี้สินค้าที่วางไม่เป็นระเบียบ/มีช่องว่างใกล้ประตูท้ายตู้"),
         })
 
-    # v25.55 FIX#3 (จุดเสี่ยงที่ 2): cross-view voting สำหรับ REAR_EMPTY_RISK
-    # ถ้าพบ REAR_EMPTY_RISK ทั้ง FRONT และ BACK พร้อมกัน และเป็น subtype ต่างกัน
-    # (length_mismatch vs color_anomaly) — เป็นสัญญาณว่าระบบ 2 กลไกขัดแย้งกันเอง:
-    # length_mismatch บอกว่า view A สั้นกว่า แต่ color_anomaly ก็ชี้ไปที่อีก view
-    # หนึ่งด้วย — กรณีนี้มักเกิดจาก structural limitation (สีผนังชนกับสีกล่อง หรือ
-    # side-face bleed) ไม่ใช่ช่องว่างจริง ให้เก็บเฉพาะ length_mismatch (หลักฐานที่วัด
-    # ได้จากค่าตัวเลขโดยตรง น่าเชื่อถือกว่า color_anomaly ซึ่งเป็นการอนุมาน)
-    # ถ้า subtype เหมือนกันทั้งคู่ (เช่น length_mismatch ทั้งคู่) ให้ผ่านตามปกติ
-    # เพราะ 2 view เห็นตรงกัน = หลักฐานแข็งแกร่งขึ้น
-    if len(risks) >= 2:
-        rear_risks = [r for r in risks if r["risk_type"] == "REAR_EMPTY_RISK"]
-        views_flagged = {r["mark_view"] for r in rear_risks}
-        if "FRONT" in views_flagged and "BACK" in views_flagged:
-            subtypes = {r["subtype"] for r in rear_risks}
-            if len(subtypes) > 1 and "length_mismatch" in subtypes:
-                # subtypes ต่างกัน: เก็บเฉพาะ length_mismatch ทิ้ง color_anomaly
-                print("[REAR_EMPTY] cross-view conflict detected (different subtypes) "
-                      "→ keeping length_mismatch only, dropping color_anomaly")
-                risks = [r for r in risks
-                         if not (r["risk_type"] == "REAR_EMPTY_RISK"
-                                 and r["subtype"] == "color_anomaly")]
-            elif len(subtypes) > 1:
-                # ทั้งคู่เป็น color_anomaly แต่ flag คนละ view — หลักฐานขัดแย้งกัน
-                # ไม่มี length_mismatch ยืนยัน → ตัดออกทั้งหมดเพื่อความปลอดภัย
-                print("[REAR_EMPTY] cross-view color_anomaly conflict (both views, no "
-                      "length_mismatch) → dropping all REAR_EMPTY_RISK")
-                risks = [r for r in risks if r["risk_type"] != "REAR_EMPTY_RISK"]
+    # v25.69 REMOVED: cross-view voting logic เดิม (v25.55 FIX#3) ออกแบบมาเพื่อแก้ความขัดแย้ง
+    # ระหว่าง length_mismatch กับ color_anomaly (subtype ต่างกัน) - ตอนนี้เหลือแค่ color_anomaly
+    # subtype เดียว (ไม่มีทางมี subtype ต่างกันในกลุ่ม REAR_EMPTY_RISK อีกต่อไป) จึง logic นี้
+    # กลายเป็น dead code ทั้งหมด (เงื่อนไข len(subtypes)>1 ไม่มีทางเป็นจริงได้อีกแล้ว) - ลบออก
 
     return risks
 
@@ -5806,8 +5896,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.66",
-            "benchmarkMode": "v25_66_topface_jump_plateau_check",
+            "checkerVersion": "V25.69",
+            "benchmarkMode": "v25_69_length_mismatch_removed_notch_box_widened",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
