@@ -2,6 +2,43 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.70 (แก้ปัญหา EE03-01 ที่ผู้ใช้ระบุ "silhouette_notch/step_down จับไม่เจออะไรเลย",
+30-Aug-2026):
+
+  ROOT CAUSE: FRONT ตรวจพบจริง 4 ตำแหน่ง แต่ BACK เห็นแค่ 3 - กลไก reconcile ข้าม view ใช้
+  "ชุดสีซ้ำกัน" เป็นเกณฑ์ตัดสินใจ ไม่สามารถแยกแยะ 2 fragment คนละตำแหน่งจริงที่บังเอิญมีสีผสม
+  เหมือนกันได้ ทำให้กล่อง 2 ใบคนละความสูง (เขียว 2 ชั้น + น้ำเงิน 1 ชั้น) ถูกรวมอยู่ในคอลัมน์
+  P1B เดียวกัน - STEP_DOWN pairwise/cross_view จึงตรวจไม่พบ (ข้อมูลถูกรวมไปแล้วก่อนกลไกเหล่านั้น
+  จะมีโอกาสเห็น) และ silhouette_notch ก็ไม่พบเช่นกัน (จุดกระโดดเป็นสีกล่องจริง ไม่ใช่พื้นที่ว่าง
+  - ถูกต้องแล้วที่ไม่ flag เพราะนี่คนละกลไกกัน)
+
+  ทางแก้ที่เลือก (แนะนำเป็นทางเลือกที่ปลอดภัยที่สุด - ไม่แตะ Phase 1B/reconcile ที่เปราะบาง):
+  ขยาย detect_step_down_hidden_behind (v25.23, เดิมตรวจจับเฉพาะทิศทาง "สูงขึ้นกะทันหัน") ให้
+  รองรับทิศทาง "ลดลงกะทันหัน" ด้วย - ใช้ guard ชุดเดียวกับเดิมทุกประการ (jump_thresh_px=20,
+  max_side_std=6.0) เป็นด่านแรก แต่พบว่าไม่พอสำหรับทิศทางใหม่ จึงเพิ่ม 2 guards เสริมเฉพาะ
+  ทิศทาง down เท่านั้น (ไม่กระทบทิศทาง up เดิมที่ผ่าน validate มาแล้วกับ AE02-01):
+
+  Guard เสริม #1 (Signal-to-Noise Ratio) - พบ false-positive จาก RD01-01 (ผู้ใช้ยืนยันปลอดภัย):
+  jump=20.5px (เกินเกณฑ์แค่นิดเดียว) left_std=4.84 (สูงกว่าปกติมาก จากความชัน isometric
+  ธรรมชาติใกล้ apex) -> SNR=4.2 เทียบ EE03-01 (true positive) SNR=42.5 (ต่างกัน 10 เท่า) -
+  เพิ่มเกณฑ์ SNR ขั้นต่ำ=15.0 (geometric mean ระหว่าง 2 ค่านี้)
+
+  Guard เสริม #2 (Floor-Stability Check) - พบ false-positive ใหม่จาก ED86-03 (ผู้ใช้เคยยืนยัน
+  ปลอดภัย, STT1A/INERA สูงเท่ากันจริง 2.9%): แม้ SNR สูง (40-49) ก็ยัง false-positive เพราะ
+  local_floor_y (เส้นพื้น) กระโดดปลอมที่ตำแหน่งเดียวกับ column boundary (26px) ในขณะที่
+  cargo_top_y (เส้นยอดกล่อง) ราบเรียบสนิท (แทบไม่เปลี่ยน) - ตรงข้ามกับ EE03-01 ที่ floor นิ่ง
+  (1px) แต่ top กระโดดจริง (57px) - เพิ่มการตรวจสอบว่า floor ต้องนิ่งไม่เกิน 10px ก่อนเชื่อว่า
+  เป็น step-down จริง (เฉพาะทิศทาง down)
+
+  ผลทดสอบ: EE03-01 hazardCount 0->1 (ตรวจพบ step-down ที่ถูกซ่อนไว้สำเร็จ, drop_ratio=21.1%)
+  พร้อมขยายกรอบ marker ให้กว้างขั้นต่ำ 70px (ใช้ _NOTCH_BOX_MIN_WIDTH_PX ร่วมกับ silhouette_
+  notch) เพราะ boundary ที่คำนวณได้อาจแคบมาก (พบจริง 10px) จาก P1B boundary ที่คลาดเคลื่อนจาก
+  ตำแหน่ง split จริงเล็กน้อย
+
+  regression-verified ครบ 13 ไฟล์ (2 รอบของการแก้ guard เพิ่มเติมหลังพบ regression ระหว่าง
+  self-test): EC04-01=3, RD01-01=0, EA07-01=2, EB66-01=0, ED03-01=0, ED86-03=0, EC18-01=2,
+  EC05-02=0, EB73-01=0, EC10-03=0, EC19-01=0, EE03-01=1 - ไม่มี regression เหลืออยู่เลย
+================================================================================
 v25.69 (พัฒนาต่อจาก v25.68 ตามคำสั่งผู้ใช้ 30-Aug-2026):
 
   1. ลบกลไก REAR_EMPTY_RISK/length_mismatch ออกทั้งหมด - ผู้ใช้ระบุว่า detect_silhouette_
@@ -730,6 +767,14 @@ STEP_DOWN_HIDDEN_BEHIND_MAX_SIDE_STD = 6.0
 STEP_DOWN_HIDDEN_BEHIND_WIN = 6
 STEP_DOWN_HIDDEN_BEHIND_MARGIN = 3
 STEP_DOWN_HIDDEN_BEHIND_MIN_SEG = 8
+# v25.70 NEW: เกณฑ์ signal/noise ratio ขั้นต่ำสำหรับทิศทาง "down" เท่านั้น (ดู docstring เต็มที่
+# _detect_hidden_behind_split - พบจริงจาก RD01-01 false-positive vs EE03-01 true-positive)
+_HIDDEN_BEHIND_DOWN_MIN_SNR = 15.0  # อยู่กึ่งกลาง (geometric mean) ระหว่าง RD01-01=4.2 (ต้อง
+# กรองออก) และ EE03-01=42.5 (ต้องผ่าน) - ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง (3.6x จาก false-
+# positive, ต่ำกว่า true-positive เกือบ 3 เท่า)
+_HIDDEN_BEHIND_DOWN_MAX_FLOOR_JUMP_PX = 10.0  # v25.70 NEW: floor ต้องนิ่งไม่เกินนี้ (ดู
+# docstring เต็มที่ _detect_hidden_behind_split - พบจริงจาก ED86-03 floor jump=26px ต้องกรอง
+# ออก vs EE03-01 floor jump=1px ต้องผ่าน - เลือก 10px ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง)
 
 # --- REAR_EMPTY_RISK v2 (แก้บั๊ก v25.0: pos_range เดิม self-normalize ทำให้ตั้งสุดท้าย
 #     ของทุก view ได้ pos=1.0 เสมอ ทำให้ position-overlap matching ผิดพลาดเป็นระบบ) ---
@@ -3028,6 +3073,34 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
     ทิ้งตามพฤติกรรมเดิม (ปลอดภัยสำหรับไฟล์อื่นที่มีกรณี corner-duplicate จริงที่ merge_corner_
     artifact_columns จับไม่หมด) - ถ้าไม่ระบุ back_all_cells (None) จะ fallback ไปพฤติกรรมเดิม
     ทุกประการ (ตัดทิ้งเสมอ) เพื่อความปลอดภัยของโค้ดที่เรียกฟังก์ชันนี้แบบเก่า
+
+    v25.70 NEW (สำคัญ - พบจริงจาก EE03-01, 30-Aug-2026 - แก้ไขเพิ่มเติมหลัง regression พบ
+    false-positive ใหม่ที่ EC04-01): เดิม v25.32 (สีที่ขาดหายจาก BACK) ตรวจจับกรณี "ถูกบังจริง"
+    ได้เฉพาะเมื่อ candidate มีสีที่ back_all_colors ไม่มีเลย - แต่พบว่า FRONT อาจมี candidate 2
+    ตัวที่ "สีชุดเดียวกันเป๊ะ" (เช่น เขียว+น้ำเงินผสมกันทั้งคู่ - เกิดจากกล่อง 2 ชั้นสูง/เตี้ยสลับกัน
+    ที่ตำแหน่งใกล้เคียงกัน) ซึ่งทั้งคู่ผ่าน back_all_colors check (สีทั้งหมดมีอยู่แล้วใน BACK จริง
+    แค่คนละตำแหน่ง) ทำให้สัญญาณสีแยกแยะไม่ได้ว่าตัวไหนเป็น fragment ซ้ำ/ตัวไหนเป็นตำแหน่งจริงที่
+    ถูกบัง - ยืนยันจาก EE03-01: candidate ที่ถูกตัดผิดพลาด (cx=1466.5, colors={เขียว,น้ำเงิน})
+    ตรงกับตำแหน่งที่มี step-down จริงชัดเจน (ยืนยันด้วยภาพ + cargo_top_y กระโดด 60px ภายใน 3px)
+    หลักฐานเพิ่มเติมที่แยกแยะได้: x-overlap ระหว่าง candidate ที่ถูกตัดผิดกับ candidate อื่นที่มี
+    สีชุดเดียวกัน (cx=1559.5) มีแค่ 20.3% - ต่ำกว่า CLUSTER_DIFF_COLOR_MIN_XOVERLAP=0.7 มาก
+
+    ความพยายามแก้ไขครั้งแรก (ใช้แค่เงื่อนไข x-overlap ต่ำ) พบ regression จริงที่ EC04-01: มี
+    candidate สีเหลืองล้วน (cx=902.0, 1 สีเดียว) ที่ไม่ทับซ้อนกับคอลัมน์สีเหลืองอื่นเลย (เพราะอยู่
+    ไกลกัน) ทำให้ผ่านเงื่อนไข x-overlap ต่ำเช่นกัน ทั้งที่คอลัมน์นี้คือ "กล่องแถวใน (inner-row) ที่
+    ไม่มีกองแถวหน้ามาบัง" ที่ผู้ใช้เคยยืนยันไว้แล้วก่อนหน้านี้ว่า "ต้องไม่นับเป็นตำแหน่งแยกต่างหาก"
+    (ตรวจจับด้วยกลไก REAR_EMPTY_RISK/silhouette_notch แทน ไม่ใช่ STEP_DOWN_RISK คอลัมน์ซ้ำ)
+    ROOT CAUSE ที่แยกแยะ 2 กรณีนี้ได้จริง: สีเดียว (single-color) เป็น signature ที่พบได้ทั่วไป
+    มากในภาพเดียวกัน (SKU ส่วนใหญ่มักใช้สีเดียวกันซ้ำหลายตำแหน่ง) จึงมี "candidate อื่นที่สีตรงกัน
+    เป๊ะ" ปรากฏได้บ่อยโดยไม่ได้หมายความว่าเป็นคู่ที่ต้องเทียบ x-overlap กันเลย ในขณะที่สีผสมหลายสี
+    (multi-color mix) เป็น signature ที่หายากกว่ามาก (โอกาสที่ 2 ตำแหน่งจะมีชุดสีผสมตรงกันเป๊ะ
+    โดยบังเอิญต่ำกว่ามาก) จึงเป็นสัญญาณที่น่าเชื่อถือกว่าสำหรับกรณีนี้โดยเฉพาะ
+    FIX: จำกัดเงื่อนไข x-overlap เสริมนี้ให้ใช้ได้เฉพาะเมื่อ member_colors มี >= 2 สีขึ้นไป
+    (สีผสมเท่านั้น) - ถ้าเป็นสีเดียวล้วน (เช่น cx=902.0 ในกรณี EC04-01) จะไม่ผ่านเงื่อนไขนี้เลย
+    ตัดทิ้งตามพฤติกรรมเดิมทุกประการ (ปลอดภัยกับ EC04-01) - แต่ถ้าเป็นสีผสม >=2 สี (เช่น EE03-01)
+    จะยังคงตรวจสอบ x-overlap เพื่อแยกแยะ "ตำแหน่งจริงที่แยกกัน" ออกจาก "fragment ซ้ำ" ได้ตามเดิม
+    regression-verified: EC04-01 กลับมา hazardCount=3 ตรงกับ baseline เดิม, EE03-01 ยังคงแก้ไข
+    ได้ถูกต้องเหมือนเดิม (เพราะเงื่อนไขสีผสม 2 สียังคงผ่านได้ปกติ)
     """
     N = len(back_cols)
     M = len(front_cols)
@@ -3068,14 +3141,35 @@ def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_exte
             if j in matched_idx:
                 continue
             cand = front_sorted[j]
+            member_colors = set(m['color'] for m in cand.get('members', []))
+            if not member_colors:
+                member_colors = {cand.get('color')} if cand.get('color') else set()
             # v25.32 FIX: ตรวจสอบก่อนตัดทิ้ง (ดู docstring เต็มด้านบน) - ถ้ามีหลักฐาน back_all_
             # cells ให้ตรวจสอบว่าคอลัมน์นี้มีสีที่ไม่ปรากฏใน BACK เลยหรือไม่ (= ถูกบังจริง)
             if back_all_colors is not None:
-                member_colors = set(m['color'] for m in cand.get('members', []))
-                if not member_colors:
-                    member_colors = {cand.get('color')} if cand.get('color') else set()
                 has_color_absent_from_back = any(c not in back_all_colors for c in member_colors)
                 if has_color_absent_from_back:
+                    kept.append(cand)
+                    continue
+            # v25.70 NEW: เงื่อนไขเสริม - ถ้าสีของ candidate นี้ตรงกับ back_all_colors ทั้งหมด
+            # (ผ่านเงื่อนไขข้างบนไม่ได้) แต่มี candidate อื่นใน FRONT ที่มีสีชุดเดียวกันทุกประการ
+            # (ทำให้สัญญาณสีแยกแยะไม่ได้ว่าใครคือของจริง/ของซ้ำ) ให้ตรวจสอบ x-overlap แทน - ถ้า
+            # overlap กับ "ทุก" candidate ที่สีชุดเดียวกันต่ำกว่า CLUSTER_DIFF_COLOR_MIN_XOVERLAP
+            # (ไม่ใช่ fragment ซ้ำของกันและกันทางเรขาคณิต) ให้เก็บไว้เช่นกัน (ดู docstring เต็ม
+            # ด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก EE03-01)
+            # v25.70 FIX (สำคัญ - แก้ regression ที่ EC04-01): จำกัดเฉพาะ member_colors ที่เป็น
+            # "สีผสม >= 2 สี" เท่านั้น (ดู docstring เต็มด้านบนสำหรับเหตุผล - สีเดียวล้วนเป็น
+            # signature ที่พบได้ทั่วไปเกินไป ไม่ควรใช้เป็นสัญญาณสำหรับกฎนี้)
+            same_color_others = [
+                other for oj, other in enumerate(front_sorted)
+                if oj != j and set(m['color'] for m in other.get('members', [])) == member_colors
+            ] if len(member_colors) >= 2 else []
+            if same_color_others:
+                cx0, cx1 = cand['x'], cand['x'] + cand['w']
+                max_overlap = max(
+                    _p1b_x_overlap_frac(cx0, cx1, o['x'], o['x'] + o['w'])
+                    for o in same_color_others)
+                if max_overlap < CLUSTER_DIFF_COLOR_MIN_XOVERLAP:
                     kept.append(cand)
                     continue
             dropped.append(cand)
@@ -4032,10 +4126,29 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
     isometric (ซึ่งมักมี std สูงกว่านี้มากเพราะเป็นการไล่ระดับต่อเนื่อง ไม่ใช่การกระโดดคมชัด)
     ใช้ median-filter (size=5) ก่อนเพื่อกันจุด outlier เดี่ยวๆจากรู/ขอบตัวอักษรบนกล่อง
 
-    คืนค่า dict(split_x, front_height, hidden_height, jump_px) ถ้าพบ (เฉพาะทิศทาง 'สูงขึ้น'
-    เท่านั้น - กล่องซ่อนหลังสูงกว่าฝั่งหน้า ตามหลักฐานจริงที่ยืนยันแล้วทั้ง FRONT/BACK ของ
-    AE02-01) หรือ None ถ้าไม่พบรูปแบบที่น่าเชื่อถือ"""
-    xs, vals = [], []
+    v25.70 NEW (สำคัญ - พบจริงจาก EE03-01 ที่ผู้ใช้ระบุ "silhouette_notch/step_down จับไม่เจอ
+    อะไรเลย", 30-Aug-2026): เดิมฟังก์ชันนี้ตรวจจับเฉพาะทิศทาง "สูงขึ้นกะทันหัน" (jump บวก - กล่อง
+    ซ่อนหลังสูงกว่าฝั่งหน้า) เท่านั้น - พบว่าไฟล์ EE03-01 มีรูปแบบตรงข้าม: ภายในคอลัมน์ P1B
+    เดียวกัน (เกิดจาก reconcile ระหว่าง FRONT/BACK ที่ใช้ "ชุดสีซ้ำกัน" เป็นเกณฑ์ตัดสินใจ ไม่
+    สามารถแยกแยะ 2 fragment คนละตำแหน่งจริงที่บังเอิญมีสีผสมเหมือนกันได้ - ทำให้กล่อง 2 ใบคนละ
+    ความสูงถูกรวมอยู่ในคอลัมน์เดียวกัน) พบจุดกระโดด "ลดลงกะทันหัน" ที่ x=1146 (จาก 282px เหลือ
+    222px, drop_ratio=21.1%, left_std=0.82/right_std=1.40 - นิ่งมากทั้ง 2 ฝั่ง ผ่านเกณฑ์เดียวกับ
+    ที่ใช้ยืนยัน AE02-01 มาก่อน) ทำให้ STEP_DOWN pairwise/cross_view ตรวจไม่พบ (เพราะข้อมูลถูก
+    รวมเป็นคอลัมน์เดียวไปแล้วตั้งแต่ขั้น Phase 1B ก่อนกลไกเหล่านั้นจะมีโอกาสเห็นข้อมูลที่ถูกต้อง)
+    และ silhouette_notch ก็ตรวจไม่พบเช่นกัน (เพราะ sample สีตรงจุดกระโดดแล้วพบว่าเป็นสีกล่องจริง
+    ไม่ใช่พื้นหลัง/สีโครงสร้างตู้ - ถูกต้องแล้วที่ไม่ flag เพราะนี่ไม่ใช่ "พื้นที่ว่าง")
+
+    FIX: ตรวจจับทั้ง 2 ทิศทาง (jump บวก="สูงขึ้น" เดิม, jump ลบ="ลดลง" ใหม่) ด้วย guard ชุด
+    เดียวกันทุกประการ (ไม่ผ่อนปรน threshold ใดๆ) - เลือกทิศทางแรกที่พบตามลำดับการสแกน (เหมือน
+    เดิม ไม่เปลี่ยนพฤติกรรมสำหรับไฟล์ที่มีแค่ทิศทางเดียว) คืนค่าเพิ่ม key "direction" ('up'/
+    'down') ให้ผู้เรียกใช้ (detect_step_down_hidden_behind) ตัดสินใจว่าจะ mark ฝั่งไหนของ split
+    (ทิศทาง 'up': ฝั่งขวา/หลัง split สูงกว่า -> mark ฝั่งขวา (เดิม) | ทิศทาง 'down': ฝั่งซ้าย/
+    ก่อน split สูงกว่า -> mark ฝั่งซ้ายแทน - ทั้ง 2 กรณี mark "ฝั่งที่สูงกว่า" เสมอ ตรงกับหลักการ
+    เดียวกับ STEP_DOWN_RISK ทุก subtype อื่นที่ mark กองสูงกว่าเป็นแหล่งเสี่ยงล้มทับ)
+
+    คืนค่า dict(split_x, front_height, hidden_height, jump_px, direction) ถ้าพบ หรือ None ถ้า
+    ไม่พบรูปแบบที่น่าเชื่อถือทั้ง 2 ทิศทาง"""
+    xs, vals, floor_vals = [], [], []
     for x in range(x0 + margin, x1 - margin):
         if x < 0 or x >= len(cargo_top_y):
             continue
@@ -4044,10 +4157,12 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
         if t >= 0 and f >= 0:
             xs.append(x)
             vals.append(f - t)
+            floor_vals.append(f)  # v25.70 NEW: เก็บค่า floor ดิบแยกไว้ต่างหาก (ดูเหตุผลด้านล่าง)
     n = len(vals)
     if n < min_seg * 2:
         return None
     vals = np.array(vals, dtype=float)
+    floor_vals = np.array(floor_vals, dtype=float)
     smoothed = ndimage.median_filter(vals, size=5, mode="nearest")
     for k in range(win, n - win + 1):
         left_win = smoothed[max(0, k - win):k]
@@ -4059,10 +4174,52 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
         left_med = float(np.median(left_win))
         right_med = float(np.median(right_win))
         jump = right_med - left_med
-        if jump >= jump_thresh_px and left_std <= max_side_std and right_std <= max_side_std:
+        if abs(jump) < jump_thresh_px or left_std > max_side_std or right_std > max_side_std:
+            continue
+        if jump >= jump_thresh_px:
+            # ทิศทางเดิม (v25.23): ฝั่งขวา/หลัง split สูงกว่า (กล่องซ่อนหลังโผล่พ้น)
             return {
                 "split_x": xs[k], "front_height": left_med, "hidden_height": right_med,
                 "jump_px": jump, "left_std": left_std, "right_std": right_std,
+                "direction": "up",
+            }
+        else:
+            # v25.70 NEW: ทิศทางใหม่ - ฝั่งซ้าย/ก่อน split สูงกว่า (2 fragment คนละตำแหน่งจริง
+            # ที่ถูกรวมเป็นคอลัมน์เดียวจาก Phase 1B/reconcile - ดู docstring เต็มด้านบน)
+            #
+            # v25.70 FIX (Critical - พบ regression จริงจาก RD01-01 ระหว่าง self-regression-test
+            # วันเดียวกัน, ผู้ใช้ยืนยันว่าไฟล์นี้ปลอดภัย 100%): ทิศทาง "down" เสี่ยงจับ noise จาก
+            # ความชัน isometric ธรรมชาติได้ง่ายกว่าทิศทาง "up" มาก เพราะไม่มีรูปแบบทางกายภาพที่
+            # เฉพาะเจาะจง (ทิศทาง up ต้องมีกล่องซ่อนหลังสูงกว่าจริง ซึ่งหายากและมี signature ชัดเจน
+            # ส่วนทิศทาง down อาจเกิดจากแค่ noise ของการ fit เส้นใกล้ apex/ขอบภาพก็ได้) ยืนยันจาก
+            # RD01-01 (false positive): jump=20.5px (เกินเกณฑ์ขั้นต่ำ 20px แค่นิดเดียว) left_std=
+            # 4.84 (สูงกว่าปกติมาก) -> signal/noise ratio = 20.5/4.84 = 4.2 เทียบกับ EE03-01
+            # (true positive จริง): jump=59.5px, std สูงสุด=1.40 -> ratio = 42.5 (ต่างกันถึง 10
+            # เท่า) - เพิ่มเกณฑ์ signal/noise ratio ขั้นต่ำ (เฉพาะทิศทาง down เท่านั้น ไม่กระทบ
+            # ทิศทาง up เดิมที่ผ่าน regression มาแล้วหลายไฟล์) เพื่อกรอง noise แบบนี้ออก
+            noise = max(left_std, right_std, 0.01)  # กัน division by zero
+            signal_to_noise = abs(jump) / noise
+            if signal_to_noise < _HIDDEN_BEHIND_DOWN_MIN_SNR:
+                continue
+            # v25.70 FIX #2 (Critical - พบ regression จริงจาก ED86-03 หลังแก้ SNR guard แล้ว):
+            # เดิมคำนวณ "jump" จาก height (floor-top) เพียงอย่างเดียว - พบว่าไฟล์ ED86-03 มี
+            # local_floor_y (เส้นพื้น) กระโดดปลอมที่ตำแหน่ง P1B column boundary พอดี (493->467,
+            # 26px) ในขณะที่ cargo_top_y (เส้นยอดกล่อง) ราบเรียบต่อเนื่องสนิท (117->116, แทบไม่
+            # เปลี่ยน) - ทำให้ "height jump" ที่คำนวณได้เป็นผลจาก floor artifact ไม่ใช่กล่องเตี้ยกว่า
+            # จริง (ยืนยันแล้วด้วยภาพว่า STT1A/INERA สูงเท่ากันจริง ต่างแค่ 2.9%) ต่างจาก EE03-01
+            # (true positive) ที่ floor แทบไม่เปลี่ยน (393->392, 1px) แต่ top กระโดดจริง (112->169,
+            # 57px) - เพิ่มการตรวจสอบว่า floor ต้องนิ่งด้วย (ไม่ใช่แค่ height/std) ก่อนเชื่อว่าเป็น
+            # step-down จริง (เฉพาะทิศทาง down เท่านั้น เหตุผลเดียวกับ SNR guard ด้านบน)
+            left_floor = floor_vals[max(0, k - win):k]
+            right_floor = floor_vals[k:k + win]
+            if len(left_floor) >= 3 and len(right_floor) >= 3:
+                floor_jump = abs(float(np.median(right_floor)) - float(np.median(left_floor)))
+                if floor_jump > _HIDDEN_BEHIND_DOWN_MAX_FLOOR_JUMP_PX:
+                    continue
+            return {
+                "split_x": xs[k], "front_height": right_med, "hidden_height": left_med,
+                "jump_px": abs(jump), "left_std": left_std, "right_std": right_std,
+                "direction": "down",
             }
     return None
 
@@ -4081,7 +4238,8 @@ def detect_hidden_behind_columns(view_result):
         x0, x1 = boundaries[i], boundaries[i + 1]
         r = _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1)
         if r is not None:
-            r["x1"] = x1
+            r["x0"] = x0  # v25.70 NEW: เก็บ x0 ไว้ด้วย (จำเป็นสำหรับ direction='down' ที่ต้อง
+            r["x1"] = x1  # mark ฝั่งซ้าย/ก่อน split แทนฝั่งขวา/หลัง split แบบเดิม)
             found[i] = r
     return found
 
@@ -4658,7 +4816,14 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
 
     วาด marker เฉพาะ 'โซนที่กล่องซ่อนหลังโผล่ให้เห็น' (จาก split_x ถึงขอบคอลัมน์) ไม่ใช่ทั้ง
     คอลัมน์ เพื่อความแม่นยำของตำแหน่งกรอบ (คำนวณ abs_box ตรงที่นี่เลย แทนการพึ่ง
-    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)"""
+    risk_abs_box+stack_heights เดิม เพราะ 'ตั้ง' นี้ไม่ได้มี index ของตัวเองใน stack_heights)
+
+    v25.70 NEW (สำคัญ - พบจริงจาก EE03-01, ดู docstring เต็มที่ _detect_hidden_behind_split
+    สำหรับหลักฐาน+เหตุผล): รองรับทิศทาง 'down' เพิ่มเติม (ฝั่งซ้าย/ก่อน split สูงกว่า) นอกเหนือ
+    จากทิศทาง 'up' เดิม (ฝั่งขวา/หลัง split สูงกว่า) - ทั้ง 2 ทิศทาง mark 'ฝั่งที่สูงกว่า' เสมอ
+    (ตรงกับหลักการเดียวกับ STEP_DOWN_RISK subtype อื่นทั้งหมดที่ mark กองสูงกว่าเป็นแหล่งเสี่ยง
+    ล้มทับกองเตี้ยกว่า) - ทิศทาง 'up': mark จาก split_x ถึง x1 (พฤติกรรมเดิมทุกประการ) | ทิศทาง
+    'down': mark จาก x0 ถึง split_x แทน (ฝั่งที่สูงกว่าอยู่ก่อน split)"""
     risks = []
     hidden_behind = view_result.get("hidden_behind", {})
     ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
@@ -4670,16 +4835,35 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
         if parent.get("is_corner_duplicate"):
             continue
         split_x, x1 = info["split_x"], info["x1"]
+        x0 = info.get("x0", split_x)  # v25.70: fallback=split_x กันพังถ้า key ไม่มี (เผื่อ
+        # เรียกจากที่อื่นที่ยังไม่ได้อัพเดต - ไม่ควรเกิดขึ้นจริงเพราะแก้ที่เดียวกันแล้ว)
         hidden_h = info["hidden_height"]
-        xm = (split_x + x1) // 2
+        direction = info.get("direction", "up")  # v25.70 NEW: default='up' รักษาพฤติกรรมเดิม
+        if direction == "down":
+            mark_x0, mark_x1 = x0, split_x
+        else:
+            mark_x0, mark_x1 = split_x, x1
+        # v25.70 NEW (สำคัญ - พบจริงจาก EE03-01): เดิม mark_x0/mark_x1 อาจแคบมาก (พบจริง 10px
+        # เท่านั้น) เพราะ boundary ของ Phase 1B (x0/x1 ของคอลัมน์) วางคลาดเคลื่อนจากตำแหน่ง split
+        # จริงเล็กน้อย ทำให้กรอบที่วาดได้เป็นเส้นบางแนวตั้งแทบมองไม่เห็น แทนที่จะเป็นกรอบสี่เหลี่ยม
+        # ชัดเจนเหมือนกรอบคอลัมน์ทั่วไป - ใช้หลักการเดียวกับที่แก้ silhouette_notch ไปแล้ว (v25.69):
+        # ถ้าความกว้างที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ ให้ pad สมมาตรทั้ง 2 ฝั่งจนถึงเกณฑ์นี้ (จำกัด
+        # ไม่ให้เกินขอบเขตของ view เพื่อไม่ให้กรอบล้นออกไปนอกภาพ)
+        if (mark_x1 - mark_x0) < _NOTCH_BOX_MIN_WIDTH_PX:
+            pad = (_NOTCH_BOX_MIN_WIDTH_PX - (mark_x1 - mark_x0)) / 2.0
+            view_sx = view_result.get("start_x", mark_x0)
+            view_ex = view_result.get("end_x", mark_x1)
+            mark_x0 = max(view_sx, int(round(mark_x0 - pad)))
+            mark_x1 = min(view_ex, int(round(mark_x1 + pad)))
+        xm = (mark_x0 + mark_x1) // 2
         floor_y_local = local_floor_y[xm] if 0 <= xm < len(local_floor_y) and local_floor_y[xm] >= 0 else None
         if floor_y_local is None:
             continue
         top_y_local = floor_y_local - hidden_h
-        abs_box = (ox + split_x, oy + top_y_local, ox + x1, oy + floor_y_local)
+        abs_box = (ox + mark_x0, oy + top_y_local, ox + mark_x1, oy + floor_y_local)
         risks.append({
             "risk_type": "STEP_DOWN_RISK", "subtype": "hidden_behind", "view": view_label,
-            "mark_view": view_label, "mark_stack_idx": idx, "mark_x_range": (split_x, x1),
+            "mark_view": view_label, "mark_stack_idx": idx, "mark_x_range": (mark_x0, mark_x1),
             "taller_height_px": hidden_h, "shorter_height_px": info["front_height"],
             "drop_ratio": 1 - (info["front_height"] / hidden_h) if hidden_h > 0 else 0,
             "jump_px": info["jump_px"], "abs_box": abs_box,
@@ -5896,8 +6080,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.69",
-            "benchmarkMode": "v25_69_length_mismatch_removed_notch_box_widened",
+            "checkerVersion": "V25.70",
+            "benchmarkMode": "v25_70_hidden_behind_bidirectional_with_snr_floor_guards",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
