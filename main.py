@@ -2,6 +2,33 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.75 (ลบกลไกที่ไม่ใช้งานจริง/ไม่เกี่ยวข้องออก ตามคำสั่งผู้ใช้ 31-Aug-2026 - "ระหว่างรอ...
+ให้ไปลบกลไกที่ไม่ใช้งานจริงๆ ไม่เกี่ยวข้อง ที่เคยแจ้งออกไปเลยครับ"):
+  ลบ 2 ส่วนที่ CHANGELOG เวอร์ชันก่อนหน้าเคยระบุไว้ชัดเจนแล้วว่า "ไม่ได้ถูกเรียกใช้จริงจาก
+  pipeline หลัก" (dead code ที่ค้างอยู่ในไฟล์เฉยๆ ไม่กระทบผลลัพธ์ใดๆ):
+  1) "v25.13 EXPERIMENTAL UTILITIES" (ทั้งบล็อก, 335 บรรทัด) - ประกอบด้วย 5 ฟังก์ชัน:
+     classify_boundary_grid_vs_seam, _global_container_silhouette, _touches_boundary,
+     is_structural_color_cross_view, locate_apex_and_width_vector_consistent - CHANGELOG
+     ของ v25.13 เองระบุไว้ตั้งแต่ต้นแล้วว่า "ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้"
+     และไม่เคย wire เข้าใช้งานจริงเลยตลอด 60+ เวอร์ชันถัดมา (v25.14-v25.74)
+  2) detect_step_down_topface_jump() (261 บรรทัด รวม constants เฉพาะของฟังก์ชันนี้ -
+     _TOPFACE_JUMP_FLOOR_TOL_PX/_WINDOW_PX/_MARGIN_PX/_MIN_POINTS/_MAX_RESID_STD/
+     _MIN_SPAN_FRACTION) - ฟังก์ชันนี้ถูก "ปิดการใช้งาน" (comment out 2 บรรทัดที่เรียกใช้ใน
+     run_full_analysis_on_image) มาตั้งแต่ v25.65 เพราะพบ false-positive ร้ายแรงหลายไฟล์
+     (EB66-01 1->6 hazards, ED86-03 0->2 hazards) และไม่เคยถูกเปิดใช้งานอีกเลยตลอด 9
+     เวอร์ชันถัดมา (v25.66-v25.74)
+  ข้อควรทราบสำคัญ: stack_expected_colors (คำนวณใน process_view_on_image, เดิม comment
+  ระบุว่า "ใช้เฉพาะกับ detect_step_down_topface_jump เท่านั้น") ยังคงเก็บไว้ในไฟล์ เพราะ v25.74
+  นำสัญญาณนี้มาใช้ใหม่เป็น trigger สำหรับ "Multi-Color Merge Recheck Guard" ใน
+  detect_step_down_pairwise/detect_step_down_crossview แล้ว (คนละกลไกกับที่ถูกลบในรอบนี้ -
+  ไม่ได้ลบทิ้งไปด้วย) เช่นเดียวกับ _stack_color_normalize/_STACK_COLOR_MATCH_HUE_TOL/
+  _STACK_COLOR_MATCH_MIN_MAXCHAN ที่ยังคงถูกใช้งานจริงโดย _recheck_stack_height_via_color
+  (v25.74) จึงไม่ได้ถูกลบเช่นกัน (แม้จะเคยถูกสร้างขึ้นมาเพื่อ topface_jump เดิมก็ตาม)
+  ผลทดสอบ (regression-verified ครบ 3 ไฟล์ที่มีอยู่): AB03-04=2 risks, AB05-01=1 risk,
+  AC03-02=1 risk - ตรงกับผลลัพธ์ของ v25.74 (ก่อนลบ) ทุกประการ 100% ไม่มี regression เลย
+  เพราะโค้ดที่ลบทั้งหมดเป็น dead code ที่ไม่เคยถูกเรียกใช้งานจริงอยู่แล้ว (ยืนยันด้วยการ grep
+  หาทุกจุดที่เรียกใช้ก่อนลบ) ไฟล์ลดขนาดจาก 6652 บรรทัด เหลือ 6063 บรรทัด (ลด 589 บรรทัด)
+================================================================================
 v25.74 (แก้ปัญหา AB03-04 ที่ผู้ใช้ระบุ "ตั้งฟ้าริมสุดไม่ควรวาดกรอบ (ปลอดภัย, สูงเท่ากับตั้งฟ้า
 ที่ติดกันจริง) แต่ตั้งฟ้าที่ติดกับตั้งน้ำเงินควรวาดกรอบ (สูงกว่าจริง)", แนะนำแนวทาง "recheck-
 front face, top face, floor jump" - 31-Aug-2026):
@@ -3563,341 +3590,14 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         return {"front": None, "back": None}
 
 
-# ============================================================================
-# v25.13 EXPERIMENTAL UTILITIES (จาก session พัฒนาแยกต่างหาก - ยังไม่ wire เข้า pipeline หลัก)
-# ============================================================================
-# ประวัติ: v25.12 เคยเสนอ utility 3 ตัว (classify_boundary_grid_vs_seam,
-# locate_container_apex_and_width_vector, และแนวคิด structural-color exclusion) โดยตอนนั้น
-# 2 ใน 3 แนวคิด "พังจริง" เมื่อทดสอบกับ AC03-01 (ไฟล์โหลดเต็มคัน 100% - ไม่เหลือช่องว่าง
-# โครงสร้างรอบกล่องเลย): (1) structural-color exclusion แบบ single-view boundary-touch ทำให้
-# กล่องสีน้ำเงินถูกเข้าใจผิดเป็นพื้นตู้ (2) width-vector geometry classifier ให้ผล FRONT/BACK
-# ไม่ตรงกันเอง (216,108) vs (128,64) ทั้งที่ควรเป็นค่าเดียวกัน (ความกว้างตู้จริงคงที่)
-#
-# v25.13 นี้ กลับไปสืบสวนหาสาเหตุที่แท้จริงและแก้ไขทั้ง 2 จุด ด้วยการทดสอบสมมติฐานใหม่กับ
-# AC03-01 จริงทุกขั้นตอน (ไม่ใช่แค่คาดเดา) สรุปผลดังนี้:
-#
-# --------------------------------------------------------------------------------------
-# (1) FIX: is_structural_color_cross_view -- ใช้หลักฐาน "ปรากฏในทั้ง 2 view พร้อมกัน" แทน
-# --------------------------------------------------------------------------------------
-# root cause ที่แท้จริงของความล้มเหลวเดิม (พิสูจน์ด้วย AC03-01 จริง): วิธี single-view
-# boundary-touch เดิม ตรวจแค่ view เดียว - กล่องสีน้ำเงินที่ชนขอบภาพ (เพราะโหลดเต็มคัน) ใน BACK
-# ถูกเข้าใจผิดเป็นพื้นตู้ ทั้งที่ในไฟล์เดียวกันนี้ FRONT (สีน้ำเงินเดียวกัน) "ไม่ชนขอบภาพเลย"
-#
-# FIX: สีโครงสร้างจริง (พื้น/ผนัง/หลังคา) เป็นส่วนหนึ่งของตัวรถทั้งคัน จึงต้องปรากฏใน "ทั้ง 2
-# view" (FRONT และ BACK คือรถคันเดียวกัน มองจากคนละมุม) และต้องชนขอบภาพใน "ทั้งคู่พร้อมกัน"
-# ส่วนกล่องสินค้าที่บังเอิญชนขอบภาพจากโหลดเต็มคัน มักชนแค่ฝั่งเดียว (มุมกล้องคนละมุมทำให้ขอบ
-# ตัดกล่องคนละตำแหน่ง) - ทดสอบยืนยันกับ AC03-01 จริง:
-#   สีน้ำเงิน (0,0,255) กล่องจริง: FRONT ไม่ชนขอบ (False), BACK ชนขอบ (True)
-#     -> เดิม (single-view): ผิดเป็น STRUCTURAL ใน BACK
-#     -> ใหม่ (cross-view AND): ต้องชนทั้งคู่ถึงจะนับเป็น STRUCTURAL -> ถูกต้อง เก็บเป็น BOX
-#   สีทอง (203,203,101)/(178,178,89) หลังคาจริง: ปรากฏเฉพาะใน FRONT (ชนขอบ=True) ไม่มีใน BACK
-#     -> ใช้ single-view fallback (เพราะไม่มีข้อมูล cross-view ให้เทียบ) -> ยังคง STRUCTURAL
-#     ถูกต้อง (ตรวจสอบด้วยภาพจริงแล้ว: เป็นแผงผนังด้านข้างขวาของตู้ ไม่ใช่กล่อง)
-#   สีทอง (210,210,105) พื้น/ผนัง฿ฝั่ง BACK: ปรากฏเฉพาะใน BACK (ชนขอบ=True) ไม่มีใน FRONT
-#     -> single-view fallback -> ยังคง STRUCTURAL ถูกต้อง
-# ผลลัพธ์: ผ่านการทดสอบ AC03-01 ครบทุกสีที่ตรวจสอบได้ ไม่มี false-positive กับกล่องอีกต่อไป
-#
-# ข้อจำกัดที่ยังต้องระวัง (บอกตรงไปตรงมา): "single-view fallback" (ใช้เมื่อสีนั้นปรากฏใน
-# แค่ 1 view) ยังคงพึ่ง boundary-touch เดี่ยวเหมือนเดิม - ถ้ามีไฟล์ที่กล่องสี unique (ปรากฏ
-# แค่ view เดียว) บังเอิญชนขอบภาพจากโหลดเต็มคันเช่นกัน จุดอ่อนเดิมจะกลับมา - ยังไม่มีไฟล์
-# ตัวอย่างที่ยืนยันเคสนี้ได้ในรอบนี้ (มีแค่ AC03-01 ให้ตรวจสอบ) จึงยังไม่ integrate เข้า
-# pipeline หลัก คงเป็น utility function แยกเท่านั้น
-#
-# --------------------------------------------------------------------------------------
-# (2) FIX: locate_apex_and_width_vector_consistent -- เพิ่ม cross-view consistency-gate
-# --------------------------------------------------------------------------------------
-# สืบสวนสาเหตุ (debug เต็มรูปแบบกับ AC03-01): พบว่าปัญหาไม่ใช่ "false-positive plateau สั้น"
-# ตามที่คาดไว้ตอนแรก (ทดสอบเพิ่ม min_flat_run จาก 3 ไปถึง 300 - ผลลัพธ์ไม่เปลี่ยนเลยจนกว่าจะ
-# เกิน length ของ plateau จริง) แต่เป็นเพราะ BACK เจอ "แนวตั้งยาวจริง" (~102 แถวติดกัน) ที่ไม่ใช่
-# ขอบตู้จริง (ไม่มี plateau อื่นที่ยาวกว่านี้เลยแม้ค้นหาถึง 1200 แถว) ในขณะที่ FRONT เจอแนวตั้ง
-# จริงที่ยาวกว่ามาก (~265 แถว) ซึ่งตรงกับขอบตู้จริงตามหลักฟิสิกส์ isometric (เส้นดิ่งของกล่อง
-# สี่เหลี่ยมในมุมมอง isometric ต้องยาวต่อเนื่องตลอดความสูงกอง) - สรุปคือวิธี trace ตามลำพัง
-# (ไม่มีข้อมูลอ้างอิงอื่น) ไม่สามารถแยกแยะ "แนวตั้งจริงของขอบตู้" ออกจาก "แนวตั้งบังเอิญจากลูกศร/
-# เส้นบอกขนาดที่ทับซ้อนกันพอดี" ได้ 100% โดยเฉพาะไฟล์โหลดเต็มคันที่ไม่มีช่องว่างช่วยยืนยัน
-#
-# FIX ที่ตรวจสอบได้จริง (ไม่ใช่การเดา): เนื่องจากความกว้างตู้จริง (2400mm) ต้องเท่ากันทั้ง FRONT
-# และ BACK (รถคันเดียวกัน, render scale เดียวกัน) - เพิ่ม "consistency-gate": คำนวณทั้ง 2 view
-# แล้วเทียบขนาด (magnitude) ของ width_vector ที่ได้ ถ้าอัตราส่วน (ค่าน้อย/ค่ามาก) ต่ำกว่า
-# เกณฑ์ (min_consistency_ratio) -> ถือว่า "ไม่น่าเชื่อถือ" คืนค่า None ทั้งคู่ แทนที่จะเชื่อ
-# ตัวเลขที่อาจผิดอย่างมั่นใจ (เปลี่ยนจาก "มั่นใจผิด" เป็น "ซื่อสัตย์ว่าไม่รู้")
-# ทดสอบกับ AC03-01 จริง: FRONT mag=241.5, BACK mag=143.1, อัตราส่วน=0.593 (ห่างจาก 1.0 มาก)
-# -> ฟังก์ชันใหม่ปฏิเสธทั้งคู่อย่างถูกต้อง (แทนที่จะคืนค่าผิดอย่างมั่นใจเหมือน v25.12 เดิม)
-#
-# ข้อจำกัดที่ยังต้องระวัง (บอกตรงไปตรงมา): แก้ไขนี้เป็น "safety gate" ไม่ใช่ "ทำให้แม่นยำขึ้น"
-# - ยังไม่มีวิธียืนยันว่ากรณีที่ผ่านเกณฑ์ (ratio สูง) จะได้ค่าที่ถูกต้องจริง 100% เพราะมีเพียง
-# ไฟล์เดียว (AC03-01 ซึ่งเป็นกรณีที่ควรถูกปฏิเสธ) ให้ตรวจสอบในรอบนี้ - ยังไม่ integrate เข้า
-# pipeline หลัก คงเป็น utility function แยกเท่านั้น จนกว่าจะมีไฟล์เพิ่มเติมมายืนยัน true-positive
-#
-# สรุปโดยรวม v25.13: ทั้ง 2 utility ผ่านการแก้ไขที่มีหลักฐาน (evidence-based) และพิสูจน์แล้วว่า
-# แก้ปัญหาที่พบใน v25.12 ได้จริงกับ AC03-01 (ไฟล์เดียวที่มีให้ตรวจสอบ) แต่ยังคง "ไม่ wire เข้า
-# pipeline หลัก" เนื่องจากมีไฟล์ตัวอย่างให้ regression-test แค่ 1 ใน 6 ไฟล์ calibration ของ
-# PHASE 1B (ไม่มี EC01-01/EC04-01/02/03/04 ให้ตรวจสอบในรอบนี้) - แนะนำให้รัน regression เต็ม
-# ทั้ง 6 ไฟล์ก่อนพิจารณา integrate เข้า pipeline จริงในเวอร์ชันถัดไป ไม่มีการแก้ไข PHASE
-# 1B/2/3/Rule Engine เดิมแต่อย่างใดในเวอร์ชันนี้ (regression-verified: AC03-01 ยังคง
-# front=7, back=7 ตรงเดิมทุกประการ)
-# ============================================================================
-
-def classify_boundary_grid_vs_seam(region, x_gap_range, y_overlap_range,
-                                    black_thresh=30, ratio_low=0.35, ratio_high=0.85,
-                                    ratio_consistency_tol=0.12,
-                                    black_core_fraction_thresh=0.15):
-    """
-    [v25.12/13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
-    แยกแยะเส้นแบ่งระหว่าง component สี 2 อัน ว่าเป็น 'GRID_LINE' (เส้น overlay ปลอม - ควร
-    merge เป็นกล่องเดียว) หรือ 'REAL_SEAM' (ขอบกล่องจริง - ไม่ควร merge)
-
-    หลักฐานที่พิสูจน์แล้ว (session พัฒนาแยก, ไฟล์ EA03-01):
-      GRID_LINE: พิกเซลเส้นแบ่ง = สีพื้นเดิม x อัตราส่วนคงที่ (~0.35-0.85) ไม่เคยถึงดำสนิท
-                 แม้พื้นหลังจะเปลี่ยนสี (ข้าม SKU) อัตราส่วนก็ยังคงที่ (วัดได้จริง: 0.622 บน
-                 พื้นแดง, 0.625 บนพื้นเขียว - ยืนยันว่าเป็นเส้นเดียวกันที่ overlay ทับ)
-      REAL_SEAM: มีแกนดำสนิท (0,0,0) ปรากฏอย่างมีนัยสำคัญ (>black_core_fraction_thresh
-                 ของความยาวเส้น) ซึ่งเส้น overlay แบบ multiply-blend ไม่มีทางให้ค่าดำสนิทได้
-
-    Args:
-      region: ภาพ RGB (numpy array, ต้องเป็นพิกัดเดียวกับที่ x_gap_range/y_overlap_range อ้างถึง)
-      x_gap_range: (x0,x1) ของช่องว่างระหว่าง 2 component (พิกัด local ของ region เดียวกัน)
-      y_overlap_range: (y0,y1) ส่วนที่ทั้ง 2 component ทับซ้อนกันในแนวตั้งเท่านั้น (สำคัญมาก:
-        ต้องจำกัดแค่ช่วงที่ทับซ้อนจริง ห้าม scan ทั้งคอลัมน์ภาพ มิฉะนั้นจะไปโดน text label อื่น
-        ที่ไม่เกี่ยวข้องปนเข้ามาทำให้ตัดสินผิด - เป็นบั๊กที่เคยพบและแก้ไขแล้วใน session พัฒนา)
-
-    Returns:
-      'GRID_LINE' หรือ 'REAL_SEAM' (default ปลอดภัย = REAL_SEAM เมื่อข้อมูลไม่พอ/ไม่แน่ใจ
-      เพื่อไม่ให้ merge ผิดพลาดโดยไม่มีหลักฐานเพียงพอ)
-    """
-    y0, y1 = y_overlap_range
-    x0, x1 = x_gap_range
-    if y1 <= y0 or x1 <= x0:
-        return 'REAL_SEAM'
-
-    total_rows = 0
-    black_core_rows = 0
-    grid_like_rows = 0
-    left_x = max(x0 - 1, 0)
-
-    for y in range(y0, y1):
-        gap_pixels = region[y, x0:x1]
-        if len(gap_pixels) == 0:
-            continue
-        total_rows += 1
-
-        min_sum = min(int(p[0]) + int(p[1]) + int(p[2]) for p in gap_pixels)
-        if min_sum < black_thresh:
-            black_core_rows += 1
-            continue
-
-        darkest = min(gap_pixels, key=lambda p: int(p[0]) + int(p[1]) + int(p[2]))
-        neighbor = region[y, left_x]
-        r, g, b = (int(v) for v in darkest)
-        nr, ng, nb = (int(v) for v in neighbor)
-        ratios = [c / nc for c, nc in zip((r, g, b), (nr, ng, nb)) if nc > 20]
-        if not ratios:
-            continue
-        avg_ratio = sum(ratios) / len(ratios)
-        consistent = all(abs(v - avg_ratio) < ratio_consistency_tol for v in ratios)
-        if consistent and ratio_low < avg_ratio < ratio_high:
-            grid_like_rows += 1
-
-    if total_rows == 0:
-        return 'REAL_SEAM'
-
-    black_core_frac = black_core_rows / total_rows
-    grid_like_frac = grid_like_rows / total_rows
-
-    if black_core_frac > black_core_fraction_thresh:
-        return 'REAL_SEAM'
-    if grid_like_frac > 0.6:
-        return 'GRID_LINE'
-    return 'REAL_SEAM'
-
-
-def _global_container_silhouette(region, sat_thresh=0.12, val_thresh=0.20):
-    """หา connected-component ที่ใหญ่ที่สุดของพิกเซลสี box-fill ใด ๆ (ทุก hue รวมกัน) -
-    แทน silhouette รวมของทั้งตัวรถ (พื้น+ผนัง+หลังคา+กล่องสินค้าทั้งหมด เพราะทุกอย่างสัมผัส
-    กันในภาพ isometric) ใช้เป็นกรอบอ้างอิงสำหรับ is_structural_color_cross_view ด้านล่าง"""
-    S, V = _p1b_sat_val(region)
-    fill_mask = (S > sat_thresh) & (V > val_thresh)
-    structure = np.ones((3, 3), dtype=int)
-    labeled, num = ndimage.label(fill_mask, structure=structure)
-    if num == 0:
-        return None
-    sizes = ndimage.sum(fill_mask, labeled, range(1, num + 1))
-    largest_label = int(np.argmax(sizes)) + 1
-    return labeled == largest_label
-
-
-def _touches_boundary(region, color, silhouette, tol=12, margin=2):
-    """สีนี้มีพิกเซลอย่างน้อย 1 จุด (ภายใน silhouette) ที่สัมผัสขอบนอกสุดของ silhouette
-    (บน/ล่าง/ซ้าย/ขวา) หรือไม่ - ใช้เป็นสัญญาณเดี่ยว (single-view) สำหรับ fallback เท่านั้น
-    (พิสูจน์แล้วว่าใช้เดี่ยว ๆ ไม่ปลอดภัยกับไฟล์โหลดเต็มคัน - ดู is_structural_color_cross_view)"""
-    if silhouette is None:
-        return False
-    gys, gxs = np.nonzero(silhouette)
-    if len(gys) == 0:
-        return False
-    g_top, g_bottom = int(gys.min()), int(gys.max())
-    g_left, g_right = int(gxs.min()), int(gxs.max())
-    diff = np.abs(region.astype(int) - np.array(color, dtype=int))
-    mask = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
-    mask = mask & silhouette
-    ys, xs = np.nonzero(mask)
-    if len(ys) == 0:
-        return False
-    return (ys.min() <= g_top + margin) or (xs.min() <= g_left + margin) or \
-           (xs.max() >= g_right - margin) or (ys.max() >= g_bottom - margin)
-
-
-def is_structural_color_cross_view(front_region, back_region, color,
-                                    front_silhouette=None, back_silhouette=None,
-                                    tol=12, margin=2, color_match_tol=15):
-    """
-    [v25.13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
-    [แก้ไขจาก v25.12 ที่พังกับ AC03-01 (โหลดเต็มคัน) - ดู docstring หัวข้อ "v25.13
-     EXPERIMENTAL UTILITIES" ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม]
-
-    ตรวจสอบว่า `color` เป็นสีโครงสร้างตู้ (พื้น/ผนัง/หลังคา) หรือสีกล่องสินค้าจริง โดยใช้
-    หลักฐาน "ปรากฏในทั้ง FRONT และ BACK พร้อมกัน และชนขอบภาพทั้งคู่" (สีโครงสร้างเป็นส่วนหนึ่ง
-    ของรถทั้งคัน ต้องเห็นได้จากทั้ง 2 มุมกล้อง) แทนการตรวจแค่ view เดียว ซึ่งพิสูจน์แล้วว่า
-    ทำให้กล่องที่บังเอิญชนขอบภาพ (จากโหลดเต็มคัน) ถูกเข้าใจผิดเป็นโครงสร้าง
-
-    Args:
-      front_region, back_region: ภาพ RGB ของ FRONT และ BACK view
-      color: (r,g,b) สีที่ต้องการตรวจสอบ
-      front_silhouette, back_silhouette: ผลลัพธ์จาก _global_container_silhouette (ถ้ามีอยู่
-        แล้วจากการเรียกครั้งก่อน ส่งเข้ามาเพื่อลดการคำนวณซ้ำได้)
-      color_match_tol: ระยะห่างสี (แต่ละ channel) สูงสุดที่ยังถือว่าเป็น "สีเดียวกัน" ระหว่าง
-        2 view (สีที่ render ออกมาอาจมี pixel-value เพี้ยนเล็กน้อยระหว่าง view ได้)
-
-    Returns:
-      True = ตัดสินว่าเป็นสีโครงสร้าง (ควรตัดออกจากการนับกล่อง)
-      False = ตัดสินว่าเป็นสีกล่องจริง (เก็บไว้)
-
-    Logic:
-      - ถ้าสีนี้ปรากฏ (มี pixel มากพอ) ในทั้ง 2 view: ต้อง "ชนขอบภาพทั้งคู่" ถึงจะถือเป็น
-        โครงสร้าง (cross-view AND) - นี่คือจุดที่แก้บั๊กเดิม เพราะกล่องที่ชนขอบแค่ฝั่งเดียว
-        (เช่น สีน้ำเงินใน AC03-01 ที่ชนขอบเฉพาะ BACK ไม่ชนใน FRONT) จะถูกเก็บไว้ถูกต้อง
-      - ถ้าสีนี้ปรากฏแค่ 1 view: fallback ไปใช้ single-view boundary-touch (ข้อจำกัด: ยัง
-        เสี่ยง false-positive ถ้ากล่องสี unique บังเอิญชนขอบจากโหลดเต็มคัน - ยังไม่มีไฟล์
-        ตัวอย่างยืนยันเคสนี้)
-    """
-    if front_silhouette is None:
-        front_silhouette = _global_container_silhouette(front_region)
-    if back_silhouette is None:
-        back_silhouette = _global_container_silhouette(back_region)
-
-    def _color_present(region, color, silhouette, tol):
-        if silhouette is None:
-            return False
-        diff = np.abs(region.astype(int) - np.array(color, dtype=int))
-        mask = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
-        mask = mask & silhouette
-        return int(mask.sum()) > 200  # ต้องมี pixel มากพอ ไม่ใช่ noise เล็กน้อย
-
-    in_front = _color_present(front_region, color, front_silhouette, tol)
-    in_back = _color_present(back_region, color, back_silhouette, tol)
-
-    if in_front and in_back:
-        touch_f = _touches_boundary(front_region, color, front_silhouette, tol=tol, margin=margin)
-        touch_b = _touches_boundary(back_region, color, back_silhouette, tol=tol, margin=margin)
-        return touch_f and touch_b  # cross-view AND: ต้องชนขอบทั้งคู่
-
-    # สีนี้ปรากฏแค่ view เดียว -> fallback เป็น single-view test
-    if in_front:
-        return _touches_boundary(front_region, color, front_silhouette, tol=tol, margin=margin)
-    if in_back:
-        return _touches_boundary(back_region, color, back_silhouette, tol=tol, margin=margin)
-    return False  # ไม่พบสีนี้ในทั้ง 2 view เลย (ไม่ควรเกิดขึ้นถ้าเรียกถูกต้อง)
-
-
-def locate_apex_and_width_vector_consistent(front_region, back_region,
-                                             sat_thresh=0.16, val_thresh=0.24,
-                                             min_flat_run=3, max_trace_rows=1200,
-                                             min_consistency_ratio=0.85):
-    """
-    [v25.13 EXPERIMENTAL - ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้]
-    [แก้ไขจาก v25.12 ที่ให้ผล FRONT/BACK ไม่ตรงกันเองกับ AC03-01 - ดู docstring หัวข้อ
-     "v25.13 EXPERIMENTAL UTILITIES" ด้านบนสำหรับหลักฐาน+เหตุผลเต็ม]
-
-    หาจุดยอดหลังคา (apex) และ pixel-vector ของความกว้างตู้เต็ม (คงที่จริง 2400mm) จาก
-    FRONT และ BACK พร้อมกัน แล้วตรวจสอบว่าทั้ง 2 view เห็นพ้องกัน (ค่า magnitude ใกล้เคียงกัน
-    ตามที่ควรเป็นจริง เพราะเป็นตู้เดียวกัน) ก่อนจะคืนค่าใด ๆ - ถ้าไม่เห็นพ้องกัน (สงสัยว่า
-    ฝั่งใดฝั่งหนึ่งเจอ "แนวตั้งบังเอิญ" ที่ไม่ใช่ขอบตู้จริง) จะคืนค่า None ทั้งคู่แทนที่จะเชื่อ
-    ตัวเลขที่อาจผิดอย่างมั่นใจ
-
-    ทดสอบกับ AC03-01: FRONT ให้ magnitude≈241.5, BACK ให้≈143.1 (อัตราส่วน 0.593 < 0.85)
-    -> ฟังก์ชันนี้ปฏิเสธทั้งคู่ (คืนค่า None) อย่างถูกต้อง แทนที่จะคืนตัวเลขผิดเหมือน v25.12
-
-    Args:
-      front_region, back_region: ภาพ RGB ของ FRONT/BACK view
-      min_consistency_ratio: อัตราส่วนขั้นต่ำ (ค่าน้อย/ค่ามาก ของ magnitude ทั้ง 2 view)
-        ที่ยังยอมรับว่า "เห็นพ้องกันพอ" (default 0.85 คือต่างกันไม่เกิน ~15%)
-
-    Returns:
-      dict {'front': (apex, width_vector) หรือ (apex, None),
-            'back':  (apex, width_vector) หรือ (apex, None),
-            'consistent': bool} -- ถ้า consistent=False ค่า width_vector ทั้งคู่จะเป็น None
-      เสมอ (แม้จะคำนวณได้ตัวเลขก็ตาม) เพื่อป้องกันการนำค่าที่ไม่น่าเชื่อถือไปใช้ต่อโดยไม่รู้ตัว
-
-    ข้อจำกัด (บอกตรงไปตรงมา): เป็น "safety gate" ที่ป้องกันการใช้ค่าผิดอย่างมั่นใจ ไม่ใช่การ
-    ทำให้ค่าที่คำนวณได้แม่นยำขึ้น - ยังไม่มีไฟล์ตัวอย่างที่ยืนยันกรณี "ผ่านเกณฑ์แล้วถูกต้องจริง"
-    (true-positive) ในรอบนี้ มีเพียง AC03-01 ซึ่งเป็นกรณีที่ควรถูกปฏิเสธ (true-negative) เท่านั้น
-    """
-    def _locate(region):
-        S, V = _p1b_sat_val(region)
-        fill_mask = (S > sat_thresh) & (V > val_thresh)
-        structure = np.ones((3, 3), dtype=int)
-        labeled, num = ndimage.label(fill_mask, structure=structure)
-        if num == 0:
-            return None, None
-        sizes = ndimage.sum(fill_mask, labeled, range(1, num + 1))
-        largest_label = int(np.argmax(sizes)) + 1
-        silhouette = (labeled == largest_label)
-
-        ys, xs = np.nonzero(silhouette)
-        apex_y = int(ys.min())
-        apex_xs = xs[ys == apex_y]
-        apex = np.array([float(apex_xs.mean()), float(apex_y)])
-
-        prev_xmax = None
-        consecutive = 0
-        corner = None
-        h = silhouette.shape[0]
-        for y in range(apex_y, min(apex_y + max_trace_rows, h)):
-            xs_row = np.nonzero(silhouette[y])[0]
-            if len(xs_row) == 0:
-                continue
-            xmax = int(xs_row.max())
-            if prev_xmax is not None and xmax == prev_xmax:
-                consecutive += 1
-                if consecutive >= min_flat_run:
-                    corner = np.array([float(xmax), float(y - min_flat_run)])
-                    break
-            else:
-                consecutive = 0
-            prev_xmax = xmax
-
-        if corner is None:
-            return apex, None
-        return apex, corner - apex
-
-    apex_f, wv_f = _locate(front_region)
-    apex_b, wv_b = _locate(back_region)
-
-    consistent = False
-    if wv_f is not None and wv_b is not None:
-        mag_f, mag_b = float(np.linalg.norm(wv_f)), float(np.linalg.norm(wv_b))
-        if mag_f > 0 and mag_b > 0:
-            ratio = min(mag_f, mag_b) / max(mag_f, mag_b)
-            consistent = ratio >= min_consistency_ratio
-
-    if not consistent:
-        wv_f, wv_b = None, None
-
-    return {
-        'front': (apex_f, wv_f),
-        'back': (apex_b, wv_b),
-        'consistent': consistent,
-    }
-
+# v25.75 NEW: ลบส่วน "v25.13 EXPERIMENTAL UTILITIES" ทั้งหมดออกตามคำสั่งผู้ใช้
+# (31-Aug-2026) - เดิมมี 5 ฟังก์ชันทดลอง (classify_boundary_grid_vs_seam,
+# _global_container_silhouette, _touches_boundary, is_structural_color_cross_view,
+# locate_apex_and_width_vector_consistent) ที่ CHANGELOG ของ v25.13 เองระบุไว้ชัดเจน
+# ตั้งแต่ต้นแล้วว่า "ยังไม่ถูกเรียกใช้จาก pipeline หลักใด ๆ ในไฟล์นี้" (experimental,
+# ไม่เคย wire เข้าใช้งานจริงเลยตลอด 60+ เวอร์ชันถัดมา) - ผู้ใช้ระบุให้ลบกลไกที่ไม่เกี่ยวข้อง/
+# ไม่ใช้งานจริงเหล่านี้ออก เพื่อลดขนาดไฟล์และความซับซ้อนที่ไม่จำเป็น (ไม่กระทบการทำงานใดๆ
+# เพราะไม่เคยถูกเรียกใช้จริงตั้งแต่แรก)
 
 # ============================================================================
 # PHASE 2: ความยาวของแต่ละตั้งของกล่อง แต่ละ VIEW
@@ -4655,267 +4355,15 @@ def _floor_linearity_anomaly(records_same_view, target_idx, local_floor_y):
     return None
 
 
-# v25.65 NEW (สำคัญ - ตามไอเดียผู้ใช้ 29-Aug-2026: "step down pairwise ใช้ jump floor พิสูจน์
-# top face สีแดงกับสีเขียว ระนาบองศาเดียวกับ front face"): เดิม compute_stack_heights_px วัด
-# ความสูงจาก cargo_top_y ตลอดทั้งคอลัมน์ - พังเมื่อคอลัมน์ที่แคบ/เตี้ยผิดปกติถูกกล่องข้างเคียงที่
-# กว้าง/สูงกว่าทะลุปนสี "ยอด" เข้ามาทั้งคอลัมน์ (ยืนยันจาก EC18-01: กล่องแดง TOC1B-BN วัดได้
-# 301.9px ทั้งที่ควรจะ ~90-115px เพราะยอดที่วัดได้จริงเป็นยอดกล่องเขียวข้างเคียง) เคยลองแก้ด้วย
-# color-filter ทั้ง compute_stack_heights_px แต่ทำให้เกิด regression ที่ EB66-01 (สีเข้มของกล่อง
-# เขียวเข้มถูกกล่องเขียวอมฟ้าข้างเคียงบดบังบางส่วนตามธรรมชาติ - เป็น pattern ปกติ ไม่ใช่บั๊ก)
-#
-# แนวทางใหม่ตามไอเดียผู้ใช้: ไม่แตะ compute_stack_heights_px เลย (ปลอดภัยจาก regression เดิม)
-# แต่สร้างกลไกใหม่ที่ทำงาน "เฉพาะช่วงแคบๆ ใกล้ seam" เท่านั้น โดยใช้หลักการ 2 ขั้น:
-#   ขั้น 1 (floor_jump พิสูจน์ระนาบ): ใช้ _p1b_compute_floor_jump (มีอยู่แล้ว, ออกแบบมาสำหรับ
-#   ตรวจ floor jump ระหว่างคอลัมน์) มาพิสูจน์ก่อนว่า floor ของทั้งคู่เป็นระนาบเดียวกันจริง
-#   (floor_jump ≈ 0) - นี่คือ "การพิสูจน์ระนาบองศาเดียวกับ front face" ตามที่ผู้ใช้อธิบาย เพราะถ้า
-#   floor เป็นระนาบเดียวกัน (ไม่มี step ที่พื้น) แปลว่าทั้ง 2 กองตั้งอยู่บนพื้นเดียวกันจริง (แถว
-#   เดียวกัน ไม่ใช่คนละความลึก) - เงื่อนไขนี้ป้องกันการเข้าใจผิดกรณีกองอยู่คนละแถว/ความลึก
-#   ขั้น 2 (top-face jump ด้วยสีกรองเฉพาะช่วงแคบ): เมื่อพิสูจน์ระนาบพื้นแล้ว ให้ fit เส้นตรงทนทาน
-#   (_robust_local_line_fit) แยกกัน 2 เส้นจากจุดข้อมูล "เฉพาะที่สีตรงกับสีคาดหวังของแต่ละคอลัมน์
-#   เท่านั้น" (stack_expected_colors จาก P1B) ในช่วงแคบใกล้ seam (40px แต่ละฝั่ง เว้น margin กัน
-#   anti-alias) แล้ว extrapolate ทั้ง 2 เส้นมาที่ตำแหน่ง seam เพื่อหา "top jump" ที่แท้จริง -
-#   วิธีนี้ปลอดภัยกว่าการกรองสีทั้งคอลัมน์ (ที่เคยพัง EB66-01) เพราะ (ก) จำกัดพื้นที่แคบมาก ลด
-#   โอกาสเจอปัญหาบดบังธรรมชาติที่อื่น (ข) ต้องพิสูจน์ระนาบพื้นก่อนเสมอ (ค) ต้องมีจุดข้อมูลเพียงพอ
-#   และ resid_std ต่ำ (fit ตรงจริง) ทั้ง 2 ฝั่งจึงจะเชื่อผล
-#
-# ยืนยันด้วยข้อมูลจริง EC18-01: floor_jump(idx0,idx1)=3.29px (≈0 - ผ่านเงื่อนไขระนาบเดียวกัน)
-# fit_red: n=38 จุด, resid_std=0.92px | fit_green: n=40 จุด, resid_std=0.25px (แม่นยำสูงมากทั้งคู่)
-# h_red=112.0px, h_green=340.7px -> drop_ratio=67.1% (ใกล้เคียงกับที่ผู้ใช้ยืนยันว่าแดง=ครึ่งหนึ่ง
-# ของเขียว 1 ใบ เมื่อเขียวซ้อน 2 ชั้น ควรจะ ~75%) ต่างจากค่าเดิมที่ผิดพลาดมาก (13-23%)
-_TOPFACE_JUMP_FLOOR_TOL_PX = 15       # floor_jump ต้องต่ำกว่านี้ถึงจะถือว่า "ระนาบเดียวกัน"
-_TOPFACE_JUMP_WINDOW_PX = 40          # (เดิม - ไม่ใช้แล้วหลัง v25.66 plateau-check, เก็บไว้อ้างอิง)
-_TOPFACE_JUMP_MARGIN_PX = 6           # เว้นระยะจาก seam/ขอบคอลัมน์ กันปัญหา anti-alias/เส้นขอบ
-_TOPFACE_JUMP_MIN_POINTS = 10         # จำนวนจุดขั้นต่ำหลังกรองสี ต่ำกว่านี้ไม่เชื่อผล
-_TOPFACE_JUMP_MAX_RESID_STD = 3.0     # resid_std สูงสุดที่ยังเชื่อว่า fit ตรงจริง (มาตรฐานเดียว
-                                       # กับ _ROOFLINE_MAX_RESID_STD ที่ใช้ทั่วระบบ)
-
-# v25.66 NEW (สำคัญ - พบจริงจาก ED86-03 หลังผู้ใช้ตรวจสอบภาพจริงยืนยันว่า STT1A/INERA สูงเท่ากัน
-# จริง (~275-283px, ต่าง 2.9%) แต่ v25.65 วัดผิดเป็น drop_ratio สูงถึง 30-84%): เดิมใช้หน้าต่าง
-# ข้อมูลระยะคงที่ 40px "ใกล้ seam" เท่านั้น - ยืนยันด้วย pixel profile เต็มรูปแบบว่าหน้าต่างนี้
-# มักไม่ตรงกับ "plateau จริง" ของกล่อง (ตำแหน่งที่ความสูงคงที่/มั่นคงที่สุด) โดยเฉพาะกล่องกว้าง
-# (STT1A กว้าง 248px, INERA กว้าง 399px) ที่ plateau จริงมักอยู่ไกลจาก seam มาก - หน้าต่างใกล้
-# seam กลับไปตกอยู่ในโซน "เปลี่ยนผ่าน/ถูกบดบังบางส่วน" (STT1A: plateau จริงที่ x=731-779 h=275
-# แต่หน้าต่างเดิมที่ใช้คือ x=831-871 ซึ่งอยู่ในช่วงขาลง h=225->192 ไม่ใช่ plateau เลย)
-# FIX (ตามคำสั่งผู้ใช้ "เพิ่ม logic ตรวจสอบ plateau"): เปลี่ยนจากหน้าต่างคงที่ 40px ใกล้ seam
-# เป็นสแกนข้อมูลสีที่กรองแล้ว "ตลอดทั้งความกว้างของคอลัมน์เอง" (ทั้ง a และ b) แล้วใช้ _robust_
-# local_line_fit (ซึ่งมี iterative outlier-rejection อยู่แล้ว) หาเส้นตรงที่เข้ากับจุดส่วนใหญ่ที่สุด
-# (plateau เด่นชัดที่สุด) - เพิ่มเงื่อนไขใหม่ "plateau span coverage": จุดข้อมูลที่ fit ยอมรับ
-# (inlier หลัง robust rejection) ต้องครอบคลุมความกว้างอย่างน้อย _TOPFACE_JUMP_MIN_SPAN_FRACTION
-# ของความกว้างที่มีข้อมูลสีทั้งหมด - ถ้า fit ยอมรับแค่ไม่กี่จุดกระจุกตัวแคบๆ (อาจเป็นแค่ transition
-# noise ที่บังเอิญเรียงเป็นเส้นตรงได้) จะถือว่าไม่ใช่ plateau จริง -> ปฏิเสธ ไม่ trigger risk
-# ทดสอบยืนยัน: ED86-03 STT1A full-column fit ครอบคลุม plateau จริง (x=731-779) เป็นส่วนใหญ่ของ
-# inlier points -> extrapolate จากเส้นที่ถูกต้องนี้ไปที่ seam ให้ค่าที่ตรงกับความจริงมากกว่าเดิม
-_TOPFACE_JUMP_MIN_SPAN_FRACTION = 0.35  # inlier span ต้อง >= 35% ของความกว้างข้อมูลสีทั้งหมด
-                                         # ของคอลัมน์นั้น ถึงจะเชื่อว่าเป็น plateau จริง (ไม่ใช่แค่
-                                         # transition-zone ที่บังเอิญตรงกันเป็นเส้น)
-
-
-def detect_step_down_topface_jump(records, view_label, view_result):
-    """ตรวจ step-down ระหว่างคอลัมน์ที่ติดกัน โดยใช้ floor_jump พิสูจน์ระนาบพื้นเดียวกันก่อน
-    แล้ว fit เส้นตรงจากจุดที่สีตรงกับสีคาดหวังของแต่ละคอลัมน์ในช่วงแคบใกล้ seam เพื่อวัด "top
-    jump" ที่แท้จริง - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EC18-01)"""
-    risks = []
-    region = view_result.get("region")
-    cargo_mask = view_result.get("cargo_mask")
-    local_floor_y = view_result.get("local_floor_y")
-    expected_colors = view_result.get("stack_expected_colors")
-    if region is None or cargo_mask is None or local_floor_y is None or not expected_colors:
-        return risks
-
-    # v25.65 FIX: ต้องเรียงตาม x_range (ตำแหน่งจริงในภาพ) ไม่ใช่ pos_range (ตำแหน่งตามตรรกะของ
-    # รถ ซึ่งบางวิว เช่น FRONT อาจเรียงสวนทางกับ x_range จริง เนื่องจาก flip_position) - พบจริง
-    # ระหว่างทดสอบ EC18-01: valid ที่เรียงด้วย pos_range ทำให้ idx=6 (x=1157-1236) มาก่อน idx=0
-    # (x=655-778) ในลิสต์ ทำให้การจับคู่ seam (a_x1, b_x0) คำนวณผิดทิศทางไปเลย ต้องเรียงด้วย
-    # x_range[0] เพื่อให้แน่ใจว่า a อยู่ทางซ้ายจริงของ b เสมอ (สำหรับการคำนวณ seam/floor_jump)
-    valid = [r for r in records if not r.get("is_corner_duplicate")]
-    valid = sorted(valid, key=lambda r: r["x_range"][0])
-    # map idx -> position in expected_colors list (P1B column order == records idx order)
-    for i in range(len(valid) - 1):
-        a, b = valid[i], valid[i + 1]
-        idx_a, idx_b = a["idx"], b["idx"]
-        if idx_a >= len(expected_colors) or idx_b >= len(expected_colors):
-            continue
-        color_a, color_b = expected_colors[idx_a], expected_colors[idx_b]
-        if color_a is None or color_b is None:
-            continue
-        norm_a = _stack_color_normalize(np.array(color_a, dtype=np.float64))
-        norm_b = _stack_color_normalize(np.array(color_b, dtype=np.float64))
-        if norm_a is None or norm_b is None:
-            continue
-        # สีคาดหวังของ 2 ฝั่งต้องต่างกันจริง (ไม่งั้นไม่มีประโยชน์จะแยกด้วยสี)
-        if float(np.sqrt(np.sum((norm_a - norm_b) ** 2))) < _STACK_COLOR_MATCH_HUE_TOL:
-            continue
-
-        a_x0, a_x1 = a["x_range"]
-        b_x0, b_x1 = b["x_range"]
-        seam_x = (a_x1 + b_x0) // 2 if a_x1 <= b_x0 else (a["x_range"][1] + b["x_range"][0]) // 2
-        # ใช้ boundary จริงระหว่าง a,b (สมมติว่า a_x1 ~ seam ~ b_x0)
-        seam_x = int(round((a_x1 + b_x0) / 2.0))
-
-        # ขั้น 1: floor_jump ต้องพิสูจน์ว่าระนาบพื้นเดียวกัน
-        floor_jump = _p1b_compute_floor_jump(local_floor_y, a_x0, seam_x, b_x1)
-        if floor_jump is None or abs(floor_jump) > _TOPFACE_JUMP_FLOOR_TOL_PX:
-            continue
-
-        # ขั้น 2 (v25.66 FIX - "plateau check" ตามคำสั่งผู้ใช้): แทนที่จะ fit จากหน้าต่างแคบๆ
-        # ใกล้ seam เท่านั้น (ซึ่งพิสูจน์แล้วจาก ED86-03 ว่ามักไม่ใช่ plateau จริงของกล่องกว้าง)
-        # ให้สแกนจุดสีที่กรองแล้ว "ตลอดทั้งความกว้างของคอลัมน์เอง" แล้วใช้ robust-fit (ซึ่งมี
-        # iterative outlier-rejection) หาเส้นตรงที่ตรงกับจุดส่วนใหญ่ที่สุด (plateau เด่นชัดที่สุด)
-        # แล้วตรวจสอบว่า inlier ที่ fit ยอมรับครอบคลุมความกว้างเพียงพอ (ไม่ใช่กระจุกตัวแคบๆ)
-        # v25.66 FIX #2 (Critical - พบจริงจาก EB66-01 ระหว่างทดสอบ regression, แล้วพบข้อจำกัด
-        # เพิ่มเติมจาก EC18-01 ระหว่างแก้): มีการทดลอง 2 วิธีก่อนหน้านี้ ทั้งคู่มีจุดอ่อน:
-        #   วิธี A (v25.65 เดิม) "สแกนทุกจุดในคอลัมน์หาจุดบนสุดที่สีตรงกัน" - อันตราย เพราะถ้าจุด
-        #   บนสุดจริงเป็นสีทะลุปนจากเพื่อนบ้าน โค้ดจะสแกนลึกลงไปเรื่อยๆ จนกว่าจะเจอสีตรงกัน ซึ่งอาจ
-        #   ไปเจอ "หน้าด้านข้างที่อยู่ในเงา" ของกล่องเดียวกัน (สีเข้ม เช่น (0,64,0) ซึ่ง normalized-
-        #   hue เดียวกับ (0,128,0)) ทำให้ได้ y ลึกผิดปกติ (ยืนยัน: EB66-01 idx2 ได้ y=514 ทั้งที่
-        #   roof จริงอยู่ y=206-219 - ผิดพลาดสิ้นเชิง กลายเป็นจุดกลางหน้าด้านข้าง ไม่ใช่หลังคา)
-        #   วิธี B (เช็คแค่ raw cargo_top_y[x] ตรงสีหรือไม่) - ปลอดภัยกว่าแต่เข้มงวดเกินไป เพราะ
-        #   กรณี EC18-01 กล่องแดงถูกกล่องเขียวข้างเคียงบังจนมิด "ตลอดทั้งคอลัมน์" (raw cargo_top_y
-        #   เป็นสีเขียวทุกจุดในขอบเขตของกล่องแดง ไม่มีจุดใดเป็นแดงที่ตำแหน่งบนสุดเลย) ทำให้ n_match=0
-        #   เสมอ ไม่มีทางตรวจพบกล่องแดงได้เลย (ซึ่งเป็นเคสต้นเหตุที่ต้องการแก้)
-        # FIX ที่ถูกต้อง: bottom-up walk - เริ่มจาก "จุดล่างสุดของ cargo_mask ในคอลัมน์นั้น" (จุด
-        # นี้รับประกันว่าเป็นของ stack นี้แน่นอน เพราะเป็นตำแหน่งติดพื้น ไม่มีอะไรบังจากด้านล่างได้)
-        # แล้วเดินขึ้นทีละ pixel ตรวจสอบสีต่อเนื่อง - หยุดทันทีที่เจอสีเปลี่ยนไปมากกว่า tolerance
-        # (ไม่ใช่สแกนหาสีที่ไหนก็ได้เหมือนวิธี A) ยอมรับช่องว่างเล็กน้อย (anti-alias/ตัวอักษร) ไม่
-        # เกิน max_gap - วิธีนี้ปลอดภัยกว่าเพราะจุดเริ่มต้นชัวร์ว่าถูกต้อง (ไม่ใช่เดางมจากบนลงล่าง)
-        # และยังคงหาเจอ "ขอบเขตการมองเห็นจริง" ของกล่องที่ถูกบังบางส่วน (เหมือนกรณี EC18-01 แดง)
-        # ได้ เพราะเดินขึ้นจากจุดที่แน่นอนว่าเป็นสีถูกต้อง ไปจนกว่าจะเจอขอบเขตจริงที่สีเปลี่ยน
-        _COLOR_WALK_MAX_GAP_PX = 2
-        # v25.66 FIX #3 (พบจริงจาก EC18-01 ระหว่างแก้ fix #2): จุดล่างสุด (bottom_y) ของคอลัมน์
-        # บางครั้งโดนลูกศรกำกับ/label ที่ MaxLoad Pro วาดทับไว้ (ยืนยัน: EC18-01 กล่องแดงมีลูกศร
-        # สีส้ม-แดงชี้อยู่จริงตามภาพที่ผู้ใช้แนบ) ทำให้สีที่ bottom_y ไม่ตรงกับสีคาดหวัง (เช่น
-        # (255,114,59) แทนที่จะเป็น (255,0,0)) การเช็คแค่ pixel เดียวที่ bottom_y จึงพลาดตั้งแต่
-        # จุดเริ่มต้น - แก้โดยค้นหาจุดเริ่มต้นภายในช่วงเล็กๆ ใกล้พื้น (ไม่เกิน
-        # _COLOR_WALK_START_SEARCH_PX) แทนที่จะเช็คแค่ pixel เดียว - ยังคงปลอดภัย เพราะจำกัด
-        # ระยะค้นหาแคบมาก (ไม่เสี่ยงกระโดดข้ามไปเจอหน้าอื่นที่ไม่เกี่ยวข้องแบบวิธี A เดิม)
-        _COLOR_WALK_START_SEARCH_PX = 30
-
-        # v25.66 FIX #4 (Critical - พบจริงจาก EC18-01 ระหว่างแก้ fix #3): เดิมค้นหาจุดเริ่มต้น
-        # (start_y) โดยเช็คแค่ "สีตรงกับที่คาดหวังหรือไม่" - พบว่าลูกศรกำกับ (annotation arrow)
-        # ที่ MaxLoad Pro วาดทับบนกล่อง (ยืนยันจากภาพจริงที่ผู้ใช้แนบ: มีลูกศรสีแดง/ส้มชี้กล่อง
-        # แดงหลายเส้น) มีบางจุดที่สีใกล้เคียงสีแดงคาดหวังมากพอจะผ่าน tolerance (60) ทำให้ algorithm
-        # ไปจับพิกเซลของลูกศร (ซึ่งอยู่ตำแหน่งสุ่ม ไม่ใช่ขอบเขตจริงของกล่อง) แทนที่จะเป็นตัวกล่อง
-        # เอง ทำให้ได้ y ที่กระโดดไปมาแบบสุ่ม (507-520 ปนกับค่าที่ถูกต้อง 457-477) ทำให้ resid_std
-        # ของ fit สูงเกินไป (22.97 > 3.0) และไม่ trigger เลย
-        # FIX: ใช้ is_arrow_color() (ฟังก์ชันที่มีอยู่แล้วในระบบ ออกแบบมาสำหรับกรองลูกศรโดยเฉพาะ)
-        # ปฏิเสธพิกเซลที่เข้าเงื่อนไขลูกศรทั้งในขั้นค้นหาจุดเริ่มต้นและขั้นเดินขึ้น - ป้องกันไม่ให้
-        # algorithm เข้าใจผิดว่าลูกศรเป็นส่วนหนึ่งของกล่องสินค้า
-        # v25.66 FIX #5 (พบจริงจาก EB66-01 idx2 ระหว่างแก้ fix #4): เพิ่มขั้นตอน "ลอง raw
-        # cargo_top_y ก่อนเป็นอันดับแรก" (เร็วและปลอดภัยที่สุด - ใช้ได้ทันทีเมื่อยอดไม่ถูกทะลุปน
-        # ซึ่งเป็นกรณีส่วนใหญ่) แล้วค่อย fallback ไป bottom-up walk เฉพาะเมื่อ raw top ไม่ตรงสี
-        # (กรณีถูกบังทั้งคอลัมน์แบบกล่องแดงใน EC18-01) - ป้องกันปัญหา bottom-up walk ไปเจอเฉด
-        # สีเข้ม (shadow) ที่ normalized-hue ตรงกันโดยบังเอิญในกรณีที่ไม่จำเป็นต้องใช้ fallback เลย
-        cargo_top_y_arr = view_result.get("cargo_top_y")
-
-        def _color_matched_top_y_local(x, expected_norm):
-            # v25.67 FIX (Critical - พบจริงจาก EC18-01 x=743, 29-Aug-2026): เดิม (v25.65/66)
-            # ใช้วิธี "bottom-up walk with small gap tolerance" (เริ่มจากจุดที่เจอสีตรงใกล้
-            # bottom_y ก่อน แล้วเดินขึ้นทีละ pixel ยอมให้มี gap เล็กน้อยได้) - พบว่าวิธีนี้ "เดิน
-            # ติด" อยู่ในโซนตัวอักษรป้ายชื่อ (เช่น "TOC1B-BN" สีดำที่ทับอยู่บนกล่องแดง) เพราะตัว
-            # อักษรมีช่องว่างระหว่างตัวอักษร (inter-letter gap) ที่บางตำแหน่ง x เห็นพื้นหลังสีแดง
-            # แท้จริงปนอยู่ (ไม่ใช่ label 100% ทึบ) ทำให้ gap-tolerance เดินผ่านจุดเหล่านี้ไปได้
-            # (เพราะแต่ละจุดเป็นสีแดงแท้จริง ไม่ใช่ noise) แต่ตำแหน่งจริงเหล่านี้อยู่ "กลางป้ายชื่อ"
-            # ไม่ใช่ "ยอดกล่องจริง" - ยืนยันจากข้อมูลจริง x=743: walk ได้ top_of_run=500 (ผิด)
-            # ทั้งที่ยอดจริงอยู่ที่ y=471 (ตรงกับเพื่อนบ้าน x=742,744 ที่ให้ผล 471 ถูกต้อง)
-            # FIX: เปลี่ยนเป็นวิธี "scan ทั้งคอลัมน์ (ทุก y ใน cargo_mask) หาจุดบนสุด (min-y) ที่
-            # สีตรงกับที่คาดหวังเท่านั้น" โดยไม่สนใจ gap ระหว่างทางเลย - ปลอดภัยกว่าเพราะสีที่ไม่
-            # ตรง (เช่น สีเขียวเพื่อนบ้าน หรือสีดำของตัวอักษร) จะถูกข้ามไปโดยอัตโนมัติจากการเช็คสี
-            # ทีละจุดอิสระ ไม่มีความเสี่ยงจะ "เดินทะลุ" เข้าไปในโซนสีอื่นแบบ walk-based เดิม -
-            # ยืนยันด้วยข้อมูลจริง (MIN_MAXCHAN=100 กรอง anti-aliasing ออกแล้ว): x=734-798 ให้ค่า
-            # ความสูงสม่ำเสมอเป็นเส้นตรงสะอาด (resid_std=1.01px) ไม่มี outlier อีกต่อไป
-            ys = np.nonzero(cargo_mask[:, x])[0] if 0 <= x < cargo_mask.shape[1] else []
-            if len(ys) == 0:
-                return None
-            best_y = None
-            for y in ys:
-                pixel = region[y, x]
-                if is_arrow_color(pixel):
-                    continue
-                cur = _stack_color_normalize(pixel)
-                if cur is None:
-                    continue
-                if float(np.sqrt(np.sum((cur - expected_norm) ** 2))) <= _STACK_COLOR_MATCH_HUE_TOL:
-                    if best_y is None or y < best_y:
-                        best_y = int(y)
-            return best_y
-
-        def _scan_full_column(x0, x1, expected_norm):
-            xs, ys = [], []
-            lo = max(0, x0 + _TOPFACE_JUMP_MARGIN_PX)
-            hi = min(region.shape[1], x1 - _TOPFACE_JUMP_MARGIN_PX)
-            for x in range(lo, hi):
-                ty = _color_matched_top_y_local(x, expected_norm)
-                if ty is not None:
-                    xs.append(x)
-                    ys.append(ty)
-            return xs, ys
-
-        xs_a_all, ys_a_all = _scan_full_column(a_x0, a_x1, norm_a)
-        xs_b_all, ys_b_all = _scan_full_column(b_x0, b_x1, norm_b)
-        if (len(xs_a_all) < _TOPFACE_JUMP_MIN_POINTS
-                or len(xs_b_all) < _TOPFACE_JUMP_MIN_POINTS):
-            continue
-
-        fit_a = _robust_local_line_fit(xs_a_all, ys_a_all)
-        fit_b = _robust_local_line_fit(xs_b_all, ys_b_all)
-        if (fit_a is None or fit_b is None
-                or fit_a["resid_std"] > _TOPFACE_JUMP_MAX_RESID_STD
-                or fit_b["resid_std"] > _TOPFACE_JUMP_MAX_RESID_STD):
-            continue
-
-        # v25.66 NEW: Plateau Span Coverage Guard - inlier points (หลัง robust rejection) ต้อง
-        # ครอบคลุมความกว้างอย่างน้อย _TOPFACE_JUMP_MIN_SPAN_FRACTION ของข้อมูลสีทั้งหมดที่มี -
-        # กัน false-plateau จากจุดที่กระจุกตัวแคบๆ บังเอิญเรียงเป็นเส้นตรงได้ (เช่น transition
-        # zone ที่มีจุดข้อมูลน้อยแต่สอดคล้องกันเอง)
-        def _span_fraction(xs_all, fit):
-            if fit is None or not xs_all:
-                return 0.0
-            total_span = max(xs_all) - min(xs_all)
-            if total_span <= 0:
-                return 1.0
-            inlier_xs = fit.get("xs", xs_all)
-            inlier_span = (max(inlier_xs) - min(inlier_xs)) if len(inlier_xs) >= 2 else 0
-            return inlier_span / total_span
-
-        span_frac_a = _span_fraction(xs_a_all, fit_a)
-        span_frac_b = _span_fraction(xs_b_all, fit_b)
-        if (span_frac_a < _TOPFACE_JUMP_MIN_SPAN_FRACTION
-                or span_frac_b < _TOPFACE_JUMP_MIN_SPAN_FRACTION):
-            continue
-
-        top_a_at_seam = fit_a["a"] * seam_x + fit_a["b"]
-        top_b_at_seam = fit_b["a"] * seam_x + fit_b["b"]
-        floor_at_seam = None
-        if 0 <= seam_x < len(local_floor_y) and local_floor_y[seam_x] >= 0:
-            floor_at_seam = float(local_floor_y[seam_x])
-        if floor_at_seam is None:
-            continue
-
-        h_a = floor_at_seam - top_a_at_seam
-        h_b = floor_at_seam - top_b_at_seam
-        if h_a <= 0 or h_b <= 0:
-            continue
-        taller_h, shorter_h = (h_a, h_b) if h_a >= h_b else (h_b, h_a)
-        shorter_idx = idx_a if h_a < h_b else idx_b
-        shorter_rec = a if h_a < h_b else b
-        drop_ratio = 1 - (shorter_h / taller_h)
-        if drop_ratio < STEP_DOWN_PAIRWISE_DROP_RATIO:
-            continue
-
-        risks.append({
-            "risk_type": "STEP_DOWN_RISK", "subtype": "topface_jump", "view": view_label,
-            "mark_view": view_label,
-            "mark_stack_idx": shorter_idx, "mark_x_range": shorter_rec["x_range"],
-            "taller_height_px": float(taller_h), "shorter_height_px": float(shorter_h),
-            "drop_ratio": float(drop_ratio), "pair_indices": (idx_a, idx_b),
-            "floor_jump_px": float(floor_jump),
-            "height_source": "topface_jump_colorfit",
-            "n_samples": min(len(xs_a_all), len(xs_b_all)),
-            "reason": (f"ตรวจสอบ floor_jump={floor_jump:.1f}px (ระนาบพื้นเดียวกัน) แล้ววัด "
-                       f"top-face jump ด้วยสีที่กรองแล้วใกล้ seam พบความสูงต่างกัน "
-                       f"{drop_ratio:.0%} (สูง={taller_h:.0f}px, เตี้ย={shorter_h:.0f}px)"),
-        })
-    return risks
+# v25.75 NEW: ลบฟังก์ชัน detect_step_down_topface_jump() ทั้งหมดออกตามคำสั่งผู้ใช้
+# (31-Aug-2026) - ฟังก์ชันนี้ถูก "ปิดการใช้งาน" (comment out การเรียกใช้ใน
+# run_full_analysis_on_image) มาตั้งแต่ v25.65 เพราะพบ false-positive ร้ายแรงหลายไฟล์
+# (EB66-01, ED86-03) และไม่เคยถูกเปิดใช้งานอีกเลยตลอด 9 เวอร์ชันถัดมา (v25.66-v25.74) -
+# ผู้ใช้ระบุให้ลบกลไกที่ไม่เกี่ยวข้อง/ไม่ใช้งานจริงเหล่านี้ออก เพื่อลดขนาดไฟล์และความ
+# ซับซ้อนที่ไม่จำเป็น (ไม่กระทบการทำงานใดๆ เพราะไม่ได้ถูกเรียกใช้จริงมานานแล้ว)
+# หมายเหตุ: stack_expected_colors (คำนวณใน process_view_on_image) ยังคงเก็บไว้ เพราะ
+# v25.74 นำมาใช้ใหม่เป็นสัญญาณสำหรับ Multi-Color Merge Recheck Guard ใน
+# detect_step_down_pairwise/detect_step_down_crossview แล้ว (คนละกลไกกับที่ถูกลบนี้)
 
 
 # v25.68 NEW (สำคัญ - พบจริงจาก EB66-01/EC10-03/EC19-01 ตามที่ผู้ใช้ระบุ, 30-Aug-2026):
@@ -6456,19 +5904,9 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
     risks += detect_silhouette_notch_risk(front, "FRONT")
     risks += detect_silhouette_notch_risk(back, "BACK")
-    # v25.65 EXPERIMENTAL (ปิดใช้งานชั่วคราว - ดู CHANGELOG หัวไฟล์): detect_step_down_
-    # topface_jump ยืนยันได้ผลดีกับ EC18-01 (drop_ratio=67.1% ตรงกับ ground-truth) แต่ regression-
-    # test พบ false-positive ใหม่ 2 ไฟล์ (EB66-01 1->6, ED86-03 0->2) - root cause: เส้น "top"
-    # ที่ fit ได้จาก isometric drawing ไม่ได้สะท้อน "ขอบบนหน้าตรง" เสมอไป (บางครั้งจับขอบหลังคาที่
-    # ลึกเข้าไปด้านในซึ่งมีเรขาคณิตต่างออกไป) ทำให้กล่องที่สูงเท่ากันจริงดูเหมือนต่างกัน 30-84% -
-    # ตรวจสอบด้วย floor-slope consistency แล้วพบว่าใช้แยกแยะ EC18(ถูก)/ED86(ผิด) ไม่ได้ (ทั้งคู่มี
-    # slope สวนทางกันเหมือนกัน) ปิดไว้ก่อนจนกว่าจะออกแบบ validation guard ที่แม่นยำกว่านี้ได้
-    # (โค้ดพร้อมเปิดใช้ทันทีถ้าออกแบบ guard สำเร็จ - ดู detect_step_down_topface_jump ด้านบน)
-    # v25.65 EXPERIMENTAL (ปิดใช้งาน - ดู CHANGELOG หัวไฟล์): ยืนยัน regression ซ้ำอีกครั้งกับ
-    # EB66-01 วันนี้ (30-Aug-2026) - ยังคง trigger ผิดพลาดหลายจุด (idx2/3, idx6/7 ทั้ง FRONT/BACK)
-    # ปิดไว้จนกว่าจะพัฒนา front-face-based approach (ดู v25.66 ด้านล่าง) ให้เสร็จสมบูรณ์
-    # risks += detect_step_down_topface_jump(records_front, "FRONT", front)
-    # risks += detect_step_down_topface_jump(records_back, "BACK", back)
+    # v25.75 NEW: ลบบรรทัด comment-out ของ detect_step_down_topface_jump ที่ปิดใช้งานถาวร
+    # มาตั้งแต่ v25.65 (ฟังก์ชันเองก็ถูกลบไปแล้วในรอบนี้ - ดู docstring เต็มที่จุดที่เคยมีฟังก์ชัน
+    # นั้นอยู่ ใกล้ _floor_linearity_anomaly) ตามคำสั่งผู้ใช้ให้ลบกลไกที่ไม่ใช้งานจริงออก
     # v25.57 NEW: dedup ระหว่าง pairwise/pairwise_floor_jump กับ tail_stepdown เมื่อทั้งคู่
     # flag "คู่ column เดียวกัน" (view+pair_indices ตรงกัน) - พบจริงจาก log EB66-01 29-Aug-2026:
     # FRONT pairwise idx=1 และ tail_stepdown idx=0 ได้ drop_ratio=0.23156868... เหมือนกันเป๊ะ
@@ -6641,8 +6079,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.74",
-            "benchmarkMode": "v25_74_multi_color_merge_recheck_guard",
+            "checkerVersion": "V25.75",
+            "benchmarkMode": "v25_75_removed_dead_experimental_code",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
