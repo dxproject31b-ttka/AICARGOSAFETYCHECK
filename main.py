@@ -2,6 +2,68 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.74 (แก้ปัญหา AB03-04 ที่ผู้ใช้ระบุ "ตั้งฟ้าริมสุดไม่ควรวาดกรอบ (ปลอดภัย, สูงเท่ากับตั้งฟ้า
+ที่ติดกันจริง) แต่ตั้งฟ้าที่ติดกับตั้งน้ำเงินควรวาดกรอบ (สูงกว่าจริง)", แนะนำแนวทาง "recheck-
+front face, top face, floor jump" - 31-Aug-2026):
+  ยืนยันด้วยภาพจริงตามที่ผู้ใช้ระบุ: BACK view มี 4 front-face fragment ดิบ - navy(x=1010-1108,
+  กล่องจริง) + cyan เศษเล็ก(x=1010-1110, ผี - หลังคาของกองฟ้าที่ติดกันยื่นล้ำมาทับตำแหน่ง navy) +
+  cyan(x=1111-1243, กองฟ้าที่ติดกับ navy) + cyan(x=1245-1376, กองฟ้าริมสุด) - ลำดับตำแหน่งจริง
+  ยืนยันแล้วว่าเป็น "น้ำเงิน, ฟ้า, ฟ้า" เรียงกันจริงตามที่ผู้ใช้ระบุ (ไม่ใช่กล่องซ้อนกันในเชิงลึก)
+  ROOT CAUSE ที่แท้จริง: navy(x=1010-1108) กับ cyan-เศษผี(x=1010-1110) มี x-overlap สูงถึง 100%
+  (เพราะมุมกล้อง isometric ทำให้หลังคาของกองฟ้าที่ติดกันยื่นล้ำมาทับตำแหน่ง x ของ navy พอดี) ทำให้
+  _p1b_cluster_columns (v25.31 multi-color-per-idx rule) รวมทั้งคู่เข้าเป็นคอลัมน์เดียว (BACK
+  idx0) - compute_stack_heights_px วัดความสูงจาก cargo_top_y ทั้งคอลัมน์ (ไม่สนใจสี) จึงได้ค่า
+  269.9px (เอนเอียงไปทางยอดของ cyan ที่สูงกว่า) แทนที่จะเป็นค่าจริงของ navy (~121px ตรงกับที่
+  FRONT วัดได้อิสระ 121.17px) ทำให้ detect_step_down_crossview เทียบ FRONT idx2(navy,121px)
+  กับ BACK idx0(269.9px) เห็นผลต่าง 55.1% -> flag STEP_DOWN_RISK ซ้ำซ้อนกับที่ FRONT pairwise
+  (idx1 vs idx2) ตรวจพบไปแล้วอย่างถูกต้อง (ความเสี่ยงเดียวกันถูกวาดกรอบซ้ำที่ BACK "เกินมา")
+  ความพยายามแก้ไขที่ "ไม่สำเร็จ" ในรอบก่อนหน้า (บันทึกไว้เพื่อไม่ให้ลองซ้ำ): (1) เพิ่มเงื่อนไข
+  cross-view consistency ใน _p1b_cluster_columns ก่อนยอมรับ merge - แก้ symptom ได้บางส่วนแต่เจอ
+  ปัญหาใหม่ (2 คอลัมน์ที่แยกออกมาสำเร็จมี cx ใกล้กันมากจน seam-computation พังคนละแบบ) (2) ลบ
+  pixel ออกจาก cargo_mask ตรงๆ ตามโซนที่ตรวจพบว่าเป็น "หลังคายื่นล้ำ" (cross-color-invasion filter)
+  - เสี่ยงเกินไปเพราะแตะ cargo_mask ซึ่งเป็นข้อมูลพื้นฐานที่ทุกกลไกใช้ร่วมกัน ทำให้ไฟล์อื่นที่ไม่
+  เกี่ยวข้อง (AC03-02) พังยับเยิน (drop_ratio เกิน 100% ซึ่งเป็นไปไม่ได้ทางฟิสิกส์)
+  FIX ที่ใช้จริง (ตามแนวทางที่ผู้ใช้แนะนำ "recheck- front face, top face, floor jump"):
+  เพิ่ม "Multi-Color Merge Recheck Guard" - ใช้สัญญาณที่มีอยู่แล้วในระบบ (stack_expected_colors
+  จาก P1B, v25.65) ซึ่งจะเป็น None เมื่อคอลัมน์มีสีสมาชิกมากกว่า 1 สี (multi-color merge ที่ P1B
+  เองไม่แน่ใจ) เป็นตัว trigger การตรวจสอบซ้ำ - เมื่อคู่เปรียบเทียบ (pairwise/cross_view) มีฝั่งใด
+  ฝั่งหนึ่งที่ P1B รู้อยู่แล้วว่าเป็น multi-color merge และอีกฝั่งมีสีคาดหวังที่รู้แน่ชัด ให้ recheck
+  ความสูงของฝั่งที่กำกวมด้วยสีของอีกฝั่ง (สมมติฐาน: กล่อง SKU เดียวกัน เห็นจาก 2 มุมกล้อง ควรมีสี
+  ตรงกัน) โดยสแกนทั้งความกว้างคอลัมน์หาจุดบนสุดที่สีตรงกับที่คาดหวังเท่านั้น (เทคนิคเดียวกับ
+  detect_step_down_topface_jump ที่มีอยู่แล้ว, is_arrow_color กรองลูกศรออกด้วย) แล้ว fit เส้นตรง
+  ทนทาน (_robust_local_line_fit) - ถ้า fit น่าเชื่อถือ (resid_std<=3.0px, n>=15 จุด) และผลต่าง
+  หลัง recheck ต่ำกว่า threshold ความเสี่ยงเดิม ให้ปฏิเสธการ flag (ถือว่าเป็นความเสี่ยงปลอมจาก
+  isometric roof-overhang bleed) - ถ้า recheck ล้มเหลว (จุดไม่พอ/fit ไม่ดี) fallback ไปใช้ค่าเดิม
+  ตามปกติ (ปลอดภัย ไม่กระทบไฟล์ที่ไม่มี multi-color merge เลย)
+  ผลทดสอบ: AB03-04 recheck ด้วยสี navy ที่ BACK idx0 ได้ h=101.9px (n=71 จุด, resid_std=0.44px -
+  แม่นยำสูงมาก) เทียบ FRONT idx2 (121.17px) ต่างกันแค่ 18.9% (ต่ำกว่าเกณฑ์ 20%) -> BACK cross_view
+  ที่เคย "เกินมา" หายไปถูกต้อง เหลือแค่ 2 จุดตามที่ผู้ใช้ยืนยัน (FRONT pairwise idx1=จุดเสี่ยงจริง,
+  tail_stepdown idx0=noise เดิมที่ทราบสาเหตุแล้ว) - AB05-01/AC03-02 ไม่เปลี่ยนแปลงเลย (AB05-01 มี
+  multi-color merge เกิดขึ้นจริงที่ FRONT idx3/BACK idx2 แต่ recheck ยืนยันค่าเดิมถูกต้องอยู่แล้ว
+  <1%/7.7% จึงไม่ suppress อะไร - พิสูจน์ว่า guard ทำงานแบบมีเงื่อนไขจริง ไม่ใช่ suppress มั่วซั่ว;
+  AC03-02 ไม่มี multi-color merge เลย guard จึงไม่ทำงานเลย ผลลัพธ์เหมือนเดิมทุกประการ)
+================================================================================
+v25.73 (เปลี่ยนชื่อ risk_type "REAR_EMPTY_RISK" -> "EMPTY_SPACE_RISK" ตามคำสั่งผู้ใช้
+31-Aug-2026):
+  เหตุผล: ผู้ใช้ระบุว่าชื่อเดิม "REAR_EMPTY_RISK" (ตั้งไว้ตั้งแต่ยุคที่กลไกหลักคือ
+  length_mismatch ซึ่งตรวจเฉพาะ "ตั้งท้ายสุดก่อนประตูท้ายตู้" เท่านั้น) ทำให้เข้าใจผิดว่า
+  กรอบ marker จำกัดอยู่แค่บริเวณท้ายรถ - แต่ตั้งแต่ v25.64/v25.69 เป็นต้นมา กลไกหลักที่ใช้จริง
+  คือ detect_silhouette_notch_risk ซึ่งสแกนหา "รอยบาก" (พื้นที่ว่าง) ได้ตลอดทั้งความยาว
+  FRONT/BACK view ไม่ได้จำกัดเฉพาะโซนท้ายตู้อีกต่อไป (กลไก color_anomaly เดิมที่ยังเช็คเฉพาะ
+  ตั้งท้ายสุดยังคงอยู่เป็นกลไกเสริม แต่ไม่ใช่กลไกหลักแล้ว) ชื่อเดิมจึงไม่ตรงกับพฤติกรรมจริงของ
+  ระบบอีกต่อไป
+  FIX: เปลี่ยน risk_type string จาก "REAR_EMPTY_RISK" เป็น "EMPTY_SPACE_RISK" ใน 4 จุดที่เป็น
+  โค้ดจริง (ไม่กระทบ logic การตรวจจับใดๆ เลย - เปลี่ยนแค่ label):
+    1) RISK_COLORS dict key (กำหนดสีกรอบ marker = orange เหมือนเดิม)
+    2) generate_action_report() - key ของคำแนะนำแก้ไขใน actions dict
+    3) detect_silhouette_notch_risk() - risk dict ที่ส่งคืน (subtype='silhouette_notch')
+    4) detect_rear_empty_risk() - risk dict ที่ส่งคืน (subtype='color_anomaly')
+  VALID_RISK_TYPES (derived จาก RISK_COLORS.keys() อัตโนมัติ) อัปเดตตามโดยไม่ต้องแก้แยก
+  ข้อควรทราบ: ชื่อฟังก์ชัน detect_rear_empty_risk() และ comment/CHANGELOG เก่าที่อ้างอิง
+  "REAR_EMPTY_RISK" ในเชิงประวัติศาสตร์ยังคงเดิมไว้ (ไม่กระทบการทำงาน เป็นแค่เอกสารอ้างอิง)
+  - ไม่มีการเปลี่ยนแปลง threshold/guard ใดๆ ในรอบนี้ (regression-safe 100%: ผลการตรวจจับ
+  ตำแหน่ง/จำนวนจุดเหมือนเดิมทุกประการ เปลี่ยนแค่ชื่อ risk_type ที่แสดงในผลลัพธ์ JSON เท่านั้น)
+================================================================================
 v25.72 (แก้ 3 ไฟล์ที่ผู้ใช้ระบุหลังทดสอบ v25.71: AB03-04/AB05-01/AC03-02, 31-Aug-2026):
   ปัญหาที่ 1 (AB03-04) - "วาดกรอบแดงผิดจุด ต้องไปอยู่บริเวณสูงต่ำ คือตำแหน่งถัดไป ฟ้ากับน้ำเงิน":
   ROOT CAUSE: v25.71 เพิ่ม guard "ถ้า height_source=='apex_fallback' ไม่ flag เลย" (ทุก subtype)
@@ -777,7 +839,7 @@ from scipy.optimize import linear_sum_assignment
 
 RISK_COLORS = {
     "STEP_DOWN_RISK": "red",
-    "REAR_EMPTY_RISK": "orange",
+    "EMPTY_SPACE_RISK": "orange",
 }
 VALID_RISK_TYPES = set(RISK_COLORS.keys())
 
@@ -924,7 +986,7 @@ def generate_action_report(case_type, description="", sku_list=""):
             f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
             f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
         ),
-        "REAR_EMPTY_RISK": (
+        "EMPTY_SPACE_RISK": (
             f"แจ้งเตือน: พบระหว่างกองสินค้ามีพื้นที่ว่าง{sku_line}\n"
             f"วิธีแก้ไข:\n"
             f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
@@ -4037,6 +4099,86 @@ def _stack_color_normalize(rgb, min_maxchan=_STACK_COLOR_MATCH_MIN_MAXCHAN):
     return np.asarray(rgb, dtype=np.float64) * (255.0 / maxchan)
 
 
+# v25.74 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "กรอบเกินมาที่ตั้งกล่องฟ้าหลังสุด ที่สูง
+# เสมอกับตั้งฟ้าตำแหน่งติดกัน", แนะนำแนวทาง "recheck- front face, top face, floor jump" -
+# 31-Aug-2026): เดิม STEP_DOWN_RISK (pairwise/cross_view) เชื่อค่า height_px ที่มาจาก
+# compute_stack_heights_px (ใช้ cargo_top_y สแกนทั้งความกว้างคอลัมน์ ไม่สนใจสี) เสมอเมื่อ
+# height_source="direct" - แต่พบว่า P1B เองมีสัญญาณเตือนอยู่แล้วที่ไม่เคยถูกใช้เป็น reliability
+# guard เลย: stack_expected_colors[idx] (คำนวณไว้ตั้งแต่ v25.65 สำหรับ topface_jump) จะเป็น None
+# เมื่อคอลัมน์นั้นมีสีสมาชิกมากกว่า 1 สี (multi-color merge) - เป็นสัญญาณที่ตรงไปตรงมาว่า P1B เอง
+# "ไม่แน่ใจ" ว่าคอลัมน์นี้เป็นสีเดียวหรือไม่ (อาจเกิดจาก isometric roof-overhang bleed-through ที่
+# หลังคาของคอลัมน์ข้างเคียงยื่นล้ำมาทับ x-range ของคอลัมน์นี้ - ยืนยันจาก AB03-04: BACK idx0
+# (navy) มี stack_expected_colors=None เพราะมีเศษหลังคาสีฟ้าของคอลัมน์ข้างเคียงยื่นล้ำมาปน ทำให้
+# compute_stack_heights_px วัดความสูงได้ 269.9px (เอนเอียงไปทางสีฟ้าที่สูงกว่า) แทนที่จะเป็นค่า
+# จริงของ navy (~121px ตรงกับที่ FRONT วัดได้อิสระ))
+# FIX: เพิ่ม "recheck mechanism" - เมื่อคู่เปรียบเทียบ (cross_view หรือ pairwise) มีฝั่งใดฝั่งหนึ่ง
+# ที่ P1B รู้อยู่แล้วว่าเป็น multi-color merge (stack_expected_colors[idx] is None) ให้ทำการวัด
+# ความสูงซ้ำ (recheck) เฉพาะฝั่งนั้น โดยกรองเฉพาะ pixel ที่สีตรงกับสีคาดหวังของฝั่งตรงข้าม (ที่รู้
+# แน่ชัด) แล้ว fit เส้นตรงทนทาน (เทคนิคเดียวกับ detect_step_down_topface_jump ที่มีอยู่แล้ว) - ถ้า
+# recheck ให้ค่าที่ใกล้เคียงกับฝั่งตรงข้ามมากพอ (ต่ำกว่า threshold ความเสี่ยง) ให้ใช้ค่า recheck
+# แทนค่า P1B เดิม (ปฏิเสธไม่ flag ความเสี่ยงปลอม) - ถ้า recheck ล้มเหลว (จุดข้อมูลไม่พอ/fit ไม่ดี)
+# fallback ไปใช้ค่าเดิมตามปกติ (ปลอดภัยสำหรับไฟล์อื่นที่ไม่เจอปัญหานี้ - guard นี้ทำงานเฉพาะเมื่อมี
+# สัญญาณ multi-color merge ชัดเจนเท่านั้น ไม่กระทบคอลัมน์สีเดียวปกติทั่วไป)
+_RECHECK_COLOR_MAX_RESID_STD = 3.0   # มาตรฐานเดียวกับ _TOPFACE_JUMP_MAX_RESID_STD
+_RECHECK_COLOR_MIN_POINTS = 15        # จำนวนจุดขั้นต่ำหลังกรองสี ต่ำกว่านี้ไม่เชื่อผล recheck
+_RECHECK_COLOR_MARGIN_PX = 6          # เว้นระยะจาก seam/ขอบคอลัมน์ กันปัญหา anti-alias
+
+
+def _recheck_stack_height_via_color(view_result, x_range, expected_color,
+                                     margin=_RECHECK_COLOR_MARGIN_PX,
+                                     min_points=_RECHECK_COLOR_MIN_POINTS,
+                                     max_resid_std=_RECHECK_COLOR_MAX_RESID_STD):
+    """ตรวจสอบซ้ำ (recheck) ความสูงของคอลัมน์ที่ตำแหน่ง x_range โดยกรองเฉพาะ pixel ที่สีตรงกับ
+    expected_color เท่านั้น (สแกนทั้งความกว้างคอลัมน์ หาจุดบนสุดที่สีตรงในแต่ละ x แล้ว fit เส้นตรง
+    ทนทาน - เทคนิคเดียวกับ _scan_full_column ใน detect_step_down_topface_jump) คืนค่า
+    (height_px, n_points, resid_std) ถ้า fit น่าเชื่อถือ หรือ None ถ้าไม่พอจะเชื่อผล (fail-safe)
+    ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04)"""
+    region = view_result.get("region")
+    cargo_mask = view_result.get("cargo_mask")
+    local_floor_y = view_result.get("local_floor_y")
+    if region is None or cargo_mask is None or local_floor_y is None:
+        return None
+    norm_expected = _stack_color_normalize(np.array(expected_color, dtype=np.float64))
+    if norm_expected is None:
+        return None
+    x0, x1 = x_range
+    lo = max(0, x0 + margin)
+    hi = min(region.shape[1], x1 - margin)
+    xs, ys = [], []
+    for x in range(lo, hi):
+        col_ys = np.nonzero(cargo_mask[:, x])[0]
+        if len(col_ys) == 0:
+            continue
+        best_y = None
+        for y in col_ys:
+            pixel = region[y, x]
+            if is_arrow_color(pixel):
+                continue
+            cur = _stack_color_normalize(pixel)
+            if cur is None:
+                continue
+            if float(np.sqrt(np.sum((cur - norm_expected) ** 2))) <= _STACK_COLOR_MATCH_HUE_TOL:
+                if best_y is None or y < best_y:
+                    best_y = int(y)
+        if best_y is not None:
+            xs.append(x)
+            ys.append(best_y)
+    if len(xs) < min_points:
+        return None
+    fit = _robust_local_line_fit(xs, ys)
+    if fit is None or fit["resid_std"] > max_resid_std:
+        return None
+    xm = (x0 + x1) // 2
+    top_y = fit["a"] * xm + fit["b"]
+    if xm < 0 or xm >= len(local_floor_y) or local_floor_y[xm] < 0:
+        return None
+    floor_y = float(local_floor_y[xm])
+    h = floor_y - top_y
+    if h <= 0:
+        return None
+    return h, len(fit["xs"]), fit["resid_std"]
+
+
 def _robust_local_line_fit(xs, ys, mad_floor=2.0, n_iter=3):
     """Fit เส้นตรง y=a*x+b แบบทนทานต่อ outlier (label/ลูกศร) โดยใช้ iterative
     MAD-based rejection - mad_floor ป้องกันกรณีข้อมูลเรียบสมบูรณ์แบบ (MAD~0)"""
@@ -5075,6 +5217,44 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ที่วัดจากพื้นตู้ ไม่ใช่ยอดกล่อง จึงไม่ได้รับผลกระทบจาก apex bias นี้)
         if shorter_rec.get("height_source") == "apex_fallback":
             continue
+        # v25.74 NEW: Multi-Color Merge Recheck Guard - mirror จาก detect_step_down_crossview
+        # ทุกประการ (ดู docstring เต็มที่ _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล -
+        # พบจริงจาก AB03-04) - ใช้ view_result เดียวกันของทั้งคู่เพราะเป็น pairwise (view เดียวกัน)
+        pairwise_recheck_suppressed = False
+        if view_result is not None:
+            expected_colors = view_result.get("stack_expected_colors")
+            def _expected_color_of_pw(rec):
+                if expected_colors is None or rec["idx"] >= len(expected_colors):
+                    return None
+                return expected_colors[rec["idx"]]
+            taller_color_pw = _expected_color_of_pw(taller_rec)
+            shorter_color_pw = _expected_color_of_pw(shorter_rec)
+            if shorter_color_pw is None and taller_color_pw is not None:
+                recheck = _recheck_stack_height_via_color(
+                    view_result, shorter_rec["x_range"], taller_color_pw)
+                if recheck is not None:
+                    recheck_h, recheck_n, recheck_resid = recheck
+                    recheck_drop = 1 - (recheck_h / taller_h) if taller_h > 0 else 0
+                    print(f"[RECHECK_PAIRWISE] view={view_label} shorter idx={shorter_rec['idx']} "
+                          f"multi-color merge - recheck สี {taller_color_pw} ได้ h={recheck_h:.1f}px "
+                          f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={shorter_h:.1f}px "
+                          f"-> recheck_drop={recheck_drop:.1%}")
+                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
+                        pairwise_recheck_suppressed = True
+            elif taller_color_pw is None and shorter_color_pw is not None:
+                recheck = _recheck_stack_height_via_color(
+                    view_result, taller_rec["x_range"], shorter_color_pw)
+                if recheck is not None:
+                    recheck_h, recheck_n, recheck_resid = recheck
+                    recheck_drop = 1 - (shorter_h / recheck_h) if recheck_h > 0 else 0
+                    print(f"[RECHECK_PAIRWISE] view={view_label} taller idx={taller_rec['idx']} "
+                          f"multi-color merge - recheck สี {shorter_color_pw} ได้ h={recheck_h:.1f}px "
+                          f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={taller_h:.1f}px "
+                          f"-> recheck_drop={recheck_drop:.1%}")
+                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
+                        pairwise_recheck_suppressed = True
+        if pairwise_recheck_suppressed:
+            continue
         if shorter_h < threshold:
             drop_ratio = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             risks.append({
@@ -5394,6 +5574,49 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             shorter_vr = front_result if shorter_rec["view"] == "FRONT" else back_result
             if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
                     or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
+                continue
+            # v25.74 NEW: Multi-Color Merge Recheck Guard - ดู docstring เต็มที่
+            # _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ถ้าฝั่งใด
+            # ฝั่งหนึ่งของคู่เปรียบเทียบ เป็นคอลัมน์ที่ P1B รู้อยู่แล้วว่าเป็น multi-color merge
+            # (stack_expected_colors[idx] is None) และอีกฝั่งมีสีคาดหวังที่รู้แน่ชัด ให้ recheck
+            # ความสูงของฝั่งที่กำกวมด้วยสีของอีกฝั่ง (สมมติฐาน: ทั้งคู่ควรเป็นกล่อง SKU เดียวกันที่
+            # ตำแหน่งเดียวกันจริง เห็นจาก 2 มุมกล้อง) - ถ้า recheck สำเร็จและให้ผลต่างกันน้อยกว่า
+            # เกณฑ์ ให้ไม่ flag (ปฏิเสธว่าเป็นความเสี่ยงปลอมจาก isometric roof-overhang bleed)
+            def _expected_color_of(rec, vr):
+                colors = vr.get("stack_expected_colors") if vr else None
+                if colors is None or rec["idx"] >= len(colors):
+                    return None
+                return colors[rec["idx"]]
+            taller_color = _expected_color_of(taller_rec, taller_vr)
+            shorter_color = _expected_color_of(shorter_rec, shorter_vr)
+            recheck_suppressed = False
+            if shorter_color is None and taller_color is not None and shorter_vr is not None:
+                recheck = _recheck_stack_height_via_color(
+                    shorter_vr, shorter_rec["x_range"], taller_color)
+                if recheck is not None:
+                    recheck_h, recheck_n, recheck_resid = recheck
+                    recheck_drop = 1 - (recheck_h / taller_h) if taller_h > 0 else 0
+                    print(f"[RECHECK_CROSSVIEW] shorter_rec view={shorter_rec['view']} "
+                          f"idx={shorter_rec['idx']} multi-color merge ตรวจพบ - recheck ด้วยสี "
+                          f"{taller_color} (จาก taller_rec) ได้ h={recheck_h:.1f}px "
+                          f"(n={recheck_n}, resid={recheck_resid:.2f}) เทียบ P1B เดิม="
+                          f"{shorter_h:.1f}px -> recheck_drop_ratio={recheck_drop:.1%}")
+                    if recheck_drop < STEP_DOWN_CROSSVIEW_DROP_RATIO:
+                        recheck_suppressed = True
+            elif taller_color is None and shorter_color is not None and taller_vr is not None:
+                recheck = _recheck_stack_height_via_color(
+                    taller_vr, taller_rec["x_range"], shorter_color)
+                if recheck is not None:
+                    recheck_h, recheck_n, recheck_resid = recheck
+                    recheck_drop = 1 - (shorter_h / recheck_h) if recheck_h > 0 else 0
+                    print(f"[RECHECK_CROSSVIEW] taller_rec view={taller_rec['view']} "
+                          f"idx={taller_rec['idx']} multi-color merge ตรวจพบ - recheck ด้วยสี "
+                          f"{shorter_color} (จาก shorter_rec) ได้ h={recheck_h:.1f}px "
+                          f"(n={recheck_n}, resid={recheck_resid:.2f}) เทียบ P1B เดิม="
+                          f"{taller_h:.1f}px -> recheck_drop_ratio={recheck_drop:.1%}")
+                    if recheck_drop < STEP_DOWN_CROSSVIEW_DROP_RATIO:
+                        recheck_suppressed = True
+            if recheck_suppressed:
                 continue
             threshold = taller_h * (1 - STEP_DOWN_CROSSVIEW_DROP_RATIO)
             if shorter_h < threshold:
@@ -6067,7 +6290,7 @@ def detect_silhouette_notch_risk(view_result, view_label):
         ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
         abs_box = (ox + x0_mark, oy + baseline_y, ox + x1_mark, oy + y_notch)
         risks.append({
-            "risk_type": "REAR_EMPTY_RISK", "subtype": "silhouette_notch",
+            "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch",
             "mark_view": view_label, "mark_stack_idx": None,
             "mark_x_range": (x0_mark, x1_mark), "pos_range": None,
             "abs_box": abs_box,
@@ -6151,7 +6374,7 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
                 continue
 
         risks.append({
-            "risk_type": "REAR_EMPTY_RISK", "subtype": "color_anomaly",
+            "risk_type": "EMPTY_SPACE_RISK", "subtype": "color_anomaly",
             "mark_view": label,
             "mark_stack_idx": rear_rec["idx"], "mark_x_range": rear_rec["x_range"],
             "pos_range": rear_rec["pos_range"], "n_colors": len(clusters),
@@ -6418,8 +6641,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.72",
-            "benchmarkMode": "v25_72_apex_window_fix_seam_jump_verified_edge_guard",
+            "checkerVersion": "V25.74",
+            "benchmarkMode": "v25_74_multi_color_merge_recheck_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
