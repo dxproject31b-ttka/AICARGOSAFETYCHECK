@@ -2,6 +2,52 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.77 (แก้ปัญหา AA05-02/AA05-04 ที่ผู้ใช้ระบุ "กรอบแดง คอลัมน์เขียว" ดูแปลก หลังทดสอบ v25.76,
+31-Aug-2026):
+  ROOT CAUSE ที่แท้จริง (ยืนยันด้วยข้อมูลระดับ pixel): ทั้ง 2 ไฟล์ (คนละ manifest คนละ SKU:
+  AA05-02 มี SHT1A/KNABA, AA05-04 มี SHT1A/KNABA/TKR1B แต่ layout กล่องต่างกันโดยสิ้นเชิง) ได้
+  height_px เหมือนกันทุกทศนิยม (idx2=283.24964539007084, idx3=221.8160664337567,
+  idx4=259.6058250030858) - เป็นไปไม่ได้ทางสถิติถ้าเป็นการวัดจริง พิสูจน์ว่าเป็น geometric
+  artifact ผูกกับตำแหน่ง apex คงที่ของรถรุ่นเดียวกัน (TTKA6WH) เหมือนรูปแบบที่เคยพบใน ED84/ED85
+  ก่อนหน้า - กรอบแดงที่วาดออกมาตกอยู่ "กลางคอลัมน์เขียว" (SKU เดียวกันทั้งแถว มองด้วยตาสูงเท่ากัน
+  ชัดเจนตามภาพจริงที่ผู้ใช้แนบ) ที่ตำแหน่ง (idx2 vs idx3, drop_ratio=21.7%)
+  ตรวจสอบพบว่า apex_x=970 ตกอยู่ "กลาง idx2" (x_range=918-1011) พอดี - idx2 เองวัดได้ถูกต้อง
+  (coverage=56.8%, ผ่านเกณฑ์ apex_partial_cut guard ของ v25.76 อยู่แล้ว จึงได้ label "direct"
+  ถูกต้อง) แต่ idx3 (x_range=1011-1105, n_samples=82 เกือบเต็มคอลัมน์ ไม่ได้ถูก apex ตัดข้อมูล
+  ของตัวเองเลย) กลับวัดความสูงต่ำกว่าจริงอย่างเป็นระบบ เพราะความชันธรรมชาติของพื้นผิว isometric
+  รอบจุด apex "ลามต่อเนื่อง" เข้ามาในคอลัมน์ข้างเคียงที่ไม่ได้ถูกตัดข้อมูลด้วย - ยืนยันจาก pixel
+  ดิบ: ความสูงลดลง "แบบค่อยเป็นค่อยไป" ตลอดช่วง x=985-1060 (283px->249px->213px) ไม่ใช่การ
+  กระโดดฉับพลันแบบ step-down จริง (เทียบ AC03-02 ที่กระโดด 158px ภายในแค่ 6px) - ยืนยันด้วย
+  _edge_outlier_has_genuine_seam_jump(idx3,idx2)=False (ไม่พบ jump จริงที่ seam)
+  ทำไม guard เดิม (v25.76) จับไม่ได้: _is_edge_measurement_outlier (Edge-Column Global
+  Consensus Guard) ตรวจสอบเฉพาะ target_idx==min_idx หรือ max_idx ของทั้งแถว (คอลัมน์ริมสุดจริง)
+  เท่านั้น - แต่ไฟล์นี้มี 5 คอลัมน์ (idx0-4) และคู่ที่มีปัญหาคือ (idx2,idx3) ซึ่งเป็น "คอลัมน์
+  กลาง" ทั้งคู่ ไม่ตรงเงื่อนไข guard เดิมเลย จึงหลุดรอด (guard เดิมออกแบบมาครอบคลุมแค่ 2 กรณี:
+  (ก) คอลัมน์ที่ตัวเองถูก apex ตัดข้อมูล (apex_fallback/apex_partial_cut) และ (ข) คอลัมน์ที่
+  เป็น "ริมสุดของแถว" เท่านั้น ไม่เคยครอบคลุมกรณี "คู่เปรียบเทียบกลางแถวที่คร่อมโซน apex")
+  FIX (ทางเลือก A ตามที่ผู้ใช้เลือก - ขอบเขตแคบ ปลอดภัยกว่าทางเลือก B ที่จะใช้ seam-jump
+  verification กับทุกคู่โดยไม่จำกัดขอบเขต): เพิ่มฟังก์ชัน _pair_is_apex_affected() ตรวจสอบว่า
+  apex_x ตกอยู่ภายในช่วง x-range รวมของคู่เปรียบเทียบหรือไม่ (ไม่จำกัดว่าต้องเป็นคอลัมน์ริมสุด
+  ของแถวเหมือน guard เดิม) - ถ้าใช่ ให้ใช้ _edge_outlier_has_genuine_seam_jump (ฟังก์ชันเดียวกับ
+  ที่ Edge-Column Guard ใช้อยู่แล้ว, v25.72) ตรวจสอบว่ามี jump จริงที่ seam หรือไม่ - ถ้าไม่พบ
+  jump จริง (คืนค่า False ชัดเจน) ให้ suppress (ไม่ flag) เพราะน่าจะเป็นความเอนเอียงจาก
+  isometric slope ต่อเนื่อง ไม่ใช่ความแตกต่างทางกายภาพจริง
+  ข้อควรระวังที่พบระหว่างพัฒนา (สำคัญ - เกือบทำให้เกิด regression 1 จุด): เมื่อใช้ guard ใหม่นี้
+  กับทุกคู่ apex-affected โดยไม่มีเงื่อนไขเพิ่มเติม พบว่า AB03-04's genuine risk (idx1 vs idx2,
+  drop=57.4% - ยืนยันแล้วว่าถูกต้องจาก v25.76) หายไปด้วย! ตรวจสอบพบว่า idx1 ของ AB03-04 มี
+  height_source="apex_partial_cut" (ปนเปื้อนจากปรากฏการณ์ "isometric roof-overhang bleed" ที่
+  หลังคาของกล่องสูงยื่นล้ำมาทับโซนใกล้ seam - คนละสาเหตุกับ AA05-02 แต่ทำให้ pixel ดิบที่
+  _edge_outlier_has_genuine_seam_jump ใช้ตรวจสอบ (ไม่กรองสี) เห็นการเปลี่ยนแปลง "ค่อยเป็น
+  ค่อยไป" ที่ seam เหมือนกัน ทั้งที่เป็นความเสี่ยงจริง) - แก้โดยจำกัดให้ guard ใหม่นี้ทำงานเฉพาะ
+  เมื่อทั้ง 2 ฝั่งมี height_source=="direct" เท่านั้น (ไม่มีฝั่งใดติดป้าย apex_fallback/
+  apex_partial_cut อยู่แล้ว) เพราะกรณีที่มีป้ายเหล่านี้ติดอยู่แล้ว มี guard เฉพาะทาง
+  (_APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO แบบ threshold-gated จาก v25.76) ดูแลอยู่แล้วอย่าง
+  เหมาะสมกว่า ไม่ควรให้ guard ใหม่นี้มาซ้อนทับ/ขัดแย้งกัน
+  ผลทดสอบ (regression-verified ครบ 6 ไฟล์): AA05-02/AA05-04=1 risk (EMPTY_SPACE_RISK เท่านั้น -
+  กรอบแดงปลอมหายไปถูกต้อง), AB03-04=1 risk (STEP_DOWN pairwise idx1, 57.4% - กลับมาถูกต้องหลัง
+  แก้ regression), AB05-01=1 risk (ไม่เปลี่ยนแปลง), AC03-02=1 risk (ไม่เปลี่ยนแปลง),
+  EC07-02=2 risks (ไม่เปลี่ยนแปลง) - ไม่มี regression เหลืออยู่เลย
+================================================================================
 v25.76 (แก้ปัญหา AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง คือกรอบซ้ายสุด" หลังทดสอบ
 v25.75, 31-Aug-2026):
   ROOT CAUSE ที่แท้จริง (ยืนยันด้วยข้อมูลระดับ pixel): FRONT idx0 (x=805-955, กล่องฟ้า TEP1A-AJ
@@ -4607,6 +4653,55 @@ def _edge_outlier_has_genuine_seam_jump(view_result, target_rec, neighbor_rec,
     return best_ratio >= min_ratio
 
 
+# v25.77 NEW (สำคัญ - พบจริงจาก AA05-02/AA05-04 ที่ผู้ใช้ระบุ "กรอบแดง คอลัมน์เขียว" ดูแปลก
+# หลังทดสอบ v25.76, 31-Aug-2026): เดิม guard ทั้งหมดที่ป้องกัน isometric bias (apex_fallback,
+# apex_partial_cut, Edge-Column Global Consensus Guard) ออกแบบมาครอบคลุมแค่ 2 กรณี: (ก) คอลัมน์
+# ที่ตัวเองถูก apex ตัดข้อมูล (apex_fallback/apex_partial_cut) และ (ข) คอลัมน์ที่เป็น "ริมสุดของ
+# แถว" (idx==0 หรือ idx==max เท่านั้น) - แต่ไม่เคยครอบคลุมกรณี "คู่เปรียบเทียบที่อยู่กลางแถว แต่
+# บังเอิญคร่อมโซน apex พอดี" ซึ่งพบจริงจาก AA05-02/AA05-04 (คนละไฟล์ คนละ SKU แต่ได้ตัวเลข
+# height_px เหมือนกันทุกทศนิยม 283.24964539007084/221.8160664337567/259.6058250030858 - เป็น
+# ไปไม่ได้ทางสถิติถ้าเป็นการวัดจริง พิสูจน์ว่าเป็น geometric artifact ผูกกับตำแหน่ง apex คงที่
+# ของรถรุ่นเดียวกัน (TTKA6WH) เหมือนรูปแบบที่เคยพบใน ED84/ED85 มาก่อน)
+# ROOT CAUSE ที่แท้จริง (ตรวจสอบระดับ pixel): apex_x=970 ตกอยู่ "กลาง idx2" (x_range=918-1011)
+# พอดี - idx2 เองวัดได้ถูกต้อง (coverage=56.8%, ผ่านเกณฑ์ apex_partial_cut guard v25.76 จึงได้
+# label "direct" ถูกต้องแล้ว) แต่ idx3 (x_range=1011-1105, n_samples=82 เกือบเต็มคอลัมน์ ไม่ได้
+# ถูกตัดข้อมูลเลย) กลับวัดความสูงต่ำกว่าจริงอย่างเป็นระบบ เพราะความชันธรรมชาติของพื้นผิว
+# isometric รอบจุด apex "ลามต่อเนื่อง" เข้ามาในคอลัมน์ข้างเคียงที่ไม่ได้ถูกตัดข้อมูลด้วย -
+# ยืนยันจาก pixel ดิบ: ความสูงลดลง "แบบค่อยเป็นค่อยไป" ตลอดช่วง x=985-1060 (283px->249px->
+# 213px) ไม่ใช่การกระโดดฉับพลันแบบ step-down จริง (เทียบ AC03-02 ที่กระโดด 158px ภายในแค่ 6px)
+# ยืนยันด้วย _edge_outlier_has_genuine_seam_jump(idx3,idx2)=False (ไม่พบ jump จริงที่ seam)
+# ทำไม guard เดิมจับไม่ได้: _is_edge_measurement_outlier ตรวจสอบเฉพาะ target_idx==min_idx หรือ
+# max_idx ของทั้งแถว (คอลัมน์ริมสุดจริง) เท่านั้น - แต่ไฟล์นี้มี 5 คอลัมน์ (idx0-4) และคู่ที่มี
+# ปัญหาคือ (idx2,idx3) ซึ่งเป็น "คอลัมน์กลาง" ทั้งคู่ ไม่ตรงเงื่อนไข guard เดิมเลย จึงหลุดรอด
+# FIX (ทางเลือก A ตามที่ผู้ใช้เลือก - ขอบเขตแคบ ปลอดภัยกว่า): เพิ่มการตรวจสอบใหม่ - ถ้าคู่
+# เปรียบเทียบ (a,b) มีช่วง x-range รวมกันครอบคลุม apex_x ของ view นั้น (ไม่จำกัดว่าต้องเป็น
+# คอลัมน์ริมสุดของแถวเหมือน guard เดิม) ให้ถือว่าคู่นี้ "อยู่ในโซนอิทธิพลของ apex" แล้วใช้
+# _edge_outlier_has_genuine_seam_jump (ฟังก์ชันเดียวกับที่ Edge-Column Guard ใช้อยู่แล้ว) ตรวจสอบ
+# ว่ามี jump จริงที่ seam หรือไม่ - ถ้าไม่พบ jump จริง (คืนค่า False ชัดเจน) ให้ suppress (ไม่ flag)
+# เพราะน่าจะเป็นความเอนเอียงจาก isometric slope ต่อเนื่อง ไม่ใช่ความแตกต่างทางกายภาพจริง - ถ้า
+# ตรวจไม่ได้ (คืนค่า None) หรือพบ jump จริง (True) ให้ผ่านตามปกติ (ปลอดภัยไว้ก่อน ไม่ suppress
+# โดยไม่มีหลักฐานชัดเจน)
+def _pair_is_apex_affected(view_result, rec_a, rec_b):
+    """True ถ้า apex_x (ตำแหน่งจุดยอด isometric ของ view นี้) ตกอยู่ภายในช่วง x-range รวมของ
+    คู่เปรียบเทียบ (rec_a, rec_b) - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก
+    AA05-02/AA05-04) - คืน False ถ้าตรวจสอบไม่ได้ (fail-safe, ไม่กระทบไฟล์ที่ไม่มีปัญหานี้)"""
+    if view_result is None:
+        return False
+    stack_heights = view_result.get("stack_heights")
+    if not stack_heights:
+        return False
+    idx_a = rec_a.get("idx")
+    if idx_a is None or idx_a >= len(stack_heights):
+        return False
+    apex_x = stack_heights[idx_a].get("apex_x")
+    if apex_x is None:
+        return False
+    a0, a1 = rec_a["x_range"]
+    b0, b1 = rec_b["x_range"]
+    lo, hi = min(a0, b0), max(a1, b1)
+    return lo <= apex_x <= hi
+
+
 def _is_edge_measurement_outlier(records_same_view, target_idx,
                                   min_plateau_size=_EDGE_OUTLIER_MIN_PLATEAU_SIZE,
                                   plateau_max_spread_ratio=_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO,
@@ -4752,6 +4847,37 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # "ค่าอ้างอิง" ที่ใช้เปรียบเทียบทั้งคู่ไม่น่าเชื่อถือ ไม่ควร flag ความเสี่ยงจากคู่นี้เลย
         if _is_edge_measurement_outlier(records, taller_rec["idx"], view_result=view_result):
             continue
+        # v25.77 NEW (สำคัญ - พบจริงจาก AA05-02/AA05-04 หลังทดสอบ v25.76, 31-Aug-2026): เดิม
+        # Edge-Column Global Consensus Guard (บรรทัดด้านบน) เช็คแค่คอลัมน์ "ริมสุดของทั้งแถว"
+        # (idx==0/max) แต่ไม่ครอบคลุมคู่เปรียบเทียบที่เป็น "คอลัมน์กลาง" ที่บังเอิญคร่อมโซน apex
+        # พอดี - ดู docstring เต็มที่ _pair_is_apex_affected สำหรับหลักฐาน+เหตุผล (พบจริงจาก
+        # AA05-02/AA05-04: คู่ idx2(283.25px)/idx3(221.82px) ทั้งคู่เป็นสีเขียวเดียวกัน SKU
+        # เดียวกัน สูงเท่ากันจริง แต่ apex_x=970 คร่อมโซนนี้พอดี ทำให้ idx3 วัดต่ำกว่าจริงจาก
+        # ความชัน isometric ต่อเนื่อง ไม่ใช่ apex ตัดข้อมูลของตัวเอง - guard เดิมทั้งหมดจึงไม่จับ)
+        # FIX: ถ้าคู่นี้อยู่ในโซนอิทธิพลของ apex (apex_x ตกอยู่ในช่วง x-range รวมของทั้งคู่) ให้
+        # ตรวจสอบเพิ่มเติมด้วย _edge_outlier_has_genuine_seam_jump (ฟังก์ชันเดียวกับที่ Edge-
+        # Column Guard ใช้อยู่แล้ว) - ถ้าไม่พบ jump จริงที่ seam (คืนค่า False ชัดเจน) ให้ไม่ flag
+        # (ปลอดภัยกว่าเพราะเป็นการเปลี่ยนแปลงราบเรียบต่อเนื่องจาก isometric slope ไม่ใช่ step
+        # จริง) - ถ้าตรวจไม่ได้ (None) หรือพบ jump จริง (True) ให้ผ่านตามปกติ (ไม่ suppress โดย
+        # ไม่มีหลักฐาน - เช่น AC03-02/AB03-04 ที่ต้องยังคง flag ถูกต้องเหมือนเดิม)
+        # v25.77 FIX (สำคัญ - พบ regression จริงจาก AB03-04 ระหว่างทดสอบ): เดิมใช้ guard ใหม่นี้
+        # กับทุกคู่ที่ apex-affected โดยไม่สนใจว่าฝั่งใดมี height_source ที่ไม่น่าเชื่อถืออยู่แล้ว
+        # (apex_fallback/apex_partial_cut) - พบว่า AB03-04's idx1 (apex_partial_cut, ปนเปื้อน
+        # จากปรากฏการณ์ "isometric roof-overhang bleed" ที่หลังคาของกล่องสูงยื่นล้ำมาทับโซน
+        # ใกล้ seam) ทำให้ pixel ดิบที่ _edge_outlier_has_genuine_seam_jump ใช้ตรวจสอบ (ไม่กรอง
+        # สี) เห็นการเปลี่ยนแปลง "ค่อยเป็นค่อยไป" ที่ seam (คนละสาเหตุกับ AA05-02 แต่ให้ผลลัพธ์
+        # เดียวกันคือ False) ทั้งที่เป็นความเสี่ยงจริงที่ยืนยันแล้ว (ผู้ใช้ยืนยันด้วยภาพ 57.4%)
+        # FIX: จำกัดให้ guard ใหม่นี้ทำงานเฉพาะเมื่อทั้ง 2 ฝั่งมี height_source == "direct" เท่านั้น
+        # (ไม่มีฝั่งใดติดป้าย apex_fallback/apex_partial_cut อยู่แล้ว) - เพราะกรณีที่มีป้ายเหล่านี้
+        # ติดอยู่แล้ว มี guard เฉพาะทาง (_APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO แบบ threshold-
+        # gated) ดูแลอยู่แล้วอย่างเหมาะสมกว่า ไม่ควรให้ guard ใหม่นี้มาซ้อนทับ/ขัดแย้งกัน
+        _both_sides_direct = (taller_rec.get("height_source") == "direct"
+                               and shorter_rec.get("height_source") == "direct")
+        if (_both_sides_direct and view_result is not None
+                and _pair_is_apex_affected(view_result, a, b)):
+            has_genuine_jump = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
+            if has_genuine_jump is False:
+                continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
@@ -6250,8 +6376,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.76",
-            "benchmarkMode": "v25_76_apex_partial_cut_reliability_label",
+            "checkerVersion": "V25.77",
+            "benchmarkMode": "v25_77_apex_affected_pair_seam_jump_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
