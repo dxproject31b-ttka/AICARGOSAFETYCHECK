@@ -2,6 +2,66 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.72 (แก้ 3 ไฟล์ที่ผู้ใช้ระบุหลังทดสอบ v25.71: AB03-04/AB05-01/AC03-02, 31-Aug-2026):
+  ปัญหาที่ 1 (AB03-04) - "วาดกรอบแดงผิดจุด ต้องไปอยู่บริเวณสูงต่ำ คือตำแหน่งถัดไป ฟ้ากับน้ำเงิน":
+  ROOT CAUSE: v25.71 เพิ่ม guard "ถ้า height_source=='apex_fallback' ไม่ flag เลย" (ทุก subtype)
+  แบบไม่แยกแยะสาเหตุของ apex_fallback - พบว่า compute_stack_heights_px เข้า branch นี้ได้จาก 2
+  สาเหตุที่ต่างกันโดยสิ้นเชิง: (ก) apex_x ตกอยู่ "กลาง" คอลัมน์ ตัดข้อมูลจนเหลือน้อยผิดปกติ (เสี่ยง
+  จริง ตรงกับที่ ED84/ED85 พิสูจน์ไว้) กับ (ข) apex_x อยู่ "ก่อน" คอลัมน์ทั้งหมด (eff_b1<=b0) ทำให้
+  ต้อง fallback ไปใช้ [b0,b1] เต็มช่วงตั้งแต่รอบแรก - กรณีนี้ผลลัพธ์เหมือนกับไม่มี apex logic เลย
+  ทุกประการ (n_samples=ความกว้างคอลัมน์เป๊ะ ไม่ใช่ค่าคงที่แปลกๆแบบ n=67 ของ ED84/ED85) แต่ถูกติดป้าย
+  ผิดเป็น "apex_fallback" เหมือนกัน ยืนยันจาก AB03-04: idx2 (กล่องน้ำเงิน ASI1A-AJ ชั้นเดียว,
+  x=1110-1240) apex_x=1000<=b0=1116 -> n=118 (=ความกว้างคอลัมน์เป๊ะ) ถูก v25.71 กรองทิ้งผิดพลาด
+  ทำให้พลาด STEP_DOWN_RISK จริงระหว่างกล่องเขียว/ฟ้า(idx1,สูง)กับกล่องน้ำเงิน(idx2,เตี้ย,drop 57%)
+  ไปเจอ tail_stepdown ที่ผิดตำแหน่ง (idx0 vs idx1, ทั้งคู่เป็นกล่องฟ้าสูงเท่ากันจริงตามภาพ, 14.5%
+  เป็น noise) แสดงแทน
+  FIX: cut ด้วย apex เฉพาะเมื่อ apex_x ตกอยู่ "ภายใน" ช่วงคอลัมน์นี้จริง (b0 < apex_x < b1)
+  เท่านั้น - ถ้า apex_x <= b0 หรือ apex_x >= b1 ใช้ [b0,b1] เต็มช่วงตั้งแต่รอบแรก ไม่ผ่าน
+  apex_cut_fallback branch อีกต่อไป -> height_source ได้ "direct" ถูกต้องตามจริง ไม่กระทบตัวเลข
+  ความสูงที่คำนวณได้เลย (ค่าเหมือนเดิม เปลี่ยนแค่ label ความน่าเชื่อถือ) ไม่กระทบกรณี apex อยู่กลาง
+  คอลัมน์จริง (เช่น ED84/ED85) ที่ยังคง fallback+ถูกกรองเหมือนเดิมทุกประการ
+  ผลทดสอบ: AB03-04 พบ STEP_DOWN_RISK ถูกต้อง 2 จุด (pairwise FRONT idx1, cross_view BACK idx0)
+  ที่ตำแหน่งกล่องฟ้า/น้ำเงินตามที่ผู้ใช้ระบุ (ยังเหลือ tail_stepdown เดิมที่ idx0/idx1 - 14.5%,
+  น่าจะเป็น noise เช่นกันแต่ยังไม่มีหลักฐานเพียงพอจะแก้ในรอบนี้ - แจ้งผู้ใช้ไว้เป็นข้อสังเกต)
+
+  ปัญหาที่ 2 (AB05-01) - "วาดกรอบแดงเกินมา บริเวณสีเหลือง ซึ่งตรงนี้ปลอดภัย":
+  ROOT CAUSE: ไฟล์นี้มี 3 ตั้งเท่านั้น (กล่อง SKU เดียวกันทั้งไฟล์ TNC1A-F2 สูงเท่ากันจริงทุกตั้น
+  ยืนยันด้วยภาพ) - Edge-Column Global Consensus Guard (v25.68/71) ที่ออกแบบมาป้องกันปัญหานี้
+  เดิมกำหนด min_plateau_size=3 (ก่อน trim) ทำให้ "ใช้ไม่ได้เลย" กับไฟล์ตั้งรวมแค่ 3 ตั้ง (excluding
+  target เหลือแค่ 2 เสมอ ต่ำกว่า 3 ตลอด) ทั้งที่ค่า after-trim (=2) ก็ยอมรับว่า 2 จุดพอจะอ้างอิงได้
+  แล้ว นอกจากนี้ guard เดิมเช็คแค่ฝั่ง "เตี้ยกว่า" (shorter_rec) ว่าเป็น edge-outlier หรือไม่ ไม่เคย
+  เช็คฝั่ง "สูงกว่า" (taller_rec) เลย - พบจริงจาก AB05-01 BACK: idx0 (คอลัมน์ริมสุด) วัดได้สูงเกิน
+  จริง 329.78px เทียบ idx1/idx2 (plateau 248-257px, spread หลัง trim แค่ 2.3%) กลายเป็น "ค่าอ้างอิง
+  สูงกว่า" ที่ผิด ทำให้ idx1 (สูงปกติ) ถูกเข้าใจผิดว่า "เตี้ยกว่า" 21.9%
+  FIX: (1) ลด min_plateau_size จาก 3 เป็น 2 (เท่ากับค่า after-trim) (2) เพิ่มการเช็ค edge-outlier
+  ให้ครอบคลุมทั้งฝั่ง taller_rec ด้วย (ไม่ใช่แค่ shorter_rec) ในทั้ง 3 กลไก (pairwise/tail_stepdown/
+  cross_view - cross_view ไม่เคยมี guard นี้มาก่อนเลย เพิ่มใหม่เพื่อความสอดคล้อง)
+  ผลทดสอบ: AB05-01 STEP_DOWN_RISK (pairwise BACK idx0) หายไปถูกต้อง (ยังเหลือ REAR_EMPTY_RISK/
+  silhouette_notch ที่อาจเป็น false-positive จากรูปแบบเดียวกัน - เป็นคนละ subtype/กลไกตรวจจับ ยัง
+  ไม่ได้แก้ในรอบนี้ แจ้งผู้ใช้ไว้เป็นข้อสังเกต)
+
+  ปัญหาที่ 3 (AC03-02) - "ไม่มีระบุจุดเสี่ยงเลย":
+  ROOT CAUSE (ผลข้างเคียงจากการแก้ปัญหาที่ 2 เปิดเผยบั๊กเดิมที่ซ่อนอยู่): เดิม Edge-Column Global
+  Consensus Guard ใช้สัญญาณเดียว (deviation จาก plateau) ตัดสินใจว่าคอลัมน์ริมสุดที่ต่างจากเพื่อน
+  บ้านมาก "ต้อง" เป็น isometric bias เสมอ - ข้อสันนิษฐานนี้ผิดในกรณีทั่วไป (คอลัมน์ริมสุดก็เตี้ยกว่า
+  จริงได้ปกติ) ยืนยันจาก AC03-02: idx0 (กล่องน้ำเงินเดี่ยว x=621-699) วัดได้ 71.76px เทียบ plateau
+  ของ idx1-idx7 (นิ่งมาก ~338px) deviation=79% ถูก guard กรองทิ้งผิดพลาด ทั้งที่ภาพจริงยืนยันว่า
+  เตี้ยกว่าจริง 100%
+  FIX: เพิ่มเงื่อนไขเสริม "seam jump verification" ก่อน suppress จริง - ตรวจสอบว่ามี jump คมชัดที่
+  ตำแหน่งรอยต่อ (seam) ระหว่าง edge column กับเพื่อนบ้านหรือไม่ (สแกนหาตำแหน่ง jump จริงในระยะ
+  ±40px รอบ seam ที่ Phase 1B รายงาน เพราะขอบ front-face กับขอบ top-face parallelogram มักไม่ตรง
+  ตำแหน่ง x กันเป๊ะในมุมมอง isometric) - ถ้าพบ jump จริง (บ่งชี้ความแตกต่างทางกายภาพจริง) ไม่
+  suppress; ถ้าไม่พบ (การเปลี่ยนแปลงราบเรียบต่อเนื่อง ตรงกับรูปแบบ bias เดิมที่ยืนยันจาก EB66-01/
+  EC10-03/EC19-01/ED85) ยัง suppress ตามเดิม - หลักการนี้แปลงมาจากวิธีที่ผู้พัฒนา v25.68 เคยตรวจสอบ
+  ด้วยมือมาก่อนแล้ว (เทียบ cargo_top_y ดิบว่ามี "รอยหัก/jump" ที่ seam หรือไม่) เป็นเงื่อนไข
+  อัตโนมัติ
+  ผลทดสอบ: AC03-02 พบ STEP_DOWN_RISK (pairwise FRONT idx1, drop_ratio=73.1%) ถูกต้องตรงตำแหน่ง
+  กล่องน้ำเงินเดี่ยว/กล่องน้ำเงินซ้อนสูงตามภาพจริง
+  ข้อจำกัดที่ยังไม่ได้แก้ในรอบนี้ (บอกตรงไปตรงมา): (1) AB03-04 tail_stepdown ที่ idx0/idx1 (14.5%,
+  น่าจะเป็น noise) (2) AB05-01 REAR_EMPTY_RISK/silhouette_notch ที่อาจเป็น false-positive จาก
+  รูปแบบเดียวกับที่แก้ในปัญหาที่ 2 (คนละกลไกตรวจจับ ไม่ได้แก้ในรอบนี้) - ทั้ง 2 จุดนี้ยังไม่มี
+  หลักฐานเพียงพอจะแก้ได้อย่างปลอดภัยในรอบนี้ รอผู้ใช้ยืนยัน/ทดสอบเพิ่มเติมก่อนแก้ในรอบถัดไป
+================================================================================
 v25.71 (แก้ ED84/ED85-01/02/03 ที่ผู้ใช้ระบุ "กล่องสีฟ้า/สีม่วง วาดกรอบเกินมา", 30-Aug-2026):
 
   ROOT CAUSE #1 (สำคัญ - ช่องโหว่ระบบ): height_source="apex_fallback" (ค่าที่วัดจากช่วง "หลัง
@@ -865,11 +925,11 @@ def generate_action_report(case_type, description="", sku_list=""):
             f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
         ),
         "REAR_EMPTY_RISK": (
-            f"แจ้งเตือน: บริเวณประตูท้ายตู้มีพื้นที่ว่าง หรือสินค้าวางไม่ถึงประตู{sku_line}\n"
+            f"แจ้งเตือน: พบระหว่างกองสินค้ามีพื้นที่ว่าง{sku_line}\n"
             f"วิธีแก้ไข:\n"
-            f"  • นำไม้อัดกั้นวางตั้งแนวตั้งชิดท้ายกองสินค้า เพื่ออุดช่องว่างหน้าประตู\n"
-            f"  • รัดด้วยสายเบลท์หรือเชือกให้สินค้าอยู่กับที่ ป้องกันไถลออกเมื่อเปิดประตู\n"
-            f"  • ตรวจสอบว่าสินค้าด้านหน้าประตูมีความสูงเสมอกันทั้งซ้ายและขวา"
+            f"  • นำไม้อัดกั้นวางขวางระหว่างกองที่สูงต่างกัน เพื่อป้องกันสินค้าล้มทับกัน\n"
+            f"  • ตรวจสอบความสูงของแต่ละกองให้ใกล้เคียงกันมากที่สุด\n"
+            f"  • รัดด้วยสายเบลท์หรือเชือกให้แน่น ทุกกองที่มีรอยต่างระดับ"
         ),
     }
     return actions.get(case_type, description or "ปลอดภัย\nไม่พบจุดเสี่ยงที่ต้องดำเนินการเพิ่มเติม")
@@ -4096,8 +4156,28 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
         b0 = boundaries[i] + margin
         b1 = boundaries[i + 1] - margin
         eff_b1 = b1
-        if apex_x is not None:
-            eff_b1 = min(b1, apex_x)
+        # v25.72 FIX (สำคัญ - พบจริงจาก AB03-04 หลัง v25.71 เพิ่ม blanket apex_fallback guard):
+        # เดิม eff_b1 = min(b1, apex_x) แบบไม่มีเงื่อนไข - ถ้า apex_x <= b0 (คอลัมน์นี้ทั้งคอลัมน์
+        # อยู่ "หลัง apex" ทั้งหมด ไม่มีส่วนใดก่อน apex เลย) จะได้ eff_b1 <= b0 -> ช่วง
+        # range(b0, eff_b1) ว่างเปล่าเสมอ -> ทุกครั้งต้องเข้า apex_cut_fallback branch (ใช้ [b0,b1]
+        # เต็มช่วง) แต่ผลลัพธ์ตัวเลขที่ได้เหมือนกับการ "ไม่มี apex logic เลย" (apex_x=None) ทุก
+        # ประการ (n_samples = b1-b0 พอดี ไม่ใช่ค่าคงที่ผิดปกติแบบ ED84/ED85 ที่ n=67 ซ้ำกันข้าม
+        # ไฟล์) - แต่กลับถูกติดป้าย "apex_fallback" อย่างผิดพลาด ทำให้ v25.71 blanket-guard (ที่ออกแบบ
+        # มาสำหรับกรณี apex อยู่ "กลางคอลัมน์" ตัดข้อมูลจนเหลือน้อยผิดปกติ) ไปกรอง exclude กรณีนี้ด้วย
+        # ทั้งที่เป็นการวัดที่เชื่อถือได้เต็มรูปแบบ (ยืนยันจาก AB03-04: idx2 (กล่องน้ำเงิน ASI1A-AJ
+        # ชั้นเดียว, x=1110-1240) มี apex_x=1000 ซึ่งอยู่ก่อนคอลัมน์นี้ทั้งหมด (apex_x <= b0=1116)
+        # -> n_samples=118 = ความกว้างคอลัมน์เป๊ะ ไม่ใช่ค่าคงที่แปลกๆ - ถูกกรองออกผิดพลาด ทำให้พลาด
+        # STEP_DOWN_RISK จริงระหว่าง idx1 (เขียว/ฟ้า สูง) กับ idx2 (น้ำเงิน เตี้ย) ไป
+        # FIX: cut ด้วย apex เฉพาะเมื่อ apex_x ตกอยู่ "ภายใน" ช่วงคอลัมน์นี้จริง (b0 < apex_x < b1)
+        # เท่านั้น - ถ้า apex_x <= b0 (ทั้งคอลัมน์อยู่หลัง apex) หรือ apex_x >= b1 (ทั้งคอลัมน์อยู่
+        # ก่อน apex, ไม่ต้องตัดอยู่แล้วเดิมก็ไม่เปลี่ยน) ให้ใช้ [b0,b1] เต็มช่วงตั้งแต่รอบแรกเลย
+        # (ไม่ต้องผ่าน apex_cut_fallback branch อีกต่อไป) -> height_source ได้ "direct" ถูกต้องตาม
+        # ความเป็นจริงของข้อมูล ไม่กระทบตัวเลขความสูงที่คำนวณได้เลย (ค่าเหมือนเดิมทุกประการ เปลี่ยน
+        # แค่ label ความน่าเชื่อถือ) - ไม่กระทบกรณี apex อยู่กลางคอลัมน์จริง (b0<apex_x<b1) ที่ยังคง
+        # ตัดข้อมูลแล้วอาจ fallback เป็น apex_fallback เหมือนเดิมทุกประการ (เช่น ED84/ED85 ที่ยืนยัน
+        # แล้วว่าเป็น geometric artifact จริง - n_samples คงที่ผิดธรรมชาติข้ามไฟล์)
+        if apex_x is not None and b0 < apex_x < b1:
+            eff_b1 = apex_x
 
         xs_top, ys_top = [], []
         for x in range(max(0, b0), max(0, eff_b1)):
@@ -4724,7 +4804,16 @@ def detect_step_down_topface_jump(records, view_label, view_result):
 # แน่ชัดแล้ว ไม่ flag เป็นความเสี่ยง (ปลอดภัยกว่าเพราะต้องมี plateau ที่นิ่งมากจริงๆ ก่อน guard
 # นี้จะทำงาน - ถ้า plateau ไม่นิ่ง (มีความแตกต่างจริงระหว่างคอลัมน์กลาง) guard นี้จะไม่ทำงานเลย
 # ปล่อยให้ logic เดิมตัดสินใจตามปกติ)
-_EDGE_OUTLIER_MIN_PLATEAU_SIZE = 3
+# v25.72 FIX (สำคัญ - พบจริงจาก AB05-01): เดิม _EDGE_OUTLIER_MIN_PLATEAU_SIZE=3 (ก่อน trim)
+# ทำให้ guard นี้ "ใช้ไม่ได้เลย" กับไฟล์ที่มีตั้งรวมทั้งวิวแค่ 3 ตั้ง (excluding target เหลือแค่ 2
+# เสมอ - ต่ำกว่า 3 ตลอด) ทั้งที่หลังจากนี้เอง (_EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM=2) ก็ยอมรับ
+# ว่า 2 จุดเพียงพอจะใช้เป็น "plateau" อ้างอิงได้แล้ว (ถ้าเกณฑ์ spread/deviation ผ่าน) - ยืนยันจาก
+# AB05-01 BACK (ไฟล์กล่องเดียว SKU เดียว 3 ตั้งเท่ากันทุกตั้งจริง ยืนยันด้วยภาพ): idx0 (edge,
+# วัดได้ 329.78px) เทียบกับ idx1+idx2 (248-257px, spread=3.7%, นิ่งมาก) ควรถูกจับได้ว่าเป็น
+# edge-measurement bias แต่ guard เดิมไม่ทำงานเพราะมีแค่ 2 จุดอ้างอิง (\< 3) - ปรับให้เท่ากับค่า
+# after-trim (2) เพื่อให้ไฟล์ตั้งน้อย (3 ตั้งรวม) ได้รับการป้องกันเช่นเดียวกับไฟล์ตั้งเยอะ (เกณฑ์
+# ความเข้มงวดของ spread/deviation ไม่เปลี่ยน ยังคงต้อง <=10%/>=10% เหมือนเดิมทุกประการ)
+_EDGE_OUTLIER_MIN_PLATEAU_SIZE = 2
 _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM = 2  # v25.71 NEW: ดู docstring เต็มใน
 # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01)
 _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10  # คงค่าเดิมไว้ (well-tested) - ดู v25.71 FIX
@@ -4734,10 +4823,108 @@ _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10  # คงค่าเดิมไ�
 _EDGE_OUTLIER_DEVIATION_THRESHOLD = 0.10
 
 
+# v25.72 NEW (สำคัญ - พบจริงจาก AC03-02 ที่ผู้ใช้ระบุ "ไม่มีระบุจุดเสี่ยงเลย", 31-Aug-2026):
+# เดิม _is_edge_measurement_outlier ใช้แค่สัญญาณเดียว (deviation จาก plateau ของคอลัมน์อื่น) เพื่อ
+# ตัดสินใจว่าคอลัมน์ริมสุดที่ต่างจากเพื่อนบ้านมาก "ต้อง" เป็น isometric measurement bias เสมอ -
+# ข้อสันนิษฐานนี้ผิดในกรณีทั่วไป: กล่องที่ริมสุดจริงของแถว (idx=0/idx สุดท้าย) ก็สามารถเตี้ยกว่า
+# เพื่อนบ้านได้จริงเช่นกัน (เป็นสถานการณ์ปกติของ STEP_DOWN_RISK ที่ต้องการตรวจจับตั้งแต่ต้น) -
+# ยืนยันจาก AC03-02 FRONT: idx0 (กล่องน้ำเงินเดี่ยว x=621-699) วัดได้ 71.76px เทียบ idx1-idx7
+# (กล่องน้ำเงินซ้อนสูง plateau นิ่งมาก ~338px, spread หลัง trim แค่ ~2.3%) deviation=79% (เกิน
+# 10% มาก) - ถูก guard เดิม (v25.68/71) กรองทิ้งอย่างผิดพลาด ทั้งที่ตรวจสอบภาพจริงแล้วว่าเป็นกล่อง
+# เตี้ยกว่าจริง 100%
+# ROOT CAUSE ที่แยกแยะ "bias เดิม (EB66-01/EC10-03/EC19-01/ED85)" ออกจาก "ของจริง (AC03-02)" ได้
+# ตรงตามที่ CHANGELOG ของ v25.68 เองระบุไว้ก่อนหน้านี้แล้ว (แค่ไม่เคยแปลงเป็นเงื่อนไขอัตโนมัติ):
+# "ตรวจสอบ cargo_top_y/local_floor_y ดิบ พบว่าเส้นทั้ง 2 เพิ่มขึ้นอย่างต่อเนื่องราบเรียบตลอดช่วง...
+# ไม่มีรอยหัก/jump ที่ตำแหน่ง seam เลยแม้แต่น้อย - พิสูจน์ว่าไม่ใช่กล่องเตี้ยกว่าจริง" (EB66-01) -
+# นั่นคือกรณี bias จะเห็น cargo_top_y เปลี่ยนแปลง "อย่างต่อเนื่อง/นุ่มนวล" ข้ามรอยต่อคอลัมน์ (seam)
+# ไม่มี jump จริง ในขณะที่กรณีจริง (AC03-02) จะเห็น jump คมชัดตรง seam พอดี (ยืนยันด้วยข้อมูลจริง:
+# x=708 h=96px -> x=714 h=254px กระโดดขึ้น 158px ภายในแค่ 6px เท่านั้น - คมชัดมาก ต่างจาก
+# isometric slant ธรรมชาติที่ค่อยๆเปลี่ยนทีละ 1-2px ต่อ pixel)
+# FIX: เพิ่มการตรวจสอบ "seam jump" เป็นเงื่อนไขเสริมก่อนตัดสินใจ suppress จริง - ถ้าพบว่ามี jump
+# คมชัดตรงรอยต่อระหว่าง target(edge) กับเพื่อนบ้านที่ใกล้ที่สุด (มีขนาดใกล้เคียงกับ deviation ที่
+# วัดได้จาก plateau) ให้ถือว่าเป็นความแตกต่างทางกายภาพจริง (ไม่ใช่ bias) -\> ไม่ suppress (คืน False)
+# ถ้าไม่พบ jump ที่ seam (การเปลี่ยนแปลงราบเรียบต่อเนื่อง สอดคล้องกับรูปแบบ bias เดิมที่ยืนยันแล้ว
+# จาก EB66-01/EC10-03/EC19-01/ED85) จึง suppress ตามเดิม (คืน True)
+# ปลอดภัยกับไฟล์เดิมที่เคย verify: ถ้า view_result=None (ไม่ส่งมา) จะ fallback ไปพฤติกรรมเดิม
+# ทุกประการ (ไม่เช็ค jump เลย) เพื่อความเข้ากันได้กับโค้ดที่อาจเรียกแบบเก่า
+_EDGE_OUTLIER_SEAM_JUMP_WIN_PX = 15  # หน้าต่างพิกเซลแต่ละฝั่งของ seam ที่ใช้วัด local height
+_EDGE_OUTLIER_SEAM_JUMP_MIN_RATIO = 0.10  # ต้องมี local jump ที่ seam อย่างน้อยเท่ากับ
+# deviation_threshold เดิม (10%) จึงจะถือว่าเป็นหลักฐาน "jump จริง" เพียงพอจะปฏิเสธการ suppress
+
+
+def _local_height_median(cargo_top_y, local_floor_y, x0, x1):
+    """ค่ามัธยฐานของความสูง (floor-top) ในช่วง x0..x1 - ใช้วัด 'ความสูงเฉพาะที่' ใกล้ seam
+    (ต่างจาก robust-fit ทั้งคอลัมน์ที่อาจถูกเบี่ยงเบนจาก slant ตลอดความกว้างคอลัมน์)"""
+    heights = []
+    for x in range(max(0, x0), max(0, x1)):
+        if (x < len(cargo_top_y) and x < len(local_floor_y)
+                and cargo_top_y[x] >= 0 and local_floor_y[x] >= 0):
+            heights.append(float(local_floor_y[x] - cargo_top_y[x]))
+    if len(heights) < 3:
+        return None
+    return float(np.median(heights))
+
+
+_EDGE_OUTLIER_SEAM_JUMP_SCAN_MARGIN_PX = 40  # v25.72 FIX: ดู docstring ด้านล่าง - ระยะสแกน
+# หาจุด jump จริงรอบๆ seam ที่รายงานจาก Phase 1B (ไม่ใช่เชื่อตำแหน่ง seam ตรงๆ)
+
+
+def _edge_outlier_has_genuine_seam_jump(view_result, target_rec, neighbor_rec,
+                                         win=_EDGE_OUTLIER_SEAM_JUMP_WIN_PX,
+                                         min_ratio=_EDGE_OUTLIER_SEAM_JUMP_MIN_RATIO,
+                                         scan_margin=_EDGE_OUTLIER_SEAM_JUMP_SCAN_MARGIN_PX):
+    """True ถ้าพบ jump คมชัดใกล้ตำแหน่ง seam ระหว่าง target(edge) กับ neighbor (บ่งชี้ความแตกต่าง
+    ทางกายภาพจริง ไม่ใช่ isometric slant bias) - ดู docstring เต็มด้านบน
+    v25.72 FIX (สำคัญ - พบจริงจาก AC03-02 ระหว่างทดสอบ): เดิมเช็ค jump แค่ที่ตำแหน่ง seam ที่
+    Phase 1B รายงาน (กึ่งกลางระหว่าง x_range ของ target/neighbor) ตรงๆ - พบว่าตำแหน่ง jump จริง
+    ในภาพอาจไม่ตรงกับ seam ที่ P1B รายงานเป๊ะ (คลาดเคลื่อนได้ ~10-15px เพราะขอบ front-face กับ
+    ขอบ top-face parallelogram ไม่ได้อยู่ตำแหน่ง x เดียวกันเป๊ะในมุมมอง isometric - หลังคากล่อง
+    มักยื่นล้ำเข้าไปในคอลัมน์ข้างเคียงเล็กน้อยจากมุมกล้อง) ยืนยันจาก AC03-02: seam ที่รายงาน=699
+    แต่ jump จริงอยู่ที่ x=708-714 (ห่างจาก seam ~12px) ทำให้เช็คที่ seam ตรงๆ พลาด (jump ratio
+    วัดได้แค่ 8.7% ต่ำกว่าเกณฑ์ 10% เพราะหน้าต่างยังไม่ครอบคลุมจุดกระโดดจริง)
+    FIX: สแกนหาตำแหน่งที่มี local jump สูงสุดภายในระยะ scan_margin รอบๆ seam ที่รายงาน (ไม่ใช่
+    เชื่อ seam ตรงๆ) แล้วใช้ค่า jump สูงสุดที่พบเป็นตัวตัดสิน"""
+    if view_result is None:
+        return None
+    cty = view_result.get("cargo_top_y")
+    lfy = view_result.get("local_floor_y")
+    if cty is None or lfy is None:
+        return None
+    tx0, tx1 = target_rec["x_range"]
+    nx0, nx1 = neighbor_rec["x_range"]
+    if nx0 >= tx1:
+        seam0 = tx1
+        direction = 1  # neighbor อยู่ทางขวา, สแกนไปทางขวา
+    elif nx1 <= tx0:
+        seam0 = tx0
+        direction = -1  # neighbor อยู่ทางซ้าย, สแกนไปทางซ้าย
+    else:
+        return None
+    best_ratio = 0.0
+    found_any = False
+    for offset in range(-scan_margin, scan_margin + 1, 2):
+        seam = seam0 + offset if direction == 1 else seam0 - offset
+        left_h = _local_height_median(cty, lfy, seam - win, seam)
+        right_h = _local_height_median(cty, lfy, seam, seam + win)
+        if left_h is None or right_h is None:
+            continue
+        base = right_h if direction == 1 else left_h
+        if base <= 0:
+            continue
+        ratio = abs(right_h - left_h) / base
+        found_any = True
+        if ratio > best_ratio:
+            best_ratio = ratio
+    if not found_any:
+        return None
+    return best_ratio >= min_ratio
+
+
 def _is_edge_measurement_outlier(records_same_view, target_idx,
                                   min_plateau_size=_EDGE_OUTLIER_MIN_PLATEAU_SIZE,
                                   plateau_max_spread_ratio=_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO,
-                                  deviation_threshold=_EDGE_OUTLIER_DEVIATION_THRESHOLD):
+                                  deviation_threshold=_EDGE_OUTLIER_DEVIATION_THRESHOLD,
+                                  view_result=None):
     """True ถ้า target_idx เป็นคอลัมน์ริมสุดจริงของแถว (idx==0 หรือ idx==max) และความสูงของมัน
     เบี่ยงเบนจาก 'plateau' ของคอลัมน์อื่นที่นิ่งมาก (เชื่อถือได้ + spread ต่ำ) เกิน threshold -
     ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)"""
@@ -4801,7 +4988,19 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
     if p_spread > plateau_max_spread_ratio:
         return False  # plateau ไม่นิ่งพอจะเป็นหลักฐานอ้างอิงได้ - ปลอดภัยไว้ก่อน ไม่ suppress
     deviation = abs(target["height_px"] - p_median) / p_median
-    return deviation >= deviation_threshold
+    if deviation < deviation_threshold:
+        return False
+    # v25.72 NEW: ก่อน suppress จริง ตรวจสอบว่ามี "seam jump" คมชัดระหว่าง target กับเพื่อนบ้าน
+    # ที่ใกล้ที่สุดหรือไม่ - ถ้ามี แสดงว่าเป็นความแตกต่างทางกายภาพจริง ไม่ใช่ isometric bias
+    # (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล พบจริงจาก AC03-02)
+    if view_result is not None:
+        neighbor_idx = target_idx + 1 if target_idx == min_idx else target_idx - 1
+        neighbor_rec = by_idx.get(neighbor_idx)
+        if neighbor_rec is not None:
+            has_jump = _edge_outlier_has_genuine_seam_jump(view_result, target, neighbor_rec)
+            if has_jump:
+                return False  # jump จริงที่ seam - ไม่ suppress ปล่อยให้ flag ตามปกติ
+    return True
 
 
 def detect_step_down_pairwise(records, view_label, view_result=None):
@@ -4839,7 +5038,22 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             continue
         # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มด้านบนสำหรับ
         # หลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)
-        if _is_edge_measurement_outlier(records, shorter_rec["idx"]):
+        if _is_edge_measurement_outlier(records, shorter_rec["idx"], view_result=view_result):
+            continue
+        # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01): เดิม Edge-Column Global Consensus Guard เช็ค
+        # เฉพาะฝั่ง "เตี้ยกว่า" (shorter_rec) ว่าเป็น edge-column ที่วัดต่ำผิดปกติหรือไม่ (เช่น
+        # EB66-01/EC10-03/EC19-01 ที่ขอบแถวถูกวัดเตี้ยกว่าจริง) - แต่ไม่เคยตรวจสอบฝั่ง "สูงกว่า"
+        # (taller_rec) เลยว่าอาจเป็น edge-column ที่วัด "สูงเกินจริง" แทน (ทิศทางตรงข้าม) - พบจริง
+        # จาก AB05-01 BACK: กล่อง TNC1A-F2 ทั้ง 3 ตั้งสูงเท่ากันจริง (ยืนยันด้วยภาพ, กล่อง SKU
+        # เดียวกันทั้งไฟล์ วางเรียงสม่ำเสมอ) แต่ idx0 (คอลัมน์ริมสุด/หัวตู้) วัดได้ 329.78px สูงกว่า
+        # idx1(257.5px)/idx2(248.25px) มาก (plateau 2 ตั้งที่เหลือ spread แค่ 3.7% นิ่งมาก) -
+        # เมื่อ idx0 กลายเป็น "taller_rec" ในคู่เปรียบเทียบ (idx0 vs idx1) มันถูกใช้เป็นฝั่ง "อ้างอิง
+        # ความสูงที่ถูกต้อง" ทำให้ idx1 (ซึ่งจริงๆ สูงปกติ ตรงกับ plateau) ถูกเข้าใจผิดว่า "เตี้ยกว่า"
+        # 21.9% ทั้งที่ตัวมันเองไม่ได้ผิดปกติเลย - ต้นเหตุที่แท้จริงคือ idx0 (ไม่ใช่ idx1)
+        # FIX: ตรวจสอบ taller_rec ด้วยกฎเดียวกัน (ไม่ว่าจะเป็นตัวที่ถูก mark หรือไม่) - ถ้า
+        # taller_rec เป็น edge-column ที่เบี่ยงเบนจาก plateau ของคอลัมน์อื่นเกินเกณฑ์เช่นกัน แสดงว่า
+        # "ค่าอ้างอิง" ที่ใช้เปรียบเทียบทั้งคู่ไม่น่าเชื่อถือ ไม่ควร flag ความเสี่ยงจากคู่นี้เลย
+        if _is_edge_measurement_outlier(records, taller_rec["idx"], view_result=view_result):
             continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
@@ -5007,7 +5221,7 @@ def _dedup_overlapping_stepdown_risks(risks):
     return result
 
 
-def detect_tail_stepdown(records, view_label):
+def detect_tail_stepdown(records, view_label, view_result=None):
     """ตรวจ step-down โซนท้ายตู้ (pos > TAIL_STEPDOWN_REAR_POS_MIN)
 
     v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้เต็ม (EA07-01):
@@ -5095,7 +5309,14 @@ def detect_tail_stepdown(records, view_label):
 
     # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มที่
     # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC10-03/EB66-01)
-    if _is_edge_measurement_outlier(records, tail_rec["idx"]):
+    if _is_edge_measurement_outlier(records, tail_rec["idx"], view_result=view_result):
+        return risks
+    # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01, mirror จุดเดียวกันใน detect_step_down_pairwise):
+    # เดิมเช็คแค่ tail_rec (ฝั่งเตี้ยกว่า) ว่าเป็น edge-outlier หรือไม่ - แต่ inner_rec (ฝั่งอ้างอิง
+    # "สูงกว่า") ก็อาจเป็น edge-column ที่วัดสูงเกินจริงได้เช่นกัน (inner_rec อาจเป็น idx=0 หรือ
+    # idx สุดท้ายได้เช่นกันในไฟล์ที่มีตั้งน้อย) - ถ้า inner_rec เองเป็น edge-outlier ค่าอ้างอิงที่ใช้
+    # เปรียบเทียบไม่น่าเชื่อถือ ไม่ควร flag
+    if _is_edge_measurement_outlier(records, inner_rec["idx"], view_result=view_result):
         return risks
 
     # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
@@ -5126,7 +5347,7 @@ def detect_tail_stepdown(records, view_label):
     })
     return risks
 
-def detect_step_down_crossview(records_front, records_back):
+def detect_step_down_crossview(records_front, records_back, front_result=None, back_result=None):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
     record ที่ is_corner_duplicate=True เสมอ (ตรวจจากเส้น rail ทางเรขาคณิตจริง)"""
     risks = []
@@ -5160,6 +5381,19 @@ def detect_step_down_crossview(records_front, records_back):
             # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
             # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03)
             if shorter_rec.get("height_source") == "apex_fallback":
+                continue
+            # v25.72 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB05-01):
+            # เดิม detect_step_down_crossview ไม่เคยเรียก Edge-Column Global Consensus Guard เลย
+            # (v25.68 เพิ่มไว้แค่ pairwise/tail_stepdown เท่านั้น) ทั้งที่เป็นปัญหาเดียวกันได้ - ถ้า
+            # ฝั่งใดฝั่งหนึ่ง (ไม่ว่าเตี้ยกว่าหรือสูงกว่า) เป็น edge-column ที่เบี่ยงเบนจาก plateau
+            # ของคอลัมน์อื่นในวิวเดียวกันมาก ให้ไม่เชื่อการเปรียบเทียบข้าม view นี้เช่นกัน (เลือก
+            # records_same_view ให้ตรงกับ view ของแต่ละฝั่งเอง)
+            taller_view_records = records_front if taller_rec["view"] == "FRONT" else records_back
+            shorter_view_records = records_front if shorter_rec["view"] == "FRONT" else records_back
+            taller_vr = front_result if taller_rec["view"] == "FRONT" else back_result
+            shorter_vr = front_result if shorter_rec["view"] == "FRONT" else back_result
+            if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
+                    or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
                 continue
             threshold = taller_h * (1 - STEP_DOWN_CROSSVIEW_DROP_RATIO)
             if shorter_h < threshold:
@@ -5991,9 +6225,9 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks = []
     risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
     risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
-    risks += detect_step_down_crossview(records_front, records_back)
-    risks += detect_tail_stepdown(records_front, "FRONT")
-    risks += detect_tail_stepdown(records_back, "BACK")
+    risks += detect_step_down_crossview(records_front, records_back, front_result=front, back_result=back)
+    risks += detect_tail_stepdown(records_front, "FRONT", view_result=front)
+    risks += detect_tail_stepdown(records_back, "BACK", view_result=back)
     risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     risks += detect_rear_empty_risk(records_front, records_back, front, back)
@@ -6184,8 +6418,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.71",
-            "benchmarkMode": "v25_71_apex_fallback_guard_robust_plateau_trim",
+            "checkerVersion": "V25.72",
+            "benchmarkMode": "v25_72_apex_window_fix_seam_jump_verified_edge_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
