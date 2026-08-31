@@ -2,6 +2,48 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.76 (แก้ปัญหา AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง คือกรอบซ้ายสุด" หลังทดสอบ
+v25.75, 31-Aug-2026):
+  ROOT CAUSE ที่แท้จริง (ยืนยันด้วยข้อมูลระดับ pixel): FRONT idx0 (x=805-955, กล่องฟ้า TEP1A-AJ
+  ไกลจากน้ำเงิน) วัดได้ 243.3px (n=138/150=92% coverage, เชื่อถือได้เต็มที่) แต่ FRONT idx1
+  (x=955-1110, กล่องฟ้าเดียวกัน SKU เดียวกัน ติดกับน้ำเงิน) วัดได้ 284.5px (n=39/143=27%
+  coverage เท่านั้น) เพราะ apex_x=1000 ตัดข้อมูลกลางคอลัมน์ (b0=961<apex_x<b1=1104) เหลือแค่
+  ช่วง 961-1000 - ทำให้ eff_mid (จุดที่ใช้ประเมินความสูง) = 980 อยู่ใกล้ apex/จุดสูงสุดของเส้นโค้ง
+  isometric มากผิดปกติ แทนที่จะเป็นจุดกึ่งกลางจริงของคอลัมน์ (~1032) ทำให้ค่าที่วัดได้เอนเอียง
+  สูงขึ้นเป็นระบบ (ไม่ใช่ noise สุ่ม) - พิสูจน์ว่าไม่ใช่ความแตกต่างทางกายภาพจริงด้วย floor_jump
+  ระหว่าง idx0/idx1 ที่วัดได้แค่ 4.8px (แทบไม่มี - พื้นเดียวกันจริง) ทำให้ detect_tail_stepdown
+  (idx0 เป็น "tail" หลัง flip position ของ FRONT) flag ผิดพลาดว่าเตี้ยกว่า inner_rec(idx1) 14.5%
+  ทั้งที่เป็นกล่อง SKU เดียวกันสูงเท่ากันจริง (ยืนยันจากภาพ - ข้อความ TEP1A-AJ ซ้ำกันทั้ง 2 กอง)
+  เดิม (v25.72) ระบบตรวจแค่กรณี "apex_fallback" (apex ตัดข้อมูลจนเหลือ<3จุด ต้อง fallback ใช้
+  ช่วงเต็ม) แต่ไม่เคยครอบคลุมกรณีนี้ (apex ตัดข้อมูลกลางคอลัมน์จริงแต่ยังเหลือ>=3จุด เพียงแต่
+  coverage ต่ำผิดปกติ) เพราะ eff_b1=apex_x ยังคง >b0 ทำให้ len(xs_top)>=3 เสมอ ไม่เข้า
+  apex_cut_fallback branch เลย จึงถูกติดป้าย "direct" เหมือนคอลัมน์ปกติทุกประการ
+  FIX (2 ส่วน):
+  1) เพิ่ม label ใหม่ "apex_partial_cut" ใน compute_stack_heights_px - เมื่อ apex ตัดข้อมูลกลาง
+     คอลัมน์จริง (apex_mid_cut=True) และ coverage fraction (n_samples เทียบความกว้างคอลัมน์เต็ม
+     ก่อนตัด) ต่ำกว่า _APEX_CUT_MIN_COVERAGE_FRACTION=35% (ใช้ค่าเดียวกับ Plateau Span Coverage
+     Guard เดิมของระบบ) ให้ติดป้ายนี้แทน "direct" - ไม่กระทบตัวเลขความสูงเลย เปลี่ยนแค่ label
+  2) เพิ่ม guard ใน detect_step_down_pairwise/detect_tail_stepdown/detect_step_down_crossview -
+     ถ้าฝั่ง "อ้างอิงสูงกว่า" (taller_rec/inner_rec) เป็น "apex_partial_cut" และ drop_ratio ที่
+     คำนวณได้ยังอยู่ในโซนก้ำกึ่ง (< _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO=0.25) ให้ไม่ flag
+     (เพราะความเอนเอียงอาจอธิบาย drop_ratio ขนาดนี้ได้ทั้งหมด) - แต่ถ้า drop_ratio สูงเกิน 25%
+     ให้เชื่อว่าเป็นความเสี่ยงจริง (ความเอนเอียงระดับ ~15-20% ไม่มีทางอธิบาย drop สูงขนาดนั้นได้)
+  ข้อควรระวังที่พบระหว่างพัฒนา (สำคัญ - เกือบทำให้เกิด regression 2 จุด):
+  - ครั้งแรกที่แก้ ใช้ blanket-exclusion (suppress ทันทีไม่ดู drop_ratio) ทำให้ AB03-04's
+    genuine risk (idx1 vs idx2, drop=57.4%) หายไปด้วย เพราะ idx1 เองก็เป็น apex_partial_cut
+    แต่มันยังคงเป็นค่าอ้างอิง "สูงกว่า" ที่ถูกต้องเพียงพอสำหรับคู่นั้น (ความเอนเอียง ~15-20%
+    ไม่มีทางอธิบาย drop 57% ได้) - แก้โดยเปลี่ยนเป็น threshold-gated ตามที่อธิบายข้างต้น
+  - _is_edge_measurement_outlier (Edge-Column Guard เดิมของ v25.68/71/72) เดิมรับเฉพาะ
+    height_source in ("direct","cross_view_filled") เข้า plateau - ทำให้ AB05-01 BACK idx2
+    (ที่ตอนนี้ได้ label ใหม่ "apex_partial_cut") ถูกตัดออกจาก plateau ไปด้วย ทำให้ plateau
+    เหลือจุดไม่พอ (<min_plateau_size) -> Edge-Column Guard ใช้ไม่ได้ -> STEP_DOWN_RISK
+    (pairwise BACK idx0, drop=21.9%) ที่เคยถูกแก้ไปแล้วตั้งแต่ v25.72 กลับมา flag ผิดพลาดอีก -
+    แก้โดยเพิ่ม "apex_partial_cut" เข้า plateau ที่ยอมรับได้ด้วย (ยังเป็นค่าที่วัดได้จริง
+    เพียงแต่มีโอกาสเอนเอียงสูงกว่าจริงเล็กน้อย - ใช้เป็นหลักฐานความนิ่งของกลุ่มได้ตามปกติ)
+  ผลทดสอบ (regression-verified ครบ 3 ไฟล์): AB03-04=1 risk (pairwise FRONT idx1, 57.4% - ถูกต้อง
+  ตามที่ผู้ใช้ยืนยัน, tail_stepdown ปลอมที่ idx0/idx1 หายไปแล้ว), AB05-01=1 risk (silhouette_notch
+  เท่านั้น - ตรงกับก่อน v25.75), AC03-02=1 risk (pairwise FRONT idx1, 73.1% - ไม่เปลี่ยนแปลง)
+================================================================================
 v25.75 (ลบกลไกที่ไม่ใช้งานจริง/ไม่เกี่ยวข้องออก ตามคำสั่งผู้ใช้ 31-Aug-2026 - "ระหว่างรอ...
 ให้ไปลบกลไกที่ไม่ใช้งานจริงๆ ไม่เกี่ยวข้อง ที่เคยแจ้งออกไปเลยครับ"):
   ลบ 2 ส่วนที่ CHANGELOG เวอร์ชันก่อนหน้าเคยระบุไว้ชัดเจนแล้วว่า "ไม่ได้ถูกเรียกใช้จริงจาก
@@ -3819,9 +3861,27 @@ def _stack_color_normalize(rgb, min_maxchan=_STACK_COLOR_MATCH_MIN_MAXCHAN):
 # แทนค่า P1B เดิม (ปฏิเสธไม่ flag ความเสี่ยงปลอม) - ถ้า recheck ล้มเหลว (จุดข้อมูลไม่พอ/fit ไม่ดี)
 # fallback ไปใช้ค่าเดิมตามปกติ (ปลอดภัยสำหรับไฟล์อื่นที่ไม่เจอปัญหานี้ - guard นี้ทำงานเฉพาะเมื่อมี
 # สัญญาณ multi-color merge ชัดเจนเท่านั้น ไม่กระทบคอลัมน์สีเดียวปกติทั่วไป)
-_RECHECK_COLOR_MAX_RESID_STD = 3.0   # มาตรฐานเดียวกับ _TOPFACE_JUMP_MAX_RESID_STD
+_RECHECK_COLOR_MAX_RESID_STD = 3.0   # มาตรฐานเดียวกับที่ใช้ทั่วระบบ (_ROOFLINE_MAX_RESID_STD)
 _RECHECK_COLOR_MIN_POINTS = 15        # จำนวนจุดขั้นต่ำหลังกรองสี ต่ำกว่านี้ไม่เชื่อผล recheck
 _RECHECK_COLOR_MARGIN_PX = 6          # เว้นระยะจาก seam/ขอบคอลัมน์ กันปัญหา anti-alias
+
+# v25.76 NEW: เกณฑ์ความครอบคลุมขั้นต่ำ (coverage fraction) สำหรับตัดสินใจว่าการวัดความสูงที่ถูก
+# apex ตัดข้อมูลกลางคอลัมน์ (apex_mid_cut) ยังน่าเชื่อถือพอหรือไม่ - ดู docstring เต็มที่จุดใช้งาน
+# จริงใน compute_stack_heights_px (ใกล้ตัวแปร apex_mid_cut) สำหรับหลักฐาน+เหตุผล (พบจริงจาก
+# AB03-04) - ใช้ค่าเดียวกับที่เคยกำหนดไว้สำหรับแนวคิดเดียวกัน (Plateau Span Coverage Guard,
+# เดิมชื่อ _TOPFACE_JUMP_MIN_SPAN_FRACTION ก่อนถูกลบไปพร้อมฟังก์ชัน detect_step_down_topface_jump
+# ใน v25.75) - นำค่า 0.35 กลับมาใช้ในบริบทใหม่นี้
+_APEX_CUT_MIN_COVERAGE_FRACTION = 0.35
+
+# v25.76 NEW: เกณฑ์ drop_ratio ขั้นต่ำที่ยัง "เชื่อ" ว่าเป็นความเสี่ยงจริง แม้ taller_rec/inner_rec
+# (ค่าอ้างอิง "สูงกว่า") จะมี height_source="apex_partial_cut" (อาจเอนเอียงสูงเกินจริงได้บ้าง) -
+# ใช้ค่าเดียวกับ TAIL_STEPDOWN_DROP_RATIO_STRICT (กำหนดไว้ใน local scope ของ
+# detect_tail_stepdown เดิม - ยกมาเป็น module-level constant ที่นี่เพื่อใช้ร่วมกันได้ทั้ง
+# detect_step_down_pairwise/detect_tail_stepdown/detect_step_down_crossview) - ดู docstring
+# เต็มที่จุดใช้งานจริงใน detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04:
+# ต้อง suppress ที่ drop=14.5% แต่ต้องไม่ suppress ที่ drop=57.4% - 0.25 อยู่กึ่งกลางระหว่าง 2
+# ค่านี้พอดี ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง)
+_APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO = 0.25
 
 
 def _recheck_stack_height_via_color(view_result, x_range, expected_color,
@@ -4018,7 +4078,8 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
         # แค่ label ความน่าเชื่อถือ) - ไม่กระทบกรณี apex อยู่กลางคอลัมน์จริง (b0<apex_x<b1) ที่ยังคง
         # ตัดข้อมูลแล้วอาจ fallback เป็น apex_fallback เหมือนเดิมทุกประการ (เช่น ED84/ED85 ที่ยืนยัน
         # แล้วว่าเป็น geometric artifact จริง - n_samples คงที่ผิดธรรมชาติข้ามไฟล์)
-        if apex_x is not None and b0 < apex_x < b1:
+        apex_mid_cut = apex_x is not None and b0 < apex_x < b1
+        if apex_mid_cut:
             eff_b1 = apex_x
 
         xs_top, ys_top = [], []
@@ -4056,6 +4117,42 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
                 n_samples = len(top_fit["xs"])
                 if apex_cut_fallback:
                     height_source = "apex_fallback"
+                elif apex_mid_cut:
+                    # v25.76 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด
+                    # ยังมีกรอบแดง คือกรอบซ้ายสุด", 31-Aug-2026): เดิม (v25.72) เมื่อ apex ตัด
+                    # ข้อมูลกลางคอลัมน์จริง (apex_mid_cut=True, b0<apex_x<b1) แต่ยังเหลือจุด>=3
+                    # จุด จะไม่เข้า apex_cut_fallback branch เลย (apex_cut_fallback=False) ทำให้
+                    # ถูกติดป้าย "direct" เหมือนคอลัมน์ปกติทุกประการ โดยไม่คำนึงว่า eff_mid ที่ใช้
+                    # ประเมินความสูง (คำนวณจาก [b0, eff_b1=apex_x] ที่ถูกตัดแล้ว) อาจอยู่ใกล้ apex
+                    # (จุดสูงสุดของเส้นโค้ง isometric) มากผิดปกติ แทนที่จะอยู่ที่ "จุดกึ่งกลางจริง"
+                    # ของคอลัมน์ (ซึ่งควรใช้ [b0,b1] เต็มช่วงเดิม ก่อนตัด apex) - ยืนยันด้วยข้อมูล
+                    # จริง AB03-04 FRONT idx1 (x=955-1110, กล่องฟ้า TEP1A-AJ ติดกับกล่องน้ำเงิน):
+                    # apex_x=1000 ตัดข้อมูลเหลือ n_samples=39 จาก 143px ที่มีอยู่ (coverage=27.3%)
+                    # eff_mid ที่ใช้จริง=980 (ใกล้ apex=1000 มาก) แทนที่จะเป็นจุดกึ่งกลางจริงของ
+                    # คอลัมน์ (~1032) ทำให้วัดความสูงได้ 284.5px (ใกล้ยอด/จุดสูงสุดของเส้นโค้ง) สูง
+                    # กว่าเพื่อนบ้าน idx0 (x=805-955, กล่องฟ้าเดียวกัน SKU เดียวกัน, eff_mid=880
+                    # อยู่กลางคอลัมน์ตัวเองจริง n_samples=138/150=92% coverage) ที่วัดได้ 243.3px
+                    # ถึง 14.5% - ทำให้ detect_tail_stepdown flag ผิดพลาดว่ากล่องฟ้าเดียวกันสูงต่ำ
+                    # ต่างกัน ทั้งที่ floor_jump ระหว่างทั้งคู่วัดได้แค่ 4.8px (แทบไม่มี - ยืนยันว่า
+                    # เป็นพื้นเดียวกันจริง ไม่ใช่คนละแถว/คนละระดับ) และทั้งคู่เป็น SKU เดียวกันเป๊ะ
+                    # (TEP1A-AJ ยืนยันจากภาพ + ข้อความบนกล่องซ้ำกัน)
+                    # ROOT CAUSE ที่แท้จริง: eff_mid คำนวณจาก eff_b1 (ช่วงที่ถูกตัด apex แล้ว) ทำให้
+                    # จุดประเมินความสูงเลื่อนไปใกล้ apex (จุดสูงสุดของเส้นโค้ง isometric ที่เกิดจาก
+                    # มุมกล้อง ไม่ใช่ความสูงกล่องจริง) แทนที่จะเป็นจุดกึ่งกลางจริงของคอลัมน์ - ยิ่ง
+                    # apex ตัดข้อมูลออกมาก (coverage ต่ำ) ยิ่งเลื่อนจุดประเมินเข้าใกล้ apex มาก
+                    # ทำให้ค่าที่วัดได้เอนเอียงสูงขึ้นเป็นระบบ (ไม่ใช่แค่ noise สุ่ม)
+                    # FIX: คำนวณ "coverage fraction" (n_samples เทียบกับความกว้างเต็มของคอลัมน์
+                    # ก่อนตัด apex, b1-b0) - ถ้าต่ำกว่าเกณฑ์ (_APEX_CUT_MIN_COVERAGE_FRACTION=35%,
+                    # แนวคิดเดียวกับ Plateau Span Coverage Guard เดิมของระบบ คือ "ต้องมีข้อมูล
+                    # ครอบคลุมเพียงพอจึงจะเชื่อว่าเป็นตัวแทนที่แท้จริงของคอลัมน์") ให้ติดป้าย
+                    # "apex_partial_cut" (ระดับความน่าเชื่อถือเดียวกับ apex_fallback) แทน "direct"
+                    # - ไม่กระทบตัวเลขความสูงที่คำนวณได้เลย (ค่าเหมือนเดิมทุกประการ เปลี่ยนแค่
+                    # label) - ไม่กระทบกรณี apex ตัดข้อมูลแล้วยังเหลือ coverage สูง (>=35%) ซึ่งยัง
+                    # คงเชื่อถือได้ตามปกติ (ยังคง "direct" เหมือนเดิม)
+                    full_width = max(1, b1 - b0)
+                    coverage_frac = n_samples / full_width
+                    if coverage_frac < _APEX_CUT_MIN_COVERAGE_FRACTION:
+                        height_source = "apex_partial_cut"
 
         if height_px is None:
             height_source = "unreliable_post_apex"
@@ -4535,7 +4632,17 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
             continue
         if r.get("height_px") is None:
             continue
-        if r.get("height_source") not in ("direct", "cross_view_filled"):
+        # v25.76 FIX (สำคัญ - พบ regression จริงจาก AB05-01 ระหว่างทดสอบ): เดิมรับเฉพาะ
+        # height_source in ("direct","cross_view_filled") เข้า plateau - หลังเพิ่ม label ใหม่
+        # "apex_partial_cut" (v25.76) คอลัมน์ที่เคยถูกนับเป็นส่วนหนึ่งของ plateau (เพราะเคยได้
+        # label "direct" มาก่อน) กลับถูกตัดออกจาก plateau ไปด้วย ทำให้ plateau เหลือจุดไม่พอ
+        # (< min_plateau_size) -> Edge-Column Global Consensus Guard ใช้ไม่ได้อีกต่อไป -> เกิด
+        # regression ที่ AB05-01 BACK (STEP_DOWN_RISK pairwise idx0 กลับมา flag ผิดพลาดอีกครั้ง
+        # ทั้งที่เคยถูกแก้ไปแล้วตั้งแต่ v25.72) - FIX: รับ "apex_partial_cut" เข้า plateau ด้วย
+        # (ยังคงเป็นค่าที่วัดได้จริง เพียงแต่มีโอกาสเอนเอียงสูงกว่าจริงเล็กน้อยจากตำแหน่งประเมินใกล้
+        # apex - ใช้เป็นหลักฐาน "ความนิ่งของกลุ่ม" ได้ตามปกติ ไม่กระทบการตรวจจับ isometric-bias
+        # เดิมที่ guard นี้ออกแบบมา)
+        if r.get("height_source") not in ("direct", "cross_view_filled", "apex_partial_cut"):
             continue
         plateau_heights.append(r["height_px"])
     if len(plateau_heights) < min_plateau_size:
@@ -4664,6 +4771,30 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ไม่กระทบ subtype='pairwise_floor_jump' ด้านล่างซึ่งมีหลักฐานอิสระคนละตัว คือ floor_jump
         # ที่วัดจากพื้นตู้ ไม่ใช่ยอดกล่อง จึงไม่ได้รับผลกระทบจาก apex bias นี้)
         if shorter_rec.get("height_source") == "apex_fallback":
+            continue
+        # v25.76 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง
+        # คือกรอบซ้ายสุด" หลังทดสอบ v25.75, 31-Aug-2026): เดิม guard ด้านบนเช็คเฉพาะ
+        # height_source=="apex_fallback" (กรณี apex ตัดข้อมูลจนเหลือ<3จุด ต้อง fallback ใช้ช่วง
+        # เต็ม) แต่ไม่เคยครอบคลุมกรณี "apex ตัดข้อมูลกลางคอลัมน์จริง (>=3 จุดเหลือ แต่ coverage
+        # ต่ำ)" ซึ่งได้ label ใหม่ "apex_partial_cut" (v25.76 - ดู docstring เต็มที่
+        # compute_stack_heights_px ใกล้ตัวแปร apex_mid_cut) - ทิศทางของความเอนเอียงที่ยืนยันแล้ว
+        # คือ "อาจสูงเกินจริง" (eff_mid ถูกเลื่อนเข้าใกล้ apex/จุดสูงสุดของเส้นโค้ง isometric มาก
+        # ขึ้นเมื่อ coverage ยิ่งต่ำ) - ถ้าถูกใช้เป็น taller_rec (ค่าอ้างอิง "สูงกว่า") ความเอนเอียง
+        # นี้จะทำให้ drop_ratio ที่คำนวณได้ "สูงเกินจริง" ไปด้วย เสี่ยง false-positive เมื่อ
+        # drop_ratio ที่แท้จริงอยู่ในโซนก้ำกึ่ง (ยืนยันจาก AB03-04: idx1(apex_partial_cut,taller)
+        # vs idx0(shorter) drop=14.5% - เกิดจากความเอนเอียงล้วนๆ ควร suppress)
+        # ROOT CAUSE ที่ต้องระวัง (พบระหว่างทดสอบ): ถ้า suppress "เสมอ" ทุกครั้งที่ taller_rec
+        # เป็น apex_partial_cut โดยไม่ดู drop_ratio เลย จะไปกระทบคู่อื่นที่ apex_partial_cut ยังคง
+        # เป็นค่าอ้างอิงที่ถูกต้องเพียงพอ (ยืนยันจาก AB03-04 เช่นกัน: idx1(apex_partial_cut,
+        # taller) vs idx2(shorter,navy) drop=57.4% - เป็นความเสี่ยงจริงที่ผู้ใช้ยืนยันแล้ว ไม่ควร
+        # suppress เพราะความเอนเอียงระดับ ~15-20% ไม่มีทางอธิบาย drop สูงถึง 57% ได้)
+        # FIX: จำกัดการ suppress เฉพาะเมื่อ drop_ratio อยู่ในโซนก้ำกึ่งที่ความเอนเอียงอาจอธิบายได้
+        # จริง (ต่ำกว่า _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO=0.25) - ถ้า drop_ratio สูงเกิน
+        # เกณฑ์นี้ ให้เชื่อว่าเป็นความเสี่ยงจริง ไม่ suppress (ปลอดภัยสำหรับทั้ง 2 กรณีที่ยืนยัน
+        # แล้วจาก AB03-04)
+        _drop_check = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
+        if (taller_rec.get("height_source") == "apex_partial_cut"
+                and _drop_check < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
             continue
         # v25.74 NEW: Multi-Color Merge Recheck Guard - mirror จาก detect_step_down_crossview
         # ทุกประการ (ดู docstring เต็มที่ _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล -
@@ -4953,6 +5084,35 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     # โดยตรงก็ตาม (tail_rec ที่นั่นเป็น direct source - ยังเป็นข้อจำกัดที่เหลืออยู่ - ดู CHANGELOG)
     if tail_rec.get("height_source") == "apex_fallback":
         return risks
+    # v25.76 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง คือ
+    # กรอบซ้ายสุด" หลังทดสอบ v25.75, 31-Aug-2026): เดิม guard ด้านบนเช็คเฉพาะ tail_rec ว่าเป็น
+    # apex_fallback หรือไม่ (ไม่เคยเช็ค inner_rec เลย ทั้งที่ inner_rec คือ "ค่าอ้างอิงความสูงกว่า"
+    # ที่ใช้ตัดสินว่า tail_rec เตี้ยกว่าจริงหรือไม่) - พบจริงจาก AB03-04 FRONT: tail_rec=idx0
+    # (x=805-955, height_source="direct", n=138/150=92% coverage - เชื่อถือได้เต็มที่) แต่
+    # inner_rec=idx1 (x=955-1110, apex_x=1000 ตัดข้อมูลกลางคอลัมน์เหลือ n=39/143=27% coverage -
+    # ต่ำกว่าเกณฑ์ _APEX_CUT_MIN_COVERAGE_FRACTION=35% ได้ label ใหม่ "apex_partial_cut" - v25.76)
+    # ทำให้ inner_rec วัดความสูงได้ 284.5px (สูงเกินจริง เพราะจุดประเมิน eff_mid=980 อยู่ใกล้ apex/
+    # จุดสูงสุดของเส้นโค้ง isometric มากผิดปกติ แทนที่จะเป็นจุดกึ่งกลางจริงของคอลัมน์ ~1032) ทำให้
+    # tail_rec (243.3px, ถูกต้องจริง) ถูกเข้าใจผิดว่า "เตี้ยกว่า" 14.5% ทั้งที่เป็นกล่อง SKU
+    # เดียวกัน (TEP1A-AJ) สูงเท่ากันจริง (ยืนยันจาก floor_jump ระหว่างทั้งคู่=4.8px แทบไม่มี -
+    # พื้นเดียวกันจริง ไม่ใช่คนละแถว) - ต้นเหตุที่แท้จริงคือ inner_rec (ไม่ใช่ tail_rec)
+    # FIX: เช็ค inner_rec ด้วยเงื่อนไขเดียวกัน (apex_fallback) ก่อนเชื่อว่าเป็นค่าอ้างอิงที่
+    # น่าเชื่อถือ - ถ้าไม่น่าเชื่อถือ ไม่ flag (ปลอดภัยกว่าการเชื่อค่าที่มาจากการประเมินใกล้ apex
+    # มากผิดปกติ)
+    if inner_rec.get("height_source") == "apex_fallback":
+        return risks
+    # v25.76 FIX (สำคัญ - พบ regression จริงระหว่างทดสอบ): เดิม suppress "เสมอ" ทันทีที่พบ
+    # apex_partial_cut ฝั่งใดฝั่งหนึ่ง โดยไม่ดู drop_ratio เลย - ปลอดภัยสำหรับ AB03-04 (drop=
+    # 14.5%) แต่มีความเสี่ยงทางทฤษฎีที่จะ suppress คู่อื่นที่ inner_rec เป็น apex_partial_cut
+    # จริงแต่ drop_ratio สูงมากจนความเอนเอียงอธิบายไม่ได้ (mirror หลักการเดียวกับที่แก้ใน
+    # detect_step_down_pairwise - ดู docstring เต็มที่นั่นสำหรับหลักฐาน+เหตุผล) - จำกัดการ
+    # suppress เฉพาะโซนก้ำกึ่ง (drop_ratio < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO=0.25)
+    if (inner_rec.get("height_source") == "apex_partial_cut"
+            and drop_ratio < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+        return risks
+    if (tail_rec.get("height_source") == "apex_partial_cut"
+            and drop_ratio < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+        return risks
 
     risks.append({
         "risk_type": "STEP_DOWN_RISK",
@@ -5009,6 +5169,17 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
             # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03)
             if shorter_rec.get("height_source") == "apex_fallback":
+                continue
+            # v25.76 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB03-04):
+            # เดิมไม่เคยเช็ค "apex_partial_cut" (v25.76 - label ใหม่สำหรับกรณี apex ตัดข้อมูล
+            # กลางคอลัมน์จนเหลือ coverage ต่ำ แม้จะยังมี>=3จุด) เลยทั้ง 2 ฝั่ง - เพิ่มเข้าไปเพื่อ
+            # ความสอดคล้องกัน (ดู docstring เต็มที่ compute_stack_heights_px/detect_step_down_
+            # pairwise สำหรับหลักฐาน+เหตุผลเต็ม) - จำกัดเฉพาะโซนก้ำกึ่ง (drop_ratio ต่ำ) เท่านั้น
+            # เหมือน pairwise/tail_stepdown เพื่อไม่ suppress คู่ที่ drop_ratio สูงมากจนความ
+            # เอนเอียงอธิบายไม่ได้ (ป้องกัน regression แบบเดียวกับที่เคยพบใน pairwise)
+            _drop_check_cv = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
+            if (taller_rec.get("height_source") == "apex_partial_cut"
+                    and _drop_check_cv < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
                 continue
             # v25.72 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB05-01):
             # เดิม detect_step_down_crossview ไม่เคยเรียก Edge-Column Global Consensus Guard เลย
@@ -6079,8 +6250,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.75",
-            "benchmarkMode": "v25_75_removed_dead_experimental_code",
+            "checkerVersion": "V25.76",
+            "benchmarkMode": "v25_76_apex_partial_cut_reliability_label",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
