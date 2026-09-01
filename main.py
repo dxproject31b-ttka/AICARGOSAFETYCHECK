@@ -3331,6 +3331,74 @@ def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
     return result
 
 
+# v25.88 NEW (สำคัญ - พบจริงจาก AB03-04 1-Sep-2026, ผู้ใช้สอนกฎการนับหน้า: "กล่อง 1 ใบ ปรากฏ
+# หน้า1/บน1/ข้าง1, กล่อง 2 ใบซ้อน ปรากฏหน้า2/บน1/ข้าง2 ... ตั้งที่ติดกันทางขวาจะไม่มีด้านข้างเลย
+# มีแค่บน+หน้า" และ "side face ต้องอยู่ทางซ้ายของ front face เสมอ ติดกันสนิท ไม่มีช่องว่าง"):
+# ยืนยันด้วยข้อมูลจริง 2 ไฟล์ตรงข้ามกัน (AB03-04 vs RD01-01) - ผู้ใช้ทำเครื่องหมายด้วยมือยืนยันว่า
+# AB03-04's comp1 (x=806-954, สีฟ้า) คือ "side face" ของ comp2 (x=956-1054, สีฟ้าเดียวกัน, front
+# face จริง) - ทั้งคู่ติดกันสนิท (gap=2px) สีเดียวกันเป๊ะ - เดิม _p1b_reconcile_with_back (Hungarian
+# matching M>N) เลือกตัด comp3 (x=1055-1153, front face จริงของอีกตั้ง) ทิ้งแทน เพราะสัดส่วนตำแหน่ง
+# (fraction) ของ comp1 ใกล้เคียงกับตำแหน่งที่ 1 ใน BACK มากกว่า (เนื่องจาก front_extent ที่คำนวณจาก
+# roof span รวม กว้างกว่า back_extent มาก ทำให้ fraction ของ comp3 เอียงไปทางขวาเกินจริง) ทำให้กรอบ
+# marker วาดผิดตำแหน่ง (ครอบคลุมครึ่งหนึ่งของ comp2+comp3 ผสมกัน ไม่ตรงกับกล่องจริงตั้งใดเลย)
+#
+# ยืนยันด้วยข้อมูลตรงข้าม RD01-01: f1 (x=644-738, ตั้งซ้ายสุดจริง ไม่มี roof ของตัวเอง เหมือน
+# comp1 ทุกประการทางเรขาคณิต) แต่ f1 คือกล่องจริงตัวที่ 1 ไม่ใช่ side face - ทดสอบสัญญาณหลายแบบ
+# (aspect ratio, mean_sat, ความชันขอบบน) ไม่พบตัวใดแยกแยะ comp1/f1 ได้เลย จนกระทั่งผู้ใช้ชี้ว่า
+# ต้องดูจาก "ความกว้างเทียบกับเพื่อนบ้านขวาสีเดียวกันที่ติดกันสนิท":
+#   comp1(148px) vs comp2(98px) เพื่อนบ้านขวา -> comp1 กว้างกว่า 51% (comp1=side face จริง)
+#   f1(94px) vs f2(144px) เพื่อนบ้านขวา -> f1 แคบกว่า 35% (f1=front face จริง)
+# ตรงกับหลักการทางเรขาคณิตของ isometric drawing: side face (หน้าผาแคบเมื่อกล่องเตี้ย, กว้างเมื่อ
+# กล่องสูง) ที่ "บังเอิญ" กว้างกว่า front face ของกล่องข้างเคียงที่วางถัดไป มักบ่งชี้ว่าเป็นหน้าข้าง
+# ของกล่องเดียวกับ front-face นั้น ไม่ใช่กล่องแยกต่างหาก (ตรงข้ามกับ front-face ริมสุดของแถวจริง ที่
+# ไม่มีเหตุผลทางเรขาคณิตใดๆ ให้ต้อง "กว้างกว่า" เพื่อนบ้านเสมอ)
+#
+# ขอบเขตการแก้ (ตามที่ตกลงกัน - ปลอดภัยที่สุดเท่าที่ยืนยันได้จากหลักฐาน 2 ไฟล์): trigger เฉพาะเมื่อ
+# ครบทุกเงื่อนไข (1) M > N เท่านั้น (ไม่แตะกรณี M<=N) (2) candidate กับเพื่อนบ้านขวาถัดไปต้อง "สี
+# เดียวกันเป๊ะ" (ไม่ใช่แค่ทับซ้อน - สีต่างกันคือคนละกล่องจริง ไม่ใช้กฎนี้) (3) ต้อง "ติดกันสนิท"
+# (gap <= _SIDE_FACE_TOUCH_GAP_MAX_PX) (4) candidate ต้อง "กว้างกว่า" เพื่อนบ้านขวาอย่างมีนัยสำคัญ
+# (>= _SIDE_FACE_WIDTH_RATIO_MIN เท่า) - ถ้าไม่ครบทุกเงื่อนไข ไม่ตัดทิ้ง (ปลอดภัยไว้ก่อน)
+_SIDE_FACE_WIDTH_RATIO_MIN = 1.2  # candidate ต้องกว้างกว่าเพื่อนบ้านขวาอย่างน้อย 20% (ยืนยันจริง
+# AB03-04=51% กว้างกว่า - ให้ margin ปลอดภัยต่ำกว่านี้พอสมควร แต่สูงกว่า noise ปกติ)
+_SIDE_FACE_TOUCH_GAP_MAX_PX = 10  # ต้องติดกันสนิทภายในระยะนี้ (ยืนยันจริง comp1-comp2 gap=2px)
+
+
+def _p1b_filter_wide_side_face_candidates(front_cols, n_back):
+    """v25.88 NEW: กรอง front-column candidate ที่แท้จริงคือ 'side face' ของเพื่อนบ้านขวาสีเดียวกัน
+    ที่ติดกันสนิท (ตามกฎที่ผู้ใช้สอน - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล พบจริงจาก
+    AB03-04) - ทำงานเฉพาะเมื่อ M (len(front_cols)) > N (n_back) เท่านั้น คืนค่า (kept, dropped)"""
+    if len(front_cols) <= n_back:
+        return list(front_cols), []
+    cols_sorted = sorted(front_cols, key=lambda c: c['x'])
+    drop_flags = [False] * len(cols_sorted)
+    for i in range(len(cols_sorted) - 1):
+        c = cols_sorted[i]
+        nxt = cols_sorted[i + 1]
+
+        def _colors_of(col):
+            cs = set(mm['color'] for mm in col.get('members', []) if mm.get('color'))
+            if not cs and col.get('color'):
+                cs = {col['color']}
+            return cs
+
+        c_colors = _colors_of(c)
+        nxt_colors = _colors_of(nxt)
+        if not c_colors or c_colors != nxt_colors:
+            continue  # สีต่างกัน หรือไม่ทราบสี - ไม่ใช้กฎนี้ (คนละกล่องจริง)
+        gap = nxt['x'] - (c['x'] + c['w'])
+        if gap > _SIDE_FACE_TOUCH_GAP_MAX_PX:
+            continue  # ไม่ติดกันสนิท - ไม่ใช้กฎนี้
+        if c['w'] >= nxt['w'] * _SIDE_FACE_WIDTH_RATIO_MIN:
+            drop_flags[i] = True
+            print(f"[SIDE_FACE_FILTER] ตัด candidate x={c['x']}-{c['x']+c['w']} (w={c['w']}) "
+                  f"ทิ้ง เพราะกว้างกว่าเพื่อนบ้านขวา x={nxt['x']}-{nxt['x']+nxt['w']} (w={nxt['w']}) "
+                  f"สีเดียวกัน({next(iter(c_colors))}) ติดกันสนิท(gap={gap}px) - ถือเป็น side face")
+    kept = [c for i, c in enumerate(cols_sorted) if not drop_flags[i]]
+    dropped = [c for i, c in enumerate(cols_sorted) if drop_flags[i]]
+    kept.sort(key=lambda c: c['cx'])
+    return kept, dropped
+
+
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
                               n_dropped_by_new_rules=0, back_all_cells=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
@@ -3693,6 +3761,18 @@ def compute_phase1b_columns(regions, down_factor=1.0):
                   f"cx={[round(c['cx'],1) for c in front_orphaned]}")
             front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
+
+        # v25.88 NEW: กรอง 'side face' ที่กว้างกว่าเพื่อนบ้านขวาสีเดียวกันติดกันสนิท ก่อนเข้า
+        # Hungarian reconcile - ดู docstring เต็มที่ _p1b_filter_wide_side_face_candidates
+        # สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ทำงานเฉพาะ M>N เท่านั้น (ปลอดภัยโดย
+        # construction สำหรับไฟล์ที่ M<=N อยู่แล้ว)
+        front_cols_raw, side_face_dropped = _p1b_filter_wide_side_face_candidates(
+            front_cols_raw, len(back_cols))
+        if side_face_dropped:
+            print(f"[P1B] FRONT after side-face-width filter: {len(front_cols_raw)} cols "
+                  f"(dropped {len(side_face_dropped)} wide-side-face), "
+                  f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
+            front_n_dropped += len(side_face_dropped)
 
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
@@ -4073,6 +4153,28 @@ def _has_internal_sharp_jump(cargo_top_y, x_range, margin=_INTERNAL_JUMP_MARGIN_
             if dist_left >= min_edge_margin and dist_right >= min_edge_margin:
                 return True
     return False
+# v25.85 NEW (สำคัญ - พบจริงจาก AC03-02 31-Aug-2026, ผู้ใช้ระบุว่า "ac03-02 ลักษณะเหมือนๆกัน [กับ
+# EA03-01] แต่ถูกแก้ไขผิดๆ ระงับ flag"): เดิม v25.82's _has_internal_sharp_jump ใช้เป็นเงื่อนไข
+# suppress ทันทีเมื่อพบ jump ภายในคอลัมน์ โดยไม่ตรวจสอบว่าข้อมูล (n_samples) ของคอลัมน์นั้นเพียงพอ
+# จะเชื่อถือได้หรือไม่ - พบว่า AC03-02 BACK idx7 (x_range=1080-1149, n_samples=57) มีจุดกระโดดที่
+# x=1122 ตำแหน่งเดียวกันเป๊ะกับที่พบใน EA03-01 (คนละไฟล์ แต่รถรุ่นเดียวกัน TTKA6WH - อาจเป็น
+# geometric artifact ของ template ที่จุดนี้เสมอ) แต่ n_samples ต่างกันอย่างสิ้นเชิง: EA03-01=3
+# (ข้อมูลแทบไม่เหลือ ค่าที่วัดได้ไม่มีความหมาย - ควร suppress) vs AC03-02=57 (ข้อมูลเพียงพอมาก -
+# robust_local_line_fit สามารถแยกแยะกลุ่มข้อมูลก่อน/หลัง jump ได้เองแล้ว โดยกลุ่มก่อน jump (36 จุด,
+# x=1086-1121) มีจำนวนมากกว่ากลุ่มหลัง jump (21 จุด, x=1123-1143) มากพอที่ iterative MAD-based
+# outlier rejection จะเลือกกลุ่มใหญ่เป็นหลักได้ถูกต้อง - ยืนยันด้วยค่าที่คำนวณได้จริง 161.5px ตรงกับ
+# โซนก่อน jump (~200-222px raw, floor~380 -> height~158-178px) ไม่ใช่ค่าผสม/blend เลย)
+# ROOT CAUSE: การ suppress ทันทีเมื่อพบ jump (ไม่ว่า n_samples เท่าไหร่) ทำให้ AC03-02 BACK idx7 vs
+# idx8 (drop=63%, ความเสี่ยงจริงที่เคยยืนยันไว้แล้วตั้งแต่ v25.72 ในชื่อ drop_ratio=73.1% - ตำแหน่ง
+# ใกล้เคียงกัน) ถูกระงับผิดพลาดไปด้วย ทั้งที่ค่าความสูงที่วัดได้ยังคงน่าเชื่อถือ (robust-fit จัดการ
+# jump ได้เองอยู่แล้วโดยไม่ต้อง suppress จากภายนอกเลย)
+# FIX: เพิ่มเงื่อนไข AND - suppress เฉพาะเมื่อมี jump จริง "และ" n_samples ของคอลัมน์นั้นต่ำกว่า
+# เกณฑ์นี้ด้วย (บ่งชี้ว่าข้อมูลที่เหลือหลังกรอง jump ไม่พอจะเชื่อถือได้จริง เหมือนกับหลักการเดียวกับ
+# v25.84's _APEX_PARTIAL_CUT_MIN_SAMPLES) - ถ้า n_samples สูงพอ (>=25, เกณฑ์เดียวกับ
+# STEP_DOWN_MIN_RELIABLE_SAMPLES ที่ใช้ทั่วระบบอยู่แล้ว) ให้เชื่อว่า robust-fit จัดการได้เอง ไม่ต้อง
+# suppress เพิ่มเติม - ยืนยันแยกแยะ 2 กรณีนี้ได้ถูกต้อง 100% (EA03-01 n=3 < 25 -> suppress ตามเดิม,
+# AC03-02 n=57 >= 25 -> ไม่ suppress อีกต่อไป)
+_INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES = 25
 
 
 def _recheck_stack_height_via_color(view_result, x_range, expected_color,
@@ -5098,11 +5200,17 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ฝั่งหนึ่ง (taller/shorter) มีรอยกระโดดคมชัดของ cargo_top_y อยู่ลึกกลางคอลัมน์ตัวเอง (ไม่ใช่
         # ใกล้ขอบ) แสดงว่า Phase 1B พลาด seam จริงระหว่างกล่อง 2 ใบสีเดียวกันที่สูงต่างกัน ทำให้ค่า
         # height_px ที่วัดได้เป็นค่าผสม (blend) ของ 2 ความสูงจริง ไม่น่าเชื่อถือพอจะ flag/วาดกรอบ
+        # v25.85 FIX (สำคัญ - พบจริงจาก AC03-02, ดู docstring เต็มที่
+        # _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES): เพิ่มเงื่อนไข AND n_samples ต่ำ - ไม่ใช่แค่มี
+        # jump ก็ suppress ทันทีเหมือน v25.82 เดิม (ซึ่งทำให้ AC03-02 BACK idx7(n=57)/idx8 ความ
+        # เสี่ยงจริงถูกระงับผิดพลาด ทั้งที่ robust-fit จัดการ jump ได้เองแล้วเมื่อ n_samples สูงพอ)
         if view_result is not None:
             cty_check = view_result.get("cargo_top_y")
             if cty_check is not None and (
-                    _has_internal_sharp_jump(cty_check, shorter_rec["x_range"])
-                    or _has_internal_sharp_jump(cty_check, taller_rec["x_range"])):
+                    (shorter_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                     and _has_internal_sharp_jump(cty_check, shorter_rec["x_range"]))
+                    or (taller_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                        and _has_internal_sharp_jump(cty_check, taller_rec["x_range"]))):
                 continue
         # v25.77 NEW (สำคัญ - พบจริงจาก AA05-02/AA05-04 หลังทดสอบ v25.76, 31-Aug-2026): เดิม
         # Edge-Column Global Consensus Guard (บรรทัดด้านบน) เช็คแค่คอลัมน์ "ริมสุดของทั้งแถว"
@@ -5605,11 +5713,15 @@ def detect_tail_stepdown(records, view_label, view_result=None):
         return risks
     # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
     # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+    # v25.85 FIX: mirror จาก detect_step_down_pairwise - เพิ่มเงื่อนไข AND n_samples ต่ำ (ดู
+    # docstring เต็มที่ _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES สำหรับหลักฐาน+เหตุผล)
     if view_result is not None:
         cty_check = view_result.get("cargo_top_y")
         if cty_check is not None and (
-                _has_internal_sharp_jump(cty_check, tail_rec["x_range"])
-                or _has_internal_sharp_jump(cty_check, inner_rec["x_range"])):
+                (tail_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                 and _has_internal_sharp_jump(cty_check, tail_rec["x_range"]))
+                or (inner_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                    and _has_internal_sharp_jump(cty_check, inner_rec["x_range"]))):
             return risks
     # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01, mirror จุดเดียวกันใน detect_step_down_pairwise):
     # เดิมเช็คแค่ tail_rec (ฝั่งเตี้ยกว่า) ว่าเป็น edge-outlier หรือไม่ - แต่ inner_rec (ฝั่งอ้างอิง
@@ -5756,12 +5868,17 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
                     or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
                 continue
-            # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
-            # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+            # v25.82/85 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+            # _has_internal_sharp_jump และ _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES สำหรับหลักฐาน+
+            # เหตุผล (พบจริงจาก AC03-02/EA03-01) - v25.85 เพิ่มเงื่อนไข AND n_samples ต่ำ
             taller_cty = taller_vr.get("cargo_top_y") if taller_vr else None
             shorter_cty = shorter_vr.get("cargo_top_y") if shorter_vr else None
-            if ((taller_cty is not None and _has_internal_sharp_jump(taller_cty, taller_rec["x_range"]))
-                    or (shorter_cty is not None and _has_internal_sharp_jump(shorter_cty, shorter_rec["x_range"]))):
+            if ((taller_cty is not None
+                 and taller_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                 and _has_internal_sharp_jump(taller_cty, taller_rec["x_range"]))
+                    or (shorter_cty is not None
+                        and shorter_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                        and _has_internal_sharp_jump(shorter_cty, shorter_rec["x_range"]))):
                 continue
             # v25.74 NEW: Multi-Color Merge Recheck Guard - ดู docstring เต็มที่
             # _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ถ้าฝั่งใด
@@ -6878,8 +6995,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.84",
-            "benchmarkMode": "v25_84_apex_partial_cut_min_samples_guard",
+            "checkerVersion": "V25.88",
+            "benchmarkMode": "v25_88_wide_side_face_width_ratio_filter",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
