@@ -3996,6 +3996,26 @@ _APEX_CUT_MIN_COVERAGE_FRACTION = 0.35
 # ต้อง suppress ที่ drop=14.5% แต่ต้องไม่ suppress ที่ drop=57.4% - 0.25 อยู่กึ่งกลางระหว่าง 2
 # ค่านี้พอดี ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง)
 _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO = 0.25
+# v25.84 NEW (สำคัญ - พบจริงจาก EA03-01 31-Aug-2026, ผู้ใช้ระบุว่า BACK view วาดกรอบผิดจุด 1
+# ตำแหน่ง): เดิม guard สำหรับ height_source="apex_partial_cut" (v25.76/77) ใช้แค่เกณฑ์
+# drop_ratio<0.25 ตัดสินใจว่าจะ suppress หรือไม่ - ไม่เคยตรวจสอบ n_samples ของ apex_partial_cut
+# เองเลยว่าต่ำผิดปกติหรือไม่ (ต่างจาก "direct" ที่มี STEP_DOWN_MIN_RELIABLE_SAMPLES=25 คอยกรอง)
+# พบว่า EA03-01 BACK idx3 (taller_rec ในคู่เปรียบเทียบกับ idx4) มี n_samples=3 เท่านั้น (ต่ำกว่า
+# apex_partial_cut ปกติที่พบในไฟล์อื่นทั้งหมด 41-47 จุด ถึง 13-15 เท่า!) เพราะ apex_x=1008 ตกอยู่
+# เกือบตรงกับจุดเริ่มต้นคอลัมน์ idx3 (x=999) พอดี ทำให้เหลือข้อมูลแทบไม่มีเลย - ยืนยันด้วยภาพ+pixel
+# จริง: บริเวณ x=918-1086 ทั้งหมดเป็น "หลังคา (roof)" ของกล่องม่วง (ITTCAS1) ที่โผล่พ้นขึ้นมาสูงกว่า
+# เพื่อนบ้าน (isometric roof-overhang) ไม่ใช่ขอบบนของ front-face จริงของกล่องใน idx3 เลย - ค่า
+# height_px ที่วัดได้ (345.6px) จาก 3 จุดนี้จึงไม่มีความหมายทางกายภาพ แต่ drop_ratio ที่คำนวณได้
+# (33.2% เทียบ idx4) สูงกว่าเกณฑ์ suppress เดิม (25%) จึงหลุดผ่าน guard เดิมไปได้ ทำให้ระบบวาดกรอบ
+# ผิดตำแหน่ง (คร่อมระหว่างกล่องฟ้ากับกล่องแดง ใต้กล่องม่วง ไม่ตรง column ใดเลย)
+# FIX: เพิ่มเกณฑ์ขั้นต่ำของ n_samples เฉพาะสำหรับ apex_partial_cut (แยกจาก drop_ratio check เดิม -
+# ทำงานเป็น AND เพิ่มเติม ไม่ใช่แทนที่) - ถ้า n_samples ต่ำกว่า _APEX_PARTIAL_CUT_MIN_SAMPLES ให้
+# suppress เสมอไม่ว่า drop_ratio จะเท่าไหร่ (ต่างจาก guard เดิมที่เชื่อ drop_ratio สูงเสมอ) เพราะค่า
+# ที่วัดจากจุดข้อมูลน้อยขนาดนี้ไม่น่าเชื่อถือพอจะใช้เป็นค่าอ้างอิงได้เลยไม่ว่าผลลัพธ์จะออกมาเท่าไหร่
+# ยืนยันด้วยข้อมูลจริงครบ 16 ไฟล์ทดสอบ: apex_partial_cut ปกติทุกไฟล์ (RD01-01, EC60-01, EC58-01,
+# ED86-03, ED03-01x2, EE06-01, EC06-01, EC25-01, EA02-02) มี n_samples=41-47 เสมอ (คลัสเตอร์แน่น
+# มาก ห่างจาก 3 ของ EA03-01 มาก) - ตั้ง threshold ไว้กึ่งกลาง (15) ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง
+_APEX_PARTIAL_CUT_MIN_SAMPLES = 15
 # v25.82 NEW (สำคัญ - พบจริงจาก AC03-02 31-Aug-2026, ผู้ใช้ขอให้ตรวจสอบว่า "back view วาดกรอบไม่
 # ตรง column หรือเปล่า"): ยืนยันด้วยหลักฐาน pixel จริง - BACK idx7 (x_range=1080-1149, กว้าง 69px
 # เทียบเพื่อนบ้านที่กว้างแค่ ~45-48px) มี cargo_top_y กระโดดคมชัด 68px ภายในแค่ 1 pixel (x=1122->
@@ -5196,6 +5216,18 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         if (taller_rec.get("height_source") == "apex_partial_cut"
                 and _drop_check < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
             continue
+        # v25.84 NEW (สำคัญ - พบจริงจาก EA03-01, ดู docstring เต็มที่ _APEX_PARTIAL_CUT_MIN_SAMPLES
+        # สำหรับหลักฐาน+เหตุผล): guard ด้านบน (v25.76) ใช้แค่ drop_ratio ตัดสินใจ - ไม่ครอบคลุมกรณีที่
+        # apex_partial_cut มี n_samples ต่ำผิดปกติมาก (3 จุด เทียบปกติ 41-47 จุด) จนค่าที่วัดได้ไม่มี
+        # ความหมายทางกายภาพเลย แม้ drop_ratio จะสูงกว่าเกณฑ์เดิมก็ตาม (เพราะ drop_ratio คำนวณจากค่าที่
+        # ผิดพลาดตั้งแต่ต้น ไม่ใช่สัญญาณที่เชื่อถือได้อีกต่อไป) - ตรวจสอบทั้ง taller/shorter เพราะฝั่ง
+        # ใดก็ตามที่ n_samples ต่ำขนาดนี้ไม่ควรถูกใช้เป็นค่าอ้างอิงหรือเป้าหมายเลย
+        if (taller_rec.get("height_source") == "apex_partial_cut"
+                and taller_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+            continue
+        if (shorter_rec.get("height_source") == "apex_partial_cut"
+                and shorter_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+            continue
         # v25.74 NEW: Multi-Color Merge Recheck Guard - mirror จาก detect_step_down_crossview
         # ทุกประการ (ดู docstring เต็มที่ _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล -
         # พบจริงจาก AB03-04) - ใช้ view_result เดียวกันของทั้งคู่เพราะเป็น pairwise (view เดียวกัน)
@@ -5622,6 +5654,14 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     if (tail_rec.get("height_source") == "apex_partial_cut"
             and drop_ratio < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
         return risks
+    # v25.84 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+    # _APEX_PARTIAL_CUT_MIN_SAMPLES สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA03-01)
+    if (inner_rec.get("height_source") == "apex_partial_cut"
+            and inner_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+        return risks
+    if (tail_rec.get("height_source") == "apex_partial_cut"
+            and tail_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+        return risks
 
     risks.append({
         "risk_type": "STEP_DOWN_RISK",
@@ -5694,6 +5734,14 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             _drop_check_cv = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             if (taller_rec.get("height_source") == "apex_partial_cut"
                     and _drop_check_cv < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+                continue
+            # v25.84 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+            # _APEX_PARTIAL_CUT_MIN_SAMPLES สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA03-01)
+            if (taller_rec.get("height_source") == "apex_partial_cut"
+                    and taller_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+                continue
+            if (shorter_rec.get("height_source") == "apex_partial_cut"
+                    and shorter_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
                 continue
             # v25.72 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB05-01):
             # เดิม detect_step_down_crossview ไม่เคยเรียก Edge-Column Global Consensus Guard เลย
@@ -6830,8 +6878,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.83",
-            "benchmarkMode": "v25_83_apex_residual_zone_seam_jump_guard",
+            "checkerVersion": "V25.84",
+            "benchmarkMode": "v25_84_apex_partial_cut_min_samples_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
