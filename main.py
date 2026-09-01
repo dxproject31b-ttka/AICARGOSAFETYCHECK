@@ -3996,6 +3996,63 @@ _APEX_CUT_MIN_COVERAGE_FRACTION = 0.35
 # ต้อง suppress ที่ drop=14.5% แต่ต้องไม่ suppress ที่ drop=57.4% - 0.25 อยู่กึ่งกลางระหว่าง 2
 # ค่านี้พอดี ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง)
 _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO = 0.25
+# v25.82 NEW (สำคัญ - พบจริงจาก AC03-02 31-Aug-2026, ผู้ใช้ขอให้ตรวจสอบว่า "back view วาดกรอบไม่
+# ตรง column หรือเปล่า"): ยืนยันด้วยหลักฐาน pixel จริง - BACK idx7 (x_range=1080-1149, กว้าง 69px
+# เทียบเพื่อนบ้านที่กว้างแค่ ~45-48px) มี cargo_top_y กระโดดคมชัด 68px ภายในแค่ 1 pixel (x=1122->
+# 1123) ซึ่งอยู่ "กลางคอลัมน์จริง" (ห่างขอบซ้าย 42px, ขอบขวา 27px - ไม่ใช่แค่ noise ใกล้ขอบ) ต่างจาก
+# ความชันธรรมชาติของมุมมอง isometric ที่เปลี่ยนแค่ ~1-3px ต่อ 1 pixel เท่านั้น (ต่างกันเกิน 20 เท่า)
+# ROOT CAUSE: Phase 1B (front-face color-blob clustering) หา seam ได้เฉพาะจากรอยต่อของสีเท่านั้น -
+# กรณีนี้กล่อง 2 ใบที่สูงต่างกันจริงเป็นสีน้ำเงินเดียวกันทั้งคู่ (ไม่มีรอยต่อสีให้จับ) ทำให้ P1B พลาด
+# seam ที่ตำแหน่งนี้ วาง boundary ผิดที่ (x=1080 แทนที่จะเป็น x≈1123) ทำให้คอลัมน์ idx7 คร่อมทั้ง
+# ส่วนปลายของกองสูง (ที่ยังลาดเอียงต่อเนื่องจาก isometric slope) และกองเตี้ยจริงพร้อมกัน -
+# compute_stack_heights_px จึงได้ค่าความสูงแบบ "ผสม" (blend, 161.55px) ซึ่งไม่ใช่ค่าจริงของฝั่งใด
+# ฝั่งหนึ่งเลย ทำให้ STEP_DOWN_RISK ที่ตรวจพบ (pairwise BACK idx6 กับ idx7) วาดกรอบคร่อมตำแหน่งที่
+# ผิดพลาด (ไม่ตรงกับขอบกล่องจริงในภาพ)
+# ทำไมกลไกเดิม (_detect_hidden_behind_split) จับไม่ได้: ฟังก์ชันนั้นใช้ win=6 (หน้าต่างแคบ) เปรียบเทียบ
+# median ของ 6 จุดซ้าย/ขวาของแต่ละตำแหน่ง - แต่โซนใกล้จุดกระโดดจริงยังมีความชัน isometric ต่อเนื่อง
+# ปนอยู่ ทำให้ std ของฝั่งใดฝั่งหนึ่งในหน้าต่าง 6 จุดนี้สูงเกิน max_side_std=6.0 เสมอ (ไม่มีจุดใดผ่าน
+# เกณฑ์ทั้ง 2 ฝั่งพร้อมกันเลย) - การตรวจจับที่แม่นยำกว่าคือดู "จุดกระโดดดิบทีละ 1 pixel" โดยตรง
+# (ไม่ผ่าน median-window smoothing) ซึ่งแยกแยะรอยต่อวัตถุจริง (คมชัดมาก, >=35px ภายใน 1px) ออกจาก
+# ความชันธรรมชาติ (ค่อยเป็นค่อยไป, ~1-3px ภายใน 1px) ได้ชัดเจนกว่ามาก
+# ข้อควรระวังสำคัญที่พบระหว่างพัฒนา (เกือบทำให้เกิด regression กับ true positive ที่เคยยืนยันแล้ว):
+# ทดสอบครั้งแรกโดยสแกนหาจุดกระโดด >=35px ทุกที่ในคอลัมน์ (margin=6 จากขอบ) พบว่า AC03-02 FRONT idx1
+# (x_range=699-781) ก็มีจุดกระโดดที่ x=710 (jump=-65px) เช่นกัน - แต่ตรวจสอบแล้วว่านี่คือ "การเบลอ
+# ของขอบ" ใกล้ seam ที่ถูกต้องอยู่แล้ว (ห่างจากขอบซ้ายของคอลัมน์แค่ 11px เท่านั้น) ไม่ใช่ seam ที่
+# ขาดหายไปจริง - ถ้า suppress คู่นี้ไปด้วย จะลบ STEP_DOWN_RISK (pairwise FRONT idx1 vs idx0,
+# drop=56.1%) ซึ่งเป็น true positive ที่ผู้ใช้เคยยืนยันถูกต้องแล้วตั้งแต่ v25.72 (กล่องน้ำเงินเดี่ยว/
+# กล่องน้ำเงินซ้อนสูงตามภาพจริง) ทิ้งไปอย่างผิดพลาด
+# FIX: กำหนดเงื่อนไขเพิ่มเติม - จุดกระโดดต้องอยู่ "ลึกเข้าไปในคอลัมน์จริง" คือห่างจากทั้งขอบซ้ายและ
+# ขอบขวาของคอลัมน์อย่างน้อย _INTERNAL_JUMP_MIN_EDGE_MARGIN_PX พิกเซล จึงจะถือว่าเป็นหลักฐานว่า
+# Phase 1B พลาด seam จริง (ไม่ใช่แค่ noise ใกล้ seam ที่ถูกต้องอยู่แล้ว) - ทดสอบยืนยันด้วยข้อมูลจริง
+# ครบ 12 ไฟล์ (11 ไฟล์ "safe" เดิม + AC03-02): มีจุดกระโดด >=35px แค่ 2 จุดในไฟล์เดียว (AC03-02)
+# คือ FRONT idx1 (x=710, ห่างขอบซ้ายแค่ 11px - ถูก reject ถูกต้อง, ไม่กระทบ true positive) และ
+# BACK idx7 (x=1122, ห่างขอบซ้าย 42px/ขอบขวา 27px - ผ่านเกณฑ์ถูกต้อง, suppress ได้ตรงจุด) - ไม่มี
+# ไฟล์อื่นใดใน 11 ไฟล์ safe เดิมที่มีจุดกระโดดลักษณะนี้เลย (safe by construction)
+_INTERNAL_JUMP_MIN_PX = 35  # ต่ำกว่าจุดกระโดดจริงที่พบ (68px) มากพอ แต่สูงกว่าความชันธรรมชาติสูงสุด
+# ที่วัดได้จริงในไฟล์ทดสอบทั้งหมด (~1-6px ต่อ 1 pixel) หลายเท่าตัว
+_INTERNAL_JUMP_MARGIN_PX = 6  # เท่ากับ margin เดียวกับที่ compute_stack_heights_px ใช้ตัดขอบคอลัมน์
+# ก่อนคำนวณความสูง (เพื่อสแกนเฉพาะช่วงที่ใช้วัดความสูงจริง)
+_INTERNAL_JUMP_MIN_EDGE_MARGIN_PX = 20  # ต้องห่างจากทั้ง 2 ขอบคอลัมน์อย่างน้อยเท่านี้ (กันการเบลอ
+# ของขอบใกล้ seam ที่ถูกต้องอยู่แล้ว - ยืนยันจาก AC03-02 FRONT idx1 ที่ห่างขอบแค่ 11px ต้อง reject)
+def _has_internal_sharp_jump(cargo_top_y, x_range, margin=_INTERNAL_JUMP_MARGIN_PX,
+                              min_jump_px=_INTERNAL_JUMP_MIN_PX,
+                              min_edge_margin=_INTERNAL_JUMP_MIN_EDGE_MARGIN_PX):
+    """True ถ้าคอลัมน์นี้ (x_range) มีรอยกระโดดคมชัด (single-pixel-step jump >= min_jump_px) ของ
+    cargo_top_y ที่อยู่ลึกเข้าไปจากทั้ง 2 ขอบอย่างน้อย min_edge_margin พิกเซล - บ่งชี้ว่า Phase 1B
+    พลาด seam จริงระหว่างกล่อง 2 ใบสีเดียวกันที่สูงต่างกัน (ดู docstring เต็มด้านบนสำหรับหลักฐาน+
+    เหตุผล) คืน False ถ้าไม่พบ (รวมถึงกรณีที่พบจุดกระโดดแต่อยู่ใกล้ขอบเกินไป - เป็นแค่ noise ปกติ
+    ใกล้ seam ที่ถูกต้องอยู่แล้ว ไม่ใช่หลักฐานของ seam ที่ขาดหายไป)"""
+    x0, x1 = x_range
+    lo = max(0, x0 + margin)
+    hi = min(len(cargo_top_y) - 1, x1 - margin - 1)
+    for x in range(lo, hi):
+        t0, t1 = cargo_top_y[x], cargo_top_y[x + 1]
+        if t0 >= 0 and t1 >= 0 and abs(t1 - t0) >= min_jump_px:
+            dist_left = x - x0
+            dist_right = x1 - x
+            if dist_left >= min_edge_margin and dist_right >= min_edge_margin:
+                return True
+    return False
 
 
 def _recheck_stack_height_via_color(view_result, x_range, expected_color,
@@ -4923,6 +4980,17 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # "ค่าอ้างอิง" ที่ใช้เปรียบเทียบทั้งคู่ไม่น่าเชื่อถือ ไม่ควร flag ความเสี่ยงจากคู่นี้เลย
         if _is_edge_measurement_outlier(records, taller_rec["idx"], view_result=view_result):
             continue
+        # v25.82 NEW (สำคัญ - พบจริงจาก AC03-02, ผู้ใช้ขอให้ตรวจสอบ "back view วาดกรอบไม่ตรง
+        # column") - ดู docstring เต็มที่ _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล: ถ้าฝั่งใด
+        # ฝั่งหนึ่ง (taller/shorter) มีรอยกระโดดคมชัดของ cargo_top_y อยู่ลึกกลางคอลัมน์ตัวเอง (ไม่ใช่
+        # ใกล้ขอบ) แสดงว่า Phase 1B พลาด seam จริงระหว่างกล่อง 2 ใบสีเดียวกันที่สูงต่างกัน ทำให้ค่า
+        # height_px ที่วัดได้เป็นค่าผสม (blend) ของ 2 ความสูงจริง ไม่น่าเชื่อถือพอจะ flag/วาดกรอบ
+        if view_result is not None:
+            cty_check = view_result.get("cargo_top_y")
+            if cty_check is not None and (
+                    _has_internal_sharp_jump(cty_check, shorter_rec["x_range"])
+                    or _has_internal_sharp_jump(cty_check, taller_rec["x_range"])):
+                continue
         # v25.77 NEW (สำคัญ - พบจริงจาก AA05-02/AA05-04 หลังทดสอบ v25.76, 31-Aug-2026): เดิม
         # Edge-Column Global Consensus Guard (บรรทัดด้านบน) เช็คแค่คอลัมน์ "ริมสุดของทั้งแถว"
         # (idx==0/max) แต่ไม่ครอบคลุมคู่เปรียบเทียบที่เป็น "คอลัมน์กลาง" ที่บังเอิญคร่อมโซน apex
@@ -5373,6 +5441,14 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC10-03/EB66-01)
     if _is_edge_measurement_outlier(records, tail_rec["idx"], view_result=view_result):
         return risks
+    # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+    # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+    if view_result is not None:
+        cty_check = view_result.get("cargo_top_y")
+        if cty_check is not None and (
+                _has_internal_sharp_jump(cty_check, tail_rec["x_range"])
+                or _has_internal_sharp_jump(cty_check, inner_rec["x_range"])):
+            return risks
     # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01, mirror จุดเดียวกันใน detect_step_down_pairwise):
     # เดิมเช็คแค่ tail_rec (ฝั่งเตี้ยกว่า) ว่าเป็น edge-outlier หรือไม่ - แต่ inner_rec (ฝั่งอ้างอิง
     # "สูงกว่า") ก็อาจเป็น edge-column ที่วัดสูงเกินจริงได้เช่นกัน (inner_rec อาจเป็น idx=0 หรือ
@@ -5496,6 +5572,13 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             shorter_vr = front_result if shorter_rec["view"] == "FRONT" else back_result
             if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
                     or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
+                continue
+            # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+            # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+            taller_cty = taller_vr.get("cargo_top_y") if taller_vr else None
+            shorter_cty = shorter_vr.get("cargo_top_y") if shorter_vr else None
+            if ((taller_cty is not None and _has_internal_sharp_jump(taller_cty, taller_rec["x_range"]))
+                    or (shorter_cty is not None and _has_internal_sharp_jump(shorter_cty, shorter_rec["x_range"]))):
                 continue
             # v25.74 NEW: Multi-Color Merge Recheck Guard - ดู docstring เต็มที่
             # _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ถ้าฝั่งใด
@@ -6612,8 +6695,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.81",
-            "benchmarkMode": "v25_81_back_priority_consensus_guard",
+            "checkerVersion": "V25.82",
+            "benchmarkMode": "v25_82_internal_sharp_jump_column_split_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
