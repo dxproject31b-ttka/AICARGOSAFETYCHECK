@@ -4687,6 +4687,15 @@ _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10  # คงค่าเดิมไ�
 # generalizable พอ (ED85-01/02 spread=12.5% แก้ได้ด้วย threshold=0.13 แต่ ED85-03 spread=13.75%
 # ยังไม่พอ - "whack-a-mole" ที่ไม่มีจุดจบชัดเจน)
 _EDGE_OUTLIER_DEVIATION_THRESHOLD = 0.10
+# v25.83 NEW: เกณฑ์ spread ที่ผ่อนปรนกว่า (15% แทน 10%) สำหรับกรณีที่ plateau กรองด้วยสีเดียวกับ
+# target แล้ว (same-color, ยืนยันแน่ชัดว่าเป็น SKU เดียวกันจาก Phase 1B) - ดู docstring เต็มที่
+# จุดใช้งานจริงใน _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01: กลุ่ม
+# สีม่วงเพียวมี spread=13.0% - สูงกว่า 10% เดิมแต่ยังต่ำกว่า 15% นี้มาก) - ข้อสังเกตสำคัญ: นี่
+# แตกต่างจากความพยายามเดิมของ v25.71 ที่เคยลองขยับ _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO ตรงๆ
+# (ทั่วไป ไม่แยกสี) แล้วพบว่า "ไม่ generalizable" (ED85-01/02 ต้องการ 0.13 แต่ ED85-03 ต้องการ
+# มากกว่านั้นอีก) - แนวทางนี้ต่างออกไปเพราะกรองสีก่อน (ไม่ปนกับคอลัมน์ต่าง SKU ที่มีสิทธิ์สูงต่ำ
+# ต่างกันจริง) จึงน่าเชื่อถือกว่าและไม่จำเป็นต้องขยับ threshold สูงเกินจำเป็น
+_EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO = 0.15
 
 
 # v25.72 NEW (สำคัญ - พบจริงจาก AC03-02 ที่ผู้ใช้ระบุ "ไม่มีระบุจุดเสี่ยงเลย", 31-Aug-2026):
@@ -4833,6 +4842,50 @@ def _pair_is_apex_affected(view_result, rec_a, rec_b):
     b0, b1 = rec_b["x_range"]
     lo, hi = min(a0, b0), max(a1, b1)
     return lo <= apex_x <= hi
+# v25.83 NEW (สำคัญ - พบจริงจาก ED85-01 31-Aug-2026, ผู้ใช้ระบุว่า FRONT view วาดกรอบบนกล่อง
+# (SA11D/ATC1C ใกล้กล่องม่วง TGT1G) ทั้งที่ภาพจริงยืนยันว่าทั้งแถวสูงเท่ากันสนิท 100% - ไม่มี
+# step-down จริงเลย): ยืนยันด้วยข้อมูล pixel จริง - idx5(SA11D,349.6px,cross_view_corrected) vs
+# idx6(ATC1C,177.2px,direct) ถูก flag drop=49.3% - ตรวจสอบราคาข้อมูลดิบ (ก่อน cross-view correct)
+# พบว่าค่าความสูงที่วัดได้ "ลดลงต่อเนื่องสม่ำเสมอ" ตลอดทั้งช่วง x=1077-1233 (299.8px->149px) ไม่มี
+# jump ที่ seam ระหว่าง idx5/idx6 เลย (x=1153:221px -> x=1157:216px ต่างกันแค่ 5px) - ยืนยันด้วย
+# _edge_outlier_has_genuine_seam_jump(idx6,idx5)=False (ไม่พบ jump จริง) พิสูจน์ว่าเป็น isometric
+# slope bias ต่อเนื่อง ไม่ใช่ step-down จริง (เทียบเท่ากับที่ v25.77 เคยพิสูจน์ไว้กับ AA05-02/04)
+# ROOT CAUSE ที่ต่างจาก AA05-02/04 (v25.77): กรณีนั้น apex_x ตกอยู่ "ระหว่าง" x-range ของคู่
+# เปรียบเทียบ (คร่อมกลาง) แต่กรณีนี้ apex_x=995 อยู่ "ก่อน" ทั้งคู่ (995 < 1077 และ < 1157) คือทั้ง
+# 2 คอลัมน์อยู่ "หลัง apex ทั้งหมด" (post-apex) - _pair_is_apex_affected เดิมตรวจสอบแค่ "apex ตก
+# อยู่ในช่วงรวม" (lo<=apex_x<=hi) เท่านั้น ไม่ครอบคลุมกรณีนี้ (apex_x=995 < lo=1077 - ไม่ผ่าน
+# เงื่อนไข) จึงหลุดรอดไม่ถูกตรวจสอบด้วย seam-jump verification เลย ทั้งที่ v25.72 (เปลี่ยน apex
+# cutting logic ให้ label="direct" แทน "apex_fallback" เมื่อ apex_x<=b0 ทั้งคอลัมน์) ทำให้คอลัมน์
+# ที่ "อยู่ห่างจาก apex มากๆ ในทิศทางเดียวกัน" (post-apex progressively further) ไม่มี guard ใดๆ
+# มาตรวจสอบความน่าเชื่อถือเลย ทั้งที่ยังคงมี isometric bias สะสมตามระยะห่างจาก apex อยู่จริง (ยืนยัน
+# จากไฟล์นี้: idx3(ก่อน apex,345.9px)->idx4(หลัง apex 7-80px,317.0px)->idx5(หลัง apex 82-162px,
+# raw~260px)->idx6(หลัง apex 162-241px,177.2px) - ยิ่งห่างจาก apex ยิ่งวัดต่ำกว่าจริงมากขึ้นเรื่อยๆ)
+# FIX: เพิ่มฟังก์ชันใหม่ตรวจสอบกรณี "ทั้งคู่อยู่ฝั่งเดียวกันของ apex ทั้งหมด" (ไม่ใช่ apex คร่อม
+# กลาง) - ถ้า apex_x อยู่ก่อนทั้งคู่ (post-apex ทั้งคู่) หรือหลังทั้งคู่ (pre-apex ทั้งคู่) ให้ถือว่า
+# เป็นโซนที่มีความเสี่ยง isometric bias สะสมเช่นกัน แล้วใช้ seam-jump verification ตัดสินใจเหมือนเดิม
+# (มาตรฐานเดียวกับ _pair_is_apex_affected - ปลอดภัยเพราะยังต้องผ่าน seam-jump check ก่อน suppress
+# จริง ไม่ใช่ suppress ทันทีที่เข้าเงื่อนไขนี้)
+def _pair_is_apex_residual_zone(view_result, rec_a, rec_b):
+    """True ถ้า apex_x อยู่ 'ฝั่งเดียวกันทั้งคู่' ของคู่เปรียบเทียบ (ทั้งคู่อยู่ก่อน apex หมด หรือ
+    หลัง apex หมด) - ต่างจาก _pair_is_apex_affected ที่ตรวจกรณี apex คร่อมกลางคู่ - ดู docstring
+    เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01) คืน False ถ้าตรวจสอบไม่ได้ (fail-safe)"""
+    if view_result is None:
+        return False
+    stack_heights = view_result.get("stack_heights")
+    if not stack_heights:
+        return False
+    idx_a = rec_a.get("idx")
+    if idx_a is None or idx_a >= len(stack_heights):
+        return False
+    apex_x = stack_heights[idx_a].get("apex_x")
+    if apex_x is None:
+        return False
+    a0, a1 = rec_a["x_range"]
+    b0, b1 = rec_b["x_range"]
+    lo, hi = min(a0, b0), max(a1, b1)
+    if lo <= apex_x <= hi:
+        return False  # apex คร่อมกลาง - กรณีนี้ _pair_is_apex_affected จัดการอยู่แล้ว ไม่ซ้ำ
+    return True  # ทั้งคู่อยู่ฝั่งเดียวกันของ apex ทั้งหมด (ก่อนหรือหลังทั้งคู่)
 
 
 def _is_edge_measurement_outlier(records_same_view, target_idx,
@@ -4875,6 +4928,46 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
         plateau_heights.append(r["height_px"])
     if len(plateau_heights) < min_plateau_size:
         return False
+    # v25.83 NEW (สำคัญ - พบจริงจาก ED85-01, 31-Aug-2026 - ผู้ใช้ระบุว่า FRONT view วาดกรอบตรง
+    # กล่องสีม่วง TGT1G ทั้งที่ไม่ควรวาด): เดิม plateau_heights ด้านบนรวมคอลัมน์ "ทุกสี" ปนกันหมด
+    # (ไม่แยกแยะ SKU) - พบว่าไฟล์ ED85-01 มี idx0 (ริมสุดจริง, สีม่วง TGT1G) วัดได้ 253.3px ต่ำกว่า
+    # เพื่อนบ้านสีม่วงเดียวกัน (idx1-4: 308.3/351.5/345.9/317.0px) มาก - แต่ plateau ที่คำนวณจาก
+    # "ทุกสีปนกัน" (รวม idx5=teal/idx6=cyan ที่มีความสูงต่างจากม่วงจริงเพราะเป็นคนละ SKU) ทำให้
+    # p_spread สูงเกิน 10% (วัดได้จริง 55%) จน guard เดิมไม่ trigger เลย ทั้งที่กลุ่มสีม่วงเพียว ๆ
+    # (ไม่รวม idx5/6) เองมี spread แค่ 13.0% (ใกล้เคียง 10% มาก - น่าเชื่อถือกว่าการปนสีมาก)
+    # ROOT CAUSE: Phase 1B เก็บ stack_expected_colors ไว้อยู่แล้ว (ยืนยันแน่ชัดว่าคอลัมน์ใดเป็น
+    # SKU/สีเดียวกัน) แต่ guard นี้ไม่เคยใช้ข้อมูลนี้เลย - การเทียบข้าม SKU (ม่วงเทียบฟ้า/เขียว)
+    # ไม่สมเหตุสมผลทางกายภาพอยู่แล้ว เพราะกล่องคนละ SKU มีสิทธิ์สูงต่ำต่างกันจริงได้ปกติ (ไม่ใช่
+    # หลักฐานของ "ความนิ่ง" ที่ควรใช้ตัดสิน isometric bias เลย)
+    # FIX: ถ้า view_result มี stack_expected_colors และ target มีสีที่รู้แน่ชัด (ไม่ใช่ None) ให้
+    # ลองกรอง plateau เฉพาะคอลัมน์ที่มีสีเดียวกับ target ก่อน (same-color plateau) - ถ้าจำนวนพอ
+    # (>= เกณฑ์ขั้นต่ำ) ให้ใช้ชุดนี้แทนที่ all-color plateau เดิม พร้อมใช้เกณฑ์ spread ที่ผ่อนปรน
+    # กว่าเล็กน้อย (_EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO=15% แทน 10%) เพราะเป็นหลักฐานที่
+    # น่าเชื่อถือกว่ามาก (ยืนยันแล้วว่าเป็น SKU เดียวกันจริงจาก Phase 1B ไม่ใช่แค่ "บังเอิญนิ่ง")
+    # - ถ้าไม่มีข้อมูลสี หรือ same-color plateau มีจุดไม่พอ ให้ fallback ไปใช้ all-color plateau
+    # เดิมทุกประการ (ปลอดภัยสำหรับไฟล์อื่นที่ไม่เจอปัญหานี้)
+    same_color_plateau_used = False
+    if view_result is not None:
+        expected_colors = view_result.get("stack_expected_colors")
+        if expected_colors is not None and target_idx < len(expected_colors):
+            target_color = expected_colors[target_idx]
+            if target_color is not None:
+                same_color_heights = []
+                for r in valid:
+                    if r["idx"] == target_idx or r.get("height_px") is None:
+                        continue
+                    if r.get("height_source") not in ("direct", "cross_view_filled", "apex_partial_cut"):
+                        continue
+                    r_idx_local = r["idx"]
+                    if r_idx_local >= len(expected_colors):
+                        continue
+                    if expected_colors[r_idx_local] == target_color:
+                        same_color_heights.append(r["height_px"])
+                if len(same_color_heights) >= _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM:
+                    plateau_heights = same_color_heights
+                    same_color_plateau_used = True
+    if same_color_plateau_used:
+        plateau_max_spread_ratio = _EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO
     # v25.71 NEW (สำคัญ - พบจริงจาก ED85-01/02/03 ที่ผู้ใช้ระบุ, 30-Aug-2026): เดิมคำนวณ
     # p_spread จาก min-max ดิบของ plateau_heights ทั้งหมด - พบว่าคอลัมน์ที่ "ติดกับ" คอลัมน์ริมสุด
     # (idx=1, ไม่ใช่ตัวริมสุดเอง) อาจได้รับผลกระทบจาก isometric distortion ในทิศทางเดียวกัน
@@ -5022,6 +5115,28 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             has_genuine_jump = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
             if has_genuine_jump is False:
                 continue
+        # v25.83 NEW (สำคัญ - พบจริงจาก ED85-01, ดู docstring เต็มที่ _pair_is_apex_residual_zone
+        # สำหรับหลักฐาน+เหตุผล): ต่างจาก guard ด้านบน (v25.77) ที่จำกัดเฉพาะ _both_sides_direct -
+        # กรณีนี้ taller_rec (idx5) มี height_source="cross_view_corrected" (ไม่ใช่ "direct") จึง
+        # ไม่ผ่านเงื่อนไขเดิม แต่ seam-jump verification ตรวจสอบ pixel ดิบ (cargo_top_y) ของ view
+        # นี้เองโดยตรง ไม่ได้ขึ้นกับว่า height_px ที่ใช้จริงถูกแก้ไขมาจาก cross-view หรือไม่ - จึงยัง
+        # คงแม่นยำในการยืนยัน "ความจริงทางเรขาคณิต" ได้เหมือนเดิม (ต่างจาก apex_partial_cut ที่ต้อง
+        # ระวังเพราะ pixel ดิบเองอาจปนเปื้อนจาก roof-overhang bleed - คนละสาเหตุกับ cross_view_
+        # corrected ซึ่งเป็นแค่การเลือกใช้ค่าจากอีก view เท่านั้น ไม่กระทบ pixel ดิบของ view นี้เอง)
+        # FIX: ผ่อนคลายเงื่อนไขให้ยอมรับ "cross_view_corrected"/"cross_view_filled" เพิ่มจาก
+        # "direct" เดิม (ยังคงกัน apex_fallback/apex_partial_cut ออกเสมอทั้ง 2 ฝั่ง เพราะมีความเสี่ยง
+        # pixel ปนเปื้อนโดยเฉพาะตามที่ AB03-04 พิสูจน์ไว้) และตรวจสอบเงื่อนไข apex เพิ่มเติมด้วย
+        # _pair_is_apex_residual_zone (ครอบคลุมกรณี 'ทั้งคู่อยู่ฝั่งเดียวกันของ apex' ที่
+        # _pair_is_apex_affected เดิมไม่ครอบคลุม)
+        _reliable_sources = ("direct", "cross_view_corrected", "cross_view_filled")
+        _both_sides_reliable = (taller_rec.get("height_source") in _reliable_sources
+                                 and shorter_rec.get("height_source") in _reliable_sources)
+        if (_both_sides_reliable and view_result is not None
+                and (_pair_is_apex_affected(view_result, a, b)
+                     or _pair_is_apex_residual_zone(view_result, a, b))):
+            has_genuine_jump2 = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
+            if has_genuine_jump2 is False:
+                continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
@@ -5041,6 +5156,21 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ไม่กระทบ subtype='pairwise_floor_jump' ด้านล่างซึ่งมีหลักฐานอิสระคนละตัว คือ floor_jump
         # ที่วัดจากพื้นตู้ ไม่ใช่ยอดกล่อง จึงไม่ได้รับผลกระทบจาก apex bias นี้)
         if shorter_rec.get("height_source") == "apex_fallback":
+            continue
+        # v25.83 NEW (สำคัญ - พบจริงจาก ED85-02/ED85-03, 31-Aug-2026 - ผู้ใช้ระบุว่า FRONT view
+        # วาดกรอบตรงกล่องสีม่วง TGT1G ทั้งที่ไม่ควรต้องวาด): เดิม guard ด้านบน (v25.71) เช็คเฉพาะ
+        # shorter_rec (ฝั่งที่จะถูก flag ว่า "เตี้ยกว่า") ว่าเป็น apex_fallback หรือไม่ - แต่ไม่เคย
+        # ตรวจสอบ taller_rec (ฝั่งที่ใช้เป็น "ค่าอ้างอิงความสูงกว่า" สำหรับคำนวณ drop_ratio) เลย
+        # ทั้งที่ apex_fallback เป็นค่าที่ระบบเองยืนยันแล้วว่า "เอียงคนละทิศ, height ผิดเพี้ยนเป็น
+        # ระบบ" ไม่ว่าจะถูกใช้เป็นฝั่งไหนก็ตาม - ยืนยันด้วยข้อมูลจริง ED85-02/03: FRONT idx7
+        # (x_range กว้างเท่าคอลัมน์ปกติ, height_source="apex_fallback", h=306.3px/307.3px) ถูกใช้
+        # เป็น taller_rec เทียบกับ idx8 (h=177.2px, direct) ได้ drop_ratio=42.1%/42.3% เกินเกณฑ์
+        # 20% มาก - ทำให้เกิด STEP_DOWN_RISK ที่วาดกรอบคร่อมตำแหน่งกล่องผิดพลาด (ไม่มีหลักฐานอื่น
+        # ยืนยันว่า idx7 สูงจริง 306px - อาจเป็นค่าที่เอนเอียงจาก apex bias เดียวกับที่ v25.71
+        # พิสูจน์ไว้แล้ว ทำให้ไม่ควรเชื่อว่าเป็น "ค่าอ้างอิงที่ถูกต้อง" สำหรับคำนวณ drop_ratio)
+        # FIX: เพิ่มการตรวจสอบ taller_rec ด้วยเงื่อนไขเดียวกัน - ถ้า taller_rec เป็น apex_fallback
+        # เช่นกัน ไม่ flag ความเสี่ยงจากคู่นี้เลย (ค่าอ้างอิงไม่น่าเชื่อถือพอจะใช้ตัดสิน)
+        if taller_rec.get("height_source") == "apex_fallback":
             continue
         # v25.76 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง
         # คือกรอบซ้ายสุด" หลังทดสอบ v25.75, 31-Aug-2026): เดิม guard ด้านบนเช็คเฉพาะ
@@ -5548,6 +5678,11 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
             # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03)
             if shorter_rec.get("height_source") == "apex_fallback":
+                continue
+            # v25.83 NEW: mirror จาก detect_step_down_pairwise - เดิมเช็คแค่ shorter_rec ไม่เคย
+            # เช็ค taller_rec (ค่าอ้างอิง) เลย - ดู docstring เต็มที่จุดเดียวกันใน
+            # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-02/03)
+            if taller_rec.get("height_source") == "apex_fallback":
                 continue
             # v25.76 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB03-04):
             # เดิมไม่เคยเช็ค "apex_partial_cut" (v25.76 - label ใหม่สำหรับกรณี apex ตัดข้อมูล
@@ -6695,8 +6830,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.82",
-            "benchmarkMode": "v25_82_internal_sharp_jump_column_split_guard",
+            "checkerVersion": "V25.83",
+            "benchmarkMode": "v25_83_apex_residual_zone_seam_jump_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
