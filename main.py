@@ -3152,6 +3152,39 @@ def _p1b_group_overlapping_roofs(roofs, min_overlap_px=_ROOF_OVERLAP_MERGE_MIN_P
         # กรณีจริงที่ต้องการ merge มักมีแค่ 2 แถว (หน้า+หลัง) ไม่ใช่หลายแถวพร้อมกัน)
         if len(idxs) != 2:
             continue
+        # v25.78 NEW (สำคัญ - พบจริงจาก EA02-02 ที่ผู้ใช้ระบุ "กรอบแดงเกินมา", 31-Aug-2026):
+        # เดิมยอมรับกลุ่มที่มี roof ทับซ้อนกันพอดี 2 ชิ้นเสมอ โดยไม่สนใจว่าเป็นสีเดียวกันหรือ
+        # คนละสีเลย - แต่กฎนี้ (v25.35) ถูกออกแบบมาจากหลักฐาน EC16 ซึ่งเป็น "2 สีต่างกัน" ทับซ้อน
+        # กัน (เขียว+เหลือง - สัญญาณของกล่องคนละใบซ้อนกันในเชิงลึกจริง ณ ตำแหน่งความยาวเดียวกัน)
+        # ไม่เคยมีหลักฐานว่า "roof สีเดียวกัน" ทับซ้อนกันควร merge ด้วย - พบว่าไฟล์ EA02-02 มีกล่อง
+        # ITC1A-BL สีเหลืองเดียวกันทั้งไฟล์ 4 ใบ วางเรียง 2 ตำแหน่งสูงเท่ากันจริง (ยืนยันด้วยภาพ)
+        # แต่หลังคาของแต่ละตำแหน่งทับซ้อนกันเล็กน้อยจากความชันธรรมชาติของมุมมอง isometric
+        # (roofline staircase แบบเดียวกับที่ FIX ด้านบนกันไว้แล้วสำหรับกรณี >=3 ชิ้น แต่ไฟล์นี้
+        # มีแค่ 2 roof ทั้งไฟล์พอดี จึงหลุดผ่านเงื่อนไข len(idxs)==2 ไปได้)
+        # ROOT CAUSE ที่แท้จริง: "สีเดียวกัน" ทับซ้อนกันเป็นสัญญาณของ isometric roofline
+        # staircase ตามธรรมชาติ (หลังคากล่อง SKU เดียวกันที่วางเรียงติดกันสูงเท่ากัน มักทับซ้อน
+        # กันเล็กน้อยที่ขอบต่อเนื่องเสมอ) ในขณะที่ "คนละสี" ทับซ้อนกันเป็นสัญญาณของกล่องคนละใบ
+        # ซ้อนกันในเชิงลึกจริงที่ตำแหน่งเดียวกัน (ตรงตามที่ EC16 พิสูจน์ไว้แต่แรก)
+        # ข้อควรระวังที่พบระหว่างพัฒนา (สำคัญ - เกือบทำให้เกิด regression ที่ AB03-04): ทดลองแก้
+        # ครั้งแรกด้วยการเพิ่มเงื่อนไขสีที่ขั้นตอน "union" (ก่อนจัดกลุ่ม) แทนที่จะเป็นขั้นตอนนี้ -
+        # พบว่าทำให้ AB03-04's FRONT (มี roof 3 ชิ้น: cyan1,cyan2,navy - cyan1/cyan2 ทับซ้อนกัน
+        # เอง (สีเดียวกัน) และ cyan2/navy ก็ทับซ้อนกัน (คนละสี)) เปลี่ยนพฤติกรรมไปโดยไม่ตั้งใจ:
+        # เดิม (ก่อนแก้) union แบบไม่สนสีทำให้ทั้ง 3 ชิ้นถูก union รวมกันเป็นกลุ่มเดียว (transitive
+        # closure ผ่าน cyan2) ขนาดกลุ่ม=3 -> ถูกกรองทิ้งโดย len(idxs)!=2 อยู่แล้ว (ปลอดภัยโดย
+        # บังเอิญ) - แต่พอเพิ่มเงื่อนไขสีที่ union (บล็อก cyan1-cyan2 เพราะสีเดียวกัน) กลับทำให้
+        # cyan2-navy (คนละสี) ยังคง union กันได้ตามปกติ แต่ตอนนี้ขนาดกลุ่มเหลือแค่ 2 (ไม่ใช่ 3)
+        # เพราะ cyan1 ไม่เข้าร่วมกลุ่มแล้ว -> ผ่านเงื่อนไข len(idxs)==2 ไปได้โดยไม่ตั้งใจ ทำให้
+        # cyan2+navy ถูก merge ผิดพลาด (นี่คือ isometric roof-overhang bleed แบบเดียวกับที่เคย
+        # แก้ไปแล้วใน v25.74 สำหรับ BACK view - คราวนี้เกิดกับ FRONT view ผ่านกลไกคนละจุด)
+        # FIX ที่ถูกต้อง: ย้ายการตรวจสอบสีมาไว้ "หลัง" ขั้นตอนจัดกลุ่ม (ตรงนี้) แทน - ให้ union-find
+        # ยังคงทำงานแบบเดิมทุกประการ (ไม่สนสีตอน union เพื่อรักษากลไก chain-length-detection เดิม
+        # ที่ป้องกัน roofline staircase ยาวไว้ - cyan1-cyan2-navy ยังคงถูกจัดเป็นกลุ่มเดียวขนาด 3
+        # เหมือนเดิม จึงถูกกรองทิ้งโดย len(idxs)!=2 ตามปกติ ไม่ถูกกระทบจากการแก้ไขนี้เลย) แล้วค่อย
+        # ตรวจสอบสีของสมาชิกทั้ง 2 ในกลุ่มที่ผ่านเกณฑ์ size==2 แล้วเท่านั้น - ถ้าเป็นสีเดียวกัน
+        # (roofline staircase) ให้ปฏิเสธ ไม่ยอมรับเป็น span สำหรับ merge - ถ้าคนละสี (genuine
+        # depth-stack ตาม EC16) ให้ยอมรับตามเดิม
+        if roofs[idxs[0]]['color'] == roofs[idxs[1]]['color']:
+            continue
         x0 = min(roofs[i]['x'] for i in idxs)
         x1 = max(roofs[i]['x'] + roofs[i]['w'] for i in idxs)
         spans.append((x0, x1))
@@ -3799,6 +3832,10 @@ def compute_cargo_top_profile(cargo_mask):
     return cargo_top_y
 
 
+_LOCAL_FLOOR_MIN_GROUNDED_SPAN_RATIO = 0.5  # v25.80 NEW: ดู docstring เต็มที่จุดใช้งานจริงใน
+# compute_local_floor_y สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA02-01: grounded span/raw span = 6.4%
+# ต่ำกว่าเกณฑ์นี้มาก) - ตั้งค่ากึ่งกลาง (50%) ให้ปลอดภัยพอจะไม่กระทบไฟล์ปกติที่ grounded ครอบคลุม
+# กว้างอยู่แล้ว (มักได้ ratio สูงกว่า 80-90% ในไฟล์ที่กล่องชิดพื้นทั้งแถวตามปกติ)
 def compute_local_floor_y(floor_y, grounded, smooth_window=41):
     """LOCAL FLOOR: แก้บั๊กพื้นตู้เป็นรูปตัว V - ใช้ rolling median เฉพาะจุดแทน
     global linear fit เพื่อรักษารูปทรง apex ที่แท้จริงของพื้นตู้ไว้
@@ -3841,6 +3878,37 @@ def compute_local_floor_y(floor_y, grounded, smooth_window=41):
         if len(xs_raw) < 3:
             return clean
         xs_g = xs_raw
+    else:
+        # v25.80 NEW (สำคัญ - พบจริงจาก EA02-01 31-Aug-2026, ผู้ใช้ระบุว่ากรอบแดงวาดผิดพลาด
+        # รวมกันเป็นก้อนใหญ่เกินจำเป็นระหว่าง 2 คอลัมน์เหลืองที่สูงเท่ากันจริง 100% เมื่อดูจากภาพ):
+        # เดิม (v25.16/34) เชื่อว่าถ้า 'grounded' มีจุด >= 3 จุด ก็เพียงพอจะใช้เป็นฐานในการ
+        # interpolate ได้เสมอ - แต่ไม่เคยตรวจสอบว่า "ช่วง x ที่จุดเหล่านั้นครอบคลุม" (span) กว้าง
+        # เพียงพอเทียบกับความกว้างทั้งหมดของคอลัมน์สินค้าหรือไม่ - พบจริงจาก EA02-01 FRONT: grounded
+        # มี 40 จุดจริง (>=3 ผ่านเงื่อนไขเดิม) แต่ทั้งหมดกระจุกตัวอยู่แค่ช่วง x=651-690 (แคบเพียง 39px)
+        # ในขณะที่คอลัมน์สินค้าทั้งหมดกว้างถึง 637-1178 (541px) - เพราะกล่องเกือบทั้งไฟล์นี้มี "หน้าข้าง
+        # (side face)" ของกล่องโผล่ก่อนถึงพื้นจริง ทำให้ gap (cargo_bottom_y ถึง floor_y ดิบ) กว้างเกิน
+        # gap_thresh=30 เกือบทั้งคอลัมน์ (วัดได้จริง 60-99px) ยกเว้นแถบแคบๆ ใกล้กล่องแดงเท่านั้น
+        # ทำให้ local_floor_y ที่คำนวณได้ interpolate ได้จริงแค่ในช่วงแคบนี้ ส่วนที่เหลือทั้งหมด (รวม
+        # ตำแหน่งกล่องเหลืองทั้ง 2 คอลัมน์) ถูก "extrapolate แบบ edge-hold" เป็นค่าคงที่แบนราบ
+        # (547px คงที่ตลอดช่วง x=700-1100) ทั้งที่พื้นตู้จริงเป็นเส้นเอียงตามมุมมอง isometric (มี apex
+        # จริงที่ x=1082) - ทำให้คอลัมน์เหลืองที่อยู่ไกลจากแถบแคบนี้ (โดยเฉพาะที่อยู่ใกล้ apex) วัด
+        # ความสูงผิดพลาดสูงเกินจริงมาก (335.85px/392.74px) ทั้งที่ภาพจริงยืนยันว่าทั้ง 2 คอลัมน์เหลือง
+        # (SKU เดียวกัน ITC1A-BL) สูงเท่ากันสนิท - ค่า floor_y ดิบ (ก่อนกรอง gap_thresh, ไม่ผ่านเกณฑ์
+        # grounded) กลับมีค่า valid ครอบคลุมเกือบทั้งคอลัมน์ (x=568-1178) และมีรูปทรงลาดเอียงตาม
+        # ธรรมชาติของพื้นตู้ isometric จริง (แม้จะมี noise บ้างจากหน้าข้างกล่องที่ทำให้ gap สูง) -
+        # เชื่อถือได้มากกว่าการ extrapolate แบบเส้นตรงแบนราบจากแถบแคบๆ ที่ไม่ครอบคลุมพื้นที่ส่วนใหญ่เลย
+        # FIX: เปรียบเทียบ "ช่วง x ที่ grounded ครอบคลุม" กับ "ช่วง x ที่ floor_y ดิบมีค่า valid" - ถ้า
+        # สัดส่วนต่ำกว่า _LOCAL_FLOOR_MIN_GROUNDED_SPAN_RATIO (grounded กระจุกตัวแคบเกินไปเทียบกับ
+        # พื้นที่ทั้งหมดที่มีข้อมูลจริง) ให้ fallback ไปใช้ floor_y ดิบแทน (เหมือน fallback ชั้นที่ 2
+        # ของ v25.34 ทุกประการ เพียงแต่เงื่อนไข trigger ต่างกัน - จาก "นับจุดน้อยกว่า 3" เป็น "ช่วง x
+        # แคบเกินไปเทียบกับพื้นที่ข้อมูลจริงทั้งหมด") - ไม่กระทบไฟล์ปกติที่ grounded ครอบคลุมกว้างอยู่
+        # แล้ว (ratio จะสูงกว่าเกณฑ์นี้มาก จึงไม่ trigger fallback เลย)
+        xs_raw_all = np.nonzero(floor_y >= 0)[0]
+        if len(xs_raw_all) >= 3:
+            raw_span = xs_raw_all.max() - xs_raw_all.min()
+            grounded_span = xs_g.max() - xs_g.min()
+            if raw_span > 0 and (grounded_span / raw_span) < _LOCAL_FLOOR_MIN_GROUNDED_SPAN_RATIO:
+                xs_g = xs_raw_all
     vals_g = floor_y[xs_g].astype(float)
     half = smooth_window // 2
     for i, x in enumerate(xs_g):
@@ -4460,6 +4528,14 @@ def _p1b_compute_floor_jump(local_floor_y, x0a, x1a, x1b, exclude=8):
 # ในวิวเดียวกัน (เฉพาะ interpolation เท่านั้น - ทดลอง extrapolation หลายแบบแล้วพบว่าทำให้เกิด
 # false-positive ใหม่กับ EB66-01 idx0 เสมอ เพราะความบิดเบือนที่ริมสุดจริงไม่เป็นเส้นตรง)
 _FLOOR_LINEARITY_ANOMALY_MIN_PX = 20
+# v25.81 NEW: ดู docstring เต็มที่จุดใช้งานจริงใน reconcile_heights_cross_view (BACK-View
+# Priority Consensus Guard) สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA02-02/ED86-03 - ตามคำแนะนำผู้ใช้
+# "ให้วิเคราะห์ BACK view ก่อนเสมอ")
+_BACK_PRIORITY_MAX_INTERNAL_SPREAD = 0.08  # BACK ต้องนิ่งมาก (spread<=8%) จึงเชื่อเป็นหลัก - สูง
+# กว่า EA02-02(0.24%)/ED86-03(2.8%) มากพอจะครอบคลุม noise ปกติ แต่ต่ำกว่าเกณฑ์ conflict_ratio
+# เริ่มต้น (10%) พอสมควรเพื่อไม่ trigger กับกรณีทั่วไปที่ BACK มีความต่างกันบ้างตามธรรมชาติ
+_BACK_PRIORITY_MIN_FRONT_DEVIATION = 0.15  # FRONT (ผู้แพ้ที่ควรจะเป็น) ต้องเบี่ยงเบนจาก BACK
+# consensus อย่างน้อยเท่านี้ จึงจะ trigger การพลิกกลับ (เท่ากับเกณฑ์เดียวกับ Global-Consensus เดิม)
 
 
 def _floor_linearity_anomaly(records_same_view, target_idx, local_floor_y):
@@ -5095,6 +5171,31 @@ def _dedup_overlapping_stepdown_risks(risks):
         and r.get("subtype") in ("pairwise", "pairwise_floor_jump")
         and _pair_key(r) is not None
     }
+    # v25.79 NEW (สำคัญ - พบจริงจาก EA02-01 31-Aug-2026, ผู้ใช้ระบุว่า EA02-01 ควรถูกตรวจจับ
+    # เหมือนไฟล์ทั่วไป ไม่ควรมีกรอบซ้ำซ้อน): เดิม dedup ด้านบนจับคู่เฉพาะ tail_stepdown vs
+    # pairwise ผ่าน (view, pair_indices) เท่านั้น - แต่ detect_step_down_crossview ก็สามารถ
+    # flag "คอลัมน์เดียวกันเป๊ะ" ซ้ำกับ pairwise ได้เช่นกัน (คนละกลไก คนละหลักฐาน แต่ชี้ตำแหน่ง
+    # เดียวกัน) ยืนยันจาก log จริง: EA02-01 FRONT idx=1 ถูก flag ทั้งจาก pairwise (pair_indices=
+    # (0,1), drop=34.6%, เทียบกับ idx0 ข้างเคียง) และจาก cross_view (drop=43.2%, เทียบกับ BACK
+    # ตำแหน่งเดียวกัน) พร้อมกัน โดยทั้งคู่ mark_x_range=(860,1028) เหมือนกันเป๊ะ (ตำแหน่งวาดกรอบ
+    # ซ้อนทับกันสนิท) - cross_view ไม่มี key "pair_indices"/"view" เหมือน tail_stepdown เลย
+    # (มีแค่ mark_view+mark_stack_idx) จึง dedup เดิมจับไม่ได้ ทำให้นับ hazardCount เกินจริง +
+    # วาดกรอบซ้อนกัน 2 ครั้งที่ตำแหน่งเดียวกัน (ผู้ใช้เห็นเป็น "สร้างกฎใหม่เกินความจำเป็น")
+    # FIX: เพิ่มรอบ dedup ที่ 2 - ถ้า cross_view มี (mark_view, mark_stack_idx) ตรงกับ pairwise/
+    # pairwise_floor_jump ตัวใดตัวหนึ่งเป๊ะ ให้ตัด cross_view ทิ้ง (เก็บ pairwise ไว้แทน ตาม
+    # หลักการเดียวกับ tail_stepdown - pairwise คือหลักฐานโดยตรงจากเพื่อนบ้านจริงในวิวเดียวกัน
+    # น่าเชื่อถือกว่า cross_view ซึ่งอาศัยการเทียบข้าม view ที่มีโอกาสคลาดเคลื่อนจาก scale/
+    # reconcile สูงกว่า) - ไม่กระทบ cross_view ที่ไม่มี pairwise คู่ตรงกัน (เช่น EA02-01 idx=2
+    # ซึ่งเป็นตำแหน่งอื่น ยังคง flag ตามปกติ)
+    def _mark_key(r):
+        return (r.get("mark_view") or r.get("view"), r.get("mark_stack_idx"))
+
+    pairwise_mark_keys = {
+        _mark_key(r) for r in risks
+        if r.get("risk_type") == "STEP_DOWN_RISK"
+        and r.get("subtype") in ("pairwise", "pairwise_floor_jump")
+    }
+
     result = []
     for r in risks:
         if (r.get("risk_type") == "STEP_DOWN_RISK" and r.get("subtype") == "tail_stepdown"
@@ -5102,6 +5203,82 @@ def _dedup_overlapping_stepdown_risks(risks):
             print(f"[DEDUP_STEPDOWN] ตัด tail_stepdown ซ้ำกับ pairwise ที่ view={r.get('view')} "
                   f"pair_indices={r.get('pair_indices')} ออก (เก็บ pairwise ไว้แทน)")
             continue
+        if (r.get("risk_type") == "STEP_DOWN_RISK" and r.get("subtype") == "cross_view"
+                and _mark_key(r) in pairwise_mark_keys):
+            print(f"[DEDUP_STEPDOWN] ตัด cross_view ซ้ำกับ pairwise ที่ mark_view/idx="
+                  f"{_mark_key(r)} ออก (เก็บ pairwise ไว้แทน)")
+            continue
+        result.append(r)
+    return result
+
+
+def _dedup_stepdown_corrupted_by_adjacent_notch(risks, records_front, records_back):
+    """v25.79 NEW (สำคัญ - พบจริงจาก EA10-01 31-Aug-2026): เดิม detect_step_down_pairwise/
+    detect_step_down_crossview ไม่เคยตรวจสอบว่า "ฝั่งเตี้ยกว่า" ของคู่เปรียบเทียบ มีขอบ x_range
+    ที่ตรงพอดีกับตำแหน่ง notch_x ของ EMPTY_SPACE_RISK/silhouette_notch ที่ตรวจพบแล้วในวิวเดียวกัน
+    หรือไม่ - พบว่า EA10-01 BACK idx=4(taller,350.1px)/idx=5(shorter,269.4px) ถูก flag เป็น
+    STEP_DOWN_RISK pairwise (drop=23.1%) ทั้งที่ตรวจสอบภาพจริงแล้วพบว่ากล่องทั้งแถว (TSE1A-D1)
+    สูงเท่ากันสนิททุกตั้ง เห็นเป็นผนังเรียบราบต่อเนื่องไม่มี step-down จริงเลย - ความผิดปกติเดียว
+    ที่มีจริงคือรอยบากเล็ก (silhouette_notch, notch_x=1080, ลึก 38px) ซึ่งตรงกับขอบซ้าย (x_range
+    เริ่มที่ 1080) ของ idx=5 พอดีเป๊ะ - แสดงว่ารอยบากเดียวกันนี้ "ปนเปื้อน" ค่าที่วัดได้ของ idx=5
+    (บาง sample ในคอลัมน์ที่สุ่มวัดความสูงไปเจอพื้นหลัง/สีโครงสร้างตู้ที่รอยบากเผยออกมา แทนที่จะ
+    เจอยอดกล่องจริง ทำให้ average/median ของคอลัมน์ถูกลากลงต่ำกว่าความจริง) ไม่ใช่กล่องเตี้ยกว่าจริง
+    ROOT CAUSE: EMPTY_SPACE_RISK/silhouette_notch กับ STEP_DOWN_RISK เป็นคนละกลไกที่ทำงานอิสระ
+    ต่อกันสนิท (ไม่เคยแชร์ข้อมูลกัน) แต่ตรวจจับ "ปรากฏการณ์ภาพเดียวกัน" (รอยบากที่ขอบคอลัมน์) จาก
+    คนละมุมมอง - silhouette_notch ตีความถูกต้องว่าเป็นรอยบาก/ช่องว่างเล็กๆ (ไม่ใช่กล่องเตี้ยเต็ม
+    ความกว้างคอลัมน์) ในขณะที่ pairwise/cross_view เข้าใจผิดว่าทั้งคอลัมน์เตี้ยกว่าจริง เพราะวัด
+    ความสูงแบบ column-wide โดยไม่รู้ว่ามีรอยบากแทรกอยู่บางส่วนของคอลัมน์นั้น
+    FIX: หลังคำนวณ risks ทั้งหมดแล้ว (มี EMPTY_SPACE_RISK/silhouette_notch ครบแล้ว) - สำหรับ
+    STEP_DOWN_RISK subtype pairwise/pairwise_floor_jump ที่มี pair_indices ครบ ให้หา x_range ของ
+    "ฝั่งเตี้ยกว่า" (index ใน pair_indices ที่ไม่ใช่ mark_stack_idx) จาก records แล้วเช็คว่ามี
+    silhouette_notch ในวิวเดียวกันที่ notch_x ตกอยู่ในช่วง x_range นั้น (±5px กันขอบพอดี) หรือไม่ -
+    ถ้าใช่ ให้ตัด STEP_DOWN_RISK ทิ้ง (เก็บ EMPTY_SPACE_RISK ไว้แทน เพราะเป็นตัวแทนที่ถูกต้องกว่า
+    ของปรากฏการณ์เดียวกัน - ระบุ "รอยบาก/ช่องว่างเฉพาะจุด" แทน "กล่องทั้งตั้งเตี้ยกว่า" ที่คลาดเคลื่อน)
+    ขอบเขตการแก้ (ปลอดภัย ไม่กระทบไฟล์อื่น): ตรวจสอบแล้วในชุดไฟล์ทดสอบทั้งหมด (AA05-02/04,
+    AB03-04, AB05-01, AC03-02, EA02-01/02, EA03-01, EA10-01, EC07-02) มีเพียง EA10-01 เท่านั้นที่
+    มีทั้ง STEP_DOWN_RISK(pairwise) และ EMPTY_SPACE_RISK(silhouette_notch) อยู่ในวิวเดียวกัน (BACK)
+    พร้อมกัน - ไฟล์อื่นที่มี silhouette_notch (AA05-02/04, AB05-01) ไม่มี STEP_DOWN_RISK คู่กันเลย
+    ในวิวเดียวกัน (safe by construction) และ EA02-01 ที่มีทั้งคู่ notch อยู่คนละวิว (BACK) กับ
+    STEP_DOWN_RISK (FRONT) จึงไม่ตรงเงื่อนไข view เดียวกัน ไม่ถูกกระทบเช่นกัน
+    """
+    notches = [r for r in risks if r.get("risk_type") == "EMPTY_SPACE_RISK"
+               and r.get("subtype") == "silhouette_notch" and r.get("notch_x") is not None]
+    if not notches:
+        return risks
+
+    def _x_range_of(view_label, idx):
+        records = records_front if view_label == "FRONT" else records_back
+        for rec in records:
+            if rec["idx"] == idx:
+                return rec.get("x_range")
+        return None
+
+    result = []
+    for r in risks:
+        if (r.get("risk_type") == "STEP_DOWN_RISK"
+                and r.get("subtype") in ("pairwise", "pairwise_floor_jump")):
+            view_label = r.get("mark_view") or r.get("view")
+            pair_indices = r.get("pair_indices")
+            taller_idx = r.get("mark_stack_idx")
+            shorter_idx = None
+            if pair_indices:
+                others = [i for i in pair_indices if i != taller_idx]
+                if others:
+                    shorter_idx = others[0]
+            if shorter_idx is not None:
+                shorter_range = _x_range_of(view_label, shorter_idx)
+                if shorter_range is not None:
+                    matched = next(
+                        (n for n in notches
+                         if (n.get("mark_view") == view_label)
+                         and (shorter_range[0] - 5 <= n["notch_x"] <= shorter_range[1] + 5)),
+                        None)
+                    if matched is not None:
+                        print(f"[DEDUP_NOTCH_CORRUPT] ตัด {r.get('subtype')} ซ้ำกับ "
+                              f"silhouette_notch ที่ view={view_label} shorter_idx={shorter_idx} "
+                              f"notch_x={matched['notch_x']} ออก (เก็บ EMPTY_SPACE_RISK ไว้แทน "
+                              f"เนื่องจากรอยบากเดียวกันปนเปื้อนค่าความสูงที่วัดได้ของฝั่งเตี้ยกว่า)")
+                        continue
         result.append(r)
     return result
 
@@ -5715,6 +5892,61 @@ def reconcile_heights_cross_view(records_front, records_back,
                         flip_reason = (f"[GLOBAL_CONSENSUS] เบี่ยงเบนจาก median กลุ่ม"
                                         f"({median_h:.1f}px, n={len(other_reliable)}) "
                                         f"{winner_dev:.1%} vs loser {loser_dev:.1%}")
+        if not should_flip:
+            # v25.81 NEW (สำคัญ - ตามคำแนะนำผู้ใช้ 31-Aug-2026: "ให้วิเคราะห์ BACK view ก่อนเสมอ"
+            # - BACK คือ ground-truth หลักของตำแหน่ง/จำนวนตั้งอยู่แล้ว (Phase 1B ทั้งระบบออกแบบให้
+            # BACK เป็นฐานอ้างอิงจับคู่ตำแหน่งกับ FRONT) แต่การ reconcile ความสูงเดิมไม่เคยให้
+            # priority พิเศษกับ "ความสอดคล้องภายใน BACK" เลย พึ่งแค่ reliability-hierarchy (direct
+            # > apex_partial_cut) เท่านั้น - ยืนยันด้วยข้อมูลจริง 2 ไฟล์อิสระกัน (EA02-02, ED86-03,
+            # คนละ SKU คนละน้ำหนักสินค้า): BACK มี spread ภายในตัวเองต่ำมาก (0.24%/2.8%) แต่ FRONT
+            # วัดสูงกว่า BACK อย่างเป็นระบบ 20-43% ทุกตำแหน่ง (ไม่ใช่ noise สุ่ม - เป็น bias
+            # เชิงระบบของมุมกล้อง FRONT ในไฟล์กลุ่มนี้) ทั้งที่ทั้งคู่ได้ label "direct" เหมือนกัน
+            # ROOT CAUSE ที่ Global-Consensus เดิม (v25.63) จับไม่ได้ครบ: รวม 'other_reliable' จาก
+            # ทั้ง FRONT+BACK ปนกันเป็น median เดียว - ทำให้บางคู่ deviation เจือจางจนต่ำกว่าเกณฑ์
+            # (ED86-03 คู่ที่ 2) และใช้ไม่ได้เลยถ้าไฟล์มีคอลัมน์รวมน้อยกว่า 2 other_reliable
+            # (EA02-02 มีแค่ 2 คอลัมน์ทั้งไฟล์ - ไม่มี "other" เหลือให้ median เลย)
+            # FIX: เปรียบเทียบ "ความสอดคล้องภายใน BACK เท่านั้น" (ไม่ผสม FRONT) กับ "ระดับความ
+            # เบี่ยงเบนของ FRONT จาก BACK" โดยตรง - ถ้า BACK นิ่งมากภายในตัวเอง (รวมค่าที่กำลัง
+            # พิจารณาด้วย ไม่ใช่แค่ "other") และ FRONT (ฝั่งที่ hierarchy เดิมเลือกให้ชนะ) เบี่ยงเบน
+            # จาก BACK เกิน threshold ให้ "เชื่อ BACK เป็นหลักเสมอ" (ให้ priority กับ BACK ตาม
+            # หลักการที่ผู้ใช้ระบุ) - ทำงานได้แม้ BACK มีแค่ 2 คอลัมน์ทั้งไฟล์ (ต่างจาก
+            # Global-Consensus เดิมที่ต้องการ >=2 other_reliable คอลัมน์แยกจากคู่ที่พิจารณาอยู่)
+            back_side = None
+            front_side = None
+            if rec_a["view"] == "BACK" and best_match["view"] == "FRONT":
+                back_side, front_side = rec_a, best_match
+            elif best_match["view"] == "BACK" and rec_a["view"] == "FRONT":
+                back_side, front_side = best_match, rec_a
+            if back_side is not None:
+                back_side_h, _ = snapshot[id(back_side)]
+                back_group = [back_side_h]
+                for r in records_back:
+                    if r is back_side:
+                        continue
+                    rh, rsrc = snapshot[id(r)]
+                    if rh is not None and rsrc in ("direct", "cross_view_filled"):
+                        back_group.append(rh)
+                if len(back_group) >= 2:
+                    back_consensus = float(np.median(back_group))
+                    back_spread = ((max(back_group) - min(back_group)) / back_consensus
+                                   if back_consensus > 0 else 999)
+                    front_side_h, _ = snapshot[id(front_side)]
+                    front_dev = (abs(front_side_h - back_consensus) / back_consensus
+                                 if back_consensus > 0 else 0)
+                    front_is_winner = ((trust_a and rec_a is front_side)
+                                        or ((not trust_a) and best_match is front_side))
+                    if (front_is_winner and back_spread <= _BACK_PRIORITY_MAX_INTERNAL_SPREAD
+                            and front_dev >= _BACK_PRIORITY_MIN_FRONT_DEVIATION):
+                        # หมายเหตุ: ไม่ตั้งค่า trust_a ตรงนี้ - ปล่อยให้ตรรกะ "if should_flip:
+                        # trust_a = not trust_a" ด้านล่าง (ใช้ร่วมกับ FLOOR_LINEARITY/GLOBAL_
+                        # CONSENSUS) จัดการสลับค่าให้ถูกต้องเพียงจุดเดียว - เพราะ front_is_winner
+                        # ยืนยันแล้วว่า trust_a ปัจจุบันเลือก FRONT ชนะอยู่ การ toggle เพียงครั้ง
+                        # เดียวที่ปลายทางจะทำให้ BACK ชนะแทนโดยอัตโนมัติ (ไม่ต้องกำหนดค่าตรงๆ ซ้ำ
+                        # ซึ่งจะถูก toggle ทับอีกรอบกลายเป็นผิดพลาด)
+                        should_flip = True
+                        flip_reason = (f"[BACK_PRIORITY] BACK spread ภายในตัวเอง={back_spread:.1%} "
+                                        f"(n={len(back_group)}, consensus={back_consensus:.1f}px) "
+                                        f"นิ่งมาก vs FRONT เบี่ยงเบน {front_dev:.1%}")
         if should_flip:
             print(f"พลิกกลับการเลือก: winner เดิม (view="
                   f"{rec_a['view'] if trust_a else best_match['view']}) {flip_reason} "
@@ -6213,6 +6445,10 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     # เฉพาะ pairwise/pairwise_floor_jump ไว้ (มี guard ครบชุดเดียวกับ tail_stepdown อยู่แล้วหลัง
     # v25.57 - เลือกอันเดียวพอ ไม่ต้องมี 2 กรอบซ้อนกันสำหรับ edge case เดียวกัน)
     risks = _dedup_overlapping_stepdown_risks(risks)
+    # v25.79 NEW: dedup STEP_DOWN_RISK(pairwise) ที่ค่าความสูงฝั่งเตี้ยกว่าถูกปนเปื้อนจาก
+    # silhouette_notch ตำแหน่งเดียวกัน - ดู docstring เต็มที่ _dedup_stepdown_corrupted_by_
+    # adjacent_notch สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA10-01)
+    risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records_front, records_back)
 
     return {
         "front": front, "back": back,
@@ -6376,8 +6612,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.77",
-            "benchmarkMode": "v25_77_apex_affected_pair_seam_jump_guard",
+            "checkerVersion": "V25.81",
+            "benchmarkMode": "v25_81_back_priority_consensus_guard",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
