@@ -1007,10 +1007,716 @@ import PIL.Image
 import PIL.ImageDraw
 import fitz  # PyMuPDF
 import functions_framework
+import cv2  # v25.90 NEW: ใช้เฉพาะใน wireframe-detection path (Hough line
+            # detection สำหรับตรวจจับ side-face sliver) - ไม่กระทบ path
+            # สีเดิมเลย เพราะ import module-level เท่านั้น ไม่ได้ถูกเรียก
+            # ใช้งานจากโค้ดเดิมของ v25.89 แม้แต่บรรทัดเดียว
 from scipy import ndimage
 from scipy.signal import find_peaks
 from scipy.ndimage import median_filter
 from scipy.optimize import linear_sum_assignment
+
+
+# ============================================================================
+# v25.90 NEW: WIREFRAME (ไฟล์ line-drawing ไม่มีสีทึบ) DETECTION MODULE
+# ============================================================================
+# รวมเข้ามาจาก session แยกต่างหาก (wireframe_core.py + wireframe_faces.py +
+# wireframe_risk_ready.py + wireframe_fullpage_pipeline.py) ที่พัฒนา+ทดสอบ
+# กับไฟล์จริง 3 ไฟล์ (AC05-01/02/03.pdf) มาแล้วครบถ้วน ยืนยันผลด้วยภาพจริง
+# ทุกจุด - ดู docstring ของแต่ละฟังก์ชันสำหรับหลักฐาน/root-cause การแก้บั๊ก
+# แต่ละจุดที่พบระหว่างพัฒนา (มีหลายรอบ ไม่ใช่ implementation เดียวจบ)
+#
+# กลไกการทำงานโดยสรุป: ไฟล์ wireframe ไม่มีสีทึบเลย (pure black-line-on-
+# white drawing) ทำให้กลไกเดิมของ v25.89 ทั้งหมด (Phase 1B color-blob
+# clustering, robust height-fit จาก cargo_top_y ฯลฯ) ใช้ไม่ได้ตรงๆ - ต้อง
+# ใช้วิธีตรวจจับ "หน้ากล่อง" (face) จาก flood-fill ของเส้นดำแทน แล้ว
+# cluster เป็นคอลัมน์ด้วย x-overlap (แทนการจับคู่สี) จากนั้น "ระบายสีปลอม"
+# (bucket-coloring ตามความสูงสัมพัทธ์) เพื่อให้มีสัญญาณสีใช้ตรวจ
+# EMPTY_SPACE_RISK ได้เหมือนไฟล์สีปกติ ส่วน STEP_DOWN_RISK ใช้
+# position-overlap matching ระหว่าง FRONT<->BACK (รองรับ many-to-one
+# เพราะ BACK มักรวมคอลัมน์ที่ FRONT แยกออกจากกันได้ - ข้อจำกัดทางข้อมูล
+# จริงที่ยืนยันแล้วว่าแก้ไม่ได้ด้วยภาพเพียงอย่างเดียว)
+#
+# จุดที่ยังเป็นข้อจำกัด (บอกตรงไปตรงมา - ไม่ใช่ผลิตภัณฑ์ที่สมบูรณ์ 100%):
+#   - ไม่มีการ calibrate สเกล mm สัมบูรณ์ (ตัวเลขมิติในไฟล์ทดสอบวาดเป็น
+#     vector path ไม่ใช่ PDF text object ที่ดึงได้) - bucket ความสูงเป็น
+#     แบบ relative ต่อไฟล์นั้นๆ เท่านั้น
+#   - FRONT_TO_BACK_HEIGHT_SCALE=1.19 เป็นค่า calibrate จากข้อมูลจริงแค่
+#     3 ไฟล์ ไม่ใช่ค่าคงที่ทางฟิสิกส์ที่แม่นยำสัมบูรณ์
+#   - BACK view มักนับคอลัมน์ได้น้อยกว่า FRONT เสมอ (ยืนยันว่าเป็นเพราะ
+#     ไม่มีเส้นแบ่งวาดไว้จริงในภาพ ไม่ใช่บั๊ก) - แก้ด้วย position-overlap
+#     matching (many-to-one) แทนการบังคับนับให้เท่ากัน
+# ============================================================================
+
+def is_wireframe_region(region, vivid_frac_thresh=0.01):
+    """True ถ้า region นี้แทบไม่มีสีสด/สีทึบเลย (เป็น line-drawing ล้วน)
+    ใช้ตัดสินใจว่าไฟล์นี้ควรเข้า wireframe-detection path (v25.90 ใหม่)
+    หรือ color-based path เดิม (v25.89 ทั้งหมด) - เรียกใช้แค่ครั้งเดียว
+    ต่อไฟล์ ก่อนตัดสินใจ branch ใน process_request"""
+    r = region[:, :, 0].astype(np.int16)
+    g = region[:, :, 1].astype(np.int16)
+    b = region[:, :, 2].astype(np.int16)
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1), 0)
+    vivid = (mx >= 50) & (sat >= 0.55)
+    return vivid.mean() < vivid_frac_thresh
+
+
+# --- wireframe_core.py (dark-mask / cargo-silhouette utilities) ---
+_WF_DARK_GRAY_THRESH = 200
+_WF_MIN_BLOB_PX = 2000
+_WF_RED_ARROW_R_MIN = 150
+_WF_RED_ARROW_GB_MAX = 100
+
+
+def _wf_dark_mask(region):
+    gray = region.astype(np.int32).mean(axis=2)
+    r = region[:, :, 0].astype(int); g = region[:, :, 1].astype(int); b = region[:, :, 2].astype(int)
+    is_red_arrow = (r > _WF_RED_ARROW_R_MIN) & (g < _WF_RED_ARROW_GB_MAX) & (b < _WF_RED_ARROW_GB_MAX)
+    return (gray < _WF_DARK_GRAY_THRESH) & (~is_red_arrow)
+
+
+def build_wireframe_cargo_mask(region):
+    """Flood-fill: เส้นดำเป็นขอบเขต, พื้นที่ขาวที่ล้อมรอบสนิท (ไม่แตะขอบ
+    crop) = cargo จริง กรอง blob เล็ก (เศษตัวอักษรที่ปิดเป็นวง) ด้วยพื้นที่"""
+    dark = _wf_dark_mask(region)
+    dark_d = ndimage.binary_dilation(dark, iterations=1)
+    non_dark = ~dark_d
+    labeled, n = ndimage.label(non_dark, structure=np.ones((3, 3)))
+    if n == 0:
+        return np.zeros_like(dark), dark
+    border_labels = set(labeled[0, :]) | set(labeled[-1, :]) | set(labeled[:, 0]) | set(labeled[:, -1])
+    border_labels.discard(0)
+    outside_mask = np.isin(labeled, list(border_labels))
+    cargo_raw = non_dark & (~outside_mask)
+    labeled2, n2 = ndimage.label(cargo_raw, structure=np.ones((3, 3)))
+    if n2 == 0:
+        return cargo_raw, dark
+    sizes = ndimage.sum(cargo_raw, labeled2, range(1, n2 + 1))
+    keep = set(np.nonzero(sizes >= _WF_MIN_BLOB_PX)[0] + 1)
+    cargo_mask = np.isin(labeled2, list(keep))
+    return cargo_mask, dark
+
+
+def _wf_profile(cargo_mask):
+    h, w = cargo_mask.shape
+    bottom_y = np.full(w, -1, dtype=int)
+    top_y = np.full(w, -1, dtype=int)
+    for x in range(w):
+        ys = np.nonzero(cargo_mask[:, x])[0]
+        if len(ys):
+            bottom_y[x] = ys.max()
+            top_y[x] = ys.min()
+    return bottom_y, top_y
+
+
+# --- wireframe_faces.py (face-segmentation + column clustering) ---
+_WF_MIN_FACE_AREA = 8000
+_WF_MIN_FACE_WIDTH_PX = 100
+_WF_FRONT_ASPECT_MIN = 0.85
+_WF_FRONT_ASPECT_MAX = 2.3
+_WF_FRONT_MIN_FILL_RATIO = 0.35
+_WF_MIN_PLAUSIBLE_SEAM_GAP_PX = 90
+_WF_SIDE_FACE_TOUCH_GAP_MAX_PX = 15
+_WF_SIDE_FACE_HEIGHT_RATIO_TOL = 0.35
+_WF_SIDE_FACE_MAX_WIDTH_RATIO = 0.85
+_WF_GAP_INFILL_MIN_RATIO = 0.5
+
+
+def _wf_get_face_components(region, min_area=_WF_MIN_FACE_AREA):
+    dark = _wf_dark_mask(region)
+    dark_d = ndimage.binary_dilation(dark, iterations=1)
+    non_dark = ~dark_d
+    labeled, n = ndimage.label(non_dark, structure=np.ones((3, 3)))
+    if n == 0:
+        return [], dark
+    border_labels = set(labeled[0, :]) | set(labeled[-1, :]) | set(labeled[:, 0]) | set(labeled[:, -1])
+    border_labels.discard(0)
+    faces = []
+    objects = ndimage.find_objects(labeled)
+    for i, sl in enumerate(objects, start=1):
+        if sl is None or i in border_labels:
+            continue
+        y_slice, x_slice = sl
+        sub = (labeled[sl] == i)
+        area = int(sub.sum())
+        if area < min_area:
+            continue
+        y0, y1 = y_slice.start, y_slice.stop
+        x0, x1 = x_slice.start, x_slice.stop
+        w, h = x1 - x0, y1 - y0
+        fill_ratio = area / max(1, w * h)
+        faces.append(dict(x=x0, y=y0, w=w, h=h, area=area,
+                           cx=(x0 + x1) / 2.0, cy=(y0 + y1) / 2.0,
+                           aspect=(h / w) if w > 0 else 0, fill_ratio=fill_ratio))
+    return faces, dark
+
+
+def _wf_is_front_like(f):
+    return (_WF_FRONT_ASPECT_MIN <= f["aspect"] <= _WF_FRONT_ASPECT_MAX
+            and f["fill_ratio"] >= _WF_FRONT_MIN_FILL_RATIO
+            and f["w"] >= _WF_MIN_FACE_WIDTH_PX)
+
+
+def _wf_x_overlap_frac(a0, a1, b0, b1):
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    return inter / max(1e-6, min(a1 - a0, b1 - b0))
+
+
+def _wf_cluster_front_faces_by_xrange(front_faces, min_overlap_frac=0.5):
+    faces = sorted(front_faces, key=lambda f: f["x"])
+    cols = []
+    for f in faces:
+        f_x0, f_x1 = f["x"], f["x"] + f["w"]
+        f_y0, f_y1 = f["y"], f["y"] + f["h"]
+        placed = False
+        for col in cols:
+            ov = _wf_x_overlap_frac(col["x0"], col["x1"], f_x0, f_x1)
+            if ov >= min_overlap_frac:
+                col["members"].append(f)
+                col["x0"] = min(col["x0"], f_x0)
+                col["x1"] = max(col["x1"], f_x1)
+                col["y0"] = min(col["y0"], f_y0)
+                col["y1"] = max(col["y1"], f_y1)
+                placed = True
+                break
+        if not placed:
+            cols.append({"x0": f_x0, "x1": f_x1, "y0": f_y0, "y1": f_y1, "members": [f]})
+    for col in cols:
+        col["cx"] = (col["x0"] + col["x1"]) / 2.0
+        col["n_members"] = len(col["members"])
+    cols.sort(key=lambda c: c["cx"])
+    return cols
+
+
+def _wf_best_y_overlapping_member_height(members, y0, y1):
+    best_h, best_overlap = None, 0.0
+    for m in members:
+        m_y0, m_y1 = m["y"], m["y"] + m["h"]
+        overlap = max(0.0, min(y1, m_y1) - max(y0, m_y0))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_h = m["h"]
+    return best_h
+
+
+def _wf_merge_side_face_sliver_columns(cols,
+                                       touch_gap_max_px=_WF_SIDE_FACE_TOUCH_GAP_MAX_PX,
+                                       height_ratio_tol=_WF_SIDE_FACE_HEIGHT_RATIO_TOL,
+                                       max_width_ratio=_WF_SIDE_FACE_MAX_WIDTH_RATIO):
+    """กรอง side-face sliver (แถบแคบมีป้าย SKU หมุน 90° ติดขอบซ้ายกล่อง)
+    ออกจากรายการคอลัมน์ - ทำงานหลัง cluster เป็นคอลัมน์แล้วเท่านั้น (ไม่ใช่
+    ก่อน) เพราะกล่องซ้อนหลายชั้น (multi-tier stack) ทำให้ face ที่ x ใกล้
+    กันที่สุดมักเป็นชั้นอื่นของกล่องเดียวกัน ไม่ใช่คอลัมน์ข้างเคียงจริง -
+    เทียบความสูงกับ "สมาชิกเฉพาะชั้นที่ y ตรงกัน" ของเพื่อนบ้าน ไม่ใช่
+    bounding-box รวมทั้งคอลัมน์ (ซึ่งพังกับ multi-tier stack)"""
+    if len(cols) < 2:
+        return list(cols), []
+    cols_sorted = sorted(cols, key=lambda c: c["x0"])
+    widths = [c["x1"] - c["x0"] for c in cols_sorted]
+    median_w = float(np.median(widths)) if widths else 0.0
+    if median_w <= 0:
+        return list(cols_sorted), []
+
+    drop_flags = [False] * len(cols_sorted)
+    for i in range(len(cols_sorted) - 1):
+        c = cols_sorted[i]
+        nxt = cols_sorted[i + 1]
+        c_w = c["x1"] - c["x0"]
+        if c_w >= max_width_ratio * median_w:
+            continue
+        gap = nxt["x0"] - c["x1"]
+        if gap > touch_gap_max_px:
+            continue
+        c_y0, c_y1 = c["y0"], c["y1"]
+        matched_h = _wf_best_y_overlapping_member_height(nxt["members"], c_y0, c_y1)
+        if matched_h is None:
+            continue
+        c_h = c_y1 - c_y0
+        h_ratio = c_h / matched_h if matched_h > 0 else 0
+        if abs(h_ratio - 1.0) > height_ratio_tol:
+            continue
+        drop_flags[i] = True
+
+    merged, dropped = [], []
+    i = 0
+    while i < len(cols_sorted):
+        if drop_flags[i] and i + 1 < len(cols_sorted):
+            nxt = cols_sorted[i + 1]
+            nxt["x0"] = min(nxt["x0"], cols_sorted[i]["x0"])
+            nxt["y0"] = min(nxt["y0"], cols_sorted[i]["y0"])
+            nxt["y1"] = max(nxt["y1"], cols_sorted[i]["y1"])
+            nxt["members"] = cols_sorted[i]["members"] + nxt["members"]
+            nxt["n_members"] = len(nxt["members"])
+            dropped.append(cols_sorted[i])
+            i += 1
+            continue
+        merged.append(cols_sorted[i])
+        i += 1
+    for col in merged:
+        col["cx"] = (col["x0"] + col["x1"]) / 2.0
+    merged.sort(key=lambda c: c["cx"])
+    return merged, dropped
+
+
+def _wf_infill_edge_gap(gap_width, median_col_width):
+    if median_col_width <= 0 or gap_width < _WF_GAP_INFILL_MIN_RATIO * median_col_width:
+        return 0
+    return max(1, round(gap_width / median_col_width))
+
+
+def find_wireframe_seams_v5(region, cargo_mask, min_overlap_frac=0.5,
+                            apply_side_face_filter=True):
+    """หาตำแหน่งคอลัมน์ (idx) ของ wireframe view หนึ่งด้าน - ยืนยันด้วย
+    ภาพจริงว่าแม่นยำ 8/8 คอลัมน์ทั้ง 3 ไฟล์ทดสอบ (FRONT view) หลังผ่านการ
+    แก้บั๊กหลายรอบ (ดู docstring ของฟังก์ชันย่อยแต่ละตัวด้านบน)"""
+    bottom_y, top_y = _wf_profile(cargo_mask)
+    faces, dark = _wf_get_face_components(region)
+    front_faces = [f for f in faces if _wf_is_front_like(f)]
+    cols = _wf_cluster_front_faces_by_xrange(front_faces, min_overlap_frac=min_overlap_frac)
+
+    side_face_dropped = []
+    if apply_side_face_filter:
+        cols, side_face_dropped = _wf_merge_side_face_sliver_columns(cols)
+
+    large_faces = [f for f in faces if f["area"] >= _WF_MIN_FACE_AREA]
+    if large_faces:
+        x_min_silhouette = min(f["x"] for f in large_faces)
+        x_max_silhouette = max(f["x"] + f["w"] for f in large_faces)
+    else:
+        xs_valid = np.nonzero(bottom_y >= 0)[0]
+        if len(xs_valid) == 0:
+            return None
+        x_min_silhouette, x_max_silhouette = int(xs_valid.min()), int(xs_valid.max())
+
+    if not cols:
+        return {"x_min": x_min_silhouette, "x_max": x_max_silhouette, "seams": [],
+                "bottom_y": bottom_y, "top_y": top_y, "n_columns": 0,
+                "columns": [], "faces": faces, "front_faces": front_faces,
+                "side_face_dropped": side_face_dropped}
+
+    established_widths = [c["x1"] - c["x0"] for c in cols]
+    median_w = float(np.median(established_widths)) if established_widths else 0.0
+    x_min = cols[0]["x0"]
+    x_max = cols[-1]["x1"]
+
+    leading_gap = x_min - x_min_silhouette
+    n_leading = _wf_infill_edge_gap(leading_gap, median_w)
+    leading_synth_boundaries = []
+    if n_leading > 0:
+        step = leading_gap / n_leading
+        for k in range(n_leading):
+            leading_synth_boundaries.append(x_min_silhouette + k * step)
+        x_min = x_min_silhouette
+
+    trailing_gap = x_max_silhouette - x_max
+    n_trailing = _wf_infill_edge_gap(trailing_gap, median_w)
+    trailing_synth_boundaries = []
+    if n_trailing > 0:
+        step = trailing_gap / n_trailing
+        for k in range(1, n_trailing + 1):
+            trailing_synth_boundaries.append(x_max + k * step)
+        x_max = x_max_silhouette
+
+    all_heights = [f["h"] for f in front_faces]
+    median_h = float(np.median(all_heights)) if all_heights else 0.0
+    HEIGHT_ANOMALY_RATIO = 1.8
+    internal_seams = []
+    for i, col in enumerate(cols):
+        col_w = col["x1"] - col["x0"]
+        has_height_anomaly = (median_h > 0 and
+                              any(m["h"] > HEIGHT_ANOMALY_RATIO * median_h for m in col["members"]))
+        n_sub = 1
+        if has_height_anomaly:
+            n_sub = _wf_infill_edge_gap(col_w, median_w) if median_w > 0 else 1
+            n_sub = max(1, n_sub)
+        if n_sub > 1:
+            step = col_w / n_sub
+            for k in range(1, n_sub):
+                internal_seams.append(col["x0"] + k * step)
+        if i < len(cols) - 1:
+            internal_seams.append((col["x1"] + cols[i + 1]["x0"]) / 2.0)
+    seams = internal_seams
+
+    all_boundaries_internal = leading_synth_boundaries[1:] + seams + trailing_synth_boundaries[:-1] \
+        if (leading_synth_boundaries or trailing_synth_boundaries) else seams
+    seams_final = sorted(all_boundaries_internal)
+    boundaries = [x_min] + seams_final + [x_max]
+    widths = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
+
+    return {"x_min": x_min, "x_max": x_max, "seams": seams_final,
+            "bottom_y": bottom_y, "top_y": top_y, "n_columns": len(widths),
+            "widths": widths, "columns": cols, "faces": faces,
+            "front_faces": front_faces, "median_established_width": median_w,
+            "n_leading_infill": n_leading, "n_trailing_infill": n_trailing,
+            "side_face_dropped": side_face_dropped}
+
+
+# --- Bucket-color preprocessing (สำหรับ EMPTY_SPACE_RISK) ---
+_WF_BUCKET_COLORS = [
+    (255, 100, 100), (100, 200, 255), (100, 220, 100), (230, 180, 60),
+]
+_WF_N_HEIGHT_BUCKETS = len(_WF_BUCKET_COLORS)
+
+
+def bucket_color_wireframe(hi_img, cargo_mask, seams_result):
+    """ระบายสีปลอมตาม bucket ความสูงสัมพัทธ์ (4 ระดับ) ให้แต่ละคอลัมน์ที่
+    ตรวจพบ - คืนสัญญาณสีที่จำเป็นสำหรับ EMPTY_SPACE_RISK detection (ไฟล์
+    wireframe ไม่มีสีเลย เช็ค white-vs-solid-color ไม่ได้ถ้าไม่มีขั้นตอนนี้)
+    ไม่ได้ calibrate สเกล mm สัมบูรณ์ (ตัวเลขมิติในไฟล์ทดสอบเป็น vector
+    path ดึงจาก PDF text layer ไม่ได้) - ใช้ relative height ต่อไฟล์แทน"""
+    bottom_y, top_y = _wf_profile(cargo_mask)
+    boundaries = sorted([seams_result["x_min"]] + seams_result["seams"] + [seams_result["x_max"]])
+    n_cols = len(boundaries) - 1
+    col_heights = []
+    for i in range(n_cols):
+        x0, x1 = boundaries[i], boundaries[i + 1]
+        xa, xb = int(x0) + 5, int(x1) - 5
+        if xb <= xa:
+            col_heights.append(None)
+            continue
+        ys_t = [top_y[x] for x in range(xa, xb) if 0 <= x < len(top_y) and top_y[x] >= 0]
+        ys_b = [bottom_y[x] for x in range(xa, xb) if 0 <= x < len(bottom_y) and bottom_y[x] >= 0]
+        if not ys_t or not ys_b:
+            col_heights.append(None)
+            continue
+        col_heights.append(float(np.median(ys_b)) - float(np.median(ys_t)))
+
+    valid_heights = [h for h in col_heights if h is not None]
+    if not valid_heights:
+        return hi_img.copy(), []
+    h_min, h_max = min(valid_heights), max(valid_heights)
+    h_range = max(1e-6, h_max - h_min)
+
+    colored = hi_img.copy()
+    column_bucket_info = []
+    for i in range(n_cols):
+        h = col_heights[i]
+        if h is None:
+            continue
+        bucket = min(_WF_N_HEIGHT_BUCKETS - 1, int((h - h_min) / h_range * _WF_N_HEIGHT_BUCKETS))
+        color = _WF_BUCKET_COLORS[bucket]
+        x0, x1 = int(boundaries[i]), int(boundaries[i + 1])
+        col_mask_slice = cargo_mask[:, x0:x1]
+        colored[:, x0:x1][col_mask_slice] = color
+        column_bucket_info.append({"col_idx": i, "height_px": h, "bucket": bucket, "color": color})
+    return colored, column_bucket_info
+
+
+_WF_NOTCH_MIN_WIDTH_PX = 20
+_WF_NOTCH_BOX_MIN_WIDTH_PX = 70
+
+
+def find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask,
+                                 min_prominence_px=15, min_distance_px=20,
+                                 min_width_px=15, min_color_fraction=0.5):
+    """EMPTY_SPACE_RISK สำหรับ wireframe - วิเคราะห์เส้นขอบบนจริงของภาพ 3D
+    isometric (cargo_top_y curve) ไม่ใช่แค่เช็คว่ามี cargo หรือไม่แบบราบ
+    เรียบ (วิธีนั้นพิสูจน์แล้วว่าพลาด/false-positive มากมายระหว่างพัฒนา)
+    ยืนยัน peak ด้วย 2 เงื่อนไขสี: (1) สัดส่วนสีใน notch ต่ำพอ (ไม่ใช่แค่
+    เส้นแบ่งกล่องจริง) (2) สี bucket ของฝั่งซ้าย/ขวาต่างกันจริง (กัน
+    "หุบเขาธรรมชาติ" ของเส้นหลังคา isometric ระหว่างกล่องสูงเท่ากัน)"""
+    bottom_y, top_y = _wf_profile(cargo_mask)
+    sx, ex = int(seams_result["x_min"]), int(seams_result["x_max"])
+    if (ex - sx) < 40:
+        return []
+    xs = np.arange(sx, ex)
+    vals = np.array([float(top_y[x]) if 0 <= x < len(top_y) and top_y[x] >= 0 else np.nan for x in xs])
+    valid_mask = ~np.isnan(vals)
+    if valid_mask.sum() < 20:
+        return []
+    if not np.all(valid_mask):
+        vals = np.interp(np.arange(len(vals)), np.where(valid_mask)[0], vals[valid_mask])
+    smoothed = median_filter(vals, size=9)
+
+    peaks, props = find_peaks(smoothed, prominence=min_prominence_px,
+                              distance=min_distance_px, width=min_width_px,
+                              rel_height=0.5)
+
+    def _is_bucket_color(pixel, tol=10):
+        for c in _WF_BUCKET_COLORS:
+            if all(abs(int(pixel[k]) - c[k]) <= tol for k in range(3)):
+                return True
+        return False
+
+    def _color_fraction_in_band(x_lo, x_hi, y_lo, y_hi, step=4):
+        n_checked, n_colored = 0, 0
+        for x in range(int(x_lo), int(x_hi), step):
+            for y in range(int(y_lo), int(y_hi), step):
+                if 0 <= y < colored_img.shape[0] and 0 <= x < colored_img.shape[1]:
+                    n_checked += 1
+                    if _is_bucket_color(colored_img[y, x]):
+                        n_colored += 1
+        return (n_colored / n_checked) if n_checked else 0.0
+
+    def _dominant_bucket_near(x, y_ref, search_radius=40, tol=10):
+        counts = {}
+        for xx in range(max(0, x - search_radius), min(colored_img.shape[1], x + search_radius)):
+            for yy in range(max(0, y_ref - search_radius), min(colored_img.shape[0], y_ref + search_radius)):
+                px = colored_img[yy, xx]
+                for ci, c in enumerate(_WF_BUCKET_COLORS):
+                    if all(abs(int(px[k]) - c[k]) <= tol for k in range(3)):
+                        counts[ci] = counts.get(ci, 0) + 1
+                        break
+        return max(counts, key=counts.get) if counts else None
+
+    risks = []
+    for i, p in enumerate(peaks):
+        prom = float(props["prominences"][i])
+        width = float(props["widths"][i])
+        x_notch = int(xs[p])
+        y_notch = int(round(smoothed[p]))
+        baseline_y = int(round(props["width_heights"][i]))
+        if y_notch <= baseline_y:
+            continue
+        half_w = width / 2.0
+        x_left = max(sx, int(round(x_notch - half_w)))
+        x_right = min(ex, int(round(x_notch + half_w)))
+
+        color_frac = _color_fraction_in_band(x_left, x_right, baseline_y, y_notch)
+        if color_frac >= (1.0 - min_color_fraction):
+            continue
+
+        left_bucket = _dominant_bucket_near(x_left - 10, y_notch)
+        right_bucket = _dominant_bucket_near(x_right + 10, y_notch)
+        if left_bucket is not None and right_bucket is not None and left_bucket == right_bucket:
+            continue
+
+        width_final = x_right - x_left
+        if width_final < _WF_NOTCH_BOX_MIN_WIDTH_PX:
+            pad = (_WF_NOTCH_BOX_MIN_WIDTH_PX - width_final) / 2.0
+            x0_mark = max(sx, int(round(x_left - pad)))
+            x1_mark = min(ex, int(round(x_right + pad)))
+        else:
+            x0_mark, x1_mark = x_left, x_right
+
+        risks.append({
+            "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch_3d",
+            "x_range": (x0_mark, x1_mark), "y_range": (baseline_y, y_notch),
+            "notch_x": x_notch, "prominence_px": prom,
+            "color_fraction_in_gap": color_frac,
+        })
+    return risks
+
+
+# --- wireframe_risk_ready.py (STEP_DOWN_RISK cross-view) ---
+_WF_MIN_OVERLAP_RATIO = 0.5
+_WF_EDGE_ZONE_POS_THRESH = 0.15
+_WF_FRONT_TO_BACK_HEIGHT_SCALE = 1.19  # calibrate จากข้อมูลจริง 3 ไฟล์ -
+                                       # ไม่ใช่ค่าคงที่ทางฟิสิกส์สัมบูรณ์
+
+
+def _wf_column_height(hi_img, x0, x1, margin=5):
+    cargo_mask, dark = build_wireframe_cargo_mask(hi_img)
+    bottom_y, top_y = _wf_profile(cargo_mask)
+    xa, xb = int(x0) + margin, int(x1) - margin
+    if xb <= xa:
+        return None
+    ys_top = [top_y[x] for x in range(xa, xb) if 0 <= x < len(top_y) and top_y[x] >= 0]
+    ys_bot = [bottom_y[x] for x in range(xa, xb) if 0 <= x < len(bottom_y) and bottom_y[x] >= 0]
+    if not ys_top or not ys_bot:
+        return None
+    return float(np.median(ys_bot)) - float(np.median(ys_top))
+
+
+def build_stack_records_wireframe(seams_result, hi_img, view_label, flip_position=None):
+    """แปลงผล find_wireframe_seams_v5 เป็น stack records - flip_position
+    ตามธรรมเนียมเดียวกับ build_stack_records เดิม (FRONT ต้อง flip เพราะ
+    ภาพสะท้อนซ้าย-ขวากับ BACK - HARDCODED_REAR_SIDE)"""
+    if flip_position is None:
+        flip_position = (view_label == "FRONT")
+    boundaries = sorted([seams_result["x_min"]] + seams_result["seams"] + [seams_result["x_max"]])
+    x_min, x_max = boundaries[0], boundaries[-1]
+    span = max(1e-6, x_max - x_min)
+    records = []
+    for i in range(len(boundaries) - 1):
+        x0, x1 = boundaries[i], boundaries[i + 1]
+        p0 = (x0 - x_min) / span
+        p1 = (x1 - x_min) / span
+        if flip_position:
+            real_p0, real_p1 = 1.0 - p1, 1.0 - p0
+        else:
+            real_p0, real_p1 = p0, p1
+        h = _wf_column_height(hi_img, x0, x1)
+        records.append({
+            "idx": i, "view": view_label,
+            "x_range": (x0, x1), "pos_range": (real_p0, real_p1),
+            "height_px": h,
+        })
+    return records
+
+
+def _wf_match_cross_view(records_a, records_b, min_overlap_ratio=_WF_MIN_OVERLAP_RATIO):
+    def _overlap(a0, a1, b0, b1):
+        inter = max(0.0, min(a1, b1) - max(a0, b0))
+        smaller = min(max(1e-6, a1 - a0), max(1e-6, b1 - b0))
+        return inter / smaller if smaller > 0 else 0.0
+    results = []
+    for rec_a in records_a:
+        a0, a1 = rec_a["pos_range"]
+        matches = [rec_b for rec_b in records_b
+                   if _overlap(a0, a1, rec_b["pos_range"][0], rec_b["pos_range"][1]) >= min_overlap_ratio]
+        results.append((rec_a, matches))
+    return results
+
+
+def _wf_reliability_zone(pos_range):
+    p0, p1 = pos_range
+    pmid = (p0 + p1) / 2.0
+    return _WF_EDGE_ZONE_POS_THRESH <= pmid <= (1.0 - _WF_EDGE_ZONE_POS_THRESH)
+
+
+def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
+                                                drop_ratio_thresh=0.20,
+                                                min_overlap_ratio=_WF_MIN_OVERLAP_RATIO,
+                                                apply_calibration=True,
+                                                exclude_edge_zone=True):
+    """STEP_DOWN_RISK สำหรับ wireframe - ใช้ position-overlap matching
+    (รองรับ many-to-one เพราะ BACK มักรวมคอลัมน์ที่ FRONT แยกออกจากกันได้
+    - ข้อจำกัดทางข้อมูลจริงที่ยืนยันแล้วว่าแก้ไม่ได้ด้วยภาพเพียงอย่างเดียว)
+    แทนการบังคับให้ FRONT/BACK นับคอลัมน์เท่ากัน (พิสูจน์แล้วว่าอันตราย -
+    เคยเกือบวาดเส้นตกกลางกล่องจริง) คูณ calibration factor 1.19 เข้ากับ
+    ความสูง BACK ก่อนเทียบ (ชดเชย bias เชิงระบบที่วัดได้จริง) และตัด
+    คอลัมน์ใกล้มุมตู้ (edge zone) ออกจากการ flag เพราะวัดไม่แม่นยำพอ"""
+    matches = _wf_match_cross_view(records_front, records_back, min_overlap_ratio)
+    risks = []
+    for rec_front, back_matches in matches:
+        if rec_front["height_px"] is None or not back_matches:
+            continue
+        if exclude_edge_zone and not _wf_reliability_zone(rec_front["pos_range"]):
+            continue
+        back_heights = [m["height_px"] for m in back_matches if m["height_px"] is not None]
+        if not back_heights:
+            continue
+        back_h = float(np.median(back_heights))
+        if apply_calibration:
+            back_h *= _WF_FRONT_TO_BACK_HEIGHT_SCALE
+        front_h = rec_front["height_px"]
+        taller = max(front_h, back_h)
+        shorter = min(front_h, back_h)
+        if taller <= 0:
+            continue
+        drop_ratio = 1 - (shorter / taller)
+        if drop_ratio >= drop_ratio_thresh:
+            risks.append({
+                "front_idx": rec_front["idx"], "front_height_px": front_h,
+                "back_height_px_calibrated": back_h, "back_match_count": len(back_matches),
+                "drop_ratio": drop_ratio, "pos_range": rec_front["pos_range"],
+            })
+    return risks
+
+
+# --- wireframe_fullpage_pipeline.py (end-to-end + full-page coordinate mapping) ---
+_WF_RISK_COLORS = {"STEP_DOWN_RISK": "red", "EMPTY_SPACE_RISK": "orange"}
+
+
+def _wf_hi_to_full_page(x_hi, y_hi, crop_origin, down_factor):
+    origin_x, origin_y = crop_origin[0], crop_origin[1]
+    return origin_x + x_hi * down_factor, origin_y + y_hi * down_factor
+
+
+def _wf_column_top_bottom_y(hi_img, x0, x1, margin=5):
+    cargo_mask, dark = build_wireframe_cargo_mask(hi_img)
+    bottom_y, top_y = _wf_profile(cargo_mask)
+    xa, xb = int(x0) + margin, int(x1) - margin
+    if xb <= xa:
+        return None, None
+    ys_top = [top_y[x] for x in range(xa, xb) if 0 <= x < len(top_y) and top_y[x] >= 0]
+    ys_bot = [bottom_y[x] for x in range(xa, xb) if 0 <= x < len(bottom_y) and bottom_y[x] >= 0]
+    if not ys_top or not ys_bot:
+        return None, None
+    return float(np.median(ys_top)), float(np.median(ys_bot))
+
+
+def _wf_pos_to_hi_pixel_range(pos_range, x_min, x_max, view_label, flip=None):
+    if flip is None:
+        flip = (view_label == "FRONT")
+    p0, p1 = pos_range
+    span = x_max - x_min
+    if flip:
+        raw_p0, raw_p1 = 1.0 - p1, 1.0 - p0
+    else:
+        raw_p0, raw_p1 = p0, p1
+    return x_min + raw_p0 * span, x_min + raw_p1 * span
+
+
+def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page_idx,
+                                    matrix_scale=3, hi_scale=8, drop_ratio_thresh=0.20):
+    """เทียบเท่า run_full_analysis_on_image() เดิม แต่สำหรับ wireframe -
+    คืนค่ารูปแบบเดียวกัน (dict มี key 'risks' เป็น list ของ risk dict ที่มี
+    'abs_box' คำนวณไว้ตรงจุดแล้ว - ให้ process_request เดิมเรียกวาด marker
+    ได้เหมือนกันทุกประการ ไม่ต้องแก้ logic การวาด/นับ hazardCount เลย)"""
+    down_factor = matrix_scale / hi_scale
+    view_data = {}
+    for view_label, view_name in [("FRONT", "front"), ("BACK", "back")]:
+        region, origin, _ = get_view_region(full_img, doc, view_name, page_idx=diagram_page_idx)
+        hi_img, _down_factor_check = render_hires_crop(page, origin, main_scale=matrix_scale, hi_scale=hi_scale)
+        cargo_mask, dark = build_wireframe_cargo_mask(hi_img)
+        seams_result = find_wireframe_seams_v5(hi_img, cargo_mask)
+        records = build_stack_records_wireframe(seams_result, hi_img, view_label)
+        colored_img, bucket_info = bucket_color_wireframe(hi_img, cargo_mask, seams_result)
+        notch_risks = find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask)
+        view_data[view_label] = {
+            "hi_img": hi_img, "origin": origin, "seams_result": seams_result,
+            "records": records, "notch_risks": notch_risks,
+        }
+
+    records_front = view_data["FRONT"]["records"]
+    records_back = view_data["BACK"]["records"]
+    height_risks = detect_wireframe_cross_view_height_mismatch(
+        records_front, records_back, drop_ratio_thresh=drop_ratio_thresh)
+
+    risks = []
+    for hr in height_risks:
+        front_idx = hr["front_idx"]
+        front_vd = view_data["FRONT"]
+        back_vd = view_data["BACK"]
+
+        fx0_hi, fx1_hi = records_front[front_idx]["x_range"]
+        top_y_hi, bot_y_hi = _wf_column_top_bottom_y(front_vd["hi_img"], fx0_hi, fx1_hi)
+        if top_y_hi is None:
+            top_y_hi, bot_y_hi = 0, front_vd["hi_img"].shape[0]
+        fx0, fy0 = _wf_hi_to_full_page(fx0_hi, top_y_hi, front_vd["origin"], down_factor)
+        fx1, fy1 = _wf_hi_to_full_page(fx1_hi, bot_y_hi, front_vd["origin"], down_factor)
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK", "subtype": "wireframe_cross_view",
+            "mark_view": "FRONT", "abs_box": (fx0, fy0, fx1, fy1),
+            "drop_ratio": hr["drop_ratio"],
+        })
+
+        back_seams = back_vd["seams_result"]
+        bx0_hi, bx1_hi = _wf_pos_to_hi_pixel_range(
+            hr["pos_range"], back_seams["x_min"], back_seams["x_max"], "BACK")
+        top_y_hi_b, bot_y_hi_b = _wf_column_top_bottom_y(back_vd["hi_img"], bx0_hi, bx1_hi)
+        if top_y_hi_b is None:
+            top_y_hi_b, bot_y_hi_b = 0, back_vd["hi_img"].shape[0]
+        bx0, by0 = _wf_hi_to_full_page(bx0_hi, top_y_hi_b, back_vd["origin"], down_factor)
+        bx1, by1 = _wf_hi_to_full_page(bx1_hi, bot_y_hi_b, back_vd["origin"], down_factor)
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK", "subtype": "wireframe_cross_view",
+            "mark_view": "BACK", "abs_box": (bx0, by0, bx1, by1),
+            "drop_ratio": hr["drop_ratio"],
+        })
+
+    for view_label in ["FRONT", "BACK"]:
+        vd = view_data[view_label]
+        origin = vd["origin"]
+        for nr in vd["notch_risks"]:
+            x0_hi, x1_hi = nr["x_range"]
+            y0_hi, y1_hi = nr["y_range"]
+            nx0, ny0 = _wf_hi_to_full_page(x0_hi, y0_hi, origin, down_factor)
+            nx1, ny1 = _wf_hi_to_full_page(x1_hi, y1_hi, origin, down_factor)
+            risks.append({
+                "risk_type": "EMPTY_SPACE_RISK", "subtype": "wireframe_silhouette_notch",
+                "mark_view": view_label, "abs_box": (nx0, ny0, nx1, ny1),
+            })
+
+    return {
+        "risks": risks,
+        "front_n_columns": view_data["FRONT"]["seams_result"]["n_columns"],
+        "back_n_columns": view_data["BACK"]["seams_result"]["n_columns"],
+    }
 
 
 # ============================================================================
@@ -7199,9 +7905,31 @@ def process_request(request):
         else:
             layout = "TOP_BOTTOM"
 
-        # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
-        result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
-        risks = result["risks"]
+        # v25.90 NEW: ตรวจสอบว่าไฟล์นี้เป็น wireframe (line-drawing ไม่มี
+        # สีทึบ) หรือไฟล์สีปกติ - เช็คจาก FRONT region (crop มาแล้วครั้งเดียว
+        # ผ่าน get_view_region เดียวกับที่ path สีเดิมใช้อยู่แล้ว ไม่เพิ่ม
+        # การ render ซ้ำซ้อน) ถ้าเป็น wireframe ให้ branch ไปใช้กลไกเฉพาะ
+        # (v25.90 wireframe module ด้านบน) แทน pipeline สีเดิมทั้งหมด -
+        # ไม่กระทบ path สีเดิมแม้แต่บรรทัดเดียว (wireframe path แยกฟังก์ชัน
+        # ทั้งหมด, ใช้แค่ get_view_region/render_hires_crop ร่วมกันเพื่อ
+        # ความสอดคล้องของพิกัด full-page เดียวกัน)
+        wf_check_region, _, _ = get_view_region(full_img, doc, "front", page_idx=diagram_page_idx)
+        is_wireframe = is_wireframe_region(wf_check_region)
+        print(f"is_wireframe={is_wireframe}")
+
+        if is_wireframe:
+            wf_result = run_wireframe_analysis_on_image(
+                pdf_bytes, full_img, doc, page, diagram_page_idx, matrix_scale=3, hi_scale=8)
+            risks = wf_result["risks"]
+            result = None  # ไม่มี stack_heights/local_floor_y แบบ pipeline สีเดิม -
+                           # ทุก risk ของ wireframe คำนวณ abs_box ไว้ตรงจุดแล้ว
+                           # (ดู run_wireframe_analysis_on_image) จึงไม่ต้องพึ่ง
+                           # risk_abs_box(risk, result) เดิมเลย (result=None จะไม่
+                           # ถูกใช้งาน เพราะ risk.get("abs_box") มีค่าเสมอ)
+        else:
+            # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
+            result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
+            risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
         draw = PIL.ImageDraw.Draw(img)
@@ -7278,11 +8006,13 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.89",
-            "benchmarkMode": "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
+            "checkerVersion": "V25.90",
+            "benchmarkMode": "v25_90_wireframe_support_added" if is_wireframe else
+                             "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
+
