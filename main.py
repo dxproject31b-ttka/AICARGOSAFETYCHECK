@@ -7286,4 +7286,3 @@ def process_request(request):
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
-
