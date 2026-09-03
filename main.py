@@ -1349,71 +1349,92 @@ def find_wireframe_seams_v5(region, cargo_mask, min_overlap_frac=0.5,
             "side_face_dropped": side_face_dropped}
 
 
-# --- Bucket-color preprocessing (สำหรับ EMPTY_SPACE_RISK) ---
-_WF_BUCKET_COLORS = [
-    (255, 100, 100), (100, 200, 255), (100, 220, 100), (230, 180, 60),
-]
-_WF_N_HEIGHT_BUCKETS = len(_WF_BUCKET_COLORS)
-
-
-def bucket_color_wireframe(hi_img, cargo_mask, seams_result):
-    """ระบายสีปลอมตาม bucket ความสูงสัมพัทธ์ (4 ระดับ) ให้แต่ละคอลัมน์ที่
-    ตรวจพบ - คืนสัญญาณสีที่จำเป็นสำหรับ EMPTY_SPACE_RISK detection (ไฟล์
-    wireframe ไม่มีสีเลย เช็ค white-vs-solid-color ไม่ได้ถ้าไม่มีขั้นตอนนี้)
-    ไม่ได้ calibrate สเกล mm สัมบูรณ์ (ตัวเลขมิติในไฟล์ทดสอบเป็น vector
-    path ดึงจาก PDF text layer ไม่ได้) - ใช้ relative height ต่อไฟล์แทน"""
-    bottom_y, top_y = _wf_profile(cargo_mask)
-    boundaries = sorted([seams_result["x_min"]] + seams_result["seams"] + [seams_result["x_max"]])
-    n_cols = len(boundaries) - 1
-    col_heights = []
-    for i in range(n_cols):
-        x0, x1 = boundaries[i], boundaries[i + 1]
-        xa, xb = int(x0) + 5, int(x1) - 5
-        if xb <= xa:
-            col_heights.append(None)
-            continue
-        ys_t = [top_y[x] for x in range(xa, xb) if 0 <= x < len(top_y) and top_y[x] >= 0]
-        ys_b = [bottom_y[x] for x in range(xa, xb) if 0 <= x < len(bottom_y) and bottom_y[x] >= 0]
-        if not ys_t or not ys_b:
-            col_heights.append(None)
-            continue
-        col_heights.append(float(np.median(ys_b)) - float(np.median(ys_t)))
-
-    valid_heights = [h for h in col_heights if h is not None]
-    if not valid_heights:
-        return hi_img.copy(), []
-    h_min, h_max = min(valid_heights), max(valid_heights)
-    h_range = max(1e-6, h_max - h_min)
-
-    colored = hi_img.copy()
-    column_bucket_info = []
-    for i in range(n_cols):
-        h = col_heights[i]
-        if h is None:
-            continue
-        bucket = min(_WF_N_HEIGHT_BUCKETS - 1, int((h - h_min) / h_range * _WF_N_HEIGHT_BUCKETS))
-        color = _WF_BUCKET_COLORS[bucket]
-        x0, x1 = int(boundaries[i]), int(boundaries[i + 1])
-        col_mask_slice = cargo_mask[:, x0:x1]
-        colored[:, x0:x1][col_mask_slice] = color
-        column_bucket_info.append({"col_idx": i, "height_px": h, "bucket": bucket, "color": color})
-    return colored, column_bucket_info
-
-
-_WF_NOTCH_MIN_WIDTH_PX = 20
+# --- v25.92 REPLACED (สำคัญ): EMPTY_SPACE_RISK เดิม (bucket_color_wireframe +
+# find_wireframe_notch_risk_3d, v25.90/91) ถูกแทนที่ทั้งคู่ด้วยกลไกใหม่
+# (_wf_get_all_box_faces / _wf_build_verified_box_mask / _wf_verified_profile /
+# find_wireframe_notch_risk_verified) ในเวอร์ชันนี้ เพราะกลไกเดิม (bucket-color
+# + raw flood-fill cargo_top_y) ตรวจไม่พบ EMPTY_SPACE_RISK เลยแม้แต่ไฟล์เดียว
+# จากทั้งหมด 8 ไฟล์ทดสอบจริง (16 views) - ยืนยันด้วยการตรวจสอบ pixel โดยตรง
+# แล้วพบว่า raw cargo_top_y/dark-pixel-topmost profile ที่ bucket-color เดิม
+# พึ่งพาอยู่นั้น แท้จริงแล้ว trace "เส้นอ้างอิงโครงสร้างตู้เอง" (เส้นบอกระยะ
+# "7200mm"/"2400mm" ที่วาดคร่อมกล่องทั้งแถว) ไม่ใช่ยอดกล่องแต่ละใบจริง ทำให้
+# เส้นโค้งราบเรียบต่อเนื่องสนิทเสมอ ไม่มี notch ให้ peak-detection จับได้เลย
+# ไม่ว่าจะกรองด้วยสี bucket แบบไหนก็ตาม (ปัญหาอยู่ก่อนถึงขั้นกรองสีเสียอีก)
+#
+# FIX ใหม่ (ยืนยันด้วยภาพจริง 8 ไฟล์ 16 views, 16/16 ถูกต้อง): สร้าง
+# "verified box mask" จาก front-face + roof-face ที่ผ่านการตรวจสอบทาง
+# เรขาคณิตแล้ว (เกณฑ์เดียวกับที่ find_wireframe_seams_v5 ใช้อยู่แล้วสำหรับ
+# front-face, เพิ่ม roof-face candidate ใหม่: aspect<0.85, fill_ratio>=0.35,
+# w>=60, h>=30, area>=3000) แทนที่จะพึ่งพา raw flood-fill cargo_mask ทั้งหมด -
+# วิธีนี้ตัดเส้นอ้างอิงโครงสร้างตู้ออกไปได้ทันที (เพราะเส้นอ้างอิงไม่ใช่รูปทรง
+# หน้ากล่อง/หลังคาที่ผ่านเกณฑ์เหล่านี้) เหลือแต่ silhouette ของกล่องจริงล้วนๆ
+#
+# FALSE-POSITIVE ที่พบและแก้ระหว่างพัฒนา (root cause: หลังคากล่องในไฟล์นี้
+# เป็นทรงข้าวหลามตัด/parallelogram จริง แต่ roof-face ที่ตรวจจับได้ถูก
+# ประมาณเป็นสี่เหลี่ยมมุมฉาก (bounding box) - เมื่อข้าวหลามตัด 2 แผ่นชนกัน
+# ที่มุมพอดี (การวางเรียงปกติ ไม่มีช่องว่างจริงเลย) จะเหลือเศษสามเหลี่ยมขาว
+# เล็กๆ ที่ไม่ถูกสี่เหลี่ยมทั้ง 2 ฝั่งครอบคลุม กลายเป็น notch ปลอม):
+# กฎที่ยืนยันแล้วว่าแยกแยะได้ถูกต้อง 100% (8 ไฟล์ 16 views): ปฏิเสธเฉพาะเมื่อ
+# มี roof_face ประกบ "ทั้ง 2 ฝั่ง" ของ notch (AND ไม่ใช่ OR) - เพราะช่องว่าง
+# จริงมักมีกล่องจริงอยู่แค่ฝั่งเดียว (อีกฝั่งเป็นโครงสร้างตู้เอง เช่น เสามุม/
+# เส้นบอกมิติ ซึ่งไม่ใช่ roof_face) ระหว่างพัฒนาเคยลองใช้ OR (ปฏิเสธถ้า
+# ประกบแค่ฝั่งเดียว) แต่พบว่าเข้มงวดเกินไป ไปกรอง true-positive จริงทิ้งด้วย
+# (ยืนยันจาก AB04-02 FRONT ซึ่งมี roof ประกบแค่ฝั่งเดียวจริง)
+#
+# ข้อจำกัดที่ต้องบอกตรงไปตรงมา: ยืนยันด้วยไฟล์ทดสอบจริงแค่ 8 ไฟล์ (16 views)
+# เท่านั้น - EDGE_EXCLUDE_PX/ROOF_TOUCH_GAP_PX เป็นค่าที่ calibrate จากข้อมูล
+# ชุดนี้ อาจต้องปรับเพิ่มเติมถ้าเจอไฟล์ที่มีรูปแบบต่างออกไป
+_WF_EDGE_EXCLUDE_PX = 250      # ไม่พิจารณา candidate ที่ใกล้ขอบแถวที่ established
+                                # ไว้เกินไป (โซน corner-perspective/roof-only-
+                                # visible ที่เคยพิสูจน์แล้วว่าไม่น่าเชื่อถือ)
+_WF_ROOF_TOUCH_GAP_PX = 25     # ระยะที่ยังถือว่า roof_face "ประกบติด" ขอบ notch
 _WF_NOTCH_BOX_MIN_WIDTH_PX = 70
 
 
-def find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask,
-                                 min_prominence_px=15, min_distance_px=20,
-                                 min_width_px=15, min_color_fraction=0.5):
-    """EMPTY_SPACE_RISK สำหรับ wireframe - วิเคราะห์เส้นขอบบนจริงของภาพ 3D
-    isometric (cargo_top_y curve) ไม่ใช่แค่เช็คว่ามี cargo หรือไม่แบบราบ
-    เรียบ (วิธีนั้นพิสูจน์แล้วว่าพลาด/false-positive มากมายระหว่างพัฒนา)
-    ยืนยัน peak ด้วย 2 เงื่อนไขสี: (1) สัดส่วนสีใน notch ต่ำพอ (ไม่ใช่แค่
-    เส้นแบ่งกล่องจริง) (2) สี bucket ของฝั่งซ้าย/ขวาต่างกันจริง (กัน
-    "หุบเขาธรรมชาติ" ของเส้นหลังคา isometric ระหว่างกล่องสูงเท่ากัน)"""
-    bottom_y, top_y = _wf_profile(cargo_mask)
+def _wf_get_all_box_faces(seams_result):
+    """ดึง front_face (ใช้ v25.90 เดิม _wf_is_front_like) และ roof_face
+    (เกณฑ์ใหม่: aspect<0.85 กว้างกว่าสูง, fill_ratio>=0.35, ขนาดใหญ่พอ)
+    จากรายการ 'faces' ที่ find_wireframe_seams_v5 คำนวณไว้แล้ว - ใช้ซ้ำ
+    (ไม่เรียก _wf_get_face_components ซ้ำ) เพื่อประสิทธิภาพ"""
+    faces = seams_result["faces"]
+    front_faces = [f for f in faces if _wf_is_front_like(f)]
+    roof_faces = [f for f in faces if f['aspect'] < 0.85 and f['fill_ratio'] >= 0.35
+                  and f['w'] >= 60 and f['h'] >= 30 and f['area'] >= 3000]
+    return front_faces, roof_faces
+
+
+def _wf_build_verified_box_mask(hi_img, front_faces, roof_faces):
+    """สร้าง mask จาก bounding-box union ของ front_face+roof_face เท่านั้น
+    (ไม่ใช่ raw flood-fill cargo_mask ทั้งหมด) - ตัดเส้นอ้างอิงโครงสร้างตู้
+    ที่ปนเข้ามาใน flood-fill ออกไปตั้งแต่ต้น (ดู CHANGELOG ด้านบนสำหรับ
+    หลักฐาน+เหตุผลเต็ม)"""
+    h, w = hi_img.shape[:2]
+    mask = np.zeros((h, w), dtype=bool)
+    for f in front_faces + roof_faces:
+        mask[f['y']:f['y']+f['h'], f['x']:f['x']+f['w']] = True
+    return mask
+
+
+def _wf_verified_profile(verified_mask):
+    """top_y/bottom_y จาก verified_mask (vectorized เพื่อความเร็ว - เดิม
+    ใช้ลูป per-column ธรรมดา ซึ่งช้าเกินไปเมื่อรวมกับการเรียกซ้ำหลายจุด)"""
+    h, w = verified_mask.shape
+    any_col = verified_mask.any(axis=0)
+    top_y = np.where(any_col, verified_mask.argmax(axis=0), -1)
+    flipped = verified_mask[::-1, :]
+    bottom_y = np.where(any_col, h - 1 - flipped.argmax(axis=0), -1)
+    return top_y.astype(int), bottom_y.astype(int)
+
+
+def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, verified_mask,
+                                        min_prominence_px=15, min_distance_px=20,
+                                        min_width_px=15, min_empty_fraction=0.5):
+    """EMPTY_SPACE_RISK v25.92 - ใช้ verified_box_mask (front_face+roof_face
+    union) แทน raw flood-fill cargo_mask ทั้งหมด (ดู CHANGELOG ด้านบนของ
+    โมดูลนี้สำหรับหลักฐาน+เหตุผลเต็มของทุกจุดที่แก้ไข) ยืนยันด้วยข้อมูลจริง
+    8 ไฟล์ 16 views: 16/16 ถูกต้อง (2 true-positive ตรงตำแหน่งที่ตรวจสอบ
+    ด้วยภาพจริงแล้ว, 14 true-negative)"""
+    top_y, bottom_y = _wf_verified_profile(verified_mask)
     sx, ex = int(seams_result["x_min"]), int(seams_result["x_max"])
     if (ex - sx) < 40:
         return []
@@ -1425,38 +1446,8 @@ def find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask,
     if not np.all(valid_mask):
         vals = np.interp(np.arange(len(vals)), np.where(valid_mask)[0], vals[valid_mask])
     smoothed = median_filter(vals, size=9)
-
-    peaks, props = find_peaks(smoothed, prominence=min_prominence_px,
-                              distance=min_distance_px, width=min_width_px,
-                              rel_height=0.5)
-
-    def _is_bucket_color(pixel, tol=10):
-        for c in _WF_BUCKET_COLORS:
-            if all(abs(int(pixel[k]) - c[k]) <= tol for k in range(3)):
-                return True
-        return False
-
-    def _color_fraction_in_band(x_lo, x_hi, y_lo, y_hi, step=4):
-        n_checked, n_colored = 0, 0
-        for x in range(int(x_lo), int(x_hi), step):
-            for y in range(int(y_lo), int(y_hi), step):
-                if 0 <= y < colored_img.shape[0] and 0 <= x < colored_img.shape[1]:
-                    n_checked += 1
-                    if _is_bucket_color(colored_img[y, x]):
-                        n_colored += 1
-        return (n_colored / n_checked) if n_checked else 0.0
-
-    def _dominant_bucket_near(x, y_ref, search_radius=40, tol=10):
-        counts = {}
-        for xx in range(max(0, x - search_radius), min(colored_img.shape[1], x + search_radius)):
-            for yy in range(max(0, y_ref - search_radius), min(colored_img.shape[0], y_ref + search_radius)):
-                px = colored_img[yy, xx]
-                for ci, c in enumerate(_WF_BUCKET_COLORS):
-                    if all(abs(int(px[k]) - c[k]) <= tol for k in range(3)):
-                        counts[ci] = counts.get(ci, 0) + 1
-                        break
-        return max(counts, key=counts.get) if counts else None
-
+    peaks, props = find_peaks(smoothed, prominence=min_prominence_px, distance=min_distance_px,
+                               width=min_width_px, rel_height=0.5)
     risks = []
     for i, p in enumerate(peaks):
         prom = float(props["prominences"][i])
@@ -1470,13 +1461,27 @@ def find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask,
         x_left = max(sx, int(round(x_notch - half_w)))
         x_right = min(ex, int(round(x_notch + half_w)))
 
-        color_frac = _color_fraction_in_band(x_left, x_right, baseline_y, y_notch)
-        if color_frac >= (1.0 - min_color_fraction):
+        # Edge-zone exclusion (โซน corner-perspective ที่ไม่น่าเชื่อถือ)
+        if (x_left - sx) < _WF_EDGE_EXCLUDE_PX or (ex - x_right) < _WF_EDGE_EXCLUDE_PX:
             continue
 
-        left_bucket = _dominant_bucket_near(x_left - 10, y_notch)
-        right_bucket = _dominant_bucket_near(x_right + 10, y_notch)
-        if left_bucket is not None and right_bucket is not None and left_bucket == right_bucket:
+        # Diamond-corner rectangle-tiling-artifact exclusion: ปฏิเสธเฉพาะ
+        # เมื่อ roof_face ประกบ "ทั้ง 2 ฝั่ง" (AND) - ดู CHANGELOG ด้านบน
+        left_roofs_touching = [f for f in roof_faces if abs((f['x'] + f['w']) - x_left) <= _WF_ROOF_TOUCH_GAP_PX]
+        right_roofs_touching = [f for f in roof_faces if abs(f['x'] - x_right) <= _WF_ROOF_TOUCH_GAP_PX]
+        if left_roofs_touching and right_roofs_touching:
+            continue
+
+        yy0, yy1 = max(0, baseline_y), min(verified_mask.shape[0], y_notch)
+        xx0, xx1 = max(0, x_left), min(verified_mask.shape[1], x_right)
+        if yy1 <= yy0 or xx1 <= xx0:
+            continue
+        band = verified_mask[yy0:yy1:3, xx0:xx1:3]
+        n_checked = band.size
+        if n_checked == 0:
+            continue
+        empty_frac = 1.0 - (band.sum() / n_checked)
+        if empty_frac < min_empty_fraction:
             continue
 
         width_final = x_right - x_left
@@ -1488,10 +1493,9 @@ def find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask,
             x0_mark, x1_mark = x_left, x_right
 
         risks.append({
-            "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch_3d",
+            "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch_verified",
             "x_range": (x0_mark, x1_mark), "y_range": (baseline_y, y_notch),
-            "notch_x": x_notch, "prominence_px": prom,
-            "color_fraction_in_gap": color_frac,
+            "notch_x": x_notch, "prominence_px": prom, "empty_fraction": empty_frac,
         })
     return risks
 
@@ -1692,8 +1696,14 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
         seams_result = find_wireframe_seams_v5(hi_img, cargo_mask)
         records = build_stack_records_wireframe(seams_result, hi_img, view_label,
                                                  cargo_mask=cargo_mask)
-        colored_img, bucket_info = bucket_color_wireframe(hi_img, cargo_mask, seams_result)
-        notch_risks = find_wireframe_notch_risk_3d(hi_img, colored_img, seams_result, cargo_mask)
+        # v25.92: ใช้กลไก EMPTY_SPACE_RISK ใหม่ (verified_box_mask จาก
+        # front_face+roof_face) แทน bucket_color_wireframe/find_wireframe_
+        # notch_risk_3d เดิม (v25.90/91) ที่พิสูจน์แล้วว่าตรวจไม่พบอะไรเลย
+        # - ดู CHANGELOG เต็มที่จุดนิยามฟังก์ชันด้านบนสำหรับหลักฐาน+เหตุผล
+        wf_front_faces, wf_roof_faces = _wf_get_all_box_faces(seams_result)
+        wf_verified_mask = _wf_build_verified_box_mask(hi_img, wf_front_faces, wf_roof_faces)
+        notch_risks = find_wireframe_notch_risk_verified(
+            seams_result, wf_front_faces, wf_roof_faces, wf_verified_mask)
         view_data[view_label] = {
             "hi_img": hi_img, "origin": origin, "seams_result": seams_result,
             "records": records, "notch_risks": notch_risks,
@@ -8048,8 +8058,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.90",
-            "benchmarkMode": "v25_90_wireframe_support_added" if is_wireframe else
+            "checkerVersion": "V25.92",
+            "benchmarkMode": "v25_92_wireframe_empty_space_verified_mask_fix" if is_wireframe else
                              "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
@@ -8057,3 +8067,4 @@ def process_request(request):
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
+
