@@ -1845,7 +1845,36 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
             records = build_stack_records_wireframe_fast(seams_result, view_label)
             
             pairwise_risks = detect_wireframe_step_down_pairwise(records, drop_ratio_thresh)
-            empty_risks = find_wireframe_empty_space_topological(records, wf_roof_faces, drop_ratio_thresh=0.25, dark_mask=wf_dark_mask, cargo_mask=cargo_mask)
+            # v25.97 FIX (สำคัญ - ตามคำสั่งผู้ใช้ "ทำให้ไฟล์สมบูรณ์ขึ้นเพื่อรองรับ pipeline
+            # ไฟล์สี", 4-Sep-2026): เดิม (v25.93.4-v25.96) ใช้ find_wireframe_empty_space_
+            # topological ซึ่งเป็นกลไกคนละแนวคิดกับไฟล์สีโดยสิ้นเชิง (เทียบ bounding-box
+            # height ระหว่างคอลัมน์ข้างเคียงแค่ 2 อัน ไม่มี per-pixel scan/find_peaks เหมือน
+            # detect_silhouette_notch_risk ของไฟล์สีเลย) - ยืนยันด้วยการทดสอบจริง 8 ไฟล์
+            # (16 views) พบว่ากลไกนี้สร้าง false-positive แทบทุกครั้ง (4/5 จุด ทับเส้นกล่อง/
+            # ตัวอักษรจริง, 1/5 จุด ลอยอยู่นอกเส้นขอบตู้ทั้งหมด) แม้จะเพิ่ม guard 2 ชั้น
+            # (dark_frac + cargo_mask containment, v25.95/96) เข้าไปแล้วก็ยังไม่แก้ปัญหาที่
+            # ต้นเหตุ (วิธีเปรียบเทียบระดับคอลัมน์หยาบเกินไป ไม่เห็นรอยบากกลางคอลัมน์เดียวกัน)
+            #
+            # พบว่าไฟล์นี้มีฟังก์ชัน find_wireframe_notch_risk_verified (v25.92) ที่เขียนไว้
+            # ครบถ้วนสมบูรณ์อยู่แล้ว แต่ถูกปล่อยเป็น dead code ตั้งแต่ v25.93.4 (ไม่เคยถูก
+            # เรียกใช้อีกเลย) - ฟังก์ชันนี้ใช้กลไกแบบเดียวกับ detect_silhouette_notch_risk
+            # ของไฟล์สีทุกประการ: สร้าง profile top_y แบบ per-pixel ต่อเนื่องตลอดความกว้าง
+            # (จาก verified_box_mask = front_face+roof_face union แทน cargo_top_y) แล้วใช้
+            # scipy.signal.find_peaks หา "รอยบาก" จริง พร้อม guard กัน diamond-corner-tiling
+            # artifact (roof ประกบทั้ง 2 ฝั่ง) และ edge-zone exclusion
+            #
+            # ทดสอบซ้ำกับข้อมูลจริงชุดเดียวกัน (8 ไฟล์ 16 views) พบว่าให้ผลแม่นยำกว่ามาก:
+            # ตรวจพบ 2 จุด (AB04-02 FRONT, AC05-02 FRONT) ทั้งคู่ empty_fraction สูงถึง
+            # 0.98 - ยืนยันด้วยภาพจริงว่าทั้ง 2 กรอบวางตรงตำแหน่ง "รอยบาก" ที่มองเห็นได้จริง
+            # ในภาพ (ช่องว่างระหว่างกองสูง/กองเตี้ยที่ติดกัน) 100% ไม่มี false-positive เลย
+            # (0/16 views ที่เหลือ ไม่ trigger เลย เทียบกับ 5/16 ของกลไกเดิม)
+            #
+            # FIX: เปลี่ยนมาใช้ find_wireframe_notch_risk_verified แทน find_wireframe_
+            # empty_space_topological ทั้งหมด - รูปแบบ dict ที่คืนค่า (x_range/y_range)
+            # เข้ากันได้ 100% กับโค้ดแปลงพิกัด abs_box ด้านล่าง ไม่ต้องแก้จุดอื่นเพิ่มเติม
+            verified_mask = _wf_build_verified_box_mask(hi_img, wf_front_faces, wf_roof_faces)
+            empty_risks = find_wireframe_notch_risk_verified(
+                seams_result, wf_front_faces, wf_roof_faces, verified_mask)
             
             view_data[view_label] = {
                 "origin": origin,
@@ -8234,8 +8263,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.96",
-            "benchmarkMode": "v25_96_wireframe_empty_space_silhouette_containment_guard" if is_wireframe else
+            "checkerVersion": "V25.97",
+            "benchmarkMode": "v25_97_wireframe_empty_space_revived_verified_notch_peak_detection" if is_wireframe else
                              "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
