@@ -1500,20 +1500,11 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
     return risks
 
 # ============================================================================
-# v25.93.5 FIX: WIREFRAME PARADIGM SHIFT (Ultimate Anti-Artifact & Crash Proof)
+# v25.93.4 FIX: WIREFRAME PARADIGM SHIFT (Anti-Artifact & Dynamic Scale)
 # ============================================================================
 
 _WF_MIN_OVERLAP_RATIO = 0.5
 _WF_EDGE_ZONE_POS_THRESH = 0.15
-_WF_FRONT_TO_BACK_HEIGHT_SCALE = 1.19  
-
-def _is_edge_artifact(pos_range):
-    """
-    เช็คว่าคอลัมน์นี้อยู่ริมสุดของภาพ (<5% หรือ >95%) หรือไม่ 
-    เพื่อใช้ตัด 'ผนังหน้ารถ/ท้ายรถ' หรือ 'ข้อความหลอก (Dimension Text)' ทิ้ง
-    """
-    pmid = (pos_range[0] + pos_range[1]) / 2.0
-    return pmid < 0.05 or pmid > 0.95
 
 def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=None):
     if flip_position is None:
@@ -1553,11 +1544,17 @@ def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=N
 
 def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
     risks = []
+    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
+    if not valid_indices: return []
+    
+    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้
+    first_valid, last_valid = valid_indices[0], valid_indices[-1]
+    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
         
-        # FIX: ข้ามการวิเคราะห์ หากคอลัมน์ใดคอลัมน์หนึ่งเป็นผนัง/ข้อความริมจอ
-        if _is_edge_artifact(r1["pos_range"]) or _is_edge_artifact(r2["pos_range"]):
+        # ป้องกันข้อความหลอกที่ขอบนอกสุด (ข้ามพื้นที่ว่างที่อยู่นอกกล่องจริง)
+        if r1["idx"] < first_valid or r2["idx"] > last_valid:
             continue
             
         h1, h2 = r1["height_px"], r2["height_px"]
@@ -1581,11 +1578,17 @@ def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
 
 def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thresh=0.25):
     risks = []
+    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
+    if not valid_indices: return []
+    
+    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้ (ป้องกันกรอบส้มลั่นที่ข้อความขอบจอ)
+    first_valid, last_valid = valid_indices[0], valid_indices[-1]
+    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
         
-        # FIX: ไม่นำผนังตู้และข้อความขอบจอมาคำนวณหาช่องว่าง ป้องกันกรอบส้มลั่น
-        if _is_edge_artifact(r1["pos_range"]) or _is_edge_artifact(r2["pos_range"]):
+        # ป้องกันกรอบส้มที่ผนังด้านนอก (ไม่นับ)
+        if r1["idx"] < first_valid or r2["idx"] > last_valid:
             continue
             
         h1, h2 = r1["height_px"], r2["height_px"]
@@ -1600,7 +1603,20 @@ def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thres
             gap_x0, gap_x1 = shorter_rec["x_range"]
             gap_y_top = taller_rec["top_y"]
             gap_y_bot = shorter_rec["top_y"] if shorter > 0 else taller_rec["bottom_y"]
-            
+            # v25.94 FIX (สำคัญ - พบจริงจาก AB03-01/AB04-02 wireframe, ทำให้ process_request
+            # ล่ม HTTP 500 ทุกครั้ง "ValueError: y1 must be greater than or equal to y0"):
+            # เดิมสมมติว่า taller_rec (คอลัมน์สูงกว่า) จะมี top_y (ค่า y น้อยกว่า/อยู่สูงกว่าใน
+            # ภาพ) เสมอเมื่อเทียบกับ shorter_rec ที่ตำแหน่งเดียวกัน - แต่ในไฟล์ wireframe ที่
+            # front_faces ของแต่ละคอลัมน์ไม่ได้อ้างอิงพื้น/เส้นฐานเดียวกันเป๊ะ (bounding box ของ
+            # แต่ละคอลัมน์คำนวณอิสระจาก members ของตัวเอง ไม่ใช่จาก floor_y ร่วม) พบว่า
+            # shorter_rec["top_y"] (1295) ต่ำกว่า taller_rec["top_y"] (1321) จริง - ทำให้
+            # gap_y_bot < gap_y_top และ PIL.ImageDraw.rectangle โยน exception ทันที (ทั้งไฟล์
+            # ประมวลผลไม่สำเร็จ แม้ risk ตัวอื่นจะคำนวณถูกต้องหมดแล้วก็ตาม)
+            # FIX: normalize ให้ gap_y_top/gap_y_bot เรียงลำดับถูกต้องเสมอ (min/max) ก่อนใช้งาน
+            # ต่อ - ไม่กระทบกรณีปกติที่เรียงลำดับถูกต้องอยู่แล้ว (min/max ไม่เปลี่ยนค่าเลยถ้า
+            # gap_y_top <= gap_y_bot อยู่แล้ว)
+            gap_y_top, gap_y_bot = min(gap_y_top, gap_y_bot), max(gap_y_top, gap_y_bot)
+
             roof_covered = False
             for rf in roof_faces:
                 overlap_x = max(0, min(gap_x1, rf['x']+rf['w']) - max(gap_x0, rf['x']))
@@ -1651,6 +1667,8 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
                                                 exclude_edge_zone=True):
     matches = _wf_match_cross_view(records_front, records_back, min_overlap_ratio)
     
+    # FIX: สร้างระบบ Dynamic Calibration คำนวณ Scale ของรถคันนั้นๆ แทนการใช้ 1.19 เสมอ 
+    # ช่วยตัดกรอบแดงปลอมจำนวนมากทิ้ง (แก้ปัญหาจากภาพ AB03-02)
     dynamic_scale = 1.0
     if apply_calibration and matches:
         ratios = []
@@ -1663,7 +1681,7 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
                     ratios.append(fh / bh_med)
         if ratios:
             dynamic_scale = float(np.median(ratios))
-            dynamic_scale = max(0.8, min(1.5, dynamic_scale))
+            dynamic_scale = max(0.8, min(1.5, dynamic_scale)) # จำกัดขอบเขตกันสวิง
             
     risks = []
     for rec_front, back_matches in matches:
@@ -1767,12 +1785,15 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     risks = []
     
+    # วาดกรอบ Cross-view
     for hr in height_risks:
         mark_view = hr.get("mark_view", "FRONT")
         front_idx = hr["front_idx"]
         
         if mark_view == "FRONT":
             front_vd = view_data["FRONT"]
+            
+            # FIX: ค้นหา Record ด้วย idx เสมอ ป้องกัน IndexError ถ้า List เปลี่ยนรูป
             rec_f_list = [r for r in front_vd["records"] if r["idx"] == front_idx]
             if not rec_f_list: continue
             rec_f = rec_f_list[0]
@@ -1804,6 +1825,7 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
                     "drop_ratio": float(hr["drop_ratio"]),
                 })
 
+    # วาดกรอบ Pairwise และ Empty Space
     for view_label in ["FRONT", "BACK"]:
         vd = view_data.get(view_label, {})
         origin = vd.get("origin", (0,0))
@@ -1830,8 +1852,8 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     return {
         "risks": risks,
-        "front_n_columns": int(view_data.get("FRONT", {}).get("seams_result", {}).get("n_columns", 0)) if view_data.get("FRONT", {}).get("seams_result") else 0,
-        "back_n_columns": int(view_data.get("BACK", {}).get("seams_result", {}).get("n_columns", 0)) if view_data.get("BACK", {}).get("seams_result") else 0,
+        "front_n_columns": int(view_data.get("FRONT", {}).get("seams_result", {}).get("n_columns", 0)),
+        "back_n_columns": int(view_data.get("BACK", {}).get("seams_result", {}).get("n_columns", 0)),
     }
 
 
@@ -2124,6 +2146,14 @@ def extract_sku_from_pdf(pdf_bytes, page_idx=None):
 
 def _draw_single_rectangle(draw, coords, outline_color):
     x0, y0, x1, y1 = map(int, coords)
+    # v25.94 FIX (safety-net เสริม - ป้องกันไม่ให้ทั้งไฟล์ล่ม HTTP 500 ซ้ำอีกในอนาคต จากกรณี
+    # ใดก็ตามที่ risk box คำนวณพิกัดสลับกัน (x1<x0 หรือ y1<y0) แม้จะพยายามแก้ที่ต้นเหตุแล้ว
+    # ในแต่ละฟังก์ชันตรวจจับ - PIL.ImageDraw.rectangle โยน ValueError ทันทีถ้า x1<x0/y1<y0
+    # ซึ่งทำให้ process_request ทั้งฟังก์ชันล้มเหลว (HTTP 500) แม้ว่า risk อื่นๆ ในภาพเดียวกัน
+    # จะคำนวณถูกต้องสมบูรณ์แล้วก็ตาม - normalize ลำดับพิกัดให้ถูกต้องเสมอก่อนวาด (ไม่กระทบ
+    # กรณีปกติที่พิกัดเรียงถูกอยู่แล้ว)
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
     draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
 
@@ -8122,8 +8152,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.92",
-            "benchmarkMode": "v25_92_wireframe_empty_space_verified_mask_fix" if is_wireframe else
+            "checkerVersion": "V25.94",
+            "benchmarkMode": "v25_94_wireframe_empty_space_gap_ybox_order_fix" if is_wireframe else
                              "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
