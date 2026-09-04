@@ -1500,12 +1500,11 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
     return risks
 
 # ============================================================================
-# v25.93.2 FIX: WIREFRAME PARADIGM SHIFT (Fixed Crash & Marker Rules)
+# v25.93.4 FIX: WIREFRAME PARADIGM SHIFT (Anti-Artifact & Dynamic Scale)
 # ============================================================================
 
 _WF_MIN_OVERLAP_RATIO = 0.5
 _WF_EDGE_ZONE_POS_THRESH = 0.15
-_WF_FRONT_TO_BACK_HEIGHT_SCALE = 1.19  
 
 def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=None):
     if flip_position is None:
@@ -1545,10 +1544,20 @@ def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=N
 
 def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
     risks = []
+    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
+    if not valid_indices: return []
+    
+    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้
+    first_valid, last_valid = valid_indices[0], valid_indices[-1]
+    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
-        h1, h2 = r1["height_px"], r2["height_px"]
         
+        # ป้องกันข้อความหลอกที่ขอบนอกสุด (ข้ามพื้นที่ว่างที่อยู่นอกกล่องจริง)
+        if r1["idx"] < first_valid or r2["idx"] > last_valid:
+            continue
+            
+        h1, h2 = r1["height_px"], r2["height_px"]
         if h1 == 0 and h2 == 0: continue
         
         taller, shorter = max(h1, h2), min(h1, h2)
@@ -1556,7 +1565,6 @@ def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
         
         drop = 1.0 - (shorter / taller)
         if drop >= drop_ratio_thresh and shorter > 0:  
-            # FIX: กฎบังคับให้วาดกรอบแดงที่ "กองที่สูงกว่า" เสมอ
             taller_rec = r1 if h1 > h2 else r2
             risks.append({
                 "risk_type": "STEP_DOWN_RISK",
@@ -1570,10 +1578,20 @@ def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
 
 def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thresh=0.25):
     risks = []
+    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
+    if not valid_indices: return []
+    
+    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้ (ป้องกันกรอบส้มลั่นที่ข้อความขอบจอ)
+    first_valid, last_valid = valid_indices[0], valid_indices[-1]
+    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
-        h1, h2 = r1["height_px"], r2["height_px"]
         
+        # ป้องกันกรอบส้มที่ผนังด้านนอก (ไม่นับ)
+        if r1["idx"] < first_valid or r2["idx"] > last_valid:
+            continue
+            
+        h1, h2 = r1["height_px"], r2["height_px"]
         taller, shorter = max(h1, h2), min(h1, h2)
         if taller <= 0: continue
         
@@ -1596,7 +1614,6 @@ def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thres
                         break
             
             if not roof_covered:
-                # FIX: ขยายความกว้างกรอบส้มขั้นต่ำที่ 70px เพื่อให้เห็นชัดเจน ไม่กลายเป็นเส้นบางๆ
                 width = gap_x1 - gap_x0
                 if width < 70:
                     pad = (70 - width) / 2.0
@@ -1636,6 +1653,23 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
                                                 apply_calibration=True,
                                                 exclude_edge_zone=True):
     matches = _wf_match_cross_view(records_front, records_back, min_overlap_ratio)
+    
+    # FIX: สร้างระบบ Dynamic Calibration คำนวณ Scale ของรถคันนั้นๆ แทนการใช้ 1.19 เสมอ 
+    # ช่วยตัดกรอบแดงปลอมจำนวนมากทิ้ง (แก้ปัญหาจากภาพ AB03-02)
+    dynamic_scale = 1.0
+    if apply_calibration and matches:
+        ratios = []
+        for rec_front, back_matches in matches:
+            fh = rec_front["height_px"]
+            bhs = [m["height_px"] for m in back_matches if m["height_px"] > 0]
+            if fh > 0 and bhs:
+                bh_med = np.median(bhs)
+                if bh_med > 0:
+                    ratios.append(fh / bh_med)
+        if ratios:
+            dynamic_scale = float(np.median(ratios))
+            dynamic_scale = max(0.8, min(1.5, dynamic_scale)) # จำกัดขอบเขตกันสวิง
+            
     risks = []
     for rec_front, back_matches in matches:
         if rec_front["height_px"] <= 0 or not back_matches:
@@ -1647,7 +1681,8 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
             continue
         back_h = float(np.median(back_heights))
         if apply_calibration:
-            back_h *= _WF_FRONT_TO_BACK_HEIGHT_SCALE
+            back_h *= dynamic_scale
+            
         front_h = rec_front["height_px"]
         
         taller = max(front_h, back_h)
@@ -1657,7 +1692,6 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
             
         drop_ratio = 1.0 - (shorter / taller)
         if drop_ratio >= drop_ratio_thresh:
-            # FIX: กฎบังคับให้วาดข้ามวิว เฉพาะบนฝั่งมุมมองที่ "กองสูงกว่า" เท่านั้น
             taller_view = "FRONT" if front_h >= back_h else "BACK"
             risks.append({
                 "front_idx": int(rec_front["idx"]), "front_height_px": float(front_h),
@@ -1692,36 +1726,46 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
     import numpy as np 
     
     for view_label, view_name in [("FRONT", "front"), ("BACK", "back")]:
-        region, origin, _ = get_view_region(full_img, doc, view_name, page_idx=diagram_page_idx)
-        hi_img, _ = render_hires_crop(page, origin, main_scale=matrix_scale, hi_scale=hi_scale)
-        
-        cargo_mask, _ = build_wireframe_cargo_mask(hi_img) 
-        seams_result = find_wireframe_seams_v5(hi_img, cargo_mask)
-        
-        # FIX: ป้องกันโปรแกรมพัง (Crash) ในกรณีที่อ่านไฟล์แล้วไม่เจอหน้ากล่อง (เช่น ไฟล์เปล่า)
-        if seams_result is None or not seams_result.get("front_faces"):
-            view_data[view_label] = {
-                "origin": origin, "seams_result": {"n_columns": 0, "x_min": 0, "x_max": 0},
-                "records": [], "pairwise_risks": [], "empty_risks": []
-            }
-            continue
+        try:
+            view_res = get_view_region(full_img, doc, view_name, page_idx=diagram_page_idx)
+            if view_res is None or view_res[0] is None:
+                view_data[view_label] = {"origin": (0,0), "seams_result": {"n_columns": 0}, "records": [], "pairwise_risks": [], "empty_risks": []}
+                continue
+            region, origin, _ = view_res
             
-        wf_front_faces, wf_roof_faces = _wf_get_all_box_faces(seams_result)
-        records = build_stack_records_wireframe_fast(seams_result, view_label)
-        
-        pairwise_risks = detect_wireframe_step_down_pairwise(records, drop_ratio_thresh)
-        empty_risks = find_wireframe_empty_space_topological(records, wf_roof_faces, drop_ratio_thresh=0.25)
-        
-        view_data[view_label] = {
-            "origin": origin,
-            "seams_result": seams_result,
-            "records": records,
-            "pairwise_risks": pairwise_risks,
-            "empty_risks": empty_risks
-        }
+            hi_res = render_hires_crop(page, origin, main_scale=matrix_scale, hi_scale=hi_scale)
+            if hi_res is None or hi_res[0] is None:
+                view_data[view_label] = {"origin": origin, "seams_result": {"n_columns": 0}, "records": [], "pairwise_risks": [], "empty_risks": []}
+                continue
+            hi_img, _ = hi_res
+            
+            cargo_mask, _ = build_wireframe_cargo_mask(hi_img) 
+            seams_result = find_wireframe_seams_v5(hi_img, cargo_mask)
+            
+            if seams_result is None or not seams_result.get("front_faces"):
+                view_data[view_label] = {"origin": origin, "seams_result": {"n_columns": 0, "x_min": 0, "x_max": 0}, "records": [], "pairwise_risks": [], "empty_risks": []}
+                continue
+                
+            wf_front_faces, wf_roof_faces = _wf_get_all_box_faces(seams_result)
+            records = build_stack_records_wireframe_fast(seams_result, view_label)
+            
+            pairwise_risks = detect_wireframe_step_down_pairwise(records, drop_ratio_thresh)
+            empty_risks = find_wireframe_empty_space_topological(records, wf_roof_faces, drop_ratio_thresh=0.25)
+            
+            view_data[view_label] = {
+                "origin": origin,
+                "seams_result": seams_result,
+                "records": records,
+                "pairwise_risks": pairwise_risks,
+                "empty_risks": empty_risks
+            }
+        except Exception as e:
+            print(f"Wireframe extraction failed for {view_label}: {e}")
+            view_data[view_label] = {"origin": (0,0), "seams_result": {"n_columns": 0}, "records": [], "pairwise_risks": [], "empty_risks": []}
+            continue
 
-    records_front = view_data["FRONT"]["records"]
-    records_back = view_data["BACK"]["records"]
+    records_front = view_data.get("FRONT", {}).get("records", [])
+    records_back = view_data.get("BACK", {}).get("records", [])
     
     height_risks = detect_wireframe_cross_view_height_mismatch(
         records_front, records_back, drop_ratio_thresh=drop_ratio_thresh)
@@ -1731,11 +1775,16 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
     # วาดกรอบ Cross-view
     for hr in height_risks:
         mark_view = hr.get("mark_view", "FRONT")
+        front_idx = hr["front_idx"]
         
         if mark_view == "FRONT":
-            front_idx = hr["front_idx"]
             front_vd = view_data["FRONT"]
-            rec_f = front_vd["records"][front_idx]
+            
+            # FIX: ค้นหา Record ด้วย idx เสมอ ป้องกัน IndexError ถ้า List เปลี่ยนรูป
+            rec_f_list = [r for r in front_vd["records"] if r["idx"] == front_idx]
+            if not rec_f_list: continue
+            rec_f = rec_f_list[0]
+            
             fx0_hi, fx1_hi = rec_f["x_range"]
             fx0, fy0 = _wf_hi_to_full_page(fx0_hi, rec_f["top_y"], front_vd["origin"], down_factor)
             fx1, fy1 = _wf_hi_to_full_page(fx1_hi, rec_f["bottom_y"], front_vd["origin"], down_factor)
@@ -1765,10 +1814,10 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     # วาดกรอบ Pairwise และ Empty Space
     for view_label in ["FRONT", "BACK"]:
-        vd = view_data[view_label]
-        origin = vd["origin"]
+        vd = view_data.get(view_label, {})
+        origin = vd.get("origin", (0,0))
         
-        for pr in vd["pairwise_risks"]:
+        for pr in vd.get("pairwise_risks", []):
             x0_hi, x1_hi = pr["x_range"]
             y0_hi, y1_hi = pr["y_range"]
             px0, py0 = _wf_hi_to_full_page(x0_hi, y0_hi, origin, down_factor)
@@ -1778,7 +1827,7 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
                 "mark_view": view_label, "abs_box": (int(px0), int(py0), int(px1), int(py1))
             })
             
-        for nr in vd["empty_risks"]:
+        for nr in vd.get("empty_risks", []):
             x0_hi, x1_hi = nr["x_range"]
             y0_hi, y1_hi = nr["y_range"]
             nx0, ny0 = _wf_hi_to_full_page(x0_hi, y0_hi, origin, down_factor)
@@ -1790,9 +1839,10 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     return {
         "risks": risks,
-        "front_n_columns": int(view_data["FRONT"]["seams_result"]["n_columns"]) if view_data["FRONT"]["seams_result"] else 0,
-        "back_n_columns": int(view_data["BACK"]["seams_result"]["n_columns"]) if view_data["BACK"]["seams_result"] else 0,
+        "front_n_columns": int(view_data.get("FRONT", {}).get("seams_result", {}).get("n_columns", 0)),
+        "back_n_columns": int(view_data.get("BACK", {}).get("seams_result", {}).get("n_columns", 0)),
     }
+
 
 # ============================================================================
 # ค่าคงที่ / สี marker (คงไว้ตามเดิมสำหรับ 3 risk types ที่เหลือ)
