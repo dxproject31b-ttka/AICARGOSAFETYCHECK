@@ -1499,7 +1499,6 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
         })
     return risks
 
-
 # ============================================================================
 # v25.93.2 FIX: WIREFRAME PARADIGM SHIFT (Fixed Crash & Marker Rules)
 # ============================================================================
@@ -1794,7 +1793,6 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
         "front_n_columns": int(view_data["FRONT"]["seams_result"]["n_columns"]) if view_data["FRONT"]["seams_result"] else 0,
         "back_n_columns": int(view_data["BACK"]["seams_result"]["n_columns"]) if view_data["BACK"]["seams_result"] else 0,
     }
-
 
 # ============================================================================
 # ค่าคงที่ / สี marker (คงไว้ตามเดิมสำหรับ 3 risk types ที่เหลือ)
