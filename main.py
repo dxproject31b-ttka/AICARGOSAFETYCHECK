@@ -1426,14 +1426,108 @@ def _wf_verified_profile(verified_mask):
     return top_y.astype(int), bottom_y.astype(int)
 
 
+# v25.98 NEW (สำคัญ - พบจริงจาก AC05-03 BACK, ผู้ใช้แนบภาพตัวอย่างระบุกรอบส้ม 2 จุดที่ควรพบ
+# แต่ v25.97 พบ 0 จุด, 4-Sep-2026):
+#
+# จุดที่ 1 (Diamond-corner guard ปฏิเสธ notch จริงที่ว่างเปล่า 100%): ยืนยันด้วยข้อมูลจริง -
+# ตรวจพบ notch ที่ x=2853 (BACK view) มี empty_fraction=1.0 (ว่างเปล่าเต็มพื้นที่ 100% ไม่มี
+# front_face/roof_face ปนอยู่เลยแม้แต่พิกเซลเดียว) ซึ่งเป็นหลักฐานที่หนักแน่นที่สุดเท่าที่ระบบ
+# จะวัดได้ว่าเป็นพื้นที่ว่างจริง - แต่ถูกฟังก์ชันเดิม (v25.92) ปฏิเสธทิ้งเพราะ diamond-corner
+# guard (ตรวจพบ roof_face ประกบทั้ง 2 ฝั่งของ notch พอดี) ทำงาน "ก่อน" การตรวจสอบ empty_fraction
+# เสมอ (ไม่มีเงื่อนไขข้อยกเว้นใดๆ) ทั้งที่ diamond-corner guard ออกแบบมาเพื่อกรอง "เศษสามเหลี่ยม
+# เล็กๆ ที่เหลือจากมุมกล้อง bounding-box ไม่พอดีกับทรงข้าวหลามตัดจริง" (ซึ่งควรมี empty_fraction
+# ต่ำกว่ามาก เพราะส่วนใหญ่ของพื้นที่ยังถูกปิดล้อมด้วย roof จริงอยู่ ไม่ใช่ว่างเปล่า 100%)
+# ROOT CAUSE: ไม่มีการแยกแยะ "เศษสามเหลี่ยมจากปัดเศษ bounding-box" (empty_fraction ต่ำ) ออกจาก
+# "ช่องว่างจริงที่บังเอิญมี roof ประกบทั้ง 2 ฝั่ง" (empty_fraction สูงมาก) เลย - ทั้ง 2 กรณีถูก
+# ปฏิเสธเหมือนกันหมดโดยไม่สนใจว่าพื้นที่ภายในว่างแค่ไหน
+# FIX: ย้ายการคำนวณ empty_frac ให้ทำงาน "ก่อน" diamond-corner guard เสมอ แล้วเพิ่มเงื่อนไข
+# ข้อยกเว้น - ถ้า empty_frac สูงมาก (>= _WF_DIAMOND_GUARD_BYPASS_EMPTY_FRAC) ให้ข้าม
+# diamond-corner guard ไปเลย (เชื่อว่าเป็นช่องว่างจริง ไม่ใช่แค่เศษปัดเศษ bounding-box) - ถ้า
+# empty_frac ต่ำกว่านี้ ยังคงให้ diamond-corner guard ทำงานตามปกติ (ป้องกัน false-positive จาก
+# เศษสามเหลี่ยมเล็กๆ ที่ยืนยันแล้วจากไฟล์ทดสอบเดิม 8 ไฟล์ 16 views)
+#
+# จุดที่ 2 (Notch ที่สองไม่ถูกตรวจพบเลยในทุกขั้นตอน): ตรวจสอบ top_y profile ของ verified_mask
+# (front_face+roof_face bounding-box union) พบว่าไม่มี peak ใดๆ เลยที่ตำแหน่งอื่นนอกจาก x=2853
+# แม้จะลดเกณฑ์ prominence ลงเหลือ 1px ก็ตาม - พิสูจน์ว่า verified_mask (ซึ่งใช้ bounding-box
+# ของ face ที่ผ่านเกณฑ์ area/aspect/fill_ratio แล้วเท่านั้น) "มองไม่เห็น" รายละเอียดที่ละเอียด
+# กว่านั้น เพราะ union ของ bounding-box สี่เหลี่ยมมักราบเรียบกว่าทรงจริงของวัตถุ (เส้นขอบ
+# raw flood-fill ที่ตามรูปทรงข้าวหลามตัด/สามเหลี่ยมจริง)
+# ตรวจสอบ raw cargo_mask (flood-fill ดิบ ก่อนกรองเป็น front_face/roof_face) พบว่ามี peak
+# เพิ่มเติมจริงที่ raw top_y profile ไม่ปรากฏใน verified_mask เลย - แต่ตรวจสอบด้วยภาพจริงแล้ว
+# พบว่าบางจุดเป็นแค่รอยต่อ diamond-tiling ปกติ (ไม่ใช่ช่องว่างจริง) เช่นเดียวกับปัญหาจุดที่ 1
+# ที่เคยพบมาก่อน - จึงต้องตรวจสอบด้วยเกณฑ์ความว่างเปล่าที่เข้มงวดเท่ากันทุกประการ (ไม่ผ่อนปรน)
+# ก่อนยอมรับเป็น candidate เพิ่มเติม
+# FIX: เพิ่ม pass ที่ 2 - สแกน raw cargo_mask top_y profile หา peak เพิ่มเติมที่ verified_mask
+# profile ไม่พบ (ห่างจาก candidate ที่พบแล้วอย่างน้อย min_distance_px) แล้วตรวจสอบด้วยเกณฑ์
+# เดียวกันทุกข้อ (edge-exclusion, empty_fraction ขั้นต่ำ, diamond-corner guard+bypass) ก่อน
+# ยอมรับ - ใช้ verified_mask (ไม่ใช่ cargo_mask) ในการวัด empty_fraction เสมอ เพื่อความแม่นยำ
+# เดียวกันกับ pass แรก (cargo_mask ดิบมีสัญญาณรบกวนจากตัวอักษร/เส้นบอกมิติมากกว่า)
+#
+# ข้อจำกัดที่ต้องบอกตรงไปตรงมา: ยืนยันด้วยไฟล์ทดสอบจริงเพิ่มเติมแค่ 1 ไฟล์ (AC05-03) นอกเหนือ
+# จาก 8 ไฟล์เดิม - แนะนำให้ตรวจสอบภาพผลลัพธ์อีกครั้งหลังแก้ไข เพื่อยืนยันตำแหน่งกรอบทั้ง 2 จุด
+# ตรงกับภาพตัวอย่างจริงหรือไม่ (โดยเฉพาะจุดที่ 2 ซึ่งยังไม่มีหลักฐานยืนยันตำแหน่งที่แน่ชัด 100%)
+_WF_DIAMOND_GUARD_BYPASS_EMPTY_FRAC = 0.9  # empty_fraction เกินนี้ = ว่างเปล่าเกือบเต็มพื้นที่
+# จริง (ยืนยันจาก AC05-03: notch ที่ถูก guard ปฏิเสธผิดพลาดมี empty_fraction=1.0 พอดี) - ตั้งไว้
+# ต่ำกว่า 1.0 เล็กน้อยเพื่อเผื่อ noise pixel เล็กน้อยจากขอบเส้น anti-alias
+
+
+def _wf_check_single_notch_candidate(x_notch, y_notch, baseline_y, width, prom, sx, ex,
+                                      roof_faces, verified_mask, min_empty_fraction):
+    """ตรวจสอบ candidate 1 จุด ผ่านทุกเกณฑ์ (edge-exclusion, empty_fraction,
+    diamond-corner guard+bypass) - คืนค่า risk dict ถ้าผ่าน หรือ None ถ้าไม่ผ่าน
+    ดู docstring เต็มด้านบน (v25.98) สำหรับหลักฐาน+เหตุผลของลำดับการตรวจสอบใหม่นี้"""
+    half_w = width / 2.0
+    x_left = max(sx, int(round(x_notch - half_w)))
+    x_right = min(ex, int(round(x_notch + half_w)))
+    if (x_left - sx) < _WF_EDGE_EXCLUDE_PX or (ex - x_right) < _WF_EDGE_EXCLUDE_PX:
+        return None
+
+    yy0, yy1 = max(0, baseline_y), min(verified_mask.shape[0], y_notch)
+    xx0, xx1 = max(0, x_left), min(verified_mask.shape[1], x_right)
+    if yy1 <= yy0 or xx1 <= xx0:
+        return None
+    band = verified_mask[yy0:yy1:3, xx0:xx1:3]
+    n_checked = band.size
+    if n_checked == 0:
+        return None
+    empty_frac = 1.0 - (band.sum() / n_checked)
+    if empty_frac < min_empty_fraction:
+        return None
+
+    # v25.98 FIX: ตรวจสอบ diamond-corner guard "หลัง" ทราบ empty_frac แล้ว - ถ้า empty_frac
+    # สูงมาก (>=_WF_DIAMOND_GUARD_BYPASS_EMPTY_FRAC) ให้ข้าม guard นี้ไปเลย (เชื่อว่าเป็นช่องว่าง
+    # จริง ไม่ใช่แค่เศษปัดเศษ bounding-box) - ดู docstring เต็มด้านบนสำหรับหลักฐาน (พบจริงจาก
+    # AC05-03: notch จริง empty_frac=1.0 ถูก guard เดิมปฏิเสธผิดพลาดเพราะเช็คก่อนรู้ empty_frac)
+    if empty_frac < _WF_DIAMOND_GUARD_BYPASS_EMPTY_FRAC:
+        left_roofs_touching = [f for f in roof_faces if abs((f['x'] + f['w']) - x_left) <= _WF_ROOF_TOUCH_GAP_PX]
+        right_roofs_touching = [f for f in roof_faces if abs(f['x'] - x_right) <= _WF_ROOF_TOUCH_GAP_PX]
+        if left_roofs_touching and right_roofs_touching:
+            return None
+
+    width_final = x_right - x_left
+    if width_final < _WF_NOTCH_BOX_MIN_WIDTH_PX:
+        pad = (_WF_NOTCH_BOX_MIN_WIDTH_PX - width_final) / 2.0
+        x0_mark = max(sx, int(round(x_left - pad)))
+        x1_mark = min(ex, int(round(x_right + pad)))
+    else:
+        x0_mark, x1_mark = x_left, x_right
+
+    return {
+        "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch_verified",
+        "x_range": (x0_mark, x1_mark), "y_range": (baseline_y, y_notch),
+        "notch_x": x_notch, "prominence_px": prom, "empty_fraction": empty_frac,
+    }
+
+
 def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, verified_mask,
                                         min_prominence_px=15, min_distance_px=20,
-                                        min_width_px=15, min_empty_fraction=0.5):
-    """EMPTY_SPACE_RISK v25.92 - ใช้ verified_box_mask (front_face+roof_face
-    union) แทน raw flood-fill cargo_mask ทั้งหมด (ดู CHANGELOG ด้านบนของ
-    โมดูลนี้สำหรับหลักฐาน+เหตุผลเต็มของทุกจุดที่แก้ไข) ยืนยันด้วยข้อมูลจริง
-    8 ไฟล์ 16 views: 16/16 ถูกต้อง (2 true-positive ตรงตำแหน่งที่ตรวจสอบ
-    ด้วยภาพจริงแล้ว, 14 true-negative)"""
+                                        min_width_px=15, min_empty_fraction=0.5,
+                                        cargo_mask=None):
+    """EMPTY_SPACE_RISK v25.98 - ใช้ verified_box_mask (front_face+roof_face
+    union) เป็นแหล่งหลัก (pass 1) + raw cargo_mask เป็นแหล่งเสริม (pass 2, v25.98 NEW)
+    สำหรับ notch ที่ verified_mask มองไม่เห็น (ดู CHANGELOG ด้านบนของโมดูลนี้และที่
+    v25.98 สำหรับหลักฐาน+เหตุผลเต็มของทุกจุดที่แก้ไข) ยืนยันด้วยข้อมูลจริง 8 ไฟล์ 16 views
+    (v25.92 เดิม) + AC05-03 (v25.98 ใหม่)"""
     top_y, bottom_y = _wf_verified_profile(verified_mask)
     sx, ex = int(seams_result["x_min"]), int(seams_result["x_max"])
     if (ex - sx) < 40:
@@ -1449,6 +1543,7 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
     peaks, props = find_peaks(smoothed, prominence=min_prominence_px, distance=min_distance_px,
                                width=min_width_px, rel_height=0.5)
     risks = []
+    accepted_notch_xs = []
     for i, p in enumerate(peaks):
         prom = float(props["prominences"][i])
         width = float(props["widths"][i])
@@ -1457,46 +1552,46 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
         baseline_y = int(round(props["width_heights"][i]))
         if y_notch <= baseline_y:
             continue
-        half_w = width / 2.0
-        x_left = max(sx, int(round(x_notch - half_w)))
-        x_right = min(ex, int(round(x_notch + half_w)))
+        r = _wf_check_single_notch_candidate(
+            x_notch, y_notch, baseline_y, width, prom, sx, ex,
+            roof_faces, verified_mask, min_empty_fraction)
+        if r is not None:
+            risks.append(r)
+            accepted_notch_xs.append(x_notch)
 
-        # Edge-zone exclusion (โซน corner-perspective ที่ไม่น่าเชื่อถือ)
-        if (x_left - sx) < _WF_EDGE_EXCLUDE_PX or (ex - x_right) < _WF_EDGE_EXCLUDE_PX:
-            continue
-
-        # Diamond-corner rectangle-tiling-artifact exclusion: ปฏิเสธเฉพาะ
-        # เมื่อ roof_face ประกบ "ทั้ง 2 ฝั่ง" (AND) - ดู CHANGELOG ด้านบน
-        left_roofs_touching = [f for f in roof_faces if abs((f['x'] + f['w']) - x_left) <= _WF_ROOF_TOUCH_GAP_PX]
-        right_roofs_touching = [f for f in roof_faces if abs(f['x'] - x_right) <= _WF_ROOF_TOUCH_GAP_PX]
-        if left_roofs_touching and right_roofs_touching:
-            continue
-
-        yy0, yy1 = max(0, baseline_y), min(verified_mask.shape[0], y_notch)
-        xx0, xx1 = max(0, x_left), min(verified_mask.shape[1], x_right)
-        if yy1 <= yy0 or xx1 <= xx0:
-            continue
-        band = verified_mask[yy0:yy1:3, xx0:xx1:3]
-        n_checked = band.size
-        if n_checked == 0:
-            continue
-        empty_frac = 1.0 - (band.sum() / n_checked)
-        if empty_frac < min_empty_fraction:
-            continue
-
-        width_final = x_right - x_left
-        if width_final < _WF_NOTCH_BOX_MIN_WIDTH_PX:
-            pad = (_WF_NOTCH_BOX_MIN_WIDTH_PX - width_final) / 2.0
-            x0_mark = max(sx, int(round(x_left - pad)))
-            x1_mark = min(ex, int(round(x_right + pad)))
-        else:
-            x0_mark, x1_mark = x_left, x_right
-
-        risks.append({
-            "risk_type": "EMPTY_SPACE_RISK", "subtype": "silhouette_notch_verified",
-            "x_range": (x0_mark, x1_mark), "y_range": (baseline_y, y_notch),
-            "notch_x": x_notch, "prominence_px": prom, "empty_fraction": empty_frac,
-        })
+    # v25.98 NEW (pass 2): สแกน raw cargo_mask (flood-fill ดิบ) หา notch เพิ่มเติมที่
+    # verified_mask profile มองไม่เห็นเลย (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล -
+    # พบจริงจาก AC05-03) - ใช้เกณฑ์ความว่างเปล่าเดียวกันทุกประการ (ไม่ผ่อนปรน) วัดจาก
+    # verified_mask เสมอ (ไม่ใช่ cargo_mask ซึ่งมี noise จากตัวอักษร/เส้นบอกมิติมากกว่า)
+    if cargo_mask is not None:
+        _, top_y_raw = _wf_profile(cargo_mask)
+        raw_vals = np.array([float(top_y_raw[x]) if 0 <= x < len(top_y_raw) and top_y_raw[x] >= 0
+                             else np.nan for x in xs])
+        raw_valid = ~np.isnan(raw_vals)
+        if raw_valid.sum() >= 20:
+            if not np.all(raw_valid):
+                raw_vals = np.interp(np.arange(len(raw_vals)), np.where(raw_valid)[0], raw_vals[raw_valid])
+            raw_smoothed = median_filter(raw_vals, size=9)
+            raw_peaks, raw_props = find_peaks(raw_smoothed, prominence=min_prominence_px,
+                                              distance=min_distance_px, width=min_width_px,
+                                              rel_height=0.5)
+            for i, p in enumerate(raw_peaks):
+                x_notch = int(xs[p])
+                # ข้ามถ้าใกล้กับ candidate ที่ pass 1 ยอมรับไปแล้ว (กันการ mark ซ้ำจุดเดียวกัน)
+                if any(abs(x_notch - ax) < min_distance_px * 2 for ax in accepted_notch_xs):
+                    continue
+                prom = float(raw_props["prominences"][i])
+                width = float(raw_props["widths"][i])
+                y_notch = int(round(raw_smoothed[p]))
+                baseline_y = int(round(raw_props["width_heights"][i]))
+                if y_notch <= baseline_y:
+                    continue
+                r = _wf_check_single_notch_candidate(
+                    x_notch, y_notch, baseline_y, width, prom, sx, ex,
+                    roof_faces, verified_mask, min_empty_fraction)
+                if r is not None:
+                    risks.append(r)
+                    accepted_notch_xs.append(x_notch)
     return risks
 
 # ============================================================================
@@ -1874,7 +1969,7 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
             # เข้ากันได้ 100% กับโค้ดแปลงพิกัด abs_box ด้านล่าง ไม่ต้องแก้จุดอื่นเพิ่มเติม
             verified_mask = _wf_build_verified_box_mask(hi_img, wf_front_faces, wf_roof_faces)
             empty_risks = find_wireframe_notch_risk_verified(
-                seams_result, wf_front_faces, wf_roof_faces, verified_mask)
+                seams_result, wf_front_faces, wf_roof_faces, verified_mask, cargo_mask=cargo_mask)
             
             view_data[view_label] = {
                 "origin": origin,
@@ -8263,8 +8358,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.97",
-            "benchmarkMode": "v25_97_wireframe_empty_space_revived_verified_notch_peak_detection" if is_wireframe else
+            "checkerVersion": "V25.98",
+            "benchmarkMode": "v25_98_wireframe_empty_space_diamond_guard_bypass_plus_raw_scan" if is_wireframe else
                              "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
