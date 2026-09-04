@@ -1576,7 +1576,63 @@ def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
             })
     return risks
 
-def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thresh=0.25):
+# v25.95 NEW (สำคัญ - พบจริงจาก AB03-01/AB04-02 หลังผู้ใช้ระบุ "กรอบส้มยังวาดไม่ตรงตำแหน่ง"
+# หลังแก้ v25.94 (แก้แค่ HTTP 500 จาก y1<y0 แต่ไม่ได้แก้ตำแหน่งกรอบ)): ตรวจสอบด้วยภาพจริง
+# (crop เทียบ pixel) พบว่ากรอบส้ม 4 จาก 5 จุดที่ตรวจพบใน 2 ไฟล์นี้ วาดทับ "กล่องสินค้าจริง"
+# ที่มีอยู่แล้วเต็มพื้นที่ (เช่น AB03-01 BACK abs_box=(696,1362,833,1463) ทับซ้อนเต็มกับกอง
+# TGRTA-AA/AD/AT ที่เห็นชัดในภาพว่าไม่มีพื้นที่ว่างเลย) ไม่ใช่ "พื้นที่ว่างจริง" ตามชื่อ
+# risk_type ควรจะเป็น
+# ROOT CAUSE: find_wireframe_empty_space_topological (v25.93.4) ตัดสินใจ flag จากการ
+# เปรียบเทียบ "ความสูง" (height_px = bottom_y - top_y ที่คำนวณจาก bounding box ของ
+# front_face members ในคอลัมน์นั้น) ระหว่างคอลัมน์ข้างเคียงเพียงอย่างเดียว - ถ้าคอลัมน์หนึ่ง
+# "วัดความสูงได้น้อยกว่า" เพื่อนบ้าน (ซึ่งเกิดได้ทั้งจากพื้นที่ว่างจริง หรือจากการตรวจจับ
+# front-face ผิดพลาด/ไม่ครบในคอลัมน์ที่มีหลาย SKU ซ้อนกันเป็นแถวแนวตั้ง) จะถือว่าเป็น "ช่องว่าง"
+# ทันที โดยไม่เคยตรวจสอบเลยว่าพื้นที่ที่จะวาดกรอบนั้น "มีเส้นวาดกล่อง/ตัวอักษรจริงอยู่หรือไม่"
+# (ต่างจาก v25.92 เดิม find_wireframe_notch_risk_verified ที่เคยมี verified_mask emptiness
+# check แต่ถูกแทนที่ไปทั้งฟังก์ชันใน v25.93.4 โดยไม่ได้พกกลไกตรวจสอบความว่างติดมาด้วย)
+# ยืนยันด้วยข้อมูลจริง (วัด fraction ของ dark-line pixel ในกรอบที่ตรวจพบ เทียบกับพื้นที่ว่าง
+# จริงที่ทราบแน่ชัด - background มุมภาพที่ไม่มีกล่องเลย มี dark_frac=0.000 เป๊ะ):
+#   AB03-01 BACK: 4 จุดที่ flag มี dark_frac = 0.204 / 0.219 / 0.268 / 0.130 (ทั้งหมดสูงกว่า
+#     background จริงมาก - ทับเส้นกรอบกล่อง/ตัวอักษร SKU จริง ไม่ใช่พื้นที่ว่าง)
+#   AB04-02 BACK: 1 จุดที่ flag มี dark_frac = 0.105 (เช่นเดียวกัน - ทับเส้นกล่องจริง)
+#   AB04-02 FRONT: 1 จุดที่ flag มี dark_frac = 0.000 (ตรงกับพื้นที่ว่างจริง - ไม่มีเส้นใดๆเลย)
+# พิสูจน์ว่า dark-line density เป็นสัญญาณที่แยกแยะ "พื้นที่ว่างจริง" ออกจาก "ทับกล่องจริง" ได้
+# แม่นยำ (4/5 จุดที่วาดผิดตำแหน่งมี dark_frac สูงกว่าเกณฑ์อย่างชัดเจน เทียบกับ 1 จุดที่อาจ
+# ถูกต้องซึ่งมี dark_frac=0 พอดี)
+# FIX: เพิ่มการตรวจสอบ "ความว่างจริง" ก่อนยอมรับ risk - sample เส้น dark-mask (เส้นวาด
+# กล่อง/ขอบ/ตัวอักษร, คำนวณไว้แล้วจาก build_wireframe_cargo_mask) ภายในกรอบที่จะวาด - ถ้า
+# fraction ของ dark pixel เกิน _WF_EMPTY_GAP_MAX_DARK_FRAC (เผื่อ margin ให้เส้นบางๆที่อาจ
+# ลากผ่านพื้นที่ว่างจริงโดยบังเอิญเล็กน้อย เช่น เส้นบอกระยะ/มิติที่ลากคร่อมทั้งภาพ) ให้ปฏิเสธ
+# (ถือว่าเป็นการทับกล่อง/ตัวอักษรจริง ไม่ใช่พื้นที่ว่าง) - รับ dark_mask เป็นพารามิเตอร์เสริม
+# (default=None, fail-safe: ถ้าไม่ส่งมาจะข้ามการตรวจสอบนี้ไปเลย ไม่กระทบโค้ดเดิมที่เรียกใช้
+# ฟังก์ชันนี้แบบเก่า)
+_WF_EMPTY_GAP_MAX_DARK_FRAC = 0.05
+# v25.96 NEW (สำคัญ - พบจริงจาก AB04-02 FRONT หลังผู้ใช้ระบุ "กรอบส้มวาดนอกตู้สินค้า" - ยืนยัน
+# ว่า v25.95 (dark_frac guard) แก้ได้แค่บางส่วน ไม่ครบ): ยืนยันด้วยข้อมูลจริงระดับ pixel ว่า
+# กรอบที่เหลืออยู่ 1 จุด (AB04-02 FRONT, abs_box=(967,323,1009,353)) แม้จะผ่าน dark_frac
+# check (=0.0, ไม่มีเส้นทับ) แต่กลับ "ลอยอยู่นอกเส้นขอบเขตตู้สินค้า" (container silhouette)
+# ทั้งหมด - ตรวจสอบด้วย cargo_mask (เส้นที่ล้อมรอบพื้นที่ขาวภายในตู้ทั้งหมด, มีอยู่แล้วจาก
+# build_wireframe_cargo_mask - คำนวณจาก flood-fill ของพื้นที่ขาวที่ปิดล้อมสนิทด้วยเส้นดำ ไม่
+# แตะขอบภาพ) พบว่า cargo_mask coverage ในกรอบที่ flag ผิด = 0.0 (ไม่ถูกปิดล้อมด้วยโครงสร้างตู้
+# เลยแม้แต่พิกเซลเดียว) เทียบกับพื้นที่กล่องจริงข้างเคียง (y=280-500 ที่ x เดียวกัน) ที่มี
+# cargo_mask coverage สูงถึง 0.79 - และเมื่อตรวจสอบ y-extent ของ cargo_mask ที่ x-slice
+# เดียวกันทั้งหมด พบว่าเริ่มที่ y=293 เท่านั้น (ไม่ใช่ y=196 ที่ระบบใช้เป็น gap_y_top) - พิสูจน์
+# ชัดเจนว่าเส้นขอบหลังคาตู้จริง ณ ตำแหน่งนี้อยู่ที่ y≈293 ไม่ใช่ y=196 - กรอบที่วาดจึงล้ำออกไป
+# นอกเส้นขอบตู้ (พื้นที่ margin ว่างเปล่าเหนือหลังคา) ไปหมด ไม่ใช่ "พื้นที่ว่างภายในตู้" ตามที่
+# risk_type ควรจะสื่อความหมาย
+# ROOT CAUSE: dark_frac guard (v25.95) ตรวจแค่ "ไม่มีเส้นทับ" แต่ไม่เคยตรวจว่า "อยู่ภายในเส้น
+# ขอบเขตตู้หรือไม่" - พื้นที่นอกตู้ (blank margin บนหน้ากระดาษ) ก็ไม่มีเส้นทับเช่นกัน (dark_frac
+# =0 เหมือนกัน) ทำให้ dark_frac guard เพียงอย่างเดียวแยกแยะ "ว่างในตู้" กับ "นอกตู้" ไม่ได้เลย
+# FIX: เพิ่มการตรวจสอบ "การปิดล้อมภายในตู้" (containment) เป็นเงื่อนไขเสริมอีกชั้น - รับ
+# cargo_mask (แยกจาก dark_mask ที่มีอยู่แล้ว) เป็นพารามิเตอร์เสริม แล้วตรวจสอบว่ากรอบที่จะวาด
+# มี cargo_mask coverage อย่างน้อย _WF_EMPTY_GAP_MIN_CARGO_COVERAGE หรือไม่ - ถ้าต่ำกว่านี้
+# (ส่วนใหญ่ของกรอบอยู่นอกขอบเขตที่ปิดล้อมด้วยโครงสร้างตู้) ให้ปฏิเสธ (ไม่ใช่พื้นที่ว่างภายในตู้
+# จริง) - เกณฑ์ 0.5 เลือกจากหลักฐานจริง (กล่องจริง=0.79, นอกตู้=0.0 - อยู่กึ่งกลางระหว่าง 2 ค่า
+# นี้พอดี ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง) - รับ default=None (fail-safe: ถ้าไม่ส่งมาจะข้าม
+# การตรวจสอบนี้ไปเลย ไม่กระทบโค้ดเดิมที่เรียกใช้ฟังก์ชันนี้แบบเก่า)
+_WF_EMPTY_GAP_MIN_CARGO_COVERAGE = 0.5
+def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thresh=0.25,
+                                           dark_mask=None, cargo_mask=None):
     risks = []
     valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
     if not valid_indices: return []
@@ -1627,6 +1683,32 @@ def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thres
                         break
             
             if not roof_covered:
+                # v25.95 NEW: Emptiness Verification Guard - ดู docstring เต็มด้านบน
+                # _WF_EMPTY_GAP_MAX_DARK_FRAC สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-01/AB04-02)
+                if dark_mask is not None:
+                    yy0 = max(0, int(min(gap_y_top, gap_y_bot)))
+                    yy1 = min(dark_mask.shape[0], int(max(gap_y_top, gap_y_bot)))
+                    xx0 = max(0, int(gap_x0))
+                    xx1 = min(dark_mask.shape[1], int(gap_x1))
+                    if yy1 > yy0 and xx1 > xx0:
+                        band = dark_mask[yy0:yy1, xx0:xx1]
+                        dark_frac = float(band.mean()) if band.size else 1.0
+                        if dark_frac > _WF_EMPTY_GAP_MAX_DARK_FRAC:
+                            continue  # ทับเส้นกล่อง/ตัวอักษรจริง ไม่ใช่พื้นที่ว่าง - ปฏิเสธ
+                # v25.96 NEW: Container Silhouette Containment Guard - ดู docstring เต็มด้านบน
+                # _WF_EMPTY_GAP_MIN_CARGO_COVERAGE สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB04-02
+                # FRONT - กรอบลอยอยู่นอกเส้นขอบเขตตู้ทั้งหมด แม้จะผ่าน dark_frac guard แล้ว)
+                if cargo_mask is not None:
+                    yy0c = max(0, int(min(gap_y_top, gap_y_bot)))
+                    yy1c = min(cargo_mask.shape[0], int(max(gap_y_top, gap_y_bot)))
+                    xx0c = max(0, int(gap_x0))
+                    xx1c = min(cargo_mask.shape[1], int(gap_x1))
+                    if yy1c > yy0c and xx1c > xx0c:
+                        cband = cargo_mask[yy0c:yy1c, xx0c:xx1c]
+                        cargo_cov = float(cband.mean()) if cband.size else 0.0
+                        if cargo_cov < _WF_EMPTY_GAP_MIN_CARGO_COVERAGE:
+                            continue  # ลอยอยู่นอกเส้นขอบเขตตู้ (ไม่ถูกปิดล้อมด้วยโครงสร้าง
+                            # ตู้เพียงพอ) - ไม่ใช่พื้นที่ว่างภายในตู้จริง - ปฏิเสธ
                 width = gap_x1 - gap_x0
                 if width < 70:
                     pad = (70 - width) / 2.0
@@ -1752,7 +1834,7 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
                 continue
             hi_img, _ = hi_res
             
-            cargo_mask, _ = build_wireframe_cargo_mask(hi_img) 
+            cargo_mask, wf_dark_mask = build_wireframe_cargo_mask(hi_img) 
             seams_result = find_wireframe_seams_v5(hi_img, cargo_mask)
             
             if seams_result is None or not seams_result.get("front_faces"):
@@ -1763,7 +1845,7 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
             records = build_stack_records_wireframe_fast(seams_result, view_label)
             
             pairwise_risks = detect_wireframe_step_down_pairwise(records, drop_ratio_thresh)
-            empty_risks = find_wireframe_empty_space_topological(records, wf_roof_faces, drop_ratio_thresh=0.25)
+            empty_risks = find_wireframe_empty_space_topological(records, wf_roof_faces, drop_ratio_thresh=0.25, dark_mask=wf_dark_mask, cargo_mask=cargo_mask)
             
             view_data[view_label] = {
                 "origin": origin,
@@ -8152,8 +8234,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.94",
-            "benchmarkMode": "v25_94_wireframe_empty_space_gap_ybox_order_fix" if is_wireframe else
+            "checkerVersion": "V25.96",
+            "benchmarkMode": "v25_96_wireframe_empty_space_silhouette_containment_guard" if is_wireframe else
                              "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
