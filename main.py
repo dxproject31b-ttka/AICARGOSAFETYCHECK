@@ -1500,11 +1500,20 @@ def find_wireframe_notch_risk_verified(seams_result, front_faces, roof_faces, ve
     return risks
 
 # ============================================================================
-# v25.93.4 FIX: WIREFRAME PARADIGM SHIFT (Anti-Artifact & Dynamic Scale)
+# v25.93.5 FIX: WIREFRAME PARADIGM SHIFT (Ultimate Anti-Artifact & Crash Proof)
 # ============================================================================
 
 _WF_MIN_OVERLAP_RATIO = 0.5
 _WF_EDGE_ZONE_POS_THRESH = 0.15
+_WF_FRONT_TO_BACK_HEIGHT_SCALE = 1.19  
+
+def _is_edge_artifact(pos_range):
+    """
+    เช็คว่าคอลัมน์นี้อยู่ริมสุดของภาพ (<5% หรือ >95%) หรือไม่ 
+    เพื่อใช้ตัด 'ผนังหน้ารถ/ท้ายรถ' หรือ 'ข้อความหลอก (Dimension Text)' ทิ้ง
+    """
+    pmid = (pos_range[0] + pos_range[1]) / 2.0
+    return pmid < 0.05 or pmid > 0.95
 
 def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=None):
     if flip_position is None:
@@ -1544,17 +1553,11 @@ def build_stack_records_wireframe_fast(seams_result, view_label, flip_position=N
 
 def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
     risks = []
-    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
-    if not valid_indices: return []
-    
-    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้
-    first_valid, last_valid = valid_indices[0], valid_indices[-1]
-    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
         
-        # ป้องกันข้อความหลอกที่ขอบนอกสุด (ข้ามพื้นที่ว่างที่อยู่นอกกล่องจริง)
-        if r1["idx"] < first_valid or r2["idx"] > last_valid:
+        # FIX: ข้ามการวิเคราะห์ หากคอลัมน์ใดคอลัมน์หนึ่งเป็นผนัง/ข้อความริมจอ
+        if _is_edge_artifact(r1["pos_range"]) or _is_edge_artifact(r2["pos_range"]):
             continue
             
         h1, h2 = r1["height_px"], r2["height_px"]
@@ -1578,17 +1581,11 @@ def detect_wireframe_step_down_pairwise(records, drop_ratio_thresh=0.20):
 
 def find_wireframe_empty_space_topological(records, roof_faces, drop_ratio_thresh=0.25):
     risks = []
-    valid_indices = [r["idx"] for r in records if r["height_px"] > 0]
-    if not valid_indices: return []
-    
-    # FIX: หาขอบเขตกล่องจริงใบแรกและใบสุดท้าย เพื่อข้ามผนังตู้ (ป้องกันกรอบส้มลั่นที่ข้อความขอบจอ)
-    first_valid, last_valid = valid_indices[0], valid_indices[-1]
-    
     for i in range(len(records) - 1):
         r1, r2 = records[i], records[i+1]
         
-        # ป้องกันกรอบส้มที่ผนังด้านนอก (ไม่นับ)
-        if r1["idx"] < first_valid or r2["idx"] > last_valid:
+        # FIX: ไม่นำผนังตู้และข้อความขอบจอมาคำนวณหาช่องว่าง ป้องกันกรอบส้มลั่น
+        if _is_edge_artifact(r1["pos_range"]) or _is_edge_artifact(r2["pos_range"]):
             continue
             
         h1, h2 = r1["height_px"], r2["height_px"]
@@ -1654,8 +1651,6 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
                                                 exclude_edge_zone=True):
     matches = _wf_match_cross_view(records_front, records_back, min_overlap_ratio)
     
-    # FIX: สร้างระบบ Dynamic Calibration คำนวณ Scale ของรถคันนั้นๆ แทนการใช้ 1.19 เสมอ 
-    # ช่วยตัดกรอบแดงปลอมจำนวนมากทิ้ง (แก้ปัญหาจากภาพ AB03-02)
     dynamic_scale = 1.0
     if apply_calibration and matches:
         ratios = []
@@ -1668,7 +1663,7 @@ def detect_wireframe_cross_view_height_mismatch(records_front, records_back,
                     ratios.append(fh / bh_med)
         if ratios:
             dynamic_scale = float(np.median(ratios))
-            dynamic_scale = max(0.8, min(1.5, dynamic_scale)) # จำกัดขอบเขตกันสวิง
+            dynamic_scale = max(0.8, min(1.5, dynamic_scale))
             
     risks = []
     for rec_front, back_matches in matches:
@@ -1772,15 +1767,12 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     risks = []
     
-    # วาดกรอบ Cross-view
     for hr in height_risks:
         mark_view = hr.get("mark_view", "FRONT")
         front_idx = hr["front_idx"]
         
         if mark_view == "FRONT":
             front_vd = view_data["FRONT"]
-            
-            # FIX: ค้นหา Record ด้วย idx เสมอ ป้องกัน IndexError ถ้า List เปลี่ยนรูป
             rec_f_list = [r for r in front_vd["records"] if r["idx"] == front_idx]
             if not rec_f_list: continue
             rec_f = rec_f_list[0]
@@ -1812,7 +1804,6 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
                     "drop_ratio": float(hr["drop_ratio"]),
                 })
 
-    # วาดกรอบ Pairwise และ Empty Space
     for view_label in ["FRONT", "BACK"]:
         vd = view_data.get(view_label, {})
         origin = vd.get("origin", (0,0))
@@ -1839,8 +1830,8 @@ def run_wireframe_analysis_on_image(pdf_bytes, full_img, doc, page, diagram_page
 
     return {
         "risks": risks,
-        "front_n_columns": int(view_data.get("FRONT", {}).get("seams_result", {}).get("n_columns", 0)),
-        "back_n_columns": int(view_data.get("BACK", {}).get("seams_result", {}).get("n_columns", 0)),
+        "front_n_columns": int(view_data.get("FRONT", {}).get("seams_result", {}).get("n_columns", 0)) if view_data.get("FRONT", {}).get("seams_result") else 0,
+        "back_n_columns": int(view_data.get("BACK", {}).get("seams_result", {}).get("n_columns", 0)) if view_data.get("BACK", {}).get("seams_result") else 0,
     }
 
 
