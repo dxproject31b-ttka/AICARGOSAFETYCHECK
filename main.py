@@ -1150,7 +1150,20 @@ REAR_GAP_MIN_RATIO = 0.065
 #   ปะปนกันผิดปกติหรือไม่ (เช่น SKU แปลกปลอมโผล่ที่ตำแหน่งท้ายสุด มักพบคู่กับพื้นที่ว่าง/สินค้า
 #   วางไม่เป็นระเบียบใกล้ประตูท้ายตู้) คาลิเบรตจาก EC04-02 BACK idx5 (TEM1A, 4 สีเด่น) ที่ต้อง
 #   flag ในขณะที่ตั้งท้ายสุดของอีก 5 view (สีเดียวล้วน) ต้องไม่ flag
-REAR_COLOR_ANOMALY_MIN_COLORS = 3
+# v25.90 FIX #2 (สำคัญ - พบจริงจาก EB66-01 ที่ผู้ใช้ยืนยันว่า "ไม่มีความเสี่ยง" แต่ v25.89 flag
+# EMPTY_SPACE_RISK/color_anomaly ถึง 2 จุด (FRONT idx0 และ BACK idx6), 10-Sep-2026):
+# ROOT CAUSE: เกณฑ์เดิม (>=3 สี) ต่ำเกินไปสำหรับไฟล์ที่มี SKU หลากหลายมากตามปกติของงานจริง -
+# EB66-01 มี SKU ถึง 47 รายการ (ASIAA/CMI11/DITHB/HMT1B/MCT1A/MCT1B/MCT1C/MCT1CE4/TAI1A/TVI1A...)
+# ทำให้ "ตั้งท้ายสุด" มีกล่องคนละ SKU วางซ้อนกันตามปกติ 3 สีพอดี (วัดได้จริง: FRONT idx0 =
+# {เขียวอมฟ้า,แดงเข้ม,เขียว} dominant_frac=0.593 | BACK idx6 = {เขียวอมฟ้า,เขียว,แดง}
+# dominant_frac=0.591) - ทั้ง 2 จุดเป็นการวางซ้อน SKU ต่างชนิดตามปกติ ไม่ใช่ความไม่เป็นระเบียบ
+# ยืนยันด้วยภาพจริง: EB66-01 บรรทุกเต็มคัน (Unused Floor=0, cargo 91.9%) และหลังคาสินค้าเรียบ
+# เป็นระนาบเดียวต่อเนื่องทั้งคัน (BACK view ไม่พบรอยบากใดๆ เลยแม้แต่จุดเดียว) - ไม่มีพื้นที่ว่างจริง
+# FIX: ปรับเกณฑ์จาก >=3 เป็น >=4 สี - เลือกค่านี้จาก ground-truth เดิมที่คาลิเบรตไว้โดยตรง ไม่ใช่
+# การเดา: CHANGELOG v25.10 บันทึกไว้ชัดเจนว่า EC04-02 (ไฟล์ ground-truth ที่ "ต้อง flag" สำหรับ
+# กลไกนี้) มี "4 สี SKU ปะปนกัน" ที่ BACK idx5 - ดังนั้นเกณฑ์ >=4 ยังคง flag EC04-02 ได้ถูกต้อง
+# เหมือนเดิมทุกประการ ในขณะที่ตัดกรณี 3 สีของ EB66-01 ออกไป (ห่างกันพอดี 1 สี แยก 2 กรณีนี้ได้)
+REAR_COLOR_ANOMALY_MIN_COLORS = 4
 REAR_COLOR_MIN_FRACTION = 0.03
 REAR_COLOR_MIN_PIXELS = 80
 
@@ -4526,6 +4539,13 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
     return results
 
 
+# v25.90 NEW: ดู docstring เต็มที่จุดใช้งานจริงใน detect_step_down_hidden_behind (FIX #3)
+# สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB66-01: hidden_height สูงกว่า median คอลัมน์อื่นแค่ 10.3%
+# ซึ่งเป็น depth-offset artifact ต้องกรองออก) - ตั้งไว้ที่ 15% ให้สูงกว่าค่าที่วัดได้จริงพอสมควร
+# แต่ยังต่ำกว่า "การเพิ่มขึ้น 1 ชั้นกล่องจริง" (~25-35% ของความสูงกอง) มาก จึงไม่กระทบกรณี
+# hidden_behind ที่เป็นอันตรายจริงแบบ AE02-01 (กล่องแดงซ้อนชั้นที่ 3 สูงพ้นทุกกองอย่างชัดเจน)
+_HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO = 0.15
+
 _HIDDEN_BEHIND_UP_MAX_BOTTOM_JUMP_PX = 40  # v25.89 NEW: ดู docstring เต็มที่จุดใช้งานจริงด้านล่าง
 # (ทิศทาง 'up') สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01) - ตั้งค่าให้สูงกว่า noise ปกติของขอบกล่อง
 # (มักไม่กี่ px) มากพอ แต่ต่ำกว่าความจริงของกรณี ghost-artifact ที่พบ (197px) มาก
@@ -5231,7 +5251,29 @@ def _isolated_pair_no_genuine_jump(records_same_view, view_result):
         return False
     lo = min(a["x_range"][0], b["x_range"][0])
     hi = max(a["x_range"][1], b["x_range"][1])
-    return not _has_internal_sharp_jump(cty, (lo, hi))
+    if _has_internal_sharp_jump(cty, (lo, hi)):
+        return False
+    # v25.90 FIX #4 (สำคัญ - พบจริงจาก EB63-01 ที่ผู้ใช้ยืนยันว่า "มีความเสี่ยง" แต่ v25.89
+    # รายงาน SAFE, 10-Sep-2026): guard นี้ (v25.89, สร้างขึ้นเพื่อแก้ EB73-01) ใช้สัญญาณเดียวคือ
+    # _has_internal_sharp_jump ตัดสินใจ suppress ทั้งคู่ - พบว่าเข้มงวดเกินไปสำหรับ EB63-01 ซึ่งมี
+    # ลายเซ็นภายนอกเหมือน EB73-01 ทุกประการ (บรรทุกเบาบางมาก 6.9%, SKU เดียว API1A สีน้ำเงินล้วน
+    # ทั้งไฟล์, Phase 1B นับได้แค่ 2 คอลัมน์รวมทั้งวิว) แต่เป็นความเสี่ยงจริง 100%:
+    # BACK idx0=115.9px vs idx1=59.5px -> drop=48.7% (กล่องวางนอนแบนอยู่ข้างกล่องตั้งสูง - ยืนยัน
+    # ด้วยภาพจริงชัดเจนมาก) และที่สำคัญ _edge_outlier_has_genuine_seam_jump(idx1,idx0)=True
+    # (พบ jump จริงที่ seam) ในขณะที่ EB73-01 ไม่พบ jump จากตัวตรวจจับใดเลย
+    # ROOT CAUSE: _has_internal_sharp_jump ตรวจเฉพาะ "single-pixel step >=35px" ซึ่งจับไม่ได้เมื่อ
+    # รอยต่อระหว่างกล่อง 2 ใบเป็นแนวทแยงตามธรรมชาติของภาพ isometric (ความสูงเปลี่ยนแบบค่อยเป็น
+    # ค่อยไปตลอดแนวทแยง ไม่กระโดดใน 1 pixel) - แต่ _edge_outlier_has_genuine_seam_jump (window-
+    # median scan รอบ seam) จับกรณีนี้ได้ เพราะเปรียบเทียบ "ระดับความสูงเฉลี่ย" 2 ฝั่งแทน
+    # FIX: ต้องให้ตัวตรวจจับ jump "ทั้ง 2 ตัวเห็นตรงกันว่าไม่มี jump" จึงจะ suppress (เดิมใช้ตัวเดียว)
+    # - เป็นรูปแบบเดียวกับที่ v25.89 ใช้อยู่แล้วใน apex-affected guard (ใช้ 2 ตัวตรวจสอบร่วมกัน)
+    # การแก้นี้ "แคบลงเสมอ" (suppress ยากขึ้น) จึงไม่มีทางสร้าง false-negative ใหม่ในไฟล์ใดเลย
+    # ข้อจำกัดที่ต้องบอกตรงไปตรงมา: ไม่มีไฟล์ EB73-01 ให้ regression-test ในรอบนี้ - ถ้า EB73-01
+    # มี seam-jump ตรวจพบด้วย (ซึ่ง CHANGELOG v25.89 ไม่ได้ระบุค่าไว้) กรอบเดิมอาจกลับมา แนะนำให้
+    # รัน regression กับ EB73-01 ยืนยันก่อนใช้งานจริง
+    if _edge_outlier_has_genuine_seam_jump(view_result, a, b) is True:
+        return False
+    return True
 
 
 def _is_edge_measurement_outlier(records_same_view, target_idx,
@@ -5706,6 +5748,41 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
         # เรียกจากที่อื่นที่ยังไม่ได้อัพเดต - ไม่ควรเกิดขึ้นจริงเพราะแก้ที่เดียวกันแล้ว)
         hidden_h = info["hidden_height"]
         direction = info.get("direction", "up")  # v25.70 NEW: default='up' รักษาพฤติกรรมเดิม
+        # v25.90 FIX #3 (สำคัญ - พบจริงจาก EB66-01 ที่ผู้ใช้ยืนยันว่า "ไม่มีความเสี่ยง" แต่ v25.89
+        # flag STEP_DOWN_RISK/hidden_behind ที่ FRONT idx=2, 10-Sep-2026): ทิศทาง 'up' (v25.23 เดิม)
+        # แทบไม่มี guard ใดๆ เลย (ต่างจากทิศทาง 'down' ที่ v25.70 เพิ่ม SNR + floor-stability ไว้)
+        # ยืนยันด้วยข้อมูล pixel จริง: split_x=841 มี jump=75px, left_std=0.37, right_std=0.73
+        # (นิ่งมากทั้ง 2 ฝั่ง), floor jump=1.8px (นิ่ง), cargo_bottom jump=2.5px (นิ่ง), สี 2 ฝั่ง
+        # ต่างกัน (ม่วง->เหลือง) - ผ่าน guard เดิมทุกข้อ แต่ตรวจสอบภาพจริงระดับ pixel พบว่าเป็น
+        # "depth-offset artifact" ล้วนๆ: ฝั่งซ้ายของ split คือ "หลังคา (top face) ของกล่องแถวหน้า"
+        # (TVI1A-BN ฟ้า) ที่สิ้นสุดพอดี และฝั่งขวาคือ "หลังคาของกล่องแถวหลัง" (TAI1A-D1 เหลือง) ที่
+        # เริ่มต้น - ในมุมมอง isometric แถวหลังถูกวาดสูงกว่าบนหน้ากระดาษเสมอแม้จะสูงเท่ากันจริง
+        # หลักฐานยืนยันว่าทั้งคู่สูงเท่ากันจริง: เหนือทั้ง 2 ฝั่งคือรางเพดานตู้ (olive) ติดกันสนิท
+        # ไม่มีช่องว่างสีขาวเลย + BACK view ของไฟล์เดียวกันแสดงหลังคาเป็นระนาบเรียบต่อเนื่องทั้งคัน
+        # ROOT CAUSE เชิงกายภาพ: hidden_behind จะเป็น "อันตราย" ก็ต่อเมื่อกล่องที่ซ่อนอยู่ข้างหลัง
+        # "โผล่สูงพ้นระดับหลังคาสินค้าทั่วไป" จริง (เช่น AE02-01 ที่มีกล่องแดงซ้อนเป็นชั้นที่ 3 สูง
+        # กว่าทุกกองอย่างชัดเจน) - ถ้าความสูงที่วัดได้ของฝั่งที่ "ซ่อนอยู่" เสมอกับระดับหลังคาปกติ
+        # ของทั้งวิวอยู่แล้ว แสดงว่าไม่มีอะไรโผล่พ้นขึ้นมาเลย เป็นแค่ความเอนเอียงจากมุมมองเชิงลึก
+        # ยืนยันตัวเลข EB66-01 FRONT: hidden_height=337.0 เทียบ median ความสูงของคอลัมน์อื่นในวิว
+        # เดียวกัน (ไม่รวมคอลัมน์นี้เอง) = 305.5 -> สูงกว่าแค่ 10.3% (เสมอระดับหลังคาปกติ ไม่ได้โผล่)
+        # FIX: เพิ่ม guard เฉพาะทิศทาง 'up' - ถ้า hidden_height ไม่ได้สูงกว่า median ของคอลัมน์อื่น
+        # เกิน _HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO ให้ถือว่าเป็น depth-offset artifact ไม่ flag
+        # (ไม่กระทบทิศทาง 'down' เดิมเลย และไม่กระทบกรณีที่กล่องโผล่สูงพ้นจริงซึ่งจะสูงกว่า median
+        # มากกว่านี้มาก - ชั้นกล่องเพิ่ม 1 ชั้นตามปกติคิดเป็น ~25-35% ของความสูงกองทั้งหมด)
+        if direction == "up":
+            others = [r.get("height_px") for r in records
+                      if r.get("idx") != idx and r.get("height_px")
+                      and r.get("height_source") in ("direct", "cross_view_filled",
+                                                     "cross_view_corrected", "apex_partial_cut")]
+            if len(others) >= 2:
+                med_other = float(np.median(others))
+                if med_other > 0 and hidden_h <= med_other * (1 + _HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO):
+                    print(f"[HIDDEN_BEHIND_UP_GUARD] view={view_label} idx={idx} "
+                          f"hidden_h={hidden_h:.1f} <= median_other({med_other:.1f})*"
+                          f"{1 + _HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO:.2f} -> depth-offset artifact "
+                          f"(กล่องหลังไม่ได้โผล่พ้นระดับหลังคาปกติ) ไม่ flag")
+                    continue
+
         if direction == "down":
             mark_x0, mark_x1 = x0, split_x
         else:
@@ -6856,7 +6933,23 @@ def _p1b_extended_length_for_rear_check(view_result):
 # peak ที่ไม่ใช่ apex จริง) นั่นคือสัญญาณกล่องเตี้ยกว่าที่ไม่ถูกกองข้างเคียงบังจนมิด เผยพื้นหลัง/
 # ผนังตู้ - ยืนยัน sample สีในรอยบากได้ 100% เป็นพื้นหลังขาว/สีโครงสร้างตู้ (ไม่ใช่สีกล่องสินค้า)
 # Regression-tested สะอาดกับ 8 ไฟล์ (ไม่มี false-positive)
-_NOTCH_MIN_PROMINENCE_PX = 15
+# v25.90 FIX #1 (สำคัญ - พบจริงจาก EB63-01 + EB08-01 ที่ผู้ใช้ยืนยันด้วยตาเองว่า "มีความเสี่ยง"
+# แต่ v25.89 รายงาน SAFE ทั้ง 2 ไฟล์, 10-Sep-2026): เดิม _NOTCH_MIN_PROMINENCE_PX=15 ตัดรอยบากที่
+# "ตื้นกว่า 15px" ทิ้งทั้งหมดก่อนจะได้ตรวจสอบสีด้วยซ้ำ - พบว่าไฟล์ที่บรรทุกเต็มคัน (Unused Floor=0)
+# รอยบาก/ช่องว่างจริงมักตื้น เพราะกล่องรอบข้างสูงใกล้เคียงกัน (ช่องว่างไม่ได้ลึกมาก แต่ยังเป็น
+# พื้นที่ว่างจริงที่สินค้าล้มเข้าไปได้) ยืนยันด้วยข้อมูล pixel จริง (sample สีในแนวตั้งของรอยบาก):
+#   EB08-01 BACK x=1047 prominence=13px, empty_fraction=0.88 (พื้นหลังขาว 255,255,255 ล้วน)
+#   EB63-01 FRONT x=1108 prominence=12px, empty_fraction=1.00 (สีผนังตู้ 255,255,175 ล้วน 100%)
+# ทั้ง 2 จุดเป็นพื้นที่ว่างจริงชัดเจนระดับ pixel แต่ถูกตัดทิ้งเพราะ prominence ต่ำกว่า 15 เพียง
+# 2-3px เท่านั้น (ไม่เกี่ยวกับคุณภาพของหลักฐานสีเลย)
+# FIX: ลด threshold 15 -> 12 (ต่ำกว่า 12.0/13.0 ที่วัดได้จริงเล็กน้อยเพื่อให้มี margin)
+# ทำไมจึงปลอดภัยเป็นพิเศษ (ยืนยันด้วยข้อมูลจริง ไม่ใช่การเดา): เกณฑ์ prominence เป็นเพียง "ด่านคัด
+# กรองเบื้องต้น" เท่านั้น - ด่านตัดสินจริงคือ empty_fraction (>=60% ต้องเป็นพื้นหลัง/สีโครงสร้างตู้)
+# ซึ่งไม่ได้ถูกผ่อนปรนเลยแม้แต่น้อย ยืนยันจาก EB66-01 (ไฟล์ที่ผู้ใช้ยืนยันว่า "ไม่มีความเสี่ยง"):
+# มีรอยบากเดียวที่ FRONT x=837 prominence=34px (สูงกว่า threshold เดิม 15 อยู่แล้ว!) แต่ถูกปฏิเสธ
+# ด้วย empty_fraction=0.45 (<0.60) - แสดงว่าการลด threshold นี้ไม่กระทบ EB66-01 แม้แต่จุดเดียว
+# (จุดที่ถูกปฏิเสธ ถูกปฏิเสธด้วยหลักฐานสี ไม่ใช่ด้วย prominence)
+_NOTCH_MIN_PROMINENCE_PX = 12
 _NOTCH_MIN_DISTANCE_PX = 20
 _NOTCH_MIN_EMPTY_FRACTION = 0.6
 
@@ -7278,8 +7371,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.89",
-            "benchmarkMode": "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
+            "checkerVersion": "V25.90",
+            "benchmarkMode": "v25_90_notch_prominence_color_anomaly_hiddenbehind_up_isolated_pair",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
