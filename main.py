@@ -3331,6 +3331,74 @@ def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
     return result
 
 
+# v25.88 NEW (สำคัญ - พบจริงจาก AB03-04 1-Sep-2026, ผู้ใช้สอนกฎการนับหน้า: "กล่อง 1 ใบ ปรากฏ
+# หน้า1/บน1/ข้าง1, กล่อง 2 ใบซ้อน ปรากฏหน้า2/บน1/ข้าง2 ... ตั้งที่ติดกันทางขวาจะไม่มีด้านข้างเลย
+# มีแค่บน+หน้า" และ "side face ต้องอยู่ทางซ้ายของ front face เสมอ ติดกันสนิท ไม่มีช่องว่าง"):
+# ยืนยันด้วยข้อมูลจริง 2 ไฟล์ตรงข้ามกัน (AB03-04 vs RD01-01) - ผู้ใช้ทำเครื่องหมายด้วยมือยืนยันว่า
+# AB03-04's comp1 (x=806-954, สีฟ้า) คือ "side face" ของ comp2 (x=956-1054, สีฟ้าเดียวกัน, front
+# face จริง) - ทั้งคู่ติดกันสนิท (gap=2px) สีเดียวกันเป๊ะ - เดิม _p1b_reconcile_with_back (Hungarian
+# matching M>N) เลือกตัด comp3 (x=1055-1153, front face จริงของอีกตั้ง) ทิ้งแทน เพราะสัดส่วนตำแหน่ง
+# (fraction) ของ comp1 ใกล้เคียงกับตำแหน่งที่ 1 ใน BACK มากกว่า (เนื่องจาก front_extent ที่คำนวณจาก
+# roof span รวม กว้างกว่า back_extent มาก ทำให้ fraction ของ comp3 เอียงไปทางขวาเกินจริง) ทำให้กรอบ
+# marker วาดผิดตำแหน่ง (ครอบคลุมครึ่งหนึ่งของ comp2+comp3 ผสมกัน ไม่ตรงกับกล่องจริงตั้งใดเลย)
+#
+# ยืนยันด้วยข้อมูลตรงข้าม RD01-01: f1 (x=644-738, ตั้งซ้ายสุดจริง ไม่มี roof ของตัวเอง เหมือน
+# comp1 ทุกประการทางเรขาคณิต) แต่ f1 คือกล่องจริงตัวที่ 1 ไม่ใช่ side face - ทดสอบสัญญาณหลายแบบ
+# (aspect ratio, mean_sat, ความชันขอบบน) ไม่พบตัวใดแยกแยะ comp1/f1 ได้เลย จนกระทั่งผู้ใช้ชี้ว่า
+# ต้องดูจาก "ความกว้างเทียบกับเพื่อนบ้านขวาสีเดียวกันที่ติดกันสนิท":
+#   comp1(148px) vs comp2(98px) เพื่อนบ้านขวา -> comp1 กว้างกว่า 51% (comp1=side face จริง)
+#   f1(94px) vs f2(144px) เพื่อนบ้านขวา -> f1 แคบกว่า 35% (f1=front face จริง)
+# ตรงกับหลักการทางเรขาคณิตของ isometric drawing: side face (หน้าผาแคบเมื่อกล่องเตี้ย, กว้างเมื่อ
+# กล่องสูง) ที่ "บังเอิญ" กว้างกว่า front face ของกล่องข้างเคียงที่วางถัดไป มักบ่งชี้ว่าเป็นหน้าข้าง
+# ของกล่องเดียวกับ front-face นั้น ไม่ใช่กล่องแยกต่างหาก (ตรงข้ามกับ front-face ริมสุดของแถวจริง ที่
+# ไม่มีเหตุผลทางเรขาคณิตใดๆ ให้ต้อง "กว้างกว่า" เพื่อนบ้านเสมอ)
+#
+# ขอบเขตการแก้ (ตามที่ตกลงกัน - ปลอดภัยที่สุดเท่าที่ยืนยันได้จากหลักฐาน 2 ไฟล์): trigger เฉพาะเมื่อ
+# ครบทุกเงื่อนไข (1) M > N เท่านั้น (ไม่แตะกรณี M<=N) (2) candidate กับเพื่อนบ้านขวาถัดไปต้อง "สี
+# เดียวกันเป๊ะ" (ไม่ใช่แค่ทับซ้อน - สีต่างกันคือคนละกล่องจริง ไม่ใช้กฎนี้) (3) ต้อง "ติดกันสนิท"
+# (gap <= _SIDE_FACE_TOUCH_GAP_MAX_PX) (4) candidate ต้อง "กว้างกว่า" เพื่อนบ้านขวาอย่างมีนัยสำคัญ
+# (>= _SIDE_FACE_WIDTH_RATIO_MIN เท่า) - ถ้าไม่ครบทุกเงื่อนไข ไม่ตัดทิ้ง (ปลอดภัยไว้ก่อน)
+_SIDE_FACE_WIDTH_RATIO_MIN = 1.2  # candidate ต้องกว้างกว่าเพื่อนบ้านขวาอย่างน้อย 20% (ยืนยันจริง
+# AB03-04=51% กว้างกว่า - ให้ margin ปลอดภัยต่ำกว่านี้พอสมควร แต่สูงกว่า noise ปกติ)
+_SIDE_FACE_TOUCH_GAP_MAX_PX = 10  # ต้องติดกันสนิทภายในระยะนี้ (ยืนยันจริง comp1-comp2 gap=2px)
+
+
+def _p1b_filter_wide_side_face_candidates(front_cols, n_back):
+    """v25.88 NEW: กรอง front-column candidate ที่แท้จริงคือ 'side face' ของเพื่อนบ้านขวาสีเดียวกัน
+    ที่ติดกันสนิท (ตามกฎที่ผู้ใช้สอน - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล พบจริงจาก
+    AB03-04) - ทำงานเฉพาะเมื่อ M (len(front_cols)) > N (n_back) เท่านั้น คืนค่า (kept, dropped)"""
+    if len(front_cols) <= n_back:
+        return list(front_cols), []
+    cols_sorted = sorted(front_cols, key=lambda c: c['x'])
+    drop_flags = [False] * len(cols_sorted)
+    for i in range(len(cols_sorted) - 1):
+        c = cols_sorted[i]
+        nxt = cols_sorted[i + 1]
+
+        def _colors_of(col):
+            cs = set(mm['color'] for mm in col.get('members', []) if mm.get('color'))
+            if not cs and col.get('color'):
+                cs = {col['color']}
+            return cs
+
+        c_colors = _colors_of(c)
+        nxt_colors = _colors_of(nxt)
+        if not c_colors or c_colors != nxt_colors:
+            continue  # สีต่างกัน หรือไม่ทราบสี - ไม่ใช้กฎนี้ (คนละกล่องจริง)
+        gap = nxt['x'] - (c['x'] + c['w'])
+        if gap > _SIDE_FACE_TOUCH_GAP_MAX_PX:
+            continue  # ไม่ติดกันสนิท - ไม่ใช้กฎนี้
+        if c['w'] >= nxt['w'] * _SIDE_FACE_WIDTH_RATIO_MIN:
+            drop_flags[i] = True
+            print(f"[SIDE_FACE_FILTER] ตัด candidate x={c['x']}-{c['x']+c['w']} (w={c['w']}) "
+                  f"ทิ้ง เพราะกว้างกว่าเพื่อนบ้านขวา x={nxt['x']}-{nxt['x']+nxt['w']} (w={nxt['w']}) "
+                  f"สีเดียวกัน({next(iter(c_colors))}) ติดกันสนิท(gap={gap}px) - ถือเป็น side face")
+    kept = [c for i, c in enumerate(cols_sorted) if not drop_flags[i]]
+    dropped = [c for i, c in enumerate(cols_sorted) if drop_flags[i]]
+    kept.sort(key=lambda c: c['cx'])
+    return kept, dropped
+
+
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
                               n_dropped_by_new_rules=0, back_all_cells=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
@@ -3694,6 +3762,18 @@ def compute_phase1b_columns(regions, down_factor=1.0):
             front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
 
+        # v25.88 NEW: กรอง 'side face' ที่กว้างกว่าเพื่อนบ้านขวาสีเดียวกันติดกันสนิท ก่อนเข้า
+        # Hungarian reconcile - ดู docstring เต็มที่ _p1b_filter_wide_side_face_candidates
+        # สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ทำงานเฉพาะ M>N เท่านั้น (ปลอดภัยโดย
+        # construction สำหรับไฟล์ที่ M<=N อยู่แล้ว)
+        front_cols_raw, side_face_dropped = _p1b_filter_wide_side_face_candidates(
+            front_cols_raw, len(back_cols))
+        if side_face_dropped:
+            print(f"[P1B] FRONT after side-face-width filter: {len(front_cols_raw)} cols "
+                  f"(dropped {len(side_face_dropped)} wide-side-face), "
+                  f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
+            front_n_dropped += len(side_face_dropped)
+
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
             n_dropped_by_new_rules=front_n_dropped, back_all_cells=back_all)
@@ -3996,6 +4076,26 @@ _APEX_CUT_MIN_COVERAGE_FRACTION = 0.35
 # ต้อง suppress ที่ drop=14.5% แต่ต้องไม่ suppress ที่ drop=57.4% - 0.25 อยู่กึ่งกลางระหว่าง 2
 # ค่านี้พอดี ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง)
 _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO = 0.25
+# v25.84 NEW (สำคัญ - พบจริงจาก EA03-01 31-Aug-2026, ผู้ใช้ระบุว่า BACK view วาดกรอบผิดจุด 1
+# ตำแหน่ง): เดิม guard สำหรับ height_source="apex_partial_cut" (v25.76/77) ใช้แค่เกณฑ์
+# drop_ratio<0.25 ตัดสินใจว่าจะ suppress หรือไม่ - ไม่เคยตรวจสอบ n_samples ของ apex_partial_cut
+# เองเลยว่าต่ำผิดปกติหรือไม่ (ต่างจาก "direct" ที่มี STEP_DOWN_MIN_RELIABLE_SAMPLES=25 คอยกรอง)
+# พบว่า EA03-01 BACK idx3 (taller_rec ในคู่เปรียบเทียบกับ idx4) มี n_samples=3 เท่านั้น (ต่ำกว่า
+# apex_partial_cut ปกติที่พบในไฟล์อื่นทั้งหมด 41-47 จุด ถึง 13-15 เท่า!) เพราะ apex_x=1008 ตกอยู่
+# เกือบตรงกับจุดเริ่มต้นคอลัมน์ idx3 (x=999) พอดี ทำให้เหลือข้อมูลแทบไม่มีเลย - ยืนยันด้วยภาพ+pixel
+# จริง: บริเวณ x=918-1086 ทั้งหมดเป็น "หลังคา (roof)" ของกล่องม่วง (ITTCAS1) ที่โผล่พ้นขึ้นมาสูงกว่า
+# เพื่อนบ้าน (isometric roof-overhang) ไม่ใช่ขอบบนของ front-face จริงของกล่องใน idx3 เลย - ค่า
+# height_px ที่วัดได้ (345.6px) จาก 3 จุดนี้จึงไม่มีความหมายทางกายภาพ แต่ drop_ratio ที่คำนวณได้
+# (33.2% เทียบ idx4) สูงกว่าเกณฑ์ suppress เดิม (25%) จึงหลุดผ่าน guard เดิมไปได้ ทำให้ระบบวาดกรอบ
+# ผิดตำแหน่ง (คร่อมระหว่างกล่องฟ้ากับกล่องแดง ใต้กล่องม่วง ไม่ตรง column ใดเลย)
+# FIX: เพิ่มเกณฑ์ขั้นต่ำของ n_samples เฉพาะสำหรับ apex_partial_cut (แยกจาก drop_ratio check เดิม -
+# ทำงานเป็น AND เพิ่มเติม ไม่ใช่แทนที่) - ถ้า n_samples ต่ำกว่า _APEX_PARTIAL_CUT_MIN_SAMPLES ให้
+# suppress เสมอไม่ว่า drop_ratio จะเท่าไหร่ (ต่างจาก guard เดิมที่เชื่อ drop_ratio สูงเสมอ) เพราะค่า
+# ที่วัดจากจุดข้อมูลน้อยขนาดนี้ไม่น่าเชื่อถือพอจะใช้เป็นค่าอ้างอิงได้เลยไม่ว่าผลลัพธ์จะออกมาเท่าไหร่
+# ยืนยันด้วยข้อมูลจริงครบ 16 ไฟล์ทดสอบ: apex_partial_cut ปกติทุกไฟล์ (RD01-01, EC60-01, EC58-01,
+# ED86-03, ED03-01x2, EE06-01, EC06-01, EC25-01, EA02-02) มี n_samples=41-47 เสมอ (คลัสเตอร์แน่น
+# มาก ห่างจาก 3 ของ EA03-01 มาก) - ตั้ง threshold ไว้กึ่งกลาง (15) ให้ margin ปลอดภัยกับทั้ง 2 ฝั่ง
+_APEX_PARTIAL_CUT_MIN_SAMPLES = 15
 # v25.82 NEW (สำคัญ - พบจริงจาก AC03-02 31-Aug-2026, ผู้ใช้ขอให้ตรวจสอบว่า "back view วาดกรอบไม่
 # ตรง column หรือเปล่า"): ยืนยันด้วยหลักฐาน pixel จริง - BACK idx7 (x_range=1080-1149, กว้าง 69px
 # เทียบเพื่อนบ้านที่กว้างแค่ ~45-48px) มี cargo_top_y กระโดดคมชัด 68px ภายในแค่ 1 pixel (x=1122->
@@ -4053,6 +4153,28 @@ def _has_internal_sharp_jump(cargo_top_y, x_range, margin=_INTERNAL_JUMP_MARGIN_
             if dist_left >= min_edge_margin and dist_right >= min_edge_margin:
                 return True
     return False
+# v25.85 NEW (สำคัญ - พบจริงจาก AC03-02 31-Aug-2026, ผู้ใช้ระบุว่า "ac03-02 ลักษณะเหมือนๆกัน [กับ
+# EA03-01] แต่ถูกแก้ไขผิดๆ ระงับ flag"): เดิม v25.82's _has_internal_sharp_jump ใช้เป็นเงื่อนไข
+# suppress ทันทีเมื่อพบ jump ภายในคอลัมน์ โดยไม่ตรวจสอบว่าข้อมูล (n_samples) ของคอลัมน์นั้นเพียงพอ
+# จะเชื่อถือได้หรือไม่ - พบว่า AC03-02 BACK idx7 (x_range=1080-1149, n_samples=57) มีจุดกระโดดที่
+# x=1122 ตำแหน่งเดียวกันเป๊ะกับที่พบใน EA03-01 (คนละไฟล์ แต่รถรุ่นเดียวกัน TTKA6WH - อาจเป็น
+# geometric artifact ของ template ที่จุดนี้เสมอ) แต่ n_samples ต่างกันอย่างสิ้นเชิง: EA03-01=3
+# (ข้อมูลแทบไม่เหลือ ค่าที่วัดได้ไม่มีความหมาย - ควร suppress) vs AC03-02=57 (ข้อมูลเพียงพอมาก -
+# robust_local_line_fit สามารถแยกแยะกลุ่มข้อมูลก่อน/หลัง jump ได้เองแล้ว โดยกลุ่มก่อน jump (36 จุด,
+# x=1086-1121) มีจำนวนมากกว่ากลุ่มหลัง jump (21 จุด, x=1123-1143) มากพอที่ iterative MAD-based
+# outlier rejection จะเลือกกลุ่มใหญ่เป็นหลักได้ถูกต้อง - ยืนยันด้วยค่าที่คำนวณได้จริง 161.5px ตรงกับ
+# โซนก่อน jump (~200-222px raw, floor~380 -> height~158-178px) ไม่ใช่ค่าผสม/blend เลย)
+# ROOT CAUSE: การ suppress ทันทีเมื่อพบ jump (ไม่ว่า n_samples เท่าไหร่) ทำให้ AC03-02 BACK idx7 vs
+# idx8 (drop=63%, ความเสี่ยงจริงที่เคยยืนยันไว้แล้วตั้งแต่ v25.72 ในชื่อ drop_ratio=73.1% - ตำแหน่ง
+# ใกล้เคียงกัน) ถูกระงับผิดพลาดไปด้วย ทั้งที่ค่าความสูงที่วัดได้ยังคงน่าเชื่อถือ (robust-fit จัดการ
+# jump ได้เองอยู่แล้วโดยไม่ต้อง suppress จากภายนอกเลย)
+# FIX: เพิ่มเงื่อนไข AND - suppress เฉพาะเมื่อมี jump จริง "และ" n_samples ของคอลัมน์นั้นต่ำกว่า
+# เกณฑ์นี้ด้วย (บ่งชี้ว่าข้อมูลที่เหลือหลังกรอง jump ไม่พอจะเชื่อถือได้จริง เหมือนกับหลักการเดียวกับ
+# v25.84's _APEX_PARTIAL_CUT_MIN_SAMPLES) - ถ้า n_samples สูงพอ (>=25, เกณฑ์เดียวกับ
+# STEP_DOWN_MIN_RELIABLE_SAMPLES ที่ใช้ทั่วระบบอยู่แล้ว) ให้เชื่อว่า robust-fit จัดการได้เอง ไม่ต้อง
+# suppress เพิ่มเติม - ยืนยันแยกแยะ 2 กรณีนี้ได้ถูกต้อง 100% (EA03-01 n=3 < 25 -> suppress ตามเดิม,
+# AC03-02 n=57 >= 25 -> ไม่ suppress อีกต่อไป)
+_INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES = 25
 
 
 def _recheck_stack_height_via_color(view_result, x_range, expected_color,
@@ -4687,6 +4809,15 @@ _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO = 0.10  # คงค่าเดิมไ�
 # generalizable พอ (ED85-01/02 spread=12.5% แก้ได้ด้วย threshold=0.13 แต่ ED85-03 spread=13.75%
 # ยังไม่พอ - "whack-a-mole" ที่ไม่มีจุดจบชัดเจน)
 _EDGE_OUTLIER_DEVIATION_THRESHOLD = 0.10
+# v25.83 NEW: เกณฑ์ spread ที่ผ่อนปรนกว่า (15% แทน 10%) สำหรับกรณีที่ plateau กรองด้วยสีเดียวกับ
+# target แล้ว (same-color, ยืนยันแน่ชัดว่าเป็น SKU เดียวกันจาก Phase 1B) - ดู docstring เต็มที่
+# จุดใช้งานจริงใน _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01: กลุ่ม
+# สีม่วงเพียวมี spread=13.0% - สูงกว่า 10% เดิมแต่ยังต่ำกว่า 15% นี้มาก) - ข้อสังเกตสำคัญ: นี่
+# แตกต่างจากความพยายามเดิมของ v25.71 ที่เคยลองขยับ _EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO ตรงๆ
+# (ทั่วไป ไม่แยกสี) แล้วพบว่า "ไม่ generalizable" (ED85-01/02 ต้องการ 0.13 แต่ ED85-03 ต้องการ
+# มากกว่านั้นอีก) - แนวทางนี้ต่างออกไปเพราะกรองสีก่อน (ไม่ปนกับคอลัมน์ต่าง SKU ที่มีสิทธิ์สูงต่ำ
+# ต่างกันจริง) จึงน่าเชื่อถือกว่าและไม่จำเป็นต้องขยับ threshold สูงเกินจำเป็น
+_EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO = 0.15
 
 
 # v25.72 NEW (สำคัญ - พบจริงจาก AC03-02 ที่ผู้ใช้ระบุ "ไม่มีระบุจุดเสี่ยงเลย", 31-Aug-2026):
@@ -4833,6 +4964,50 @@ def _pair_is_apex_affected(view_result, rec_a, rec_b):
     b0, b1 = rec_b["x_range"]
     lo, hi = min(a0, b0), max(a1, b1)
     return lo <= apex_x <= hi
+# v25.83 NEW (สำคัญ - พบจริงจาก ED85-01 31-Aug-2026, ผู้ใช้ระบุว่า FRONT view วาดกรอบบนกล่อง
+# (SA11D/ATC1C ใกล้กล่องม่วง TGT1G) ทั้งที่ภาพจริงยืนยันว่าทั้งแถวสูงเท่ากันสนิท 100% - ไม่มี
+# step-down จริงเลย): ยืนยันด้วยข้อมูล pixel จริง - idx5(SA11D,349.6px,cross_view_corrected) vs
+# idx6(ATC1C,177.2px,direct) ถูก flag drop=49.3% - ตรวจสอบราคาข้อมูลดิบ (ก่อน cross-view correct)
+# พบว่าค่าความสูงที่วัดได้ "ลดลงต่อเนื่องสม่ำเสมอ" ตลอดทั้งช่วง x=1077-1233 (299.8px->149px) ไม่มี
+# jump ที่ seam ระหว่าง idx5/idx6 เลย (x=1153:221px -> x=1157:216px ต่างกันแค่ 5px) - ยืนยันด้วย
+# _edge_outlier_has_genuine_seam_jump(idx6,idx5)=False (ไม่พบ jump จริง) พิสูจน์ว่าเป็น isometric
+# slope bias ต่อเนื่อง ไม่ใช่ step-down จริง (เทียบเท่ากับที่ v25.77 เคยพิสูจน์ไว้กับ AA05-02/04)
+# ROOT CAUSE ที่ต่างจาก AA05-02/04 (v25.77): กรณีนั้น apex_x ตกอยู่ "ระหว่าง" x-range ของคู่
+# เปรียบเทียบ (คร่อมกลาง) แต่กรณีนี้ apex_x=995 อยู่ "ก่อน" ทั้งคู่ (995 < 1077 และ < 1157) คือทั้ง
+# 2 คอลัมน์อยู่ "หลัง apex ทั้งหมด" (post-apex) - _pair_is_apex_affected เดิมตรวจสอบแค่ "apex ตก
+# อยู่ในช่วงรวม" (lo<=apex_x<=hi) เท่านั้น ไม่ครอบคลุมกรณีนี้ (apex_x=995 < lo=1077 - ไม่ผ่าน
+# เงื่อนไข) จึงหลุดรอดไม่ถูกตรวจสอบด้วย seam-jump verification เลย ทั้งที่ v25.72 (เปลี่ยน apex
+# cutting logic ให้ label="direct" แทน "apex_fallback" เมื่อ apex_x<=b0 ทั้งคอลัมน์) ทำให้คอลัมน์
+# ที่ "อยู่ห่างจาก apex มากๆ ในทิศทางเดียวกัน" (post-apex progressively further) ไม่มี guard ใดๆ
+# มาตรวจสอบความน่าเชื่อถือเลย ทั้งที่ยังคงมี isometric bias สะสมตามระยะห่างจาก apex อยู่จริง (ยืนยัน
+# จากไฟล์นี้: idx3(ก่อน apex,345.9px)->idx4(หลัง apex 7-80px,317.0px)->idx5(หลัง apex 82-162px,
+# raw~260px)->idx6(หลัง apex 162-241px,177.2px) - ยิ่งห่างจาก apex ยิ่งวัดต่ำกว่าจริงมากขึ้นเรื่อยๆ)
+# FIX: เพิ่มฟังก์ชันใหม่ตรวจสอบกรณี "ทั้งคู่อยู่ฝั่งเดียวกันของ apex ทั้งหมด" (ไม่ใช่ apex คร่อม
+# กลาง) - ถ้า apex_x อยู่ก่อนทั้งคู่ (post-apex ทั้งคู่) หรือหลังทั้งคู่ (pre-apex ทั้งคู่) ให้ถือว่า
+# เป็นโซนที่มีความเสี่ยง isometric bias สะสมเช่นกัน แล้วใช้ seam-jump verification ตัดสินใจเหมือนเดิม
+# (มาตรฐานเดียวกับ _pair_is_apex_affected - ปลอดภัยเพราะยังต้องผ่าน seam-jump check ก่อน suppress
+# จริง ไม่ใช่ suppress ทันทีที่เข้าเงื่อนไขนี้)
+def _pair_is_apex_residual_zone(view_result, rec_a, rec_b):
+    """True ถ้า apex_x อยู่ 'ฝั่งเดียวกันทั้งคู่' ของคู่เปรียบเทียบ (ทั้งคู่อยู่ก่อน apex หมด หรือ
+    หลัง apex หมด) - ต่างจาก _pair_is_apex_affected ที่ตรวจกรณี apex คร่อมกลางคู่ - ดู docstring
+    เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-01) คืน False ถ้าตรวจสอบไม่ได้ (fail-safe)"""
+    if view_result is None:
+        return False
+    stack_heights = view_result.get("stack_heights")
+    if not stack_heights:
+        return False
+    idx_a = rec_a.get("idx")
+    if idx_a is None or idx_a >= len(stack_heights):
+        return False
+    apex_x = stack_heights[idx_a].get("apex_x")
+    if apex_x is None:
+        return False
+    a0, a1 = rec_a["x_range"]
+    b0, b1 = rec_b["x_range"]
+    lo, hi = min(a0, b0), max(a1, b1)
+    if lo <= apex_x <= hi:
+        return False  # apex คร่อมกลาง - กรณีนี้ _pair_is_apex_affected จัดการอยู่แล้ว ไม่ซ้ำ
+    return True  # ทั้งคู่อยู่ฝั่งเดียวกันของ apex ทั้งหมด (ก่อนหรือหลังทั้งคู่)
 
 
 def _is_edge_measurement_outlier(records_same_view, target_idx,
@@ -4875,6 +5050,46 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
         plateau_heights.append(r["height_px"])
     if len(plateau_heights) < min_plateau_size:
         return False
+    # v25.83 NEW (สำคัญ - พบจริงจาก ED85-01, 31-Aug-2026 - ผู้ใช้ระบุว่า FRONT view วาดกรอบตรง
+    # กล่องสีม่วง TGT1G ทั้งที่ไม่ควรวาด): เดิม plateau_heights ด้านบนรวมคอลัมน์ "ทุกสี" ปนกันหมด
+    # (ไม่แยกแยะ SKU) - พบว่าไฟล์ ED85-01 มี idx0 (ริมสุดจริง, สีม่วง TGT1G) วัดได้ 253.3px ต่ำกว่า
+    # เพื่อนบ้านสีม่วงเดียวกัน (idx1-4: 308.3/351.5/345.9/317.0px) มาก - แต่ plateau ที่คำนวณจาก
+    # "ทุกสีปนกัน" (รวม idx5=teal/idx6=cyan ที่มีความสูงต่างจากม่วงจริงเพราะเป็นคนละ SKU) ทำให้
+    # p_spread สูงเกิน 10% (วัดได้จริง 55%) จน guard เดิมไม่ trigger เลย ทั้งที่กลุ่มสีม่วงเพียว ๆ
+    # (ไม่รวม idx5/6) เองมี spread แค่ 13.0% (ใกล้เคียง 10% มาก - น่าเชื่อถือกว่าการปนสีมาก)
+    # ROOT CAUSE: Phase 1B เก็บ stack_expected_colors ไว้อยู่แล้ว (ยืนยันแน่ชัดว่าคอลัมน์ใดเป็น
+    # SKU/สีเดียวกัน) แต่ guard นี้ไม่เคยใช้ข้อมูลนี้เลย - การเทียบข้าม SKU (ม่วงเทียบฟ้า/เขียว)
+    # ไม่สมเหตุสมผลทางกายภาพอยู่แล้ว เพราะกล่องคนละ SKU มีสิทธิ์สูงต่ำต่างกันจริงได้ปกติ (ไม่ใช่
+    # หลักฐานของ "ความนิ่ง" ที่ควรใช้ตัดสิน isometric bias เลย)
+    # FIX: ถ้า view_result มี stack_expected_colors และ target มีสีที่รู้แน่ชัด (ไม่ใช่ None) ให้
+    # ลองกรอง plateau เฉพาะคอลัมน์ที่มีสีเดียวกับ target ก่อน (same-color plateau) - ถ้าจำนวนพอ
+    # (>= เกณฑ์ขั้นต่ำ) ให้ใช้ชุดนี้แทนที่ all-color plateau เดิม พร้อมใช้เกณฑ์ spread ที่ผ่อนปรน
+    # กว่าเล็กน้อย (_EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO=15% แทน 10%) เพราะเป็นหลักฐานที่
+    # น่าเชื่อถือกว่ามาก (ยืนยันแล้วว่าเป็น SKU เดียวกันจริงจาก Phase 1B ไม่ใช่แค่ "บังเอิญนิ่ง")
+    # - ถ้าไม่มีข้อมูลสี หรือ same-color plateau มีจุดไม่พอ ให้ fallback ไปใช้ all-color plateau
+    # เดิมทุกประการ (ปลอดภัยสำหรับไฟล์อื่นที่ไม่เจอปัญหานี้)
+    same_color_plateau_used = False
+    if view_result is not None:
+        expected_colors = view_result.get("stack_expected_colors")
+        if expected_colors is not None and target_idx < len(expected_colors):
+            target_color = expected_colors[target_idx]
+            if target_color is not None:
+                same_color_heights = []
+                for r in valid:
+                    if r["idx"] == target_idx or r.get("height_px") is None:
+                        continue
+                    if r.get("height_source") not in ("direct", "cross_view_filled", "apex_partial_cut"):
+                        continue
+                    r_idx_local = r["idx"]
+                    if r_idx_local >= len(expected_colors):
+                        continue
+                    if expected_colors[r_idx_local] == target_color:
+                        same_color_heights.append(r["height_px"])
+                if len(same_color_heights) >= _EDGE_OUTLIER_MIN_PLATEAU_SIZE_AFTER_TRIM:
+                    plateau_heights = same_color_heights
+                    same_color_plateau_used = True
+    if same_color_plateau_used:
+        plateau_max_spread_ratio = _EDGE_OUTLIER_SAME_COLOR_MAX_SPREAD_RATIO
     # v25.71 NEW (สำคัญ - พบจริงจาก ED85-01/02/03 ที่ผู้ใช้ระบุ, 30-Aug-2026): เดิมคำนวณ
     # p_spread จาก min-max ดิบของ plateau_heights ทั้งหมด - พบว่าคอลัมน์ที่ "ติดกับ" คอลัมน์ริมสุด
     # (idx=1, ไม่ใช่ตัวริมสุดเอง) อาจได้รับผลกระทบจาก isometric distortion ในทิศทางเดียวกัน
@@ -4985,11 +5200,17 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ฝั่งหนึ่ง (taller/shorter) มีรอยกระโดดคมชัดของ cargo_top_y อยู่ลึกกลางคอลัมน์ตัวเอง (ไม่ใช่
         # ใกล้ขอบ) แสดงว่า Phase 1B พลาด seam จริงระหว่างกล่อง 2 ใบสีเดียวกันที่สูงต่างกัน ทำให้ค่า
         # height_px ที่วัดได้เป็นค่าผสม (blend) ของ 2 ความสูงจริง ไม่น่าเชื่อถือพอจะ flag/วาดกรอบ
+        # v25.85 FIX (สำคัญ - พบจริงจาก AC03-02, ดู docstring เต็มที่
+        # _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES): เพิ่มเงื่อนไข AND n_samples ต่ำ - ไม่ใช่แค่มี
+        # jump ก็ suppress ทันทีเหมือน v25.82 เดิม (ซึ่งทำให้ AC03-02 BACK idx7(n=57)/idx8 ความ
+        # เสี่ยงจริงถูกระงับผิดพลาด ทั้งที่ robust-fit จัดการ jump ได้เองแล้วเมื่อ n_samples สูงพอ)
         if view_result is not None:
             cty_check = view_result.get("cargo_top_y")
             if cty_check is not None and (
-                    _has_internal_sharp_jump(cty_check, shorter_rec["x_range"])
-                    or _has_internal_sharp_jump(cty_check, taller_rec["x_range"])):
+                    (shorter_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                     and _has_internal_sharp_jump(cty_check, shorter_rec["x_range"]))
+                    or (taller_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                        and _has_internal_sharp_jump(cty_check, taller_rec["x_range"]))):
                 continue
         # v25.77 NEW (สำคัญ - พบจริงจาก AA05-02/AA05-04 หลังทดสอบ v25.76, 31-Aug-2026): เดิม
         # Edge-Column Global Consensus Guard (บรรทัดด้านบน) เช็คแค่คอลัมน์ "ริมสุดของทั้งแถว"
@@ -5022,6 +5243,28 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             has_genuine_jump = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
             if has_genuine_jump is False:
                 continue
+        # v25.83 NEW (สำคัญ - พบจริงจาก ED85-01, ดู docstring เต็มที่ _pair_is_apex_residual_zone
+        # สำหรับหลักฐาน+เหตุผล): ต่างจาก guard ด้านบน (v25.77) ที่จำกัดเฉพาะ _both_sides_direct -
+        # กรณีนี้ taller_rec (idx5) มี height_source="cross_view_corrected" (ไม่ใช่ "direct") จึง
+        # ไม่ผ่านเงื่อนไขเดิม แต่ seam-jump verification ตรวจสอบ pixel ดิบ (cargo_top_y) ของ view
+        # นี้เองโดยตรง ไม่ได้ขึ้นกับว่า height_px ที่ใช้จริงถูกแก้ไขมาจาก cross-view หรือไม่ - จึงยัง
+        # คงแม่นยำในการยืนยัน "ความจริงทางเรขาคณิต" ได้เหมือนเดิม (ต่างจาก apex_partial_cut ที่ต้อง
+        # ระวังเพราะ pixel ดิบเองอาจปนเปื้อนจาก roof-overhang bleed - คนละสาเหตุกับ cross_view_
+        # corrected ซึ่งเป็นแค่การเลือกใช้ค่าจากอีก view เท่านั้น ไม่กระทบ pixel ดิบของ view นี้เอง)
+        # FIX: ผ่อนคลายเงื่อนไขให้ยอมรับ "cross_view_corrected"/"cross_view_filled" เพิ่มจาก
+        # "direct" เดิม (ยังคงกัน apex_fallback/apex_partial_cut ออกเสมอทั้ง 2 ฝั่ง เพราะมีความเสี่ยง
+        # pixel ปนเปื้อนโดยเฉพาะตามที่ AB03-04 พิสูจน์ไว้) และตรวจสอบเงื่อนไข apex เพิ่มเติมด้วย
+        # _pair_is_apex_residual_zone (ครอบคลุมกรณี 'ทั้งคู่อยู่ฝั่งเดียวกันของ apex' ที่
+        # _pair_is_apex_affected เดิมไม่ครอบคลุม)
+        _reliable_sources = ("direct", "cross_view_corrected", "cross_view_filled")
+        _both_sides_reliable = (taller_rec.get("height_source") in _reliable_sources
+                                 and shorter_rec.get("height_source") in _reliable_sources)
+        if (_both_sides_reliable and view_result is not None
+                and (_pair_is_apex_affected(view_result, a, b)
+                     or _pair_is_apex_residual_zone(view_result, a, b))):
+            has_genuine_jump2 = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
+            if has_genuine_jump2 is False:
+                continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
@@ -5041,6 +5284,21 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ไม่กระทบ subtype='pairwise_floor_jump' ด้านล่างซึ่งมีหลักฐานอิสระคนละตัว คือ floor_jump
         # ที่วัดจากพื้นตู้ ไม่ใช่ยอดกล่อง จึงไม่ได้รับผลกระทบจาก apex bias นี้)
         if shorter_rec.get("height_source") == "apex_fallback":
+            continue
+        # v25.83 NEW (สำคัญ - พบจริงจาก ED85-02/ED85-03, 31-Aug-2026 - ผู้ใช้ระบุว่า FRONT view
+        # วาดกรอบตรงกล่องสีม่วง TGT1G ทั้งที่ไม่ควรต้องวาด): เดิม guard ด้านบน (v25.71) เช็คเฉพาะ
+        # shorter_rec (ฝั่งที่จะถูก flag ว่า "เตี้ยกว่า") ว่าเป็น apex_fallback หรือไม่ - แต่ไม่เคย
+        # ตรวจสอบ taller_rec (ฝั่งที่ใช้เป็น "ค่าอ้างอิงความสูงกว่า" สำหรับคำนวณ drop_ratio) เลย
+        # ทั้งที่ apex_fallback เป็นค่าที่ระบบเองยืนยันแล้วว่า "เอียงคนละทิศ, height ผิดเพี้ยนเป็น
+        # ระบบ" ไม่ว่าจะถูกใช้เป็นฝั่งไหนก็ตาม - ยืนยันด้วยข้อมูลจริง ED85-02/03: FRONT idx7
+        # (x_range กว้างเท่าคอลัมน์ปกติ, height_source="apex_fallback", h=306.3px/307.3px) ถูกใช้
+        # เป็น taller_rec เทียบกับ idx8 (h=177.2px, direct) ได้ drop_ratio=42.1%/42.3% เกินเกณฑ์
+        # 20% มาก - ทำให้เกิด STEP_DOWN_RISK ที่วาดกรอบคร่อมตำแหน่งกล่องผิดพลาด (ไม่มีหลักฐานอื่น
+        # ยืนยันว่า idx7 สูงจริง 306px - อาจเป็นค่าที่เอนเอียงจาก apex bias เดียวกับที่ v25.71
+        # พิสูจน์ไว้แล้ว ทำให้ไม่ควรเชื่อว่าเป็น "ค่าอ้างอิงที่ถูกต้อง" สำหรับคำนวณ drop_ratio)
+        # FIX: เพิ่มการตรวจสอบ taller_rec ด้วยเงื่อนไขเดียวกัน - ถ้า taller_rec เป็น apex_fallback
+        # เช่นกัน ไม่ flag ความเสี่ยงจากคู่นี้เลย (ค่าอ้างอิงไม่น่าเชื่อถือพอจะใช้ตัดสิน)
+        if taller_rec.get("height_source") == "apex_fallback":
             continue
         # v25.76 NEW (สำคัญ - พบจริงจาก AB03-04 ที่ผู้ใช้ระบุ "ตำแหน่งฟ้าท้ายสุด ยังมีกรอบแดง
         # คือกรอบซ้ายสุด" หลังทดสอบ v25.75, 31-Aug-2026): เดิม guard ด้านบนเช็คเฉพาะ
@@ -5065,6 +5323,18 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         _drop_check = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
         if (taller_rec.get("height_source") == "apex_partial_cut"
                 and _drop_check < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+            continue
+        # v25.84 NEW (สำคัญ - พบจริงจาก EA03-01, ดู docstring เต็มที่ _APEX_PARTIAL_CUT_MIN_SAMPLES
+        # สำหรับหลักฐาน+เหตุผล): guard ด้านบน (v25.76) ใช้แค่ drop_ratio ตัดสินใจ - ไม่ครอบคลุมกรณีที่
+        # apex_partial_cut มี n_samples ต่ำผิดปกติมาก (3 จุด เทียบปกติ 41-47 จุด) จนค่าที่วัดได้ไม่มี
+        # ความหมายทางกายภาพเลย แม้ drop_ratio จะสูงกว่าเกณฑ์เดิมก็ตาม (เพราะ drop_ratio คำนวณจากค่าที่
+        # ผิดพลาดตั้งแต่ต้น ไม่ใช่สัญญาณที่เชื่อถือได้อีกต่อไป) - ตรวจสอบทั้ง taller/shorter เพราะฝั่ง
+        # ใดก็ตามที่ n_samples ต่ำขนาดนี้ไม่ควรถูกใช้เป็นค่าอ้างอิงหรือเป้าหมายเลย
+        if (taller_rec.get("height_source") == "apex_partial_cut"
+                and taller_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+            continue
+        if (shorter_rec.get("height_source") == "apex_partial_cut"
+                and shorter_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
             continue
         # v25.74 NEW: Multi-Color Merge Recheck Guard - mirror จาก detect_step_down_crossview
         # ทุกประการ (ดู docstring เต็มที่ _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล -
@@ -5443,11 +5713,15 @@ def detect_tail_stepdown(records, view_label, view_result=None):
         return risks
     # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
     # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+    # v25.85 FIX: mirror จาก detect_step_down_pairwise - เพิ่มเงื่อนไข AND n_samples ต่ำ (ดู
+    # docstring เต็มที่ _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES สำหรับหลักฐาน+เหตุผล)
     if view_result is not None:
         cty_check = view_result.get("cargo_top_y")
         if cty_check is not None and (
-                _has_internal_sharp_jump(cty_check, tail_rec["x_range"])
-                or _has_internal_sharp_jump(cty_check, inner_rec["x_range"])):
+                (tail_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                 and _has_internal_sharp_jump(cty_check, tail_rec["x_range"]))
+                or (inner_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                    and _has_internal_sharp_jump(cty_check, inner_rec["x_range"]))):
             return risks
     # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01, mirror จุดเดียวกันใน detect_step_down_pairwise):
     # เดิมเช็คแค่ tail_rec (ฝั่งเตี้ยกว่า) ว่าเป็น edge-outlier หรือไม่ - แต่ inner_rec (ฝั่งอ้างอิง
@@ -5491,6 +5765,14 @@ def detect_tail_stepdown(records, view_label, view_result=None):
         return risks
     if (tail_rec.get("height_source") == "apex_partial_cut"
             and drop_ratio < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+        return risks
+    # v25.84 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+    # _APEX_PARTIAL_CUT_MIN_SAMPLES สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA03-01)
+    if (inner_rec.get("height_source") == "apex_partial_cut"
+            and inner_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+        return risks
+    if (tail_rec.get("height_source") == "apex_partial_cut"
+            and tail_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
         return risks
 
     risks.append({
@@ -5549,6 +5831,11 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED84/ED85-01/02/03)
             if shorter_rec.get("height_source") == "apex_fallback":
                 continue
+            # v25.83 NEW: mirror จาก detect_step_down_pairwise - เดิมเช็คแค่ shorter_rec ไม่เคย
+            # เช็ค taller_rec (ค่าอ้างอิง) เลย - ดู docstring เต็มที่จุดเดียวกันใน
+            # detect_step_down_pairwise สำหรับหลักฐาน+เหตุผล (พบจริงจาก ED85-02/03)
+            if taller_rec.get("height_source") == "apex_fallback":
+                continue
             # v25.76 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB03-04):
             # เดิมไม่เคยเช็ค "apex_partial_cut" (v25.76 - label ใหม่สำหรับกรณี apex ตัดข้อมูล
             # กลางคอลัมน์จนเหลือ coverage ต่ำ แม้จะยังมี>=3จุด) เลยทั้ง 2 ฝั่ง - เพิ่มเข้าไปเพื่อ
@@ -5559,6 +5846,14 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             _drop_check_cv = 1 - (shorter_h / taller_h) if taller_h > 0 else 0
             if (taller_rec.get("height_source") == "apex_partial_cut"
                     and _drop_check_cv < _APEX_PARTIAL_CUT_MAX_TRUSTED_DROP_RATIO):
+                continue
+            # v25.84 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+            # _APEX_PARTIAL_CUT_MIN_SAMPLES สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA03-01)
+            if (taller_rec.get("height_source") == "apex_partial_cut"
+                    and taller_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
+                continue
+            if (shorter_rec.get("height_source") == "apex_partial_cut"
+                    and shorter_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
                 continue
             # v25.72 NEW (สำคัญ - เพิ่มความสอดคล้องกับ pairwise/tail_stepdown หลังพบ AB05-01):
             # เดิม detect_step_down_crossview ไม่เคยเรียก Edge-Column Global Consensus Guard เลย
@@ -5573,12 +5868,17 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
                     or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
                 continue
-            # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
-            # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
+            # v25.82/85 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
+            # _has_internal_sharp_jump และ _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES สำหรับหลักฐาน+
+            # เหตุผล (พบจริงจาก AC03-02/EA03-01) - v25.85 เพิ่มเงื่อนไข AND n_samples ต่ำ
             taller_cty = taller_vr.get("cargo_top_y") if taller_vr else None
             shorter_cty = shorter_vr.get("cargo_top_y") if shorter_vr else None
-            if ((taller_cty is not None and _has_internal_sharp_jump(taller_cty, taller_rec["x_range"]))
-                    or (shorter_cty is not None and _has_internal_sharp_jump(shorter_cty, shorter_rec["x_range"]))):
+            if ((taller_cty is not None
+                 and taller_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                 and _has_internal_sharp_jump(taller_cty, taller_rec["x_range"]))
+                    or (shorter_cty is not None
+                        and shorter_rec.get("n_samples", 999) < _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES
+                        and _has_internal_sharp_jump(shorter_cty, shorter_rec["x_range"]))):
                 continue
             # v25.74 NEW: Multi-Color Merge Recheck Guard - ดู docstring เต็มที่
             # _recheck_stack_height_via_color สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ถ้าฝั่งใด
@@ -6695,8 +6995,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.82",
-            "benchmarkMode": "v25_82_internal_sharp_jump_column_split_guard",
+            "checkerVersion": "V25.88",
+            "benchmarkMode": "v25_88_wide_side_face_width_ratio_filter",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
