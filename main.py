@@ -3331,74 +3331,6 @@ def _p1b_merge_near_duplicate_cols(cols, tol=5.0):
     return result
 
 
-# v25.88 NEW (สำคัญ - พบจริงจาก AB03-04 1-Sep-2026, ผู้ใช้สอนกฎการนับหน้า: "กล่อง 1 ใบ ปรากฏ
-# หน้า1/บน1/ข้าง1, กล่อง 2 ใบซ้อน ปรากฏหน้า2/บน1/ข้าง2 ... ตั้งที่ติดกันทางขวาจะไม่มีด้านข้างเลย
-# มีแค่บน+หน้า" และ "side face ต้องอยู่ทางซ้ายของ front face เสมอ ติดกันสนิท ไม่มีช่องว่าง"):
-# ยืนยันด้วยข้อมูลจริง 2 ไฟล์ตรงข้ามกัน (AB03-04 vs RD01-01) - ผู้ใช้ทำเครื่องหมายด้วยมือยืนยันว่า
-# AB03-04's comp1 (x=806-954, สีฟ้า) คือ "side face" ของ comp2 (x=956-1054, สีฟ้าเดียวกัน, front
-# face จริง) - ทั้งคู่ติดกันสนิท (gap=2px) สีเดียวกันเป๊ะ - เดิม _p1b_reconcile_with_back (Hungarian
-# matching M>N) เลือกตัด comp3 (x=1055-1153, front face จริงของอีกตั้ง) ทิ้งแทน เพราะสัดส่วนตำแหน่ง
-# (fraction) ของ comp1 ใกล้เคียงกับตำแหน่งที่ 1 ใน BACK มากกว่า (เนื่องจาก front_extent ที่คำนวณจาก
-# roof span รวม กว้างกว่า back_extent มาก ทำให้ fraction ของ comp3 เอียงไปทางขวาเกินจริง) ทำให้กรอบ
-# marker วาดผิดตำแหน่ง (ครอบคลุมครึ่งหนึ่งของ comp2+comp3 ผสมกัน ไม่ตรงกับกล่องจริงตั้งใดเลย)
-#
-# ยืนยันด้วยข้อมูลตรงข้าม RD01-01: f1 (x=644-738, ตั้งซ้ายสุดจริง ไม่มี roof ของตัวเอง เหมือน
-# comp1 ทุกประการทางเรขาคณิต) แต่ f1 คือกล่องจริงตัวที่ 1 ไม่ใช่ side face - ทดสอบสัญญาณหลายแบบ
-# (aspect ratio, mean_sat, ความชันขอบบน) ไม่พบตัวใดแยกแยะ comp1/f1 ได้เลย จนกระทั่งผู้ใช้ชี้ว่า
-# ต้องดูจาก "ความกว้างเทียบกับเพื่อนบ้านขวาสีเดียวกันที่ติดกันสนิท":
-#   comp1(148px) vs comp2(98px) เพื่อนบ้านขวา -> comp1 กว้างกว่า 51% (comp1=side face จริง)
-#   f1(94px) vs f2(144px) เพื่อนบ้านขวา -> f1 แคบกว่า 35% (f1=front face จริง)
-# ตรงกับหลักการทางเรขาคณิตของ isometric drawing: side face (หน้าผาแคบเมื่อกล่องเตี้ย, กว้างเมื่อ
-# กล่องสูง) ที่ "บังเอิญ" กว้างกว่า front face ของกล่องข้างเคียงที่วางถัดไป มักบ่งชี้ว่าเป็นหน้าข้าง
-# ของกล่องเดียวกับ front-face นั้น ไม่ใช่กล่องแยกต่างหาก (ตรงข้ามกับ front-face ริมสุดของแถวจริง ที่
-# ไม่มีเหตุผลทางเรขาคณิตใดๆ ให้ต้อง "กว้างกว่า" เพื่อนบ้านเสมอ)
-#
-# ขอบเขตการแก้ (ตามที่ตกลงกัน - ปลอดภัยที่สุดเท่าที่ยืนยันได้จากหลักฐาน 2 ไฟล์): trigger เฉพาะเมื่อ
-# ครบทุกเงื่อนไข (1) M > N เท่านั้น (ไม่แตะกรณี M<=N) (2) candidate กับเพื่อนบ้านขวาถัดไปต้อง "สี
-# เดียวกันเป๊ะ" (ไม่ใช่แค่ทับซ้อน - สีต่างกันคือคนละกล่องจริง ไม่ใช้กฎนี้) (3) ต้อง "ติดกันสนิท"
-# (gap <= _SIDE_FACE_TOUCH_GAP_MAX_PX) (4) candidate ต้อง "กว้างกว่า" เพื่อนบ้านขวาอย่างมีนัยสำคัญ
-# (>= _SIDE_FACE_WIDTH_RATIO_MIN เท่า) - ถ้าไม่ครบทุกเงื่อนไข ไม่ตัดทิ้ง (ปลอดภัยไว้ก่อน)
-_SIDE_FACE_WIDTH_RATIO_MIN = 1.2  # candidate ต้องกว้างกว่าเพื่อนบ้านขวาอย่างน้อย 20% (ยืนยันจริง
-# AB03-04=51% กว้างกว่า - ให้ margin ปลอดภัยต่ำกว่านี้พอสมควร แต่สูงกว่า noise ปกติ)
-_SIDE_FACE_TOUCH_GAP_MAX_PX = 10  # ต้องติดกันสนิทภายในระยะนี้ (ยืนยันจริง comp1-comp2 gap=2px)
-
-
-def _p1b_filter_wide_side_face_candidates(front_cols, n_back):
-    """v25.88 NEW: กรอง front-column candidate ที่แท้จริงคือ 'side face' ของเพื่อนบ้านขวาสีเดียวกัน
-    ที่ติดกันสนิท (ตามกฎที่ผู้ใช้สอน - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล พบจริงจาก
-    AB03-04) - ทำงานเฉพาะเมื่อ M (len(front_cols)) > N (n_back) เท่านั้น คืนค่า (kept, dropped)"""
-    if len(front_cols) <= n_back:
-        return list(front_cols), []
-    cols_sorted = sorted(front_cols, key=lambda c: c['x'])
-    drop_flags = [False] * len(cols_sorted)
-    for i in range(len(cols_sorted) - 1):
-        c = cols_sorted[i]
-        nxt = cols_sorted[i + 1]
-
-        def _colors_of(col):
-            cs = set(mm['color'] for mm in col.get('members', []) if mm.get('color'))
-            if not cs and col.get('color'):
-                cs = {col['color']}
-            return cs
-
-        c_colors = _colors_of(c)
-        nxt_colors = _colors_of(nxt)
-        if not c_colors or c_colors != nxt_colors:
-            continue  # สีต่างกัน หรือไม่ทราบสี - ไม่ใช้กฎนี้ (คนละกล่องจริง)
-        gap = nxt['x'] - (c['x'] + c['w'])
-        if gap > _SIDE_FACE_TOUCH_GAP_MAX_PX:
-            continue  # ไม่ติดกันสนิท - ไม่ใช้กฎนี้
-        if c['w'] >= nxt['w'] * _SIDE_FACE_WIDTH_RATIO_MIN:
-            drop_flags[i] = True
-            print(f"[SIDE_FACE_FILTER] ตัด candidate x={c['x']}-{c['x']+c['w']} (w={c['w']}) "
-                  f"ทิ้ง เพราะกว้างกว่าเพื่อนบ้านขวา x={nxt['x']}-{nxt['x']+nxt['w']} (w={nxt['w']}) "
-                  f"สีเดียวกัน({next(iter(c_colors))}) ติดกันสนิท(gap={gap}px) - ถือเป็น side face")
-    kept = [c for i, c in enumerate(cols_sorted) if not drop_flags[i]]
-    dropped = [c for i, c in enumerate(cols_sorted) if drop_flags[i]]
-    kept.sort(key=lambda c: c['cx'])
-    return kept, dropped
-
-
 def _p1b_reconcile_with_back(back_cols, front_cols, back_extent=None, front_extent=None,
                               n_dropped_by_new_rules=0, back_all_cells=None):
     """จับคู่ตำแหน่งจริง (สัดส่วนตามแนวยาว) ระหว่าง BACK (ground-truth N ตำแหน่ง) กับ FRONT
@@ -3761,18 +3693,6 @@ def compute_phase1b_columns(regions, down_factor=1.0):
                   f"cx={[round(c['cx'],1) for c in front_orphaned]}")
             front_cols_raw = sorted(front_cols_raw + front_orphaned, key=lambda c: c['cx'])
         front_extent = _p1b_roof_extent(front_all)
-
-        # v25.88 NEW: กรอง 'side face' ที่กว้างกว่าเพื่อนบ้านขวาสีเดียวกันติดกันสนิท ก่อนเข้า
-        # Hungarian reconcile - ดู docstring เต็มที่ _p1b_filter_wide_side_face_candidates
-        # สำหรับหลักฐาน+เหตุผล (พบจริงจาก AB03-04) - ทำงานเฉพาะ M>N เท่านั้น (ปลอดภัยโดย
-        # construction สำหรับไฟล์ที่ M<=N อยู่แล้ว)
-        front_cols_raw, side_face_dropped = _p1b_filter_wide_side_face_candidates(
-            front_cols_raw, len(back_cols))
-        if side_face_dropped:
-            print(f"[P1B] FRONT after side-face-width filter: {len(front_cols_raw)} cols "
-                  f"(dropped {len(side_face_dropped)} wide-side-face), "
-                  f"cx={[round(c['cx'],1) for c in front_cols_raw]}")
-            front_n_dropped += len(side_face_dropped)
 
         front_cols, _ = _p1b_reconcile_with_back(
             back_cols, front_cols_raw, back_extent=back_extent, front_extent=front_extent,
@@ -6995,8 +6915,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.88",
-            "benchmarkMode": "v25_88_wide_side_face_width_ratio_filter",
+            "checkerVersion": "V25.85",
+            "benchmarkMode": "v25_85_internal_jump_requires_low_n_samples",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
