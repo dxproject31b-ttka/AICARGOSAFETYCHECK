@@ -2,6 +2,71 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.89 (แก้ 2 ไฟล์ที่ผู้ใช้แนบหลังทดสอบ v25.88 กับ 164 ไฟล์ (สำเร็จ 161): EB73-01/EC26-01,
+2-Sep-2026 - ยืนยันด้วยการรันโค้ดจริง+ตรวจสอบ pixel ระดับ debug log แล้ว ไม่ใช่การเดา):
+  ปัญหาที่ 1 (EB73-01) - "ปลอดภัย แต่มีกรอบแดงทั้ง 2 view" (SKU เดียว SEWTA สีเดียวกันทั้งไฟล์
+  บรรทุกเบาบางมาก Unused Floor 189in=87.9% ว่าง กล่องรวมเป็นก้อนเดียวลอยกลางตู้เปล่า):
+  ROOT CAUSE: Phase 1B นับได้ "รวมทั้งวิวแค่ 2 คอลัมน์" ทั้ง FRONT/BACK - ทำให้ Edge-Column
+  Global Consensus Guard (v25.68, ต้องการ plateau อ้างอิงอย่างน้อย 2 คอลัมน์อื่น) ใช้งานไม่ได้
+  เลย (เหลือคอลัมน์อ้างอิงแค่ 1 หลังตัดเป้าหมายออก) ยืนยันด้วย pixel จริง: cargo_top_y ราบเรียบ
+  ต่อเนื่องสนิท (_has_internal_sharp_jump=False) แต่ local_floor_y มีความชันต่อเนื่องตามธรรมชาติ
+  ของมุมมอง isometric ของวัตถุที่ลอยตัวโดดเดี่ยว (ไม่มี apex ให้ detect_isometric_apex ตรวจพบเลย
+  เพราะวัตถุแคบเกินไป) ทำให้ pairwise/cross_view/tail_stepdown เข้าใจผิดว่าสูงต่างกัน + พบเพิ่มว่า
+  hidden_behind (BACK) ถูก flag จาก "ghost artifact" (เศษ mask ปลอมสั้นๆ ที่ไม่ต่อเนื่องกับกล่อง
+  จริง ทำให้ cargo_bottom_y กระโดด 197px ภายใน 1 pixel ณ ขอบเขตวัตถุ)
+  FIX: (1) เพิ่ม _isolated_pair_no_genuine_jump() - ถ้าวิวมีรวมแค่ 2 คอลัมน์และไม่มี genuine
+  sharp jump (ตรวจด้วย _has_internal_sharp_jump ที่ผ่านการยืนยันมาแล้วจาก AC03-02/EA03-01) ไม่
+  flag - wire เข้า detect_step_down_pairwise/crossview/tail_stepdown ทั้ง 3 กลไก (2) เพิ่มการ
+  ตรวจสอบ cargo_bottom_y stability สำหรับทิศทาง 'up' ของ hidden_behind (มิเรอร์จาก floor-
+  stability guard ของทิศทาง 'down' เดิม v25.70) - ถ้า cargo_bottom_y กระโดดเกิน 40px ที่จุด split
+  เดียวกัน ถือว่าเป็น mask ไม่ต่อเนื่อง/ghost artifact ไม่ใช่กล่องซ่อนหลังจริง
+  ผลทดสอบ: EB73-01 hazardCount 3->0 (SAFE) ตรงกับที่ผู้ใช้ยืนยันด้วยภาพจริง
+  ปัญหาที่ 2 (EC26-01) - "กรอบแดง front view ที่ตั้งกล่องน้ำเงินและตำแหน่งติดกัน (ADVSE สีเดียวกัน
+  SKU เดียวกัน) ปกติปลอดภัย": ROOT CAUSE: idx3/idx4 (ทั้งคู่สีน้ำเงิน ADVSE) มี apex_x คร่อมกลาง
+  พอดี (_pair_is_apex_affected=True ถูกต้องแล้ว) แต่ _edge_outlier_has_genuine_seam_jump
+  (window-median scan ±40px รอบ seam) คืนค่า True ผิดพลาด เพราะช่วง scan ไปครอบคลุมโซนที่ floor
+  ลาดชันตามธรรมชาติใกล้ apex พอดี (median หน้าต่างซ้าย/ขวาต่างกันมากจากความชันสะสม ไม่ใช่ jump
+  คมชัดจริง) ยืนยันด้วย _has_internal_sharp_jump()=False (ไม่พบ jump แบบ single-pixel step เลย
+  ตลอดช่วงรวม ต่างจาก AC03-02/AB03-04 ที่มี jump จริงและ has_internal_sharp_jump()=True เช่นกัน)
+  FIX: เพิ่มการตรวจสอบซ้ำด้วย _has_internal_sharp_jump (เชื่อถือได้กว่า window-median เพราะดู
+  per-pixel step โดยตรง) ในทั้ง 2 จุดของ apex-affected-pair guard (v25.77 _both_sides_direct +
+  v25.83 _both_sides_reliable) - ถ้า _edge_outlier_has_genuine_seam_jump บอกว่ามี jump (True)
+  แต่ _has_internal_sharp_jump ไม่พบ jump คมชัดจริงเลย ให้เชื่อฝั่งหลัง (เข้มงวดกว่า) แล้ว suppress
+  ผลทดสอบ: EC26-01 pairwise_floor_jump (idx3/idx4 น้ำเงิน-น้ำเงิน) หายไปถูกต้อง เหลือจุดอื่นที่
+  ผู้ใช้ไม่ได้ระบุว่าผิด (cross_view/tail_stepdown/hidden_behind ระหว่าง SKU ต่างกันจริง เขียว/
+  แดง/น้ำเงิน - ไม่แตะเพราะยังไม่มีหลักฐานว่าผิด)
+  ปัญหาที่ 3 (EC05-01) - "กรอบแดง zone กล่องสีเทา" - ผู้ใช้ระบุเองว่าอาจเป็นความเข้มงวดของเกณฑ์
+  ความสูงที่ยอมรับได้ ไม่ต้องแก้: ตรวจสอบยืนยันด้วย _has_internal_sharp_jump()=True (พบ jump
+  คมชัดจริงระดับ pixel ที่ seam) สอดคล้องกับที่ผู้ใช้ประเมินไว้ - ไม่แก้ไขใดๆ ตามที่ร้องขอ
+  ข้อจำกัดที่ต้องบอกตรงไปตรงมา (ตอนพัฒนาเบื้องต้น): การแก้ไขทั้ง 2 จุดนี้ยืนยันด้วยข้อมูลจริงจาก
+  ไฟล์ที่แนบมาเท่านั้น (EB73-01, EC26-01) - ยังไม่ได้ regression-test ย้อนกับไฟล์ calibration
+  เดิม แนะนำให้รัน regression เต็มรูปแบบก่อนใช้งานจริง (ดูผลการรันจริงด้านล่าง)
+================================================================================
+v25.89-regression-fix (รัน regression test เต็มรูปแบบ 19 ไฟล์ 2-Sep-2026 - พบ+แก้ 1 regression
+ที่เกิดจากการแก้ไข v25.89 ข้างต้น ก่อนส่งมอบจริง):
+  พบว่า hidden_behind guard ใหม่ (cargo_bottom_y jump check สำหรับ EB73-01) ทำให้ EC05-01
+  hazardCount เปลี่ยนจาก 6 เป็น 5 โดยไม่ได้ตั้งใจ (สูญเสีย hidden_behind FRONT idx=4,
+  drop_ratio=0.4328) - ตรวจสอบด้วยข้อมูล pixel จริงพบว่า EC05-01 idx=4 เป็น "genuine hidden_
+  behind" จริง (ไม่ใช่ ghost artifact แบบ EB73-01) เพราะมี cargo_bottom_y jump ใหญ่ตามธรรมชาติ
+  เช่นกัน (กล่องแถวหลังที่ซ่อนอยู่ เห็นแค่หลังคาที่โผล่พ้นขึ้นมา ส่วนล่างถูกกล่องแถวหน้าบังไว้เสมอ
+  - เป็นลักษณะทางกายภาพปกติ ไม่ใช่แค่สัญญาณของ ghost artifact อย่างที่เข้าใจตอนแรก)
+  ROOT CAUSE ที่แยกแยะ 2 กรณีนี้ได้จริง (ยืนยันด้วยสี pixel): EB73-01 (ghost จริง) มีสีเดียวกัน
+  เป๊ะทั้ง 2 ฝั่งของ jump (0,0,255 น้ำเงินล้วนทั้งคู่ - เพราะไฟล์นี้มี SKU เดียวสีเดียวทั้งไฟล์
+  และไม่มี "แถวหลัง" จริงเลย) ในขณะที่ EC05-01 (genuine ทั้ง idx=0 ที่ guard เดิมไม่แตะ และ idx=4
+  ที่เพิ่งถูกกระทบ) มีสีต่างกันชัดเจนทั้งคู่ (ส้ม->เขียวมะกอก, ม่วง/ชมพู->เขียว - กล่องคนละใบ/คนละ
+  SKU ที่ซ่อนอยู่จริง)
+  FIX: เปลี่ยนเงื่อนไข suppress จาก "cargo_bottom_y jump อย่างเดียว" เป็น "cargo_bottom_y jump
+  ใหญ่ AND สีเดียวกันทั้ง 2 ฝั่ง" (เพิ่มฟังก์ชัน _hidden_behind_sides_same_color ใช้ normalized-
+  hue distance เดียวกับที่ใช้ทั่วระบบ) - ต้องผ่านทั้ง 2 เงื่อนไขจึงจะ suppress ถ้าสีต่างกันชัดเจน
+  ให้เชื่อว่าเป็น genuine hidden_behind เสมอไม่ว่า jump จะใหญ่แค่ไหน
+  ผลทดสอบ regression เต็มรูปแบบ (19 ไฟล์: EB73-01, EB74-ALL, EB76-01, EB90-ALL, EB91-01/02,
+  EB92-01, EB93-01, EC05-01/02, EC18-01, EC19-01, EC25-ALL, EC26-01, EC60-01, EC61-01,
+  ED02-01/02/03) หลังแก้ไขครั้งนี้: 17/19 ไฟล์ SAME ทุกจุด (ตรวจสอบระดับ risk_type/subtype/
+  view/idx ครบถ้วน ไม่ใช่แค่นับจำนวน) มีแค่ 2 ไฟล์ที่เปลี่ยนแปลงตามที่ตั้งใจไว้เท่านั้น:
+  EB73-01 (3->0, SAFE ตรงตามที่ผู้ใช้ยืนยัน) และ EC26-01 (7->6, ตัด pairwise_floor_jump
+  FRONT idx=4 ที่ผิดพลาดออกเพียงจุดเดียว จุดอื่นทั้งหมดยังคงอยู่ครบ) - ไม่มี regression หลุดรอด
+  ในไฟล์อื่นเลยแม้แต่จุดเดียว
+================================================================================
 v25.77 (แก้ปัญหา AA05-02/AA05-04 ที่ผู้ใช้ระบุ "กรอบแดง คอลัมน์เขียว" ดูแปลก หลังทดสอบ v25.76,
 31-Aug-2026):
   ROOT CAUSE ที่แท้จริง (ยืนยันด้วยข้อมูลระดับ pixel): ทั้ง 2 ไฟล์ (คนละ manifest คนละ SKU:
@@ -4461,12 +4526,72 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
     return results
 
 
+_HIDDEN_BEHIND_UP_MAX_BOTTOM_JUMP_PX = 40  # v25.89 NEW: ดู docstring เต็มที่จุดใช้งานจริงด้านล่าง
+# (ทิศทาง 'up') สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01) - ตั้งค่าให้สูงกว่า noise ปกติของขอบกล่อง
+# (มักไม่กี่ px) มากพอ แต่ต่ำกว่าความจริงของกรณี ghost-artifact ที่พบ (197px) มาก
+# v25.89 FIX (สำคัญ - พบ regression จริงจาก EC05-01 ระหว่าง regression-test เต็มรูปแบบ
+# 2-Sep-2026): เดิมเช็คแค่ cargo_bottom_y jump อย่างเดียว (ไม่เช็คสี) - พบว่า EC05-01 FRONT
+# idx=4 (genuine hidden_behind จริง ยืนยันด้วยภาพ: กล่องม่วง/ชมพูแถวหน้า TTTCA ถูกกล่องเขียว
+# STT1A แถวหลังที่สูงกว่าบัง) ก็มี cargo_bottom_y กระโดดใหญ่เช่นกัน (461->116 = 345px) เพราะ
+# "หลังคา" ที่โผล่พ้นมาโดยธรรมชาติจะเห็นแค่ส่วนบนเท่านั้น (ส่วนล่างถูกกล่องแถวหน้าบังไว้เสมอ -
+# เป็นลักษณะทางกายภาพปกติของ genuine hidden_behind ไม่ใช่แค่สัญญาณของ ghost artifact) ทำให้
+# guard เดิม suppress ผิดพลาด (regression)
+# ROOT CAUSE ที่แยกแยะ 2 กรณีนี้ได้จริง (ยืนยันด้วยข้อมูลสี pixel จริงทั้ง 2 ไฟล์): EB73-01
+# (ghost จริง) มีสีเดียวกันเป๊ะทั้ง 2 ฝั่งของ jump (0,0,255 น้ำเงินล้วนทั้งคู่ - เพราะไฟล์นี้มี
+# SKU เดียว สีเดียวทั้งไฟล์ และ Phase 1B นับได้แค่ 2 คอลัมน์ทั้งวิว ไม่มี "แถวหลัง" อยู่จริงเลย)
+# ในขณะที่ EC05-01 (genuine ทั้ง idx=0 และ idx=4) มีสีต่างกันชัดเจนทั้ง 2 กรณี (ส้ม->เขียวมะกอก,
+# ม่วง/ชมพู->เขียว - เป็นกล่องคนละใบ/คนละ SKU ที่ซ่อนอยู่แถวหลังจริง)
+# FIX: เปลี่ยนเงื่อนไข suppress จาก "cargo_bottom_y jump อย่างเดียว" เป็น "cargo_bottom_y jump
+# ใหญ่ AND สีเดียวกันทั้ง 2 ฝั่ง" (ต้องผ่านทั้ง 2 เงื่อนไขจึง suppress) - เพิ่มพารามิเตอร์
+# region/cargo_mask เพื่อ sample สีจริงที่ตำแหน่ง top ของแต่ละฝั่ง เปรียบเทียบด้วย
+# normalized-hue distance (เทคนิคเดียวกับที่ใช้ใน _recheck_stack_height_via_color/
+# _merge_shade_duplicate_clusters ที่ผ่านการยืนยันมาแล้วทั่วระบบ) - ถ้าระยะห่างสีต่ำกว่า
+# threshold (สีเดียวกัน/ใกล้เคียงกันมาก) และ cargo_bottom_y jump ใหญ่ ให้ถือว่าเป็น ghost
+# artifact - ถ้าสีต่างกันชัดเจน (เกิน threshold) ให้เชื่อว่าเป็น genuine hidden_behind เสมอ
+# (ไม่ suppress) ไม่ว่า cargo_bottom_y jump จะใหญ่แค่ไหนก็ตาม
+_HIDDEN_BEHIND_SAME_COLOR_MAX_DIST = 35  # ระยะห่าง normalized-hue สูงสุดที่ยังถือว่า "สีเดียวกัน"
+# (ยืนยันจาก EB73: (0,0,255) vs (24,24,254) normalize แล้วใกล้เคียงกันมาก distance<10 | EC05:
+# ส้ม vs เขียวมะกอก, ม่วง vs เขียว distance>150 ทั้งคู่ - ตั้ง threshold ต่ำไว้ก่อนเพื่อความปลอดภัย
+# ให้ margin สูงพอจะไม่ suppress กรณีที่สีต่างกันจริงโดยไม่ตั้งใจ)
+def _sample_color_near(region, cargo_mask, x_center, half_width=4):
+    """เก็บสี median ของ pixel ที่ 'ขอบบนสุดของ cargo_mask' ในช่วง x_center±half_width -
+    ใช้เปรียบเทียบว่า 2 ฝั่งของ hidden_behind split เป็นสีเดียวกันหรือไม่ (ดู docstring เต็ม
+    ด้านบน) คืนค่า None ถ้า sample ไม่ได้ (fail-safe)"""
+    if region is None or cargo_mask is None:
+        return None
+    h, w = cargo_mask.shape[:2]
+    colors = []
+    for x in range(max(0, x_center - half_width), min(w, x_center + half_width + 1)):
+        ys = np.nonzero(cargo_mask[:, x])[0]
+        if len(ys) == 0:
+            continue
+        y0 = int(ys.min())
+        if 0 <= y0 < h:
+            colors.append(region[y0, x].astype(np.float64))
+    if not colors:
+        return None
+    return np.median(np.array(colors), axis=0)
+def _hidden_behind_sides_same_color(region, cargo_mask, left_x, right_x):
+    """True ถ้าสีที่ขอบซ้าย (left_x) และขอบขวา (right_x) ของ split เป็นสีเดียวกัน/ใกล้เคียงกัน
+    มาก (ใช้ normalized-hue distance เดียวกับที่ใช้ทั่วระบบ) - คืน False ถ้าตรวจสอบไม่ได้หรือ
+    สีต่างกันชัดเจน (fail-safe: ถ้าไม่แน่ใจ ให้ถือว่า "ต่างสี" = ไม่ suppress = ปลอดภัยกว่า)"""
+    c_left = _sample_color_near(region, cargo_mask, left_x)
+    c_right = _sample_color_near(region, cargo_mask, right_x)
+    if c_left is None or c_right is None:
+        return False
+    n_left = _stack_color_normalize(c_left)
+    n_right = _stack_color_normalize(c_right)
+    if n_left is None or n_right is None:
+        return False
+    dist = float(np.sqrt(np.sum((n_left - n_right) ** 2)))
+    return dist <= _HIDDEN_BEHIND_SAME_COLOR_MAX_DIST
 def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
                                  margin=STEP_DOWN_HIDDEN_BEHIND_MARGIN,
                                  min_seg=STEP_DOWN_HIDDEN_BEHIND_MIN_SEG,
                                  jump_thresh_px=STEP_DOWN_HIDDEN_BEHIND_MIN_JUMP_PX,
                                  win=STEP_DOWN_HIDDEN_BEHIND_WIN,
-                                 max_side_std=STEP_DOWN_HIDDEN_BEHIND_MAX_SIDE_STD):
+                                 max_side_std=STEP_DOWN_HIDDEN_BEHIND_MAX_SIDE_STD,
+                                 cargo_bottom_y=None, region=None, cargo_mask=None):
     """v25.23 NEW: หาจุด 'seam ที่ซ่อนอยู่กลางคอลัมน์' ซึ่งเกิดจากกล่องแถวหลัง (ข้ามความกว้าง
     ตู้) สูงกว่ากล่องแถวหน้าที่บังอยู่ - สัญญาณคือ top-face bleed-through (หลังคากล่องหลัง
     โผล่พ้นกล่องหน้า) ทำให้ cargo_top_y กระโดดขึ้นกะทันหันกลางคอลัมน์ (คนละสาเหตุกับ seam
@@ -4500,7 +4625,7 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
 
     คืนค่า dict(split_x, front_height, hidden_height, jump_px, direction) ถ้าพบ หรือ None ถ้า
     ไม่พบรูปแบบที่น่าเชื่อถือทั้ง 2 ทิศทาง"""
-    xs, vals, floor_vals = [], [], []
+    xs, vals, floor_vals, bottom_vals = [], [], [], []
     for x in range(x0 + margin, x1 - margin):
         if x < 0 or x >= len(cargo_top_y):
             continue
@@ -4510,11 +4635,18 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
             xs.append(x)
             vals.append(f - t)
             floor_vals.append(f)  # v25.70 NEW: เก็บค่า floor ดิบแยกไว้ต่างหาก (ดูเหตุผลด้านล่าง)
+            # v25.89 NEW: เก็บ cargo_bottom_y ดิบ (ขอบล่างจริงของ mask กล่อง ก่อนคำนวณ floor) ไว้
+            # ด้วย - ใช้ตรวจสอบความต่อเนื่องของ mask ในทิศทาง 'up' (ดู docstring ด้านล่าง)
+            if cargo_bottom_y is not None and x < len(cargo_bottom_y):
+                bottom_vals.append(float(cargo_bottom_y[x]) if cargo_bottom_y[x] >= 0 else np.nan)
+            else:
+                bottom_vals.append(np.nan)
     n = len(vals)
     if n < min_seg * 2:
         return None
     vals = np.array(vals, dtype=float)
     floor_vals = np.array(floor_vals, dtype=float)
+    bottom_vals = np.array(bottom_vals, dtype=float)
     smoothed = ndimage.median_filter(vals, size=5, mode="nearest")
     for k in range(win, n - win + 1):
         left_win = smoothed[max(0, k - win):k]
@@ -4529,6 +4661,40 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
         if abs(jump) < jump_thresh_px or left_std > max_side_std or right_std > max_side_std:
             continue
         if jump >= jump_thresh_px:
+            # v25.89 NEW (สำคัญ - พบจริงจาก EB73-01 ที่ผู้ใช้แนบ 2-Sep-2026, ผู้ใช้ยืนยันว่า
+            # ไฟล์นี้ปลอดภัย แต่ v25.88 flag hidden_behind BACK idx0 ผิดพลาด): ยืนยันด้วยข้อมูล
+            # จริงระดับ pixel - cargo_bottom_y (ขอบล่างจริงของ mask กล่อง ก่อนคำนวณ floor) กระโดด
+            # จาก 387px ไป 584px (197px) ภายในแค่ 1 pixel (x=755->756) ณ ตำแหน่งเดียวกับที่พบ
+            # "jump" ของ height (floor-top) - พิสูจน์ว่า cargo_mask ตรงนี้เป็น "เศษสีปลอม/artifact"
+            # (ghost sliver) ที่ไม่ต่อเนื่องกับ mask หลัก (2 ก้อนแยกกันจริง ไม่ใช่วัตถุเดียวที่มี
+            # หลังคากล่องซ่อนโผล่พ้น) เพราะกรณี "หลังคากล่องซ่อนโผล่พ้นจริง" (genuine top-face
+            # bleed-through) ควรมี cargo_bottom_y ต่อเนื่องคงที่ (พื้น/ขอบล่างกล่องแถวหน้าเดิม
+            # ไม่เปลี่ยน มีแค่ยอดที่โผล่สูงขึ้น) ไม่ใช่กระโดดพร้อมกันทั้งขอบบนและขอบล่างแบบนี้
+            # FIX: ตรวจสอบความต่อเนื่องของ cargo_bottom_y (mask ดิบ) ที่จุด split เดียวกัน - ถ้า
+            # cargo_bottom_y เองก็กระโดดเกิน _HIDDEN_BEHIND_UP_MAX_BOTTOM_JUMP_PX ด้วย (บ่งชี้ mask
+            # ไม่ต่อเนื่อง/เป็นคนละก้อน) ให้ไม่เชื่อว่าเป็น genuine hidden-behind - ปลอดภัยเพราะเกณฑ์
+            # นี้ตั้งสูง (40px) กว่า noise ปกติของขอบกล่องมาก แต่ยังต่ำกว่าค่าที่พบจริงของ artifact
+            # (197px) มาก - ถ้าไม่มีข้อมูล cargo_bottom_y (None) จะข้ามการตรวจสอบนี้ไป (fail-safe)
+            bottom_jump_ok = True
+            if not np.all(np.isnan(bottom_vals)):
+                bl = bottom_vals[max(0, k - win):k]
+                br = bottom_vals[k:k + win]
+                bl = bl[~np.isnan(bl)]
+                br = br[~np.isnan(br)]
+                if len(bl) >= 3 and len(br) >= 3:
+                    bottom_jump = abs(float(np.median(br)) - float(np.median(bl)))
+                    if bottom_jump > _HIDDEN_BEHIND_UP_MAX_BOTTOM_JUMP_PX:
+                        bottom_jump_ok = False
+            # v25.89 FIX (สำคัญ - พบ regression จริงจาก EC05-01): ไม่ suppress ทันทีแค่เพราะ
+            # cargo_bottom_y jump ใหญ่ (เพราะ genuine hidden_behind ก็มี jump แบบนี้ได้ตามธรรมชาติ
+            # - ดู docstring เต็มด้านบน) ต้องตรวจสอบเพิ่มว่าสีทั้ง 2 ฝั่งเดียวกันหรือไม่ด้วย - ถ้า
+            # bottom_jump ใหญ่ "และ" สีทั้ง 2 ฝั่งเป็นสีเดียวกัน (บ่งชี้ ghost/fragment ของวัตถุ
+            # เดียวกัน ไม่ใช่กล่องคนละใบ) จึงจะ suppress
+            if not bottom_jump_ok:
+                same_color = _hidden_behind_sides_same_color(
+                    region, cargo_mask, xs[k] - win // 2, xs[k] + win // 2)
+                if same_color:
+                    continue
             # ทิศทางเดิม (v25.23): ฝั่งขวา/หลัง split สูงกว่า (กล่องซ่อนหลังโผล่พ้น)
             return {
                 "split_x": xs[k], "front_height": left_med, "hidden_height": right_med,
@@ -4582,13 +4748,19 @@ def detect_hidden_behind_columns(view_result):
     รูปแบบที่ผ่านเกณฑ์ทางสถิติเท่านั้น (ดู _detect_hidden_behind_split)"""
     cargo_top_y = view_result["cargo_top_y"]
     local_floor_y = view_result["local_floor_y"]
+    cargo_bottom_y = view_result.get("cargo_bottom_y")  # v25.89 NEW: ดู docstring ที่
+    # _detect_hidden_behind_split (ทิศทาง 'up') สำหรับหลักฐาน+เหตุผล
+    region = view_result.get("region")  # v25.89 NEW: สำหรับ same-color check
+    cargo_mask = view_result.get("cargo_mask")  # v25.89 NEW: สำหรับ same-color check
     seams = view_result["seams"]
     start_x, end_x = view_result["start_x"], view_result["end_x"]
     boundaries = [start_x] + sorted(seams) + [end_x]
     found = {}
     for i in range(len(boundaries) - 1):
         x0, x1 = boundaries[i], boundaries[i + 1]
-        r = _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1)
+        r = _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
+                                         cargo_bottom_y=cargo_bottom_y,
+                                         region=region, cargo_mask=cargo_mask)
         if r is not None:
             r["x0"] = x0  # v25.70 NEW: เก็บ x0 ไว้ด้วย (จำเป็นสำหรับ direction='down' ที่ต้อง
             r["x1"] = x1  # mark ฝั่งซ้าย/ก่อน split แทนฝั่งขวา/หลัง split แบบเดิม)
@@ -5010,6 +5182,58 @@ def _pair_is_apex_residual_zone(view_result, rec_a, rec_b):
     return True  # ทั้งคู่อยู่ฝั่งเดียวกันของ apex ทั้งหมด (ก่อนหรือหลังทั้งคู่)
 
 
+# v25.89 NEW (สำคัญ - พบจริงจาก EB73-01 ที่ผู้ใช้แนบ 2-Sep-2026, ผู้ใช้ยืนยันด้วยภาพจริงว่า
+# ไฟล์นี้ "ปลอดภัย" แต่ v25.88 วาดกรอบแดง STEP_DOWN_RISK ทั้ง FRONT/BACK): ไฟล์นี้มี SKU เดียว
+# (SEWTA, สีเดียวกันทั้งไฟล์) บรรทุกเบาบางมาก (Unused Floor 189in = 87.9% ว่าง) กล่องทั้งหมด
+# รวมกันเป็นวัตถุก้อนเดียวลอยอยู่กลางตู้เปล่าๆ ทำให้ Phase 1B นับได้ "เพียง 2 คอลัมน์รวมทั้งวิว"
+# (ทั้ง FRONT และ BACK) - กรณีนี้ทั้ง 2 คอลัมน์เป็น "ริมสุดของแถว" พร้อมกันโดยปริยาย (ไม่มีคอลัมน์
+# อื่นเหลือให้เป็น 'plateau' อ้างอิงได้เลยแม้แต่คอลัมน์เดียว) ทำให้ Edge-Column Global Consensus
+# Guard (v25.68, ต้องการ plateau อย่างน้อย 2 คอลัมน์ไม่นับตัวเป้าหมาย) ใช้งานไม่ได้เลยในกรณีนี้
+# ยืนยันด้วยข้อมูลจริงระดับ pixel: cargo_top_y (เส้นขอบบนกองสินค้า) ราบเรียบต่อเนื่องสนิทตลอดทั้ง
+# ช่วงวัตถุ (BACK: 291->366px, FRONT เช่นกัน - ไม่มี jump คมชัดที่ seam เลย ยืนยันด้วย
+# _has_internal_sharp_jump()=False ทั้งคู่) แต่ local_floor_y (เส้นพื้น) กลับมีความชันต่อเนื่อง
+# ราบรื่นเช่นกัน (577px ลดหลั่นลงเหลือ 513px ตลอดความกว้างวัตถุ) ทำให้ "ความสูงที่วัดได้"
+# (floor-top) ต่างกันไปตามตำแหน่ง x ที่ใช้ประเมิน (eff_mid ของแต่ละคอลัมน์) - เป็นความเอนเอียงจาก
+# มุมมอง isometric ธรรมชาติของวัตถุที่ลอยตัวอยู่โดดเดี่ยวในตู้เปล่า (ไม่มี apex ให้ detect_
+# isometric_apex ตรวจพบเลย เพราะวัตถุแคบเกินไป/ไม่มี V-shape ในช่วงแคบๆ ของตัวมันเอง - apex_x=None
+# ทั้งคู่) ไม่ใช่ความแตกต่างทางกายภาพจริงของกล่อง SKU เดียวกันที่สูงเท่ากันจริง
+# FIX: เพิ่มเงื่อนไขตรวจสอบใหม่ - ถ้าวิวนี้มี "รวมทั้งหมดเพียง 2 คอลัมน์" (ไม่มี plateau ใดๆ ให้
+# อ้างอิงได้เลยแม้แต่คอลัมน์เดียว, ต่างจาก Edge-Column Guard เดิมที่ยังพอมี 1+ คอลัมน์เหลือ) และ
+# ทั้งคู่เป็น height_source=="direct" ให้ตรวจสอบด้วย _has_internal_sharp_jump (เทคนิคเดียวกับที่
+# ใช้แยกแยะ jump จริงจาก isometric slope ต่อเนื่องใน AC03-02/EA03-01 - เชื่อถือได้มากกว่า
+# _edge_outlier_has_genuine_seam_jump ซึ่งใช้ window-median scan ที่เสี่ยงถูกความชันธรรมชาติ
+# หลอกได้ในบางกรณี) ครอบคลุมทั้งช่วงของทั้ง 2 คอลัมน์รวมกัน - ถ้าไม่พบ jump คมชัดจริง (False) ให้
+# ถือว่าเป็นวัตถุความสูงสม่ำเสมอจริง ไม่ flag ความเสี่ยง
+# ขอบเขตการแก้ (แคบมาก ปลอดภัยสูง): ทำงานเฉพาะไฟล์ที่มีคอลัมน์รวมทั้งวิวเพียง 2 คอลัมน์เท่านั้น
+# (เงื่อนไขนี้พบได้ยาก เฉพาะไฟล์ที่บรรทุกเบาบางมากและกล่องรวมเป็นก้อนเดียว) ไม่กระทบไฟล์ที่มี
+# คอลัมน์ตั้งแต่ 3 ขึ้นไปเลย (ยังคงใช้ Edge-Column Guard เดิมตามปกติ)
+# ข้อจำกัดที่ต้องบอกตรงไปตรงมา: ยืนยันด้วยข้อมูลจริงจากไฟล์เดียว (EB73-01) เท่านั้น - ยังไม่ได้
+# regression-test ย้อนกับไฟล์ calibration เดิมทั้งหมด (ไม่มีไฟล์เหล่านั้นให้ทดสอบในรอบนี้) แต่ประเมิน
+# ความเสี่ยงแล้วว่าปลอดภัยสูง เพราะเงื่อนไข "รวมทั้งวิวมีแค่ 2 คอลัมน์" เป็นเงื่อนไขที่แคบมาก
+# (พบเฉพาะไฟล์บรรทุกเบาบางมากผิดปกติ) แนะนำให้รัน regression เต็มรูปแบบก่อนใช้งานจริง
+def _isolated_pair_no_genuine_jump(records_same_view, view_result):
+    """True ถ้าวิวนี้มีทั้งหมดเพียง 2 คอลัมน์ (ไม่มี plateau ใดๆ ให้อ้างอิงได้เลยแม้แต่คอลัมน์
+    เดียว - ต่างจาก Edge-Column Global Consensus Guard เดิมที่ยังต้องการอย่างน้อย 2 คอลัมน์อื่น)
+    และไม่มี genuine sharp jump (single-pixel step, ตรวจด้วย _has_internal_sharp_jump) ระหว่าง
+    คอลัมน์ทั้ง 2 ทั่วทั้งช่วงรวม - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01)
+    """
+    valid = [r for r in records_same_view if not r.get("is_corner_duplicate")]
+    if len(valid) != 2:
+        return False
+    valid = sorted(valid, key=lambda r: r["x_range"][0])
+    a, b = valid[0], valid[1]
+    if a.get("height_source") != "direct" or b.get("height_source") != "direct":
+        return False
+    if view_result is None:
+        return False
+    cty = view_result.get("cargo_top_y")
+    if cty is None:
+        return False
+    lo = min(a["x_range"][0], b["x_range"][0])
+    hi = max(a["x_range"][1], b["x_range"][1])
+    return not _has_internal_sharp_jump(cty, (lo, hi))
+
+
 def _is_edge_measurement_outlier(records_same_view, target_idx,
                                   min_plateau_size=_EDGE_OUTLIER_MIN_PLATEAU_SIZE,
                                   plateau_max_spread_ratio=_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO,
@@ -5176,6 +5400,12 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 and shorter_rec.get("cross_view_conflict_ratio", 0.0)
                 > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
             continue
+        # v25.89 NEW: Isolated-2-Column No-Plateau Guard - ดู docstring เต็มที่
+        # _isolated_pair_no_genuine_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01) - ครอบคลุม
+        # กรณีที่ Edge-Column Global Consensus Guard ด้านล่างใช้งานไม่ได้เลย (ต้องการ plateau
+        # อย่างน้อย 2 คอลัมน์อื่น แต่ไฟล์นี้มีคอลัมน์รวมทั้งวิวแค่ 2 คอลัมน์ ไม่เหลือ plateau เลย)
+        if _isolated_pair_no_genuine_jump(records, view_result):
+            continue
         # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มด้านบนสำหรับ
         # หลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)
         if _is_edge_measurement_outlier(records, shorter_rec["idx"], view_result=view_result):
@@ -5243,6 +5473,29 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             has_genuine_jump = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
             if has_genuine_jump is False:
                 continue
+            # v25.89 NEW (สำคัญ - พบจริงจาก EC26-01 ที่ผู้ใช้แนบ 2-Sep-2026, ผู้ใช้ยืนยันด้วยภาพ
+            # ว่า "ตั้งกล่องน้ำเงินและตำแหน่งติดกัน" (ADVSE สีเดียวกัน SKU เดียวกัน) ปกติปลอดภัย
+            # แต่ pairwise_floor_jump ยัง flag อยู่): ยืนยันด้วยข้อมูลจริงระดับ pixel ว่า
+            # _edge_outlier_has_genuine_seam_jump คืน True ผิดพลาด (window-median scan ถูก
+            # ความชันธรรมชาติที่ชันขึ้นใกล้ apex หลอก - ช่วง scan ±40px รอบ seam ไปครอบคลุมโซนที่
+            # floor ลาดชันตามธรรมชาติของภาพ isometric ใกล้ apex พอดี ทำให้ median ของหน้าต่างซ้าย/
+            # ขวาต่างกันมาก ทั้งที่ cargo_top_y ดิบ (per-pixel) ราบเรียบต่อเนื่องสนิทตลอดช่วง ไม่มี
+            # jump คมชัดที่จุดใดเลย - ยืนยันด้วย _has_internal_sharp_jump()=False) - ต่างจาก
+            # AC03-02/AB03-04 (ที่ guard นี้ถูกออกแบบมาใช้งานถูกต้อง) ซึ่งมี jump คมชัดจริงแบบ
+            # single-pixel step (>=35px ภายใน 1px) ที่ has_internal_sharp_jump ตรวจพบได้เช่นกัน
+            # FIX: เพิ่มการตรวจสอบซ้ำด้วย _has_internal_sharp_jump (เชื่อถือได้มากกว่าเพราะดู
+            # per-pixel step แทน window-median) - ถ้า _edge_outlier_has_genuine_seam_jump บอกว่า
+            # "มี jump จริง" (True) แต่ _has_internal_sharp_jump ไม่พบ jump คมชัดจริงเลยในช่วงรวม
+            # ของคู่นี้ ให้เชื่อ _has_internal_sharp_jump แทน (เข้มงวดกว่า, พิสูจน์แล้วว่าแยกแยะ
+            # true/false positive ได้แม่นยำใน AC03-02/EA03-01) แล้ว suppress - ไม่กระทบ AC03-02/
+            # AB03-04 เดิมเพราะทั้งคู่มี genuine single-pixel jump จริง (has_internal_sharp_jump
+            # จะคืน True เช่นกัน ผ่านเงื่อนไขนี้ไปได้ตามปกติ)
+            cty_apex_check = view_result.get("cargo_top_y")
+            if cty_apex_check is not None:
+                lo_ab = min(a["x_range"][0], b["x_range"][0])
+                hi_ab = max(a["x_range"][1], b["x_range"][1])
+                if not _has_internal_sharp_jump(cty_apex_check, (lo_ab, hi_ab)):
+                    continue
         # v25.83 NEW (สำคัญ - พบจริงจาก ED85-01, ดู docstring เต็มที่ _pair_is_apex_residual_zone
         # สำหรับหลักฐาน+เหตุผล): ต่างจาก guard ด้านบน (v25.77) ที่จำกัดเฉพาะ _both_sides_direct -
         # กรณีนี้ taller_rec (idx5) มี height_source="cross_view_corrected" (ไม่ใช่ "direct") จึง
@@ -5265,6 +5518,14 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
             has_genuine_jump2 = _edge_outlier_has_genuine_seam_jump(view_result, shorter_rec, taller_rec)
             if has_genuine_jump2 is False:
                 continue
+            # v25.89 NEW: mirror จากจุดเดียวกันด้านบน (_both_sides_direct block) - ดู docstring
+            # เต็มที่นั่นสำหรับหลักฐาน+เหตุผล (พบจริงจาก EC26-01)
+            cty_apex_check2 = view_result.get("cargo_top_y")
+            if cty_apex_check2 is not None:
+                lo_ab2 = min(a["x_range"][0], b["x_range"][0])
+                hi_ab2 = max(a["x_range"][1], b["x_range"][1])
+                if not _has_internal_sharp_jump(cty_apex_check2, (lo_ab2, hi_ab2)):
+                    continue
         threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
@@ -5707,6 +5968,12 @@ def detect_tail_stepdown(records, view_label, view_result=None):
             > STEP_DOWN_MAX_CORRECTION_CONFLICT_RATIO):
         return risks
 
+    # v25.89 NEW: mirror จาก detect_step_down_pairwise/crossview - ดู docstring เต็มที่
+    # _isolated_pair_no_genuine_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01 - ไฟล์ที่มีคอลัมน์
+    # รวมทั้งวิวแค่ 2 คอลัมน์ ทำให้ tail_stepdown เปรียบเทียบ pair เดียวกับที่ pairwise เพิ่งถูก
+    # suppress ไป แต่ tail_stepdown เป็นฟังก์ชันแยก ไม่ได้รับผลจาก guard ของ pairwise เลย)
+    if _isolated_pair_no_genuine_jump(records, view_result):
+        return risks
     # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มที่
     # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC10-03/EB66-01)
     if _is_edge_measurement_outlier(records, tail_rec["idx"], view_result=view_result):
@@ -5801,6 +6068,13 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
     record ที่ is_corner_duplicate=True เสมอ (ตรวจจากเส้น rail ทางเรขาคณิตจริง)"""
     risks = []
     seen_pairs = set()
+    # v25.89 NEW (สำคัญ - พบจริงจาก EB73-01): ดู docstring เต็มที่ _isolated_pair_no_genuine_jump
+    # สำหรับหลักฐาน+เหตุผล - คำนวณล่วงหน้าครั้งเดียวต่อวิว (ไม่ใช่ต่อคู่) ว่าวิวนี้เป็นกรณี "รวม
+    # ทั้งวิวมีแค่ 2 คอลัมน์ ไม่มี plateau ให้อ้างอิง และไม่มี genuine jump จริง" หรือไม่ - ถ้าใช่
+    # แสดงว่าค่าความสูงรายคอลัมน์ของวิวนี้ไม่น่าเชื่อถือพอจะใช้เปรียบเทียบข้าม view ได้ (พิสูจน์แล้ว
+    # ว่าเป็นวัตถุความสูงสม่ำเสมอจริง ความต่างที่วัดได้เป็นความเอนเอียงจาก isometric slope)
+    front_isolated_uniform = _isolated_pair_no_genuine_jump(records_front, front_result)
+    back_isolated_uniform = _isolated_pair_no_genuine_jump(records_back, back_result)
 
     def _compare(rec_a, records_b_all, view_a_label, view_b_label):
         if rec_a.get("is_corner_duplicate"):
@@ -5819,6 +6093,15 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             shorter_rec = rec_b if taller_rec is rec_a else rec_a
             taller_h = taller_rec["height_px"]
             shorter_h = shorter_rec["height_px"]
+            # v25.89 NEW: ถ้าฝั่งใดฝั่งหนึ่งมาจากวิวที่พิสูจน์แล้วว่า "รวมทั้งวิวมีแค่ 2 คอลัมน์
+            # และไม่มี genuine jump จริง" (isolated uniform object) ไม่เชื่อถือค่าความสูงรายคอลัมน์
+            # ของวิวนั้นพอจะเปรียบเทียบข้าม view ได้ - ไม่ flag (ดู docstring เต็มที่
+            # _isolated_pair_no_genuine_jump, พบจริงจาก EB73-01)
+            if ((taller_rec["view"] == "FRONT" and front_isolated_uniform)
+                    or (taller_rec["view"] == "BACK" and back_isolated_uniform)
+                    or (shorter_rec["view"] == "FRONT" and front_isolated_uniform)
+                    or (shorter_rec["view"] == "BACK" and back_isolated_uniform)):
+                continue
             # v25.48 NEW: เกณฑ์เดียวกับ pairwise - ดู STEP_DOWN_MIN_RELIABLE_SAMPLES
             if (shorter_rec.get("height_source") == "direct"
                     and shorter_rec.get("n_samples", 999) < STEP_DOWN_MIN_RELIABLE_SAMPLES):
@@ -6995,8 +7278,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.88",
-            "benchmarkMode": "v25_88_wide_side_face_width_ratio_filter",
+            "checkerVersion": "V25.89",
+            "benchmarkMode": "v25_89_isolated_pair_apex_jump_guard_hidden_behind_color_check",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
