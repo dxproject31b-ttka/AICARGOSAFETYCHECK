@@ -2,6 +2,104 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.92 (ผู้ใช้แจ้งเพิ่มเติม 11-Sep-2026 พร้อมแนบไฟล์ CC19-all opt2.pdf - 2 ประเด็น):
+
+  ประเด็นที่ 1: "หน้าที่ 1 เป็น front view ใช้การวิเคราะห์ตามระบบได้"
+  -> เดิม v25.91 ปิด detect_tail_stepdown ไว้ในโหมด single_view_page1 เพราะยังไม่แน่ใจว่า
+     ทิศทางหัว/ท้ายตู้ของหน้าที่ 1 ตรงกับ FRONT view มาตรฐานหรือไม่ (ไม่มี label ให้ยืนยัน)
+     เมื่อผู้ใช้ยืนยันแล้ว จึง "เปิดใช้งาน" detect_tail_stepdown เพิ่ม โดยใช้ทิศทางเดียวกับ
+     FRONT view มาตรฐานทุกประการ (build_stack_records ใช้ flip_position=True อยู่แล้ว)
+     ผลทดสอบ: PB01-02 พบ tail_stepdown เพิ่ม 1 จุด (FRONT idx=0, drop=20.8%, n_samples=70)
+     ตรวจสอบภาพ marked แล้วว่าเป็นตั้งท้ายสุดที่เตี้ยกว่าเพื่อนบ้านจริง (ถูกต้อง)
+     ตอนนี้โหมดหน้าเดียวเปิดครบ 4 กลไก: pairwise + hidden_behind + silhouette_notch +
+     tail_stepdown (เหลือปิดเฉพาะ cross_view/rear_empty ที่ต้องมี 2 view จริงๆ เท่านั้น)
+
+  ประเด็นที่ 2: "ไฟล์ประเภท 2 ตู้ ต่อ view ขอให้ยกเว้นการจับกรอบส้มระหว่างตู้ cargo
+  เนื่องจากเป็นประเภทรถ full trailer มี 2 ตู้"
+  ยืนยันด้วยการรันโค้ดจริง: CC19 (TTKAFT Double Trailer) ถูก flag EMPTY_SPACE_RISK/
+  silhouette_notch 2 จุด (FRONT notch_x=894, BACK notch_x=871) ซึ่งตรงกับ "ช่องว่างระหว่าง
+  ตัวตู้ 2 ตู้" พอดีเป๊ะทั้ง 2 จุด (ยืนยันด้วยภาพ marked ด้วย)
+  ข้อมูลเรขาคณิตที่วัดได้จริง (matrix_scale=3):
+    FRONT: กอง x=[529,897] (368px) + x=[964,1297] (333px) คั่นด้วยช่องว่าง 67px (พื้นหลัง
+           ขาวล้วน 80% - ไม่มีพื้นตู้/ผนังตู้อยู่เลย)
+    BACK : กอง x=[604,872] (268px) + x=[972,1307] (335px) คั่นด้วยช่องว่าง 88px (ขาว 88%)
+  หลักการแยกแยะที่ใช้ (สำคัญ): ถ้าเป็น "พื้นที่ว่างในตู้เดียวกัน" (= ความเสี่ยงจริงที่ต้อง
+  flag ต่อไป) พื้นตู้/ผนังตู้จะยังถูกวาดต่อเนื่องผ่านช่องว่างนั้นเสมอ แต่ช่องว่างระหว่าง 2 ตู้
+  ของรถพ่วงเป็นการแยกกันทางกายภาพจริง จึงไม่มีโครงสร้างตู้ใดๆ อยู่เลย (เป็นพื้นหลังขาว)
+  FIX (ใช้ 3 เงื่อนไขร่วมกันแบบ AND เพื่อความปลอดภัยสูงสุด):
+    (1) _detect_multi_container_vehicle() - ต้องยืนยันจากข้อความประเภทรถใน PDF ก่อนเสมอ
+        (CC19 = "TTKAFT (Double Trailer) (1 / 1)" ชัดเจน | ไฟล์ตู้เดียว = "(Truck)"/
+        "(SideBay)") เป็นด่านหลักเพราะเป็นข้อมูลที่ผู้ผลิตไฟล์ระบุมาโดยตรง ไม่ใช่การอนุมาน
+    (2) _find_inter_container_gaps() - ต้องพบช่องว่างที่แยกกองสินค้าเป็น 2 ก้อนใหญ่จริง
+        (>=40px, กองข้างละ >=80px) และภายในช่องต้องเป็นพื้นหลังไร้โครงสร้างตู้ >=50%
+    (3) จำกัดจำนวนช่องที่ยกเว้นได้ = (จำนวนตู้ - 1) โดยเลือกช่องที่กว้างที่สุดเท่านั้น
+        -> รถ 2 ตู้ ยกเว้นได้แค่ 1 ช่องต่อ view ช่องว่างอื่นยังคงถูก flag ตามปกติ
+    ผลกระทบจำกัดที่ EMPTY_SPACE_RISK (กรอบส้ม) เท่านั้น - STEP_DOWN_RISK (กรอบแดง) ไม่ถูก
+    แตะเลยแม้แต่จุดเดียว ตามที่ผู้ใช้ระบุ
+  ผลทดสอบจริง: CC19 hazardCount 4 -> 2 (กรอบส้มระหว่างตู้หายไปทั้ง FRONT/BACK ถูกต้อง,
+  กรอบแดง hidden_behind 2 จุดในตู้ยังอยู่ครบ) | ไฟล์ตู้เดียวทั้ง 3 ไฟล์ไม่ถูกกระทบเลย
+  (n_containers=1 -> guard ไม่ทำงานเลยตั้งแต่ต้น)
+  ทดสอบ unit-test ความปลอดภัย 5 ข้อ ผ่านครบ: (1) พบช่องระหว่างตู้ถูกต้อง (2) รถตู้เดียว
+  ไม่ suppress เลย (3) ช่องที่มีพื้นตู้วาดต่อเนื่อง = ปฏิเสธถูกต้อง (empty_frac=0.00) ยังคง
+  flag เป็นความเสี่ยงจริง (4) รถ 2 ตู้ที่มี 2 ช่อง -> ยกเว้นเฉพาะช่องกว้างสุด อีกช่องยังถูก
+  flag (5) end-to-end: กรอบส้มระหว่างตู้ถูกตัด / กรอบส้มจุดอื่นและกรอบแดงยังอยู่ครบ
+  ข้อจำกัดที่ต้องบอกตรงไปตรงมา: มีไฟล์รถหลายตู้ให้ทดสอบเพียงไฟล์เดียว (CC19) - ถ้าไฟล์รถพ่วง
+  รุ่นอื่นใช้คำอธิบายประเภทรถต่างออกไปจาก "Double/Full/Triple Trailer" (เช่น ภาษาไทย หรือ
+  รหัสรุ่นล้วน) จะไม่ถูกตรวจจับและกรอบส้มระหว่างตู้จะกลับมา - กรณีนั้นเพิ่มคำใน
+  _MULTI_CONTAINER_KEYWORDS ได้ทันทีที่จุดเดียว
+================================================================================
+v25.91 (แก้ปัญหา "โปรแกรมประมวลผลไฟล์ไม่ได้" ที่ผู้ใช้แจ้ง 11-Sep-2026 พร้อมแนบไฟล์ตัวอย่าง
+3 ไฟล์: CC45-all, KB03-01, PB01-02 - ยืนยันด้วยการรันโค้ดจริง ไม่ใช่การเดา):
+  อาการ: ทั้ง 3 ไฟล์คืน HTTP 500 ทุกไฟล์ ข้อความ error ตรงกันเป๊ะ
+  "ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า 1" -> วิเคราะห์ไม่ได้เลยทั้งไฟล์
+  ROOT CAUSE (ยืนยันด้วยการสแกน text layer ครบทุกหน้าของทั้ง 3 ไฟล์ = 9/6/8 หน้า):
+  ไฟล์กลุ่มนี้ "ไม่มีคำว่า Front/Back อยู่ในหน้าใดเลยแม้แต่หน้าเดียว" (Front=False, Back=False
+  ทุกหน้า) เพราะโครงสร้างไฟล์ต่างจากปกติโดยสิ้นเชิง:
+     หน้าที่ 1 (index 0) = Manifest + ภาพ isometric front view ของทั้งคัน (ภาพที่ใช้ได้จริง)
+     หน้าที่ 2 เป็นต้นไป  = "By Placement" ซึ่งเป็นตาราง 6 ช่องย่อยแสดงกล่องทีละใบ
+                            (ไม่ใช่ไดอะแกรม Front/Back แบบบนล่างหรือซ้ายขวาที่ระบบออกแบบไว้)
+  เดิม _find_diagram_page_idx เมื่อหา Front/Back ไม่เจอ จะ "fallback ไป index 1" แบบตายตัว
+  (return 1 if True else 0) โดยไม่ตรวจสอบเลยว่าหน้านั้นเป็นไดอะแกรมจริงหรือไม่ -> ระบบไปใช้หน้า
+  "By Placement" เป็นหน้าวิเคราะห์ -> get_view_region หา label ไม่เจอ -> raise ValueError ->
+  process_request คืน HTTP 500
+  FIX (ตามกฎที่ผู้ใช้กำหนด: "ถ้าหน้าที่ 2 ไม่ใช่แบบบนล่าง/ซ้ายขวาที่สร้างไว้ ให้ใช้หน้าที่ 1
+  เท่านั้น ในการนำไปวาดกรอบจุดเสี่ยง"):
+  (1) เพิ่ม _validate_dual_view_page() - ตรวจว่าหน้านั้น "เป็นไดอะแกรม Front/Back จริง" หรือไม่
+      (ไม่ใช่แค่ "มีคำว่า Front/Back") ด้วยเกณฑ์ 4 ชั้น: label ครบทั้งคู่ -> แปลงพิกัดผ่าน
+      rotation_matrix ได้ -> กรอบ 2 view ไม่ผิดรูป/ไม่เล็กผิดปกติ (>=5% ของหน้า) -> กรอบ 2 view
+      ไม่ทับซ้อนกันเอง (<=50%) พร้อมจำแนก layout เป็น LEFT_RIGHT/TOP_BOTTOM
+  (2) เพิ่ม _dual_view_regions_have_cargo() - ตรวจชั้นที่ 5 ระดับ pixel ว่ากรอบ front/back
+      "มีสินค้าจริงทั้ง 2 ฝั่ง" (>=500px) กันกรณีหน้าที่มี label ครบแต่ไม่ใช่ไดอะแกรมจริง
+  (3) เพิ่ม _resolve_diagram_target() แทน _find_diagram_page_idx เดิม - เลือกหน้า+โหมดแบบ 3 ชั้น
+      tier1: หน้าที่ผ่านการตรวจสอบครบทุกชั้น -> dual_view (พฤติกรรมเดิมทุกประการ)
+      tier2 (REGRESSION-SAFETY NET สำคัญมาก): ถ้าไม่มีหน้าใดผ่าน tier1 แต่ยังมีหน้าที่มี label
+             Front/Back ครบทั้งคู่ ให้ใช้หน้านั้นตามพฤติกรรมเดิมของ v25.90 ทุกประการ - เพราะ
+             get_view_region ต้องการแค่ label ครบทั้งคู่จึงจะไม่ crash ดังนั้น "ไฟล์ใดก็ตามที่
+             เคยประมวลผลผ่านมาก่อน ย่อมต้องมีหน้าแบบนี้เสมอ" -> รับประกันว่าไฟล์เดิมทุกไฟล์ได้
+             page_idx เดิมเป๊ะ ไม่มีทางเกิด regression จากเกณฑ์เรขาคณิตใหม่แม้แต่ไฟล์เดียว
+      tier3: ไม่มีหน้าใดเป็นไดอะแกรม Front/Back เลย -> โหมด single_view_page1 (กฎใหม่)
+  (4) เพิ่มโหมด single-view (หน้าที่ 1 เท่านั้น): get_single_view_region() หาไดอะแกรมจาก
+      vivid_cargo_mask โดยไม่พึ่ง label เลย + compute_phase1b_columns_single() (PHASE 1B
+      แบบวิวเดียว ตัดขั้นตอนที่ผูกกับ BACK ออก) + run_single_view_analysis_on_image()
+      กลไกที่เปิดใช้ 3 กลไก (ทำงานภายในวิวเดียวล้วน ไม่พึ่งการเทียบข้าม view และไม่พึ่งทิศทาง
+      หัว/ท้ายตู้): pairwise + hidden_behind + silhouette_notch
+      กลไกที่ปิด พร้อมเหตุผล: cross_view (ต้องมี 2 view), rear_empty (Guard 1 ต้องใช้ length
+      ของทั้ง 2 view - ถูกบล็อกเองอยู่แล้ว), tail_stepdown (ต้องรู้ทิศหัว/ท้ายตู้จาก label
+      Front/Back ซึ่งไฟล์กลุ่มนี้ไม่มีเลย - ปิดไว้เพื่อไม่ให้วาดกรอบผิดด้านของรถ)
+  (5) เพิ่ม output field ใหม่แบบ additive (ไม่กระทบ key เดิมที่ WebApp/GAS ใช้อยู่):
+      analysisMode / analysisPageIndex / analysisPageReason เพื่อ traceability
+      หมายเหตุ: layout จะเป็น "SINGLE_VIEW_PAGE1" เมื่ออยู่ในโหมดใหม่ (ค่าใหม่นอกเหนือจาก
+      LEFT_RIGHT/TOP_BOTTOM เดิม - ถ้าฝั่งรับผลมี logic ผูกกับ layout ต้องรองรับค่านี้ด้วย)
+  ผลทดสอบจริง (รันโค้ดจริงทั้ง 3 ไฟล์): v25.90 = HTTP 500 ทั้ง 3 ไฟล์ -> v25.91 = HTTP 200
+  ทั้ง 3 ไฟล์ (CC45-all: 8 ตั้ง พบ 2 จุดเสี่ยง | KB03-01: 7 ตั้ง พบ 1 จุด | PB01-02: 8 ตั้ง
+  พบ 1 จุด) ตรวจสอบภาพ marked แล้วว่ากรอบวาดตรงตำแหน่งจริงบนหน้าที่ 1 ทุกไฟล์
+  ทดสอบ tier-selection ด้วย PDF สังเคราะห์ 4 แบบ: TOP_BOTTOM->dual_view(TOP_BOTTOM),
+  LEFT_RIGHT->dual_view(LEFT_RIGHT), label ครบแต่เรขาคณิตผิด->dual_view (tier2 ตามเดิม),
+  ไม่มี label เลย->single_view_page1 - ถูกต้องครบทั้ง 4 กรณี
+  ข้อจำกัดที่ต้องบอกตรงไปตรงมา: รอบนี้ไม่มีไฟล์ dual-view ปกติ (เช่น EB63/EB66/EB08) เหลืออยู่
+  ให้ regression-test จริง - ความปลอดภัยของไฟล์เดิมอาศัยการออกแบบ tier2 (safety net) เป็นหลัก
+  แนะนำให้รัน regression กับชุดไฟล์ปกติยืนยันอีกครั้งก่อน deploy
+================================================================================
 v25.89 (แก้ 2 ไฟล์ที่ผู้ใช้แนบหลังทดสอบ v25.88 กับ 164 ไฟล์ (สำเร็จ 161): EB73-01/EC26-01,
 2-Sep-2026 - ยืนยันด้วยการรันโค้ดจริง+ตรวจสอบ pixel ระดับ debug log แล้ว ไม่ใช่การเดา):
   ปัญหาที่ 1 (EB73-01) - "ปลอดภัย แต่มีกรอบแดงทั้ง 2 view" (SKU เดียว SEWTA สีเดียวกันทั้งไฟล์
@@ -1231,6 +1329,187 @@ def _find_diagram_page_idx(pdf_bytes_or_doc):
     except Exception as e:
         print(f"_find_diagram_page_idx failed: {e}, fallback to 1")
         return 1
+
+
+# ============================================================================
+# v25.91 NEW: กฎตรวจสอบ "หน้า Front/Back" + Fallback ไปใช้หน้าที่ 1 หน้าเดียว
+# ============================================================================
+# ปัญหาที่แก้ (ผู้ใช้แจ้ง 11-Sep-2026 พร้อมแนบไฟล์ตัวอย่าง 3 ไฟล์: CC45-all, KB03-01,
+# PB01-02 - "โปรแกรมประมวลผลไฟล์ไม่ได้ สาเหตุจาก หน้าที่ 2 ไม่ตรงตามที่สร้างไว้ แบบบนล่าง
+# กับแบบซ้ายขวา"): ยืนยันด้วยการรันโค้ดจริงกับทั้ง 3 ไฟล์ - ได้ HTTP 500 ทุกไฟล์ ข้อความ
+# error ตรงกันเป๊ะคือ "ไม่พบ label 'Front'/'Back' ใน text layer ของหน้า 1"
+#
+# ROOT CAUSE (ยืนยันด้วยการสแกน text layer ทุกหน้าของทั้ง 3 ไฟล์):
+#   ไฟล์กลุ่มนี้ "ไม่มีคำว่า Front/Back อยู่ในหน้าใดเลยแม้แต่หน้าเดียว" (ตรวจครบ 9/6/8 หน้า
+#   ตามลำดับ พบ Front=False, Back=False ทุกหน้า) - โครงสร้างไฟล์ต่างจากไฟล์ปกติโดยสิ้นเชิง:
+#     หน้าที่ 1 (index 0) = Manifest + ภาพ isometric front view ของทั้งคัน (ภาพที่ใช้ได้จริง)
+#     หน้าที่ 2 เป็นต้นไป    = "By Placement" ซึ่งเป็น "ตาราง 6 ช่องย่อย" แสดงกล่องทีละใบ
+#                             (ไม่ใช่ไดอะแกรม Front/Back แบบบนล่างหรือซ้ายขวาเลย)
+#   เดิม _find_diagram_page_idx เมื่อหา Front/Back ไม่เจอ จะ "fallback ไป index 1" แบบตายตัว
+#   (return 1 if True else 0) โดยไม่ตรวจสอบเลยว่าหน้านั้นเป็นไดอะแกรม Front/Back จริงหรือไม่
+#   -> ระบบไปใช้หน้า "By Placement" (ตาราง 6 ช่อง) เป็นหน้าวิเคราะห์ -> get_view_region หา
+#   label ไม่เจอ -> raise ValueError -> process_request คืน HTTP 500 -> ประมวลผลไม่ได้ทั้งไฟล์
+#
+# FIX (ตามกฎที่ผู้ใช้กำหนด): "ถ้าหน้าที่ 2 ไม่ใช่แบบบนล่าง/ซ้ายขวาที่สร้างไว้ ให้ใช้หน้าที่ 1
+# เท่านั้น ในการนำไปวาดกรอบจุดเสี่ยง" - implement เป็น 2 ส่วน:
+#   (1) _validate_dual_view_page() - ตรวจสอบว่าหน้านั้น "เป็นไดอะแกรม Front/Back จริง" หรือไม่
+#       (ไม่ใช่แค่ "มีคำว่า Front/Back") โดยตรวจ 4 ชั้น: มี label ครบทั้งคู่ -> แปลงพิกัดได้ ->
+#       คำนวณกรอบ 2 view ได้โดยไม่ผิดรูป/ไม่เล็กผิดปกติ -> กรอบ 2 view ไม่ทับซ้อนกันเอง
+#       พร้อมจำแนก layout เป็น LEFT_RIGHT (ซ้ายขวา) หรือ TOP_BOTTOM (บนล่าง) ตามที่ผู้ใช้ระบุ
+#   (2) ถ้า "ไม่มีหน้าใดผ่านการตรวจสอบเลย" -> เปลี่ยนไปใช้โหมด single-view บนหน้าที่ 1 (index 0)
+#       แทนการ crash (ดู run_single_view_analysis_on_image)
+#
+# ทำไมจึงปลอดภัยกับไฟล์เดิมทั้งหมด (regression-safe by construction): ไฟล์ปกติที่หน้า Front/Back
+# ถูกต้องอยู่แล้ว จะผ่าน _validate_dual_view_page ตั้งแต่เงื่อนไขแรกและได้ page_idx เดิมเป๊ะ
+# (ยืนยันด้วยการรัน regression จริงกับไฟล์ปกติ - ดูผลใน CHANGELOG ด้านบนสุด) โหมด single-view
+# จะทำงาน "เฉพาะเมื่อไม่มีหน้าใดผ่านเลย" ซึ่งเดิมคือเคสที่ระบบ crash 100% อยู่แล้ว
+
+_DUAL_VIEW_MIN_REGION_FRAC = 0.05   # แต่ละ view ต้องกินพื้นที่อย่างน้อย 5% ของหน้า (กันกรอบแคบ
+# ผิดปกติจากการที่ label Front/Back บังเอิญไปโผล่ในหน้าที่ไม่ใช่ไดอะแกรม เช่น หน้าสารบัญ/ตาราง)
+_DUAL_VIEW_MAX_SELF_OVERLAP = 0.5   # กรอบ front/back ต้องทับซ้อนกันเองไม่เกิน 50% (ถ้าทับกันมาก
+# แสดงว่าการคำนวณ split ผิดพลาด ไม่ใช่ layout บนล่าง/ซ้ายขวาที่แท้จริง)
+_SINGLE_VIEW_PAGE_IDX = 0           # "หน้าที่ 1" ตามที่ผู้ใช้ระบุ (index 0)
+_SINGLE_VIEW_PAD_PX = 120           # ระยะขยายกรอบรอบไดอะแกรมหน้าที่ 1 - ต้อง >=100px เพราะ
+# compute_floor_profile ค้นหาเส้นพื้นตู้ได้ลึกสุด 100px ใต้ cargo_bottom_y (ถ้า crop ชิดเกินไป
+# จะหาพื้นไม่เจอ -> grounded ว่าง -> วัดความสูงไม่ได้ทั้งวิว)
+_SINGLE_VIEW_MIN_CARGO_PX = 500     # จำนวน pixel สินค้าขั้นต่ำที่ยืนยันว่า "มีไดอะแกรมจริง"
+
+
+def _validate_dual_view_page(page):
+    """v25.91 NEW: ตรวจสอบว่า page นี้เป็นไดอะแกรม Front/Back จริงตามที่ระบบออกแบบไว้หรือไม่
+    (แบบบนล่าง TOP_BOTTOM หรือแบบซ้ายขวา LEFT_RIGHT) - ดู docstring เต็มด้านบนสำหรับหลักฐาน
+    คืนค่า (is_valid: bool, layout: str|None, reason: str)"""
+    try:
+        words = {w[4] for w in page.get_text("words")}
+    except Exception as e:
+        return False, None, f"อ่าน text layer ไม่สำเร็จ: {e}"
+
+    # ชั้นที่ 1: ต้องมี label ครบทั้ง 'Front' และ 'Back' (ไฟล์ปัญหาทั้ง 3 ตกตั้งแต่ชั้นนี้)
+    if "Front" not in words or "Back" not in words:
+        missing = [w for w in ("Front", "Back") if w not in words]
+        return False, None, f"ไม่พบ label {missing} ใน text layer"
+
+    # ชั้นที่ 2: ต้องแปลงพิกัด label ผ่าน rotation_matrix ได้จริง
+    front_bb = _word_bbox_rotated(page, "Front")
+    back_bb = _word_bbox_rotated(page, "Back")
+    if front_bb is None or back_bb is None:
+        return False, None, "แปลงพิกัด label Front/Back ไม่สำเร็จ"
+
+    load_bb = _word_bbox_rotated(page, "Load")
+    cust_bb = _word_bbox_rotated(page, "Customer")
+    pw, ph = page.rect.width, page.rect.height
+
+    fx0, fy0, fx1, fy1 = front_bb
+    bx0, by0, bx1, by1 = back_bb
+    f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+    b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    side_by_side = abs(f_cx - b_cx) > abs(f_cy - b_cy)
+    layout = "LEFT_RIGHT" if side_by_side else "TOP_BOTTOM"
+
+    # ชั้นที่ 3: ต้องคำนวณกรอบของทั้ง 2 view ได้ และกรอบต้องสมเหตุสมผล (ไม่ผิดรูป/ไม่เล็กผิดปกติ)
+    try:
+        fr = _view_fracs_from_bboxes(front_bb, back_bb, load_bb, cust_bb, pw, ph, "front")
+        br = _view_fracs_from_bboxes(front_bb, back_bb, load_bb, cust_bb, pw, ph, "back")
+    except Exception as e:
+        return False, layout, f"คำนวณกรอบ view ไม่สำเร็จ: {e}"
+
+    for label, fracs in (("front", fr), ("back", br)):
+        y0f, y1f, x0f, x1f = fracs
+        if not (0.0 <= x0f < x1f <= 1.0001) or not (0.0 <= y0f < y1f <= 1.0001):
+            return False, layout, (f"กรอบ {label} ผิดรูป "
+                                    f"(x={x0f:.3f}-{x1f:.3f}, y={y0f:.3f}-{y1f:.3f})")
+        area = (x1f - x0f) * (y1f - y0f)
+        if area < _DUAL_VIEW_MIN_REGION_FRAC:
+            return False, layout, (f"กรอบ {label} เล็กผิดปกติ {area:.1%} ของหน้า "
+                                    f"(ต่ำกว่าเกณฑ์ {_DUAL_VIEW_MIN_REGION_FRAC:.0%})")
+
+    # ชั้นที่ 4: กรอบ front/back ต้องไม่ทับซ้อนกันเอง (layout บนล่าง/ซ้ายขวาต้องแยกกันชัดเจน)
+    fy0_, fy1_, fx0_, fx1_ = fr
+    by0_, by1_, bx0_, bx1_ = br
+    inter = (max(0.0, min(fx1_, bx1_) - max(fx0_, bx0_))
+             * max(0.0, min(fy1_, by1_) - max(fy0_, by0_)))
+    smaller = min((fx1_ - fx0_) * (fy1_ - fy0_), (bx1_ - bx0_) * (by1_ - by0_))
+    if smaller > 0 and (inter / smaller) > _DUAL_VIEW_MAX_SELF_OVERLAP:
+        return False, layout, f"กรอบ front/back ทับซ้อนกันเอง {inter / smaller:.0%}"
+
+    return True, layout, f"ผ่านการตรวจสอบ (layout={layout})"
+
+
+def _dual_view_regions_have_cargo(full_img, doc, page_idx,
+                                   min_cargo_px=_SINGLE_VIEW_MIN_CARGO_PX):
+    """v25.91 NEW: ตรวจสอบระดับ pixel (ชั้นที่ 5) ว่ากรอบ front/back ที่คำนวณได้ "มีสินค้าจริง"
+    ทั้ง 2 ฝั่งหรือไม่ - ป้องกันกรณีที่ text layer มี label ครบและกรอบสมเหตุสมผล แต่หน้านั้น
+    ไม่ใช่ไดอะแกรมจริง (เช่น หน้าตารางที่บังเอิญมีคำว่า Front/Back อยู่ในข้อความ)
+    คืนค่า (ok: bool, reason: str) - ถ้าตรวจไม่ได้ให้ถือว่า "ไม่ผ่าน" (fail-safe ไปโหมดหน้า 1
+    ซึ่งยังวิเคราะห์ได้ ดีกว่าปล่อยให้ crash เหมือนเดิม)"""
+    try:
+        for view_name in ("front", "back"):
+            region, _origin, _fracs = get_view_region(full_img, doc, view_name, page_idx=page_idx)
+            cargo = vivid_cargo_mask(region) & (~arrow_mask(region))
+            n_cargo = int(cargo.sum())
+            if n_cargo < min_cargo_px:
+                return False, f"view {view_name} แทบไม่มี pixel สินค้า ({n_cargo}px)"
+        return True, "ok"
+    except Exception as e:
+        return False, f"crop กรอบ view ล้มเหลว: {e}"
+
+
+def _resolve_diagram_target(pdf_bytes):
+    """v25.91 NEW: หาหน้าที่จะใช้วิเคราะห์ + โหมดการวิเคราะห์ (แทน _find_diagram_page_idx เดิม
+    ที่ fallback ไป index 1 แบบตายตัวโดยไม่ตรวจสอบอะไรเลย - ดู docstring เต็มด้านบน)
+    คืนค่า dict {mode, page_idx, layout, reason}
+      mode='dual_view'          -> พบหน้า Front/Back ที่ถูกต้อง (พฤติกรรมเดิมทุกประการ)
+      mode='single_view_page1'  -> ไม่พบหน้าใดที่ถูกต้องเลย -> ใช้หน้าที่ 1 เท่านั้น (กฎใหม่)"""
+    doc = None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        n_pages = len(doc)
+
+        # ---- Tier 1 (เข้มที่สุด): หาหน้าที่ผ่านการตรวจสอบครบทุกชั้น ----
+        for idx in range(n_pages):
+            ok, layout, reason = _validate_dual_view_page(doc[idx])
+            if ok:
+                print(f"[PAGE_VALIDATE] page[{idx}] {reason} -> ใช้โหมด dual_view (tier1)")
+                return {"mode": "dual_view", "page_idx": idx, "layout": layout,
+                        "reason": f"page[{idx}] {reason}"}
+            print(f"[PAGE_VALIDATE] page[{idx}] ไม่ผ่าน tier1: {reason}")
+
+        # ---- Tier 2 (regression-safety net - สำคัญมาก): ถ้าไม่มีหน้าใดผ่าน tier1 เลย แต่ยังมี
+        # หน้าที่ "มี label Front และ Back ครบทั้งคู่" อยู่ ให้ใช้หน้านั้นตามพฤติกรรมเดิมของ
+        # v25.90 ทุกประการ - เหตุผล: get_view_region ต้องการแค่ label ครบทั้งคู่เท่านั้นจึงจะ
+        # ทำงานได้ (ไม่ crash) ดังนั้นไฟล์ใดก็ตามที่ "เคยประมวลผลผ่านมาก่อน" จะต้องมีหน้าแบบนี้
+        # เสมอ -> tier นี้รับประกันว่าไฟล์เดิมทุกไฟล์ได้ page_idx เดิมเป๊ะ ไม่มีทางเกิด regression
+        # จากเกณฑ์เรขาคณิตใหม่ (ชั้น 3/4) ที่เพิ่งเพิ่มเข้ามาในรอบนี้เลยแม้แต่ไฟล์เดียว
+        # (ยังคงมี pixel-check ชั้นที่ 5 ใน process_request คอยกรองอีกชั้นตามปกติ)
+        for idx in range(n_pages):
+            try:
+                words = {w[4] for w in doc[idx].get_text("words")}
+            except Exception:
+                continue
+            if "Front" in words and "Back" in words:
+                reason = (f"page[{idx}] มี label Front/Back ครบ แต่ไม่ผ่านเกณฑ์เรขาคณิต "
+                          f"-> ใช้ตามพฤติกรรมเดิม (tier2 regression-safety)")
+                print(f"[PAGE_VALIDATE] {reason}")
+                return {"mode": "dual_view", "page_idx": idx, "layout": "TOP_BOTTOM",
+                        "reason": reason}
+
+        # ---- Tier 3: ไม่มีหน้าใดเป็นไดอะแกรม Front/Back เลย -> ใช้หน้าที่ 1 เท่านั้น ----
+        reason = (f"ตรวจครบทั้ง {n_pages} หน้า ไม่พบหน้าใดที่เป็นไดอะแกรม Front/Back "
+                  f"แบบบนล่าง/ซ้ายขวาเลย -> ใช้หน้าที่ 1 (index {_SINGLE_VIEW_PAGE_IDX}) เท่านั้น")
+        print(f"[PAGE_VALIDATE] {reason}")
+        return {"mode": "single_view_page1", "page_idx": _SINGLE_VIEW_PAGE_IDX,
+                "layout": "SINGLE_VIEW_PAGE1", "reason": reason}
+    except Exception as e:
+        reason = f"ตรวจสอบหน้าไม่สำเร็จ ({e}) -> ใช้หน้าที่ 1 เท่านั้น (fail-safe)"
+        print(f"[PAGE_VALIDATE] {reason}")
+        return {"mode": "single_view_page1", "page_idx": _SINGLE_VIEW_PAGE_IDX,
+                "layout": "SINGLE_VIEW_PAGE1", "reason": reason}
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
 
 
 def _find_sku_page_idx(doc):
@@ -7126,6 +7405,199 @@ def detect_rear_empty_risk(records_front, records_back, front_result, back_resul
     return risks
 
 
+# ============================================================================
+# v25.92 NEW: ยกเว้นกรอบส้ม (EMPTY_SPACE_RISK) ที่ช่องว่าง "ระหว่างตู้" ของรถ 2 ตู้ต่อ 1 view
+# ============================================================================
+# ปัญหาที่แก้ (ผู้ใช้แจ้ง 11-Sep-2026 พร้อมแนบไฟล์ CC19-all opt2.pdf): "ไฟล์ประเภท 2 ตู้ ต่อ
+# view ขอให้ยกเว้นการจับกรอบส้มระหว่างตู้ cargo เนื่องจากเป็นประเภทรถ full trailer มี 2 ตู้"
+#
+# ยืนยันด้วยการรันโค้ดจริง + ตรวจสอบภาพ marked: CC19 (TTKAFT Double Trailer) ถูก flag
+# EMPTY_SPACE_RISK/silhouette_notch 2 จุด (FRONT notch_x=894, BACK notch_x=871) ซึ่งตรงกับ
+# "ช่องว่างระหว่างตัวตู้ 2 ตู้" พอดีเป๊ะทั้ง 2 จุด ไม่ใช่พื้นที่ว่างในตู้เดียวกัน
+#
+# ยืนยันด้วยข้อมูลเชิงเรขาคณิตระดับ pixel (วัดจริงจากไฟล์):
+#   FRONT: กองสินค้าแยกเป็น 2 ก้อนชัดเจน x=[529,897] (กว้าง 368px) และ x=[964,1297] (333px)
+#          คั่นด้วยช่องว่างไร้สินค้า x=[897,964] กว้าง 67px - ช่องว่างนี้เป็น "พื้นหลังขาวล้วน
+#          80%" (ไม่มีพื้นตู้/ผนังตู้อยู่เลย)
+#   BACK : กอง x=[604,872] (268px) และ x=[972,1307] (335px) คั่นด้วยช่องว่าง x=[872,960]
+#          กว้าง 88px - พื้นหลังขาวล้วน 88%
+# จุดสำคัญที่แยกแยะได้ชัดเจน: ถ้าเป็น "พื้นที่ว่างในตู้เดียวกัน" (ความเสี่ยงจริงที่ต้อง flag)
+# พื้นตู้/ผนังตู้จะยังคงถูกวาดต่อเนื่องผ่านช่องว่างนั้นเสมอ (ไม่ใช่พื้นหลังขาว) - แต่ช่องว่าง
+# ระหว่าง 2 ตู้ของรถพ่วงเป็น "การแยกกันทางกายภาพจริง" จึงไม่มีโครงสร้างตู้ใดๆ อยู่เลย
+#
+# FIX (ออกแบบให้ปลอดภัยที่สุด - ใช้ 3 เงื่อนไขร่วมกันแบบ AND ไม่ใช่เงื่อนไขเดียว):
+#   (1) ต้องยืนยันจาก "ข้อความประเภทรถ" ใน PDF ก่อนเสมอ (_detect_multi_container_vehicle)
+#       CC19 = "TTKAFT (Double Trailer) (1 / 1)" ชัดเจน / ไฟล์ตู้เดียวเป็น "(Truck)"/"(SideBay)"
+#       -> เป็นด่านหลัก เพราะเป็นข้อมูลที่ผู้ผลิตไฟล์ระบุมาโดยตรง ไม่ใช่การอนุมานจากภาพ
+#   (2) ต้องพบช่องว่างที่ "แยกกองสินค้าออกเป็น 2 ก้อนใหญ่จริง" ทางเรขาคณิต
+#       (_find_inter_container_gaps) และช่องว่างนั้นต้องเป็นพื้นหลังว่างจริง (ไม่มีโครงสร้างตู้)
+#   (3) จำกัดจำนวนช่องว่างที่ยกเว้นได้ = (จำนวนตู้ - 1) เท่านั้น โดยเลือก "ช่องที่กว้างที่สุด"
+#       -> รถ 2 ตู้ ยกเว้นได้แค่ 1 ช่องต่อ view เท่านั้น ช่องว่างอื่นที่เหลือยังคงถูก flag
+#       ตามปกติทุกประการ (เป็นความเสี่ยงจริงภายในตู้ใดตู้หนึ่ง)
+# ผลกระทบจำกัดอยู่ที่ EMPTY_SPACE_RISK (กรอบส้ม) เท่านั้นตามที่ผู้ใช้ระบุ - STEP_DOWN_RISK
+# (กรอบแดง) ไม่ถูกแตะเลยแม้แต่จุดเดียว
+
+_MULTI_CONTAINER_KEYWORDS = {
+    "double trailer": 2,
+    "full trailer": 2,
+    "triple trailer": 3,
+}
+
+# เกณฑ์เรขาคณิตของ "ช่องว่างระหว่างตู้" (คาลิเบรตจากค่าที่วัดได้จริงใน CC19 ที่ matrix_scale=3)
+_INTER_CONTAINER_MIN_GAP_PX = 40      # ช่องว่างขั้นต่ำ (วัดจริง 67px/88px - ตั้งต่ำกว่าพอสมควร
+# เพื่อรองรับไฟล์ที่ตู้ 2 ใบวางชิดกันกว่านี้ แต่ยังสูงพอจะไม่ไปจับรอยต่อระหว่างกล่องปกติ)
+_INTER_CONTAINER_MIN_CLUSTER_PX = 80  # กองสินค้าแต่ละฝั่งของช่องว่างต้องกว้างอย่างน้อยเท่านี้
+# (วัดจริง 268-368px - ตั้งต่ำไว้มากเพื่อรองรับกรณีตู้ที่บรรทุกน้อย)
+_INTER_CONTAINER_MAX_CARGO_COL = 3    # คอลัมน์ที่ถือว่า "ไม่มีสินค้า" (เผื่อ noise/anti-alias)
+_INTER_CONTAINER_MIN_EMPTY_FRAC = 0.5 # ช่องว่างต้องเป็นพื้นหลัง/ไร้โครงสร้างตู้อย่างน้อย 50%
+# (วัดจริง 0.80/0.88 - ตั้งไว้ 0.50 ให้มี margin กว้าง แต่ยังกรองกรณีที่มีพื้นตู้ต่อเนื่องอยู่จริง
+# ซึ่งบ่งชี้ว่าเป็น "พื้นที่ว่างในตู้เดียวกัน" = ความเสี่ยงจริงที่ต้องคง flag ไว้)
+_INTER_CONTAINER_MATCH_TOL_PX = 40    # ระยะเผื่อเวลาจับคู่ notch_x กับขอบช่องว่าง (วัดจริง
+# notch_x อยู่ห่างจากขอบช่องว่างเพียง 1-3px - ตั้ง 40px ให้เผื่อไฟล์อื่นที่อาจคลาดเคลื่อนกว่านี้)
+
+
+def _detect_multi_container_vehicle(pdf_bytes):
+    """v25.92 NEW: ตรวจว่าเป็นรถประเภท "หลายตู้ต่อ 1 view" หรือไม่ จากข้อความประเภทรถใน PDF
+    (เช่น "TTKAFT (Double Trailer) (1 / 1)") - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล
+    คืนค่า (n_containers: int, desc: str) - n_containers=1 หมายถึงรถตู้เดียวตามปกติ"""
+    doc = None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for idx in range(len(doc)):
+            try:
+                text = doc[idx].get_text("text")
+            except Exception:
+                continue
+            low = text.lower()
+            for kw, n in _MULTI_CONTAINER_KEYWORDS.items():
+                if kw in low:
+                    desc = kw
+                    for line in text.splitlines():
+                        if kw in line.lower():
+                            desc = line.strip()[:80]
+                            break
+                    print(f"[MULTI_CONTAINER] พบประเภทรถหลายตู้: '{desc}' "
+                          f"-> n_containers={n} (จากหน้า index {idx})")
+                    return n, desc
+        return 1, ""
+    except Exception as e:
+        print(f"[MULTI_CONTAINER] ตรวจประเภทรถไม่สำเร็จ ({e}) -> ถือว่าเป็นรถตู้เดียว (fail-safe)")
+        return 1, ""
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+def _find_inter_container_gaps(view_result, n_containers):
+    """v25.92 NEW: หาช่องว่าง "ระหว่างตู้" ในวิวนี้ - คืนค่า list ของ (x0, x1) มากสุด
+    (n_containers - 1) ช่อง โดยเรียงตามความกว้างจากมากไปน้อย (ดู docstring เต็มด้านบน)
+
+    เงื่อนไขที่ช่องว่างต้องผ่านครบทุกข้อจึงจะถือว่าเป็น "ระหว่างตู้":
+      - กว้างอย่างน้อย _INTER_CONTAINER_MIN_GAP_PX
+      - มีกองสินค้าขนาดใหญ่พอ (_INTER_CONTAINER_MIN_CLUSTER_PX) ขนาบอยู่ทั้ง 2 ฝั่ง
+      - ภายในช่องเป็นพื้นหลัง/ไร้โครงสร้างตู้ อย่างน้อย _INTER_CONTAINER_MIN_EMPTY_FRAC
+        (ถ้ามีพื้นตู้/ผนังตู้วาดต่อเนื่องผ่านช่องนั้น = พื้นที่ว่างในตู้เดียวกัน = ความเสี่ยงจริง)
+    """
+    if n_containers < 2:
+        return []
+    cargo_mask = view_result.get("cargo_mask")
+    region = view_result.get("region")
+    sx, ex = view_result.get("start_x"), view_result.get("end_x")
+    if cargo_mask is None or region is None or sx is None or ex is None or (ex - sx) < 60:
+        return []
+
+    col_cargo = cargo_mask.sum(axis=0)
+    empty = col_cargo[sx:ex] <= _INTER_CONTAINER_MAX_CARGO_COL
+
+    def _runs(flags):
+        out, st = [], None
+        for i, f in enumerate(flags):
+            if f and st is None:
+                st = i
+            elif not f and st is not None:
+                out.append((st + sx, i + sx))
+                st = None
+        if st is not None:
+            out.append((st + sx, len(flags) + sx))
+        return out
+
+    gaps = [g for g in _runs(empty) if (g[1] - g[0]) >= _INTER_CONTAINER_MIN_GAP_PX]
+    clusters = [c for c in _runs(~empty) if (c[1] - c[0]) >= _INTER_CONTAINER_MIN_CLUSTER_PX]
+    if not gaps or len(clusters) < 2:
+        return []
+
+    validated = []
+    for g0, g1 in gaps:
+        left = [c for c in clusters if c[1] <= g0 + 2]
+        right = [c for c in clusters if c[0] >= g1 - 2]
+        if not left or not right:
+            continue
+        band = region[:, g0:g1]
+        is_white = (band > 240).all(axis=2)
+        is_struct = np.zeros(is_white.shape, dtype=bool)
+        for sc in _STRUCTURAL_CONTAINER_COLORS:
+            d = np.abs(band.astype(int) - np.array(sc, dtype=int))
+            is_struct |= (d[:, :, 0] <= _STRUCTURAL_COLOR_TOL) & \
+                         (d[:, :, 1] <= _STRUCTURAL_COLOR_TOL) & \
+                         (d[:, :, 2] <= _STRUCTURAL_COLOR_TOL)
+        empty_frac = float(is_white.mean())
+        struct_frac = float(is_struct.mean())
+        if empty_frac < _INTER_CONTAINER_MIN_EMPTY_FRAC:
+            print(f"[INTER_CONTAINER] ปฏิเสธช่องว่าง x=[{g0},{g1}] w={g1-g0} "
+                  f"empty_frac={empty_frac:.2f} < {_INTER_CONTAINER_MIN_EMPTY_FRAC} "
+                  f"(struct_frac={struct_frac:.2f}) -> มีโครงสร้างตู้ต่อเนื่อง = "
+                  f"พื้นที่ว่างในตู้เดียวกัน ไม่ใช่ช่องระหว่างตู้")
+            continue
+        validated.append((g0, g1, g1 - g0, empty_frac))
+
+    if not validated:
+        return []
+
+    # เลือกเฉพาะช่องที่กว้างที่สุด จำนวนไม่เกิน (n_containers - 1) ช่อง
+    validated.sort(key=lambda t: -t[2])
+    chosen = validated[:max(0, n_containers - 1)]
+    for g0, g1, w, ef in chosen:
+        print(f"[INTER_CONTAINER] ยืนยันช่องว่างระหว่างตู้ x=[{g0},{g1}] w={w} "
+              f"empty_frac={ef:.2f}")
+    return [(g0, g1) for g0, g1, _w, _ef in chosen]
+
+
+def _suppress_inter_container_empty_space_risks(risks, view_result, view_label, n_containers):
+    """v25.92 NEW: ตัด EMPTY_SPACE_RISK (กรอบส้ม) ที่ตกอยู่ในช่องว่าง "ระหว่างตู้" ออก
+    (ไม่แตะ STEP_DOWN_RISK กรอบแดงเลย ตามที่ผู้ใช้ระบุ) - ดู docstring เต็มด้านบน"""
+    if n_containers < 2:
+        return risks
+    gaps = _find_inter_container_gaps(view_result, n_containers)
+    if not gaps:
+        return risks
+
+    tol = _INTER_CONTAINER_MATCH_TOL_PX
+    kept = []
+    for r in risks:
+        if (r.get("risk_type") != "EMPTY_SPACE_RISK"
+                or (r.get("mark_view") or r.get("view")) != view_label):
+            kept.append(r)
+            continue
+        ref_x = r.get("notch_x")
+        if ref_x is None:
+            mx = r.get("mark_x_range")
+            ref_x = (mx[0] + mx[1]) // 2 if mx else None
+        if ref_x is None:
+            kept.append(r)
+            continue
+        hit = next(((g0, g1) for g0, g1 in gaps if (g0 - tol) <= ref_x <= (g1 + tol)), None)
+        if hit is not None:
+            print(f"[INTER_CONTAINER] ยกเว้นกรอบส้ม {r.get('subtype')} view={view_label} "
+                  f"ที่ x={ref_x} เพราะอยู่ในช่องว่างระหว่างตู้ x=[{hit[0]},{hit[1]}] "
+                  f"(รถ {n_containers} ตู้ - ไม่ใช่พื้นที่ว่างในตู้เดียวกัน)")
+            continue
+        kept.append(r)
+    return kept
+
+
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -7209,9 +7681,168 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     # adjacent_notch สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA10-01)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records_front, records_back)
 
+    # v25.92 NEW: ยกเว้นกรอบส้ม (EMPTY_SPACE_RISK) ที่ช่องว่าง "ระหว่างตู้" ของรถหลายตู้ต่อ view
+    # (เช่น full trailer 2 ตู้) - ดู docstring เต็มที่ _suppress_inter_container_empty_space_risks
+    # สำหรับหลักฐาน+เหตุผล (พบจริงจาก CC19-all) - ไม่แตะ STEP_DOWN_RISK (กรอบแดง) เลยแม้แต่จุดเดียว
+    n_containers = 1
+    if pdf_bytes is not None:
+        n_containers, _veh_desc = _detect_multi_container_vehicle(pdf_bytes)
+    if n_containers >= 2:
+        risks = _suppress_inter_container_empty_space_risks(risks, front, "FRONT", n_containers)
+        risks = _suppress_inter_container_empty_space_risks(risks, back, "BACK", n_containers)
+
     return {
         "front": front, "back": back,
         "records_front": records_front, "records_back": records_back,
+        "risks": risks,
+    }
+
+
+def get_single_view_region(full_img, pad=_SINGLE_VIEW_PAD_PX):
+    """v25.91 NEW: หากรอบ (region) ของไดอะแกรม isometric บน "หน้าที่ 1" โดยไม่พึ่ง label
+    Front/Back เลย (เพราะไฟล์กลุ่มนี้ไม่มี label ดังกล่าวอยู่ในหน้าใดเลย)
+
+    วิธี: ใช้ vivid_cargo_mask (สีสดของกล่องสินค้า) ที่กรอง arrow_mask ออกแล้ว หาขอบเขตจริงของ
+    สินค้าในหน้า แล้วขยายกรอบออก pad พิกเซล - ยืนยันด้วยข้อมูลจริงจากทั้ง 3 ไฟล์ที่ผู้ใช้แนบว่า
+    ไดอะแกรมถูกแยกออกมาได้สะอาด (สินค้ากระจุกตัวอยู่บริเวณเดียว ไม่มีสีสดอื่นปนในหน้า เพราะ
+    ตัวอักษร/ตารางเป็นสีดำ ส่วนพื้นตู้/ผนังตู้เป็นโทนเหลืองอ่อนที่ค่า saturation ต่ำกว่าเกณฑ์
+    vivid (0.55) จึงไม่ถูกนับเป็นสินค้า แต่ยังคงถูกนับเป็น struct_mask สำหรับหาเส้นพื้นได้ปกติ)
+
+    pad ต้องกว้างพอให้ครอบคลุม "พื้นตู้ใต้กล่อง" ด้วย เพราะ compute_floor_profile ค้นหาเส้นพื้น
+    ได้ลึกสุด 100px ใต้ cargo_bottom_y (ดู _SINGLE_VIEW_PAD_PX) จากนั้นส่งต่อให้ ensure_safe_crop
+    ขยายเพิ่มอัตโนมัติถ้าสินค้ายังชนขอบอยู่ (ใช้กลไกเดียวกับ get_view_region ทุกประการ)
+
+    คืนค่า (region, origin_box) เหมือน get_view_region เพื่อให้ส่งต่อเป็น precrop ได้ทันที"""
+    cargo = vivid_cargo_mask(full_img) & (~arrow_mask(full_img))
+    ys, xs = np.nonzero(cargo)
+    if len(xs) < _SINGLE_VIEW_MIN_CARGO_PX:
+        raise ValueError(f"หน้าที่ 1 ไม่พบไดอะแกรมสินค้า (vivid cargo เพียง {len(xs)}px)")
+
+    H, W, _ = full_img.shape
+    x0 = max(0, int(xs.min()) - pad)
+    x1 = min(W, int(xs.max()) + pad + 1)
+    y0 = max(0, int(ys.min()) - pad)
+    y1 = min(H, int(ys.max()) + pad + 1)
+
+    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30)
+    region = full_img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
+    print(f"[SINGLE_VIEW] region x=[{safe_x0},{safe_x1}] y=[{safe_y0},{safe_y1}] "
+          f"(cargo bbox x=[{xs.min()},{xs.max()}] y=[{ys.min()},{ys.max()}])")
+    return region, (safe_x0, safe_y0, safe_x1, safe_y1)
+
+
+def compute_phase1b_columns_single(region_hires, down_factor=1.0):
+    """v25.91 NEW: PHASE 1B สำหรับ "วิวเดียว" (ไม่มี BACK ให้ reconcile ด้วย)
+
+    ใช้ขั้นตอนเดียวกับฝั่ง FRONT ของ compute_phase1b_columns ทุกประการ ยกเว้น 2 ขั้นที่ผูกกับ
+    การมี BACK เป็น ground-truth ซึ่งใช้ไม่ได้ในโหมดนี้:
+      - _p1b_drop_side_wall_contaminated_columns : เป็นขั้นตอนของฝั่ง BACK เท่านั้นอยู่แล้ว
+      - _p1b_reconcile_with_back                 : ต้องมี BACK เป็นตัวอ้างอิงจำนวน/ตำแหน่งตั้ง
+    (จงใจ "ไม่" เอา region เดียวกันไปใส่เป็น BACK หลอกๆ เพื่อให้ reconcile ทำงาน - เพราะขั้นตอน
+    เฉพาะของ BACK อาจตัดคอลัมน์ทิ้งจนจำนวน 2 ฝั่งไม่เท่ากัน แล้วไป reconcile ตัดคอลัมน์จริงทิ้ง
+    อย่างผิดพลาด ซึ่งอันตรายกว่าการไม่ reconcile เลย)
+
+    คืนค่า list ของคอลัมน์ (พิกัด local ที่ main_scale) หรือ None ถ้าล้มเหลว (fallback ไป
+    seam-based เดิมอัตโนมัติใน process_view_on_image)"""
+    try:
+        fronts, all_cells, _n_dropped = _p1b_front_faces(region_hires)
+        if not fronts:
+            print("[SINGLE_VIEW] PHASE1B: ไม่พบ front-face -> fallback seam-based")
+            return None
+
+        cx_tol = _p1b_compute_adaptive_cx_tol(fronts)
+        cols = _p1b_cluster_columns(fronts, cx_tol=cx_tol)
+        if not cols:
+            print("[SINGLE_VIEW] PHASE1B: cluster ไม่ได้เลย -> fallback seam-based")
+            return None
+
+        cols, _dropped = _p1b_merge_corner_artifact_columns(cols, all_cells)
+        cols, n_roof_merges = _p1b_merge_columns_by_overlapping_roofs(cols, all_cells)
+        cols = _p1b_merge_near_duplicate_cols(cols, tol=5.0)
+
+        orphaned = _p1b_find_orphaned_roof_columns(cols, all_cells)
+        if orphaned:
+            print(f"[SINGLE_VIEW] PHASE1B orphaned-roof columns: {len(orphaned)}")
+            cols = sorted(cols + orphaned, key=lambda c: c["cx"])
+
+        print(f"[SINGLE_VIEW] PHASE1B: {len(cols)} cols "
+              f"(roof_merges={n_roof_merges}), cx={[round(c['cx'], 1) for c in cols]}")
+        return [_p1b_scale_col(c, down_factor) for c in cols]
+    except Exception as e:
+        print(f"[SINGLE_VIEW] PHASE1B ล้มเหลว, fallback seam-based เดิม: {e}")
+        return None
+
+
+def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_IDX,
+                                       matrix_scale=3, pdf_bytes=None):
+    """v25.91 NEW: วิเคราะห์ "หน้าที่ 1 หน้าเดียว" ตามกฎที่ผู้ใช้กำหนด (ใช้เมื่อไม่มีหน้าใดเป็น
+    ไดอะแกรม Front/Back แบบบนล่าง/ซ้ายขวาเลย) - คืนค่าโครงสร้างเดียวกับ
+    run_full_analysis_on_image เพื่อให้ process_request/risk_abs_box ใช้งานต่อได้โดยไม่ต้องแก้
+
+    v25.92 UPDATE (ผู้ใช้ยืนยันเพิ่มเติม 11-Sep-2026: "หน้าที่ 1 เป็น front view ใช้การวิเคราะห์
+    ตามระบบได้"): เดิม v25.91 ปิด detect_tail_stepdown ไว้เพราะยังไม่แน่ใจว่าทิศทางหัว/ท้ายตู้ของ
+    หน้าที่ 1 ตรงกับ FRONT view มาตรฐานหรือไม่ (ไม่มี label Front/Back ให้ยืนยัน) - เมื่อผู้ใช้
+    ยืนยันแล้วว่าหน้าที่ 1 เป็น front view จริงและใช้การวิเคราะห์ตามระบบปกติได้ จึง "เปิดใช้งาน"
+    detect_tail_stepdown เพิ่ม โดยใช้ทิศทางเดียวกับ FRONT view มาตรฐานทุกประการ
+    (build_stack_records ใช้ flip_position=True สำหรับ FRONT อยู่แล้ว - ไม่ต้องแก้อะไรเพิ่ม)
+
+    กลไกตรวจจับที่ "เปิดใช้" ในโหมดนี้ (4 กลไก):
+      - detect_step_down_pairwise      (เทียบตั้งข้างเคียงในวิวเดียวกัน)
+      - detect_step_down_hidden_behind (กล่องแถวหลังโผล่พ้น/ซ่อนอยู่ ภายในคอลัมน์เดียวกัน)
+      - detect_silhouette_notch_risk   (รอยบาก/พื้นที่ว่างในเส้นขอบบนกองสินค้า)
+      - detect_tail_stepdown           (v25.92 NEW - เปิดตามที่ผู้ใช้ยืนยันว่าหน้าที่ 1 เป็น
+                                        front view ใช้การวิเคราะห์ตามระบบได้)
+
+    กลไกที่ "ปิด" ในโหมดนี้ พร้อมเหตุผลที่ตรวจสอบแล้ว (บอกตรงไปตรงมา ไม่ใช่การละเลย):
+      - detect_step_down_crossview : ต้องมี 2 view เทียบกัน - ไม่มี BACK ให้เทียบ (ใช้ไม่ได้จริง)
+      - detect_rear_empty_risk     : ต้องใช้ length_px ของทั้ง 2 view คำนวณ gap เป็น Guard 1
+                                     (v25.54) - ไม่มี BACK ทำให้ gap=0 เสมอ กลไกถูกบล็อกเองอยู่แล้ว
+    """
+    page = doc[page_idx]
+    region, origin = get_single_view_region(full_img)
+    precrop = (region, origin)
+
+    try:
+        hi_region, down_factor = render_hires_crop(page, origin, matrix_scale)
+        cols = compute_phase1b_columns_single(hi_region, down_factor=down_factor)
+        del hi_region
+    except Exception as e:
+        print(f"[SINGLE_VIEW] hi-res crop ล้มเหลว, fallback seam-based เดิม: {e}")
+        cols = None
+
+    view = process_view_with_height_on_image(
+        full_img, doc, "front", page_idx=page_idx, override_cols=cols, precrop=precrop)
+
+    records = build_stack_records(view, "FRONT")
+    fill_missing_heights(sorted(records, key=lambda r: r["idx"]))
+    for rec in records:
+        sh = view["stack_heights"][rec["idx"]]
+        sh["height_px"] = rec["height_px"]
+        sh["height_source"] = rec["height_source"]
+
+    risks = []
+    risks += detect_step_down_pairwise(records, "FRONT", view_result=view)
+    risks += detect_step_down_hidden_behind(view, records, "FRONT")
+    risks += detect_silhouette_notch_risk(view, "FRONT")
+    # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
+    # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
+    risks += detect_tail_stepdown(records, "FRONT", view_result=view)
+
+    risks = _dedup_overlapping_stepdown_risks(risks)
+    risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
+
+    # v25.92 NEW: ยกเว้นกรอบส้มที่ช่องว่างระหว่างตู้ (รองรับกรณีไฟล์รถหลายตู้ที่ไม่มีหน้า
+    # Front/Back ด้วย) - ดู docstring เต็มที่ _suppress_inter_container_empty_space_risks
+    if pdf_bytes is not None:
+        n_containers, _veh_desc = _detect_multi_container_vehicle(pdf_bytes)
+        if n_containers >= 2:
+            risks = _suppress_inter_container_empty_space_risks(
+                risks, view, "FRONT", n_containers)
+
+    print(f"[SINGLE_VIEW] n_stacks={view.get('n_stacks')} risks={len(risks)}")
+    return {
+        "front": view, "back": None,
+        "records_front": records, "records_back": [],
         "risks": risks,
     }
 
@@ -7261,10 +7892,19 @@ def process_request(request):
             base64_str = base64_str.split(",", 1)[1]
         pdf_bytes = base64.b64decode(base64_str)
 
-        # v25.17 FIX (Critical): หา page index ที่มี Front/Back diagrams จริง แทน hardcode=1
-        # ทำครั้งเดียวตรงนี้แล้วส่งให้ทุกฟังก์ชัน เพื่อรับประกันว่าทุกขั้นตอนทำงานบนหน้าเดียวกัน
-        diagram_page_idx = _find_diagram_page_idx(pdf_bytes)
-        print(f"Using diagram_page_idx={diagram_page_idx}")
+        # v25.91 FIX (Critical - แก้ HTTP 500 ที่ผู้ใช้แจ้ง 11-Sep-2026 พร้อมไฟล์ตัวอย่าง 3 ไฟล์):
+        # เดิมใช้ _find_diagram_page_idx ซึ่ง "fallback ไป index 1 แบบตายตัว" เมื่อหา Front/Back
+        # ไม่เจอ โดยไม่ตรวจสอบเลยว่าหน้านั้นเป็นไดอะแกรม Front/Back จริงหรือไม่ -> ไฟล์ที่หน้าที่ 2
+        # เป็น "By Placement" (ตาราง 6 ช่องย่อย) จะพังทั้งไฟล์ (HTTP 500)
+        # เปลี่ยนเป็น _resolve_diagram_target ซึ่งตรวจสอบทุกหน้าด้วยกฎ 4 ชั้น แล้วเลือกโหมด:
+        #   dual_view         -> พฤติกรรมเดิมทุกประการ (ไฟล์ปกติไม่ได้รับผลกระทบเลย)
+        #   single_view_page1 -> ใช้หน้าที่ 1 เท่านั้น ตามกฎที่ผู้ใช้กำหนด
+        # (ดู docstring เต็มที่ _resolve_diagram_target/_validate_dual_view_page)
+        target = _resolve_diagram_target(pdf_bytes)
+        analysis_mode = target["mode"]
+        diagram_page_idx = target["page_idx"]
+        print(f"Using diagram_page_idx={diagram_page_idx} mode={analysis_mode} "
+              f"({target['reason']})")
 
         # v25.17 FIX: extract_sku_from_pdf รับ page_idx เพื่อสแกนหน้าที่ถูกต้อง
         # (auto-detect ด้วย _find_sku_page_idx ถ้าไม่ระบุ — แต่ส่งค่าชัดเจนจะดีกว่า)
@@ -7280,20 +7920,50 @@ def process_request(request):
         # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
         full_img, doc, page = render_full_page(pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
 
+        # v25.91 NEW: ชั้นที่ 5 (pixel-level) - แม้หน้าจะผ่านการตรวจ text-layer ครบ 4 ชั้นแล้ว
+        # ก็ยังต้องยืนยันว่ากรอบ front/back ที่คำนวณได้ "มีสินค้าจริงทั้ง 2 ฝั่ง" ก่อนเชื่อว่าเป็น
+        # ไดอะแกรม Front/Back จริง - ถ้าไม่ผ่าน ให้ตกไปใช้หน้าที่ 1 เช่นกัน (ดู
+        # _dual_view_regions_have_cargo) - ไม่กระทบไฟล์ปกติเพราะทั้ง 2 ฝั่งมีสินค้าเต็มอยู่แล้ว
+        if analysis_mode == "dual_view":
+            ok_cargo, cargo_reason = _dual_view_regions_have_cargo(full_img, doc, diagram_page_idx)
+            if not ok_cargo:
+                print(f"[PAGE_VALIDATE] page[{diagram_page_idx}] ผ่าน text-layer แต่ไม่ผ่าน "
+                      f"pixel-check: {cargo_reason} -> เปลี่ยนไปใช้หน้าที่ 1 เท่านั้น")
+                analysis_mode = "single_view_page1"
+                diagram_page_idx = _SINGLE_VIEW_PAGE_IDX
+                target["layout"] = "SINGLE_VIEW_PAGE1"
+                target["reason"] = f"pixel-check ไม่ผ่าน ({cargo_reason})"
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+                full_img, doc, page = render_full_page(
+                    pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
+
         # layout label (เก็บไว้เพื่อ output contract เดิม - อนุมานจากทิศทาง Front/Back label)
-        front_bb = _word_bbox_rotated(page, "Front")
-        back_bb = _word_bbox_rotated(page, "Back")
-        if front_bb and back_bb:
-            fx0, fy0, fx1, fy1 = front_bb
-            bx0, by0, bx1, by1 = back_bb
-            f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
-            b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-            layout = "LEFT_RIGHT" if abs(f_cx - b_cx) > abs(f_cy - b_cy) else "TOP_BOTTOM"
+        if analysis_mode == "dual_view":
+            front_bb = _word_bbox_rotated(page, "Front")
+            back_bb = _word_bbox_rotated(page, "Back")
+            if front_bb and back_bb:
+                fx0, fy0, fx1, fy1 = front_bb
+                bx0, by0, bx1, by1 = back_bb
+                f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+                b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+                layout = "LEFT_RIGHT" if abs(f_cx - b_cx) > abs(f_cy - b_cy) else "TOP_BOTTOM"
+            else:
+                layout = "TOP_BOTTOM"
         else:
-            layout = "TOP_BOTTOM"
+            # v25.91: โหมดหน้าที่ 1 หน้าเดียว - ไม่มี layout Front/Back ให้จำแนก
+            layout = "SINGLE_VIEW_PAGE1"
 
         # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
-        result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
+        # v25.91 FIX: แยกเส้นทางตามโหมดที่ตรวจสอบได้ (ดู _resolve_diagram_target)
+        if analysis_mode == "dual_view":
+            result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
+        else:
+            result = run_single_view_analysis_on_image(
+                full_img, doc, page_idx=diagram_page_idx, matrix_scale=3,
+                pdf_bytes=pdf_bytes)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -7371,8 +8041,14 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.90",
-            "benchmarkMode": "v25_90_notch_prominence_color_anomaly_hiddenbehind_up_isolated_pair",
+            "checkerVersion": "V25.92",
+            "benchmarkMode": "v25_92_inter_container_gap_exclusion_single_view_tail_stepdown",
+            # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
+            # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
+            # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
+            "analysisMode": analysis_mode,
+            "analysisPageIndex": diagram_page_idx,
+            "analysisPageReason": target.get("reason", ""),
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
