@@ -2,6 +2,49 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v25.94 (ผู้ใช้แจ้ง 12-Sep-2026 พร้อมแนบ EC52-02-14-Sep-26.pdf: "ตรวจสอบไฟล์หากไม่พบจุดเสี่ยง
+ช่วยค้นหาจุดเสี่ยงท้ายรถ พร้อมวาดกรอบด้วย เพราะตรวจสอบด้วยตาพบว่ามีความเสี่ยง"):
+  อาการ: v25.93 รายงาน EC52-02 = SAFE (0 จุด) แต่ผู้ใช้เห็นด้วยตาว่าท้ายรถมีความเสี่ยงจริง
+  ROOT CAUSE (ยืนยันด้วย pixel จริงทั้ง 2 view - เป็น false-negative เชิงโครงสร้าง ไม่ใช่แค่
+  threshold ตึงเกินไป): "isometric roof-overhang bleed ที่คอลัมน์ท้ายสุด" - ตู้นี้มีสินค้า 2 แถว
+  ตามความกว้าง (2400mm = 2 x 1200mm) กองท้ายสุดของ "แถวใกล้" เตี้ยกว่าปกติจริง (ยืนยันด้วยภาพ
+  ขยาย: FRONT เห็นกล่อง TGT1G 1 ใบ + GSETA เขียวบางๆ 2 ใบวางทับ แล้วไม่มีอะไรอยู่เหนือกล่อง
+  เขียวเลย ขณะที่คอลัมน์ข้างเคียงวางเต็ม 3 ชั้น) แต่ "แถวไกล" ยังเต็มความสูง และหลังคาแถวไกล
+  ยื่นล้ำมาทับช่วง x ของคอลัมน์ท้ายพอดี -> cargo_top_y (ไม่สนใจสี) ไปวัดหลังคาแถวไกลแทนยอดจริง
+  ตัวเลขจริง (FRONT คอลัมน์ท้าย x=675-800, floor=566): ชมพู(255,0,255) -> h=328px (หลังคาแถวไกล
+  ที่ยื่นมาทับ) | เขียว(0,255,0) top-face -> h=246px (ยอดจริงของแถวใกล้) | ระบบวัดได้ 317.1px
+  เทียบ plateau 339.9px -> drop เพียง 6.7% ต่ำกว่าเกณฑ์ tail_stepdown (12%) และ pairwise (20%)
+  ทั้งคู่ -> ไม่ถูก flag เลย
+  หลักฐานยืนยันว่าสีชมพูในคอลัมน์ท้ายเป็น "ผิวเดียวกับหลังคาเพื่อนบ้าน" ไม่ใช่ยอดของกองนี้เอง:
+  fit เส้น top-line ของชมพูช่วงติดรอยต่อ (x=760-794) แล้ว extrapolate ข้ามรอยต่อไปเทียบ
+  cargo_top_y ของเพื่อนบ้านที่ x=810/820/830 -> คลาดเคลื่อนเฉลี่ยเพียง 0.7px (ระนาบต่อเนื่อง
+  เดียวกันแน่นอน) ขณะที่สีเขียวคลาดเคลื่อน 141.6px (คนละผิวชัดเจน)
+  FIX: เพิ่ม detect_rear_stack_shortfall() - ด่านสำรองเฉพาะ "ท้ายรถ" ด้วยเทคนิค Roof-Facet
+  Ladder: ในภาพ isometric หลังคาแต่ละแถวปรากฏเป็นขั้นบันไดของ parallelogram กว้างเต็มคอลัมน์
+  ไล่ลงตาม depth-offset คงที่ (วัดได้จริง ~39px ในไฟล์นี้)
+    คอลัมน์ปกติ (FRONT idx=2): 351,312,274,234,196px (ห่างสม่ำเสมอ ~39px)
+    คอลัมน์ท้ายสุด (FRONT idx=0): 328, 246px (ห่าง 82px = ขาดไป 1 ขั้น = มีช่องว่างจริง)
+  แล้วเทียบ "หลังคาแถวใกล้" (ระดับที่ 2 จากบน) ของคอลัมน์ท้าย กับเพื่อนบ้าน 3 คอลัมน์ถัดไป
+  แบบ apples-to-apples (ระดับเดียวกันทั้งคู่ ไม่มี bias จาก depth-offset):
+    FRONT: ท้ายรถ 246px vs เพื่อนบ้าน(median) 312px -> drop 21.2%
+    BACK : ท้ายรถ 239px vs เพื่อนบ้าน(median) 271px -> drop 11.8%
+  ทั้ง 2 view ชี้ไปทางเดียวกัน = หลักฐานข้ามมุมกล้องที่หนักแน่น
+  เกณฑ์ตัดสิน: flag เมื่อ (ทั้ง 2 view drop >=10%) หรือ (view ใดก็ได้ drop >=20%)
+  ขอบเขตการทำงาน (regression-safe โดยสมบูรณ์ ตามที่ผู้ใช้กำหนดเอง): กลไกนี้ทำงาน "เฉพาะเมื่อ
+  กลไกอื่นทั้งหมดไม่พบจุดเสี่ยงใดเลย (risks ว่าง)" เท่านั้น -> ไม่มีทางไปลบ/แก้ไข/เลื่อนตำแหน่ง
+  ผลลัพธ์ของไฟล์ใดที่ปัจจุบันตรวจพบความเสี่ยงอยู่แล้วได้เลยแม้แต่ไฟล์เดียว
+  ผลทดสอบ: EC52-02 hazardCount 0 -> 1 (EMPTY_SPACE_RISK/rear_stack_shortfall FRONT idx=0,
+  drop=21.2%) ตรวจสอบภาพ marked แล้วว่ากรอบวาดคร่อมกองท้ายสุดที่เตี้ยจริง (กล่อง TGT1G ล่าง +
+  GSETA เขียว 2 ใบ) จากยอดเขียวลงถึงพื้นตู้ ตรงตำแหน่งที่ผู้ใช้เห็นด้วยตาพอดี |
+  EC05-01 ไม่เปลี่ยนแปลงเลย (1 จุดเท่าเดิม, ยืนยันด้วย log ว่าด่านท้ายรถไม่ถูกเรียกเลย)
+  ทดสอบความปลอดภัย 10 ข้อ ผ่านครบ: EC52 พบถูกต้อง | EC05 ไม่ถูกแตะและด่านไม่ถูกเรียก |
+  threshold logic 6 กรณี (รวมกรณีกองท้ายสูงกว่าเพื่อนบ้าน drop ติดลบ -> ไม่ flag) |
+  กล่องสีเดียวผืนเดียว facets=1 -> ไม่ประเมิน | สีโครงสร้างตู้ล้วน facets=0 -> ไม่ถูกนับ
+  ข้อจำกัดที่ต้องบอกตรงไปตรงมา: คาลิเบรตจากไฟล์จริงเพียงไฟล์เดียว (EC52-02) - ไฟล์ที่ปัจจุบัน
+  รายงาน SAFE อยู่เท่านั้นที่มีโอกาสเปลี่ยนผล (ซึ่งตรงกับเจตนาของผู้ใช้) แนะนำให้รัน regression
+  กับไฟล์ที่ผู้ใช้ยืนยันแล้วว่า "ปลอดภัยจริง" (EB66-01, EB73-01, ED03-01, ED86-03, EC10-03,
+  EC19-01, RD01-01, EC05-02) เพื่อยืนยันว่าด่านใหม่นี้ไม่ไปสร้าง false-positive ก่อน deploy
+================================================================================
 v25.93 (ผู้ใช้แจ้ง 12-Sep-2026 พร้อมแนบ EC05-01-10-Sep-26.pdf + ภาพวงกลมสีส้ม:
 "จาก v25.92 พบว่า ไฟล์ที่แนบ มีจุดเสี่ยง เกินมาที่ front view 2 จุด"):
   อาการ: v25.92 รายงาน hazardCount=3 - FRONT 2 จุด (ตรงกับวงกลมส้มที่ผู้ใช้ทำเครื่องหมายไว้
@@ -7736,6 +7779,190 @@ def _suppress_inter_container_empty_space_risks(risks, view_result, view_label, 
     return kept
 
 
+# ============================================================================
+# v25.94 NEW: REAR-STACK SHORTFALL (ด่านสำรองเฉพาะ "ท้ายรถ" - ทำงานเมื่อไม่พบจุดเสี่ยงใดเลย)
+# ============================================================================
+# ที่มา (ผู้ใช้แจ้ง 12-Sep-2026 พร้อมแนบ EC52-02-14-Sep-26.pdf): "ตรวจสอบไฟล์หากไม่พบจุดเสี่ยง
+# ช่วยค้นหาจุดเสี่ยงท้ายรถ พร้อมวาดกรอบด้วย เพราะตรวจสอบด้วยตาพบว่ามีความเสี่ยง"
+#
+# อาการ: v25.93 รายงาน EC52-02 = SAFE (0 จุด) แต่ผู้ใช้เห็นด้วยตาว่าท้ายรถมีความเสี่ยงจริง
+#
+# ROOT CAUSE (ยืนยันด้วย pixel จริงทั้ง 2 view - เป็น false-negative เชิงโครงสร้าง ไม่ใช่แค่
+# threshold ตึงไป): "isometric roof-overhang bleed ที่คอลัมน์ท้ายสุด"
+#   ตู้นี้มีสินค้า 2 แถวตามความกว้าง (2400mm = 2 แถว x 1200mm) - กองท้ายสุดของ "แถวใกล้" เตี้ยกว่า
+#   ปกติจริง (ยืนยันด้วยภาพ: FRONT เห็นกล่อง TGT1G 1 ใบ + GSETA เขียวบางๆ 2 ใบวางทับ แล้ว "ไม่มี
+#   อะไรอยู่เหนือกล่องเขียวเลย" ในขณะที่คอลัมน์ข้างเคียงวางเต็ม 3 ชั้น) - แต่ "แถวไกล" ที่อยู่ลึก
+#   เข้าไปยังวางเต็มความสูง และหลังคาของแถวไกลยื่นล้ำมาทับช่วง x ของคอลัมน์ท้ายสุดพอดีในมุมมอง
+#   isometric -> cargo_top_y (ซึ่งไม่สนใจสี) จึงไปวัด "หลังคาแถวไกล" แทน "ยอดจริงของแถวใกล้"
+# ตัวเลขที่วัดได้จริง (FRONT, คอลัมน์ท้าย x=675-800, floor=566):
+#   สีชมพู (255,0,255) top-line ในคอลัมน์นี้ -> h=328px  <- หลังคาแถวไกลที่ยื่นมาทับ
+#   สีเขียว (0,255,0)  top-face parallelogram -> h=246px  <- ยอดจริงของกองแถวใกล้
+#   ระบบวัดได้ 317.1px (ใกล้ 328 = ค่าที่ปนเปื้อน) เทียบ plateau 339.9px -> drop เพียง 6.7%
+#   ต่ำกว่าเกณฑ์ tail_stepdown (12%) และ pairwise (20%) ทั้งคู่ -> ไม่ถูก flag เลย
+# หลักฐานยืนยันว่าสีชมพูในคอลัมน์ท้าย "เป็นผิวเดียวกับหลังคาเพื่อนบ้าน" (ไม่ใช่ยอดของกองนี้เอง):
+#   fit เส้น top-line ของสีชมพูในช่วงติดรอยต่อ (x=760-794) แล้ว extrapolate ข้ามรอยต่อไปเทียบกับ
+#   cargo_top_y ของคอลัมน์เพื่อนบ้านที่ x=810/820/830 -> คลาดเคลื่อนเฉลี่ยเพียง 0.7px
+#   (เป็นระนาบต่อเนื่องเดียวกันแน่นอน) ในขณะที่สีเขียวคลาดเคลื่อน 141.6px (คนละผิวชัดเจน)
+#
+# วิธีตรวจที่ใช้ (Roof-Facet Ladder): ในภาพ isometric หลังคาของแต่ละแถวจะปรากฏเป็น "ขั้นบันได"
+# ของ parallelogram กว้างเต็มคอลัมน์ ไล่ลงมาทีละระดับตาม depth-offset คงที่ (วัดได้จริง ~39px
+# ในไฟล์นี้) - ระดับบนสุด = แถวไกลสุด, ระดับถัดลงมา = แถวที่ใกล้ขึ้นมา
+#   คอลัมน์ปกติ (FRONT idx=2): 351, 312, 274, 234, 196 px  (ห่างกันสม่ำเสมอ ~39px)
+#   คอลัมน์ท้ายสุด (FRONT idx=0): 328, 246 px  (ห่างกัน 82px = "ขาดไป 1 ขั้น" = มีช่องว่างจริง)
+# จึงเทียบ "หลังคาแถวใกล้" (ระดับที่ 2 จากบน) ของคอลัมน์ท้าย กับคอลัมน์เพื่อนบ้าน 3 คอลัมน์ถัดไป
+# แบบ apples-to-apples (ระดับเดียวกันทั้งคู่ ไม่มี bias จาก depth-offset):
+#   FRONT: ท้ายรถ 246px vs เพื่อนบ้าน(median) 312px -> drop 21.2%
+#   BACK : ท้ายรถ 239px vs เพื่อนบ้าน(median) 271px -> drop 11.8%
+# ทั้ง 2 view สอดคล้องกัน (ชี้ไปทางเดียวกันทั้งคู่) = หลักฐานข้ามมุมกล้องที่หนักแน่น
+#
+# ขอบเขตการทำงาน (ทำให้ regression-safe โดยสมบูรณ์ตามที่ผู้ใช้กำหนดเอง): กลไกนี้ทำงาน
+# "เฉพาะเมื่อกลไกอื่นทั้งหมดไม่พบจุดเสี่ยงใดเลย (risks ว่าง)" เท่านั้น -> ไม่มีทางไปลบ/แก้ไข/
+# เลื่อนตำแหน่งผลลัพธ์ของไฟล์ใดที่ปัจจุบันตรวจพบความเสี่ยงอยู่แล้วได้เลยแม้แต่ไฟล์เดียว
+# (ไฟล์ที่เคย SAFE เท่านั้นที่มีโอกาสเปลี่ยน ซึ่งตรงกับเจตนาของผู้ใช้)
+_REAR_SHORTFALL_MIN_FACETS = 2        # คอลัมน์ท้ายต้องเห็นหลังคาอย่างน้อย 2 ระดับ จึงเทียบได้
+_REAR_SHORTFALL_BOTH_VIEW_DROP = 0.10 # ถ้าทั้ง 2 view ชี้ตรงกัน ใช้เกณฑ์นี้
+_REAR_SHORTFALL_SINGLE_VIEW_DROP = 0.20  # ถ้ามี view เดียว ต้องชัดเจนกว่ามาก
+_REAR_FACET_MIN_AREA = 800
+_REAR_FACET_MIN_WIDTH_FRAC = 0.85     # ต้องกว้างเกือบเต็มคอลัมน์ (เป็นหลังคาจริง ไม่ใช่เศษข้าง)
+_REAR_FACET_MERGE_TOL_PX = 12         # ยุบระดับที่ห่างกัน <12px (ผิวเดียวกันที่แตกเป็นชิ้น)
+
+
+def _rear_roof_facets(region, x0, x1):
+    """v25.94 NEW: คืน list ของ 'ระดับหลังคา' (top-face parallelogram กว้างเต็มคอลัมน์) ในช่วง
+    x0..x1 เรียงจากบนลงล่าง -> [(top_y, color), ...] (ดู docstring เต็มด้านบน)"""
+    colw = max(1, x1 - x0)
+    lo, hi = x0 + 6, x1 - 6
+    if hi <= lo or region is None:
+        return []
+    sub = region[:, lo:hi].reshape(-1, 3)
+    try:
+        cols, cnts = np.unique(sub, axis=0, return_counts=True)
+    except Exception:
+        return []
+    out = []
+    for i in np.argsort(-cnts)[:10]:
+        c = tuple(int(q) for q in cols[i])
+        if int(cnts[i]) < 1200 or _p1b_is_structural_container_color(c):
+            continue
+        if max(c) < 50 or min(c) > 240:
+            continue
+        mask = ((region[:, :, 0] == c[0]) & (region[:, :, 1] == c[1])
+                & (region[:, :, 2] == c[2]))
+        lab, nn = ndimage.label(mask, structure=np.ones((3, 3), int))
+        if nn == 0:
+            continue
+        for li, sl in enumerate(ndimage.find_objects(lab), start=1):
+            if sl is None:
+                continue
+            ys_, xs_ = sl
+            w = xs_.stop - xs_.start
+            area = int((lab[sl] == li).sum())
+            ov = max(0, min(xs_.stop, x1) - max(xs_.start, x0))
+            if (area < _REAR_FACET_MIN_AREA or ov < 0.5 * colw
+                    or w < _REAR_FACET_MIN_WIDTH_FRAC * colw):
+                continue
+            out.append((int(ys_.start), c))
+    out.sort()
+    merged = []
+    for t, c in out:
+        if merged and (t - merged[-1][0]) < _REAR_FACET_MERGE_TOL_PX:
+            continue
+        merged.append((t, c))
+    return merged
+
+
+def _rear_shortfall_for_view(view_result, records, view_label):
+    """v25.94 NEW: วัด 'ความเตี้ยผิดปกติของกองท้ายรถ' ในวิวเดียว โดยเทียบ 'หลังคาแถวใกล้'
+    (ระดับที่ 2 จากบน) ของคอลัมน์ท้ายสุด กับคอลัมน์เพื่อนบ้าน 3 คอลัมน์ถัดไป (ระดับเดียวกัน)
+    คืน dict หรือ None (ดู docstring เต็มด้านบน)"""
+    valid = [r for r in records if not r.get("is_corner_duplicate")]
+    if len(valid) < 3:
+        return None
+    region = view_result.get("region")
+    lfy = view_result.get("local_floor_y")
+    if region is None or lfy is None:
+        return None
+    ordered = sorted(valid, key=lambda r: (r["pos_range"][0] + r["pos_range"][1]) / 2.0)
+    tail = ordered[-1]
+    if tail["pos_range"][1] < TAIL_STEPDOWN_REAR_POS_MIN:
+        return None
+    neighbours = ordered[-4:-1]
+    if not neighbours:
+        return None
+
+    def near_row_height(rec):
+        x0, x1 = rec["x_range"]
+        xm = (x0 + x1) // 2
+        if not (0 <= xm < len(lfy)) or lfy[xm] < 0:
+            return None, 0
+        facets = _rear_roof_facets(region, x0, x1)
+        if len(facets) < _REAR_SHORTFALL_MIN_FACETS:
+            return None, len(facets)
+        return float(lfy[xm] - facets[1][0]), len(facets)
+
+    t_h, t_n = near_row_height(tail)
+    if t_h is None or t_h <= 0:
+        return None
+    nb_h = [h for h, _n in (near_row_height(r) for r in neighbours) if h and h > 0]
+    if len(nb_h) < 2:
+        return None
+    base = float(np.median(nb_h))
+    if base <= 0:
+        return None
+    drop = 1.0 - (t_h / base)
+    print(f"[REAR_SHORTFALL] {view_label} tail idx={tail['idx']} x={tail['x_range']} "
+          f"หลังคาแถวใกล้={t_h:.0f}px เพื่อนบ้าน(median)={base:.0f}px (n={len(nb_h)}) "
+          f"drop={drop:.1%} facets={t_n}")
+    return {"rec": tail, "tail_h": t_h, "base_h": base, "drop": drop, "view": view_label}
+
+
+def detect_rear_stack_shortfall(front, back, records_front, records_back):
+    """v25.94 NEW: ด่านสำรองเฉพาะ 'ท้ายรถ' - เรียกใช้เฉพาะเมื่อไม่พบจุดเสี่ยงใดเลยเท่านั้น
+    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล พบจริงจาก EC52-02)"""
+    cand = []
+    for v, recs, lbl in ((front, records_front, "FRONT"), (back, records_back, "BACK")):
+        if v is None or not recs:
+            continue
+        try:
+            r = _rear_shortfall_for_view(v, recs, lbl)
+        except Exception as e:
+            print(f"[REAR_SHORTFALL] {lbl} ตรวจไม่สำเร็จ ({e}) - ข้าม")
+            r = None
+        if r is not None:
+            cand.append(r)
+    if not cand:
+        return []
+    both_ok = (len(cand) == 2
+               and all(c["drop"] >= _REAR_SHORTFALL_BOTH_VIEW_DROP for c in cand))
+    single_ok = any(c["drop"] >= _REAR_SHORTFALL_SINGLE_VIEW_DROP for c in cand)
+    if not (both_ok or single_ok):
+        print("[REAR_SHORTFALL] ไม่ถึงเกณฑ์ (ต้องทั้ง 2 view >=10% หรือ view ใดก็ได้ >=20%)")
+        return []
+    best = max(cand, key=lambda c: c["drop"])
+    v = front if best["view"] == "FRONT" else back
+    rec = best["rec"]
+    x0, x1 = rec["x_range"]
+    xm = (x0 + x1) // 2
+    floor_y = float(v["local_floor_y"][xm])
+    top_y = floor_y - best["tail_h"]
+    ox, oy = v["crop_origin_x"], v["crop_origin_y"]
+    abs_box = (ox + x0, oy + top_y, ox + x1, oy + floor_y)
+    print(f"[REAR_SHORTFALL] ==> FLAG ที่ {best['view']} idx={rec['idx']} "
+          f"drop={best['drop']:.1%} box={abs_box}")
+    return [{
+        "risk_type": "EMPTY_SPACE_RISK", "subtype": "rear_stack_shortfall",
+        "mark_view": best["view"], "mark_stack_idx": rec["idx"],
+        "mark_x_range": (x0, x1), "pos_range": rec["pos_range"],
+        "abs_box": abs_box,
+        "tail_height_px": best["tail_h"], "base_height_px": best["base_h"],
+        "drop_ratio": best["drop"],
+        "reason": (f"กองสินค้าท้ายรถเตี้ยกว่ากองข้างเคียงอย่างมีนัยสำคัญ "
+                   f"({best['tail_h']:.0f}px เทียบ {best['base_h']:.0f}px, "
+                   f"ต่ำกว่า {best['drop']:.0%}) เหลือพื้นที่ว่างเหนือกองท้ายสุดก่อนประตูท้ายตู้ "
+                   f"เสี่ยงสินค้าล้ม/เลื่อนไปทางท้ายรถขณะเบรก"),
+    }]
+
+
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -7818,6 +8045,14 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     # silhouette_notch ตำแหน่งเดียวกัน - ดู docstring เต็มที่ _dedup_stepdown_corrupted_by_
     # adjacent_notch สำหรับหลักฐาน+เหตุผล (พบจริงจาก EA10-01)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records_front, records_back)
+
+    # v25.94 NEW: ด่านสำรองเฉพาะ "ท้ายรถ" - ทำงานเฉพาะเมื่อกลไกอื่นทั้งหมดไม่พบจุดเสี่ยงใดเลย
+    # (ตามที่ผู้ใช้กำหนด: "ตรวจสอบไฟล์หากไม่พบจุดเสี่ยง ช่วยค้นหาจุดเสี่ยงท้ายรถ") - การจำกัด
+    # ขอบเขตแบบนี้ทำให้ไม่มีทางกระทบไฟล์ที่ปัจจุบันตรวจพบความเสี่ยงอยู่แล้วเลยแม้แต่ไฟล์เดียว
+    # ดู docstring เต็มที่ detect_rear_stack_shortfall สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC52-02)
+    if not risks:
+        print("[REAR_SHORTFALL] ไม่พบจุดเสี่ยงจากกลไกปกติ -> เริ่มตรวจเพิ่มเฉพาะท้ายรถ")
+        risks += detect_rear_stack_shortfall(front, back, records_front, records_back)
 
     # v25.92 NEW: ยกเว้นกรอบส้ม (EMPTY_SPACE_RISK) ที่ช่องว่าง "ระหว่างตู้" ของรถหลายตู้ต่อ view
     # (เช่น full trailer 2 ตู้) - ดู docstring เต็มที่ _suppress_inter_container_empty_space_risks
@@ -7968,6 +8203,12 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
+
+    # v25.94 NEW: ด่านสำรองเฉพาะท้ายรถ (โหมดหน้าเดียว) - เงื่อนไขเดียวกับโหมด dual_view
+    # ใช้ view เดียวที่มี จึงต้องผ่านเกณฑ์ single-view (>=20%) ที่เข้มกว่าเสมอ
+    if not risks:
+        print("[REAR_SHORTFALL] (single-view) ไม่พบจุดเสี่ยง -> ตรวจเพิ่มเฉพาะท้ายรถ")
+        risks += detect_rear_stack_shortfall(view, None, records, [])
 
     # v25.92 NEW: ยกเว้นกรอบส้มที่ช่องว่างระหว่างตู้ (รองรับกรณีไฟล์รถหลายตู้ที่ไม่มีหน้า
     # Front/Back ด้วย) - ดู docstring เต็มที่ _suppress_inter_container_empty_space_risks
@@ -8179,8 +8420,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.93",
-            "benchmarkMode": "v25_93_lowsat_cargo_color_tier2",
+            "checkerVersion": "V25.94",
+            "benchmarkMode": "v25_94_rear_stack_shortfall_fallback",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
