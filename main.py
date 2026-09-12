@@ -2,66 +2,6 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v25.93 (ผู้ใช้แจ้ง 11-Sep-2026 พร้อมแนบ EC52-02-14-Sep-26.pdf + ภาพระบุจุดเสี่ยง:
-"ไม่มีกรอบวาดบริเวณที่เสี่ยง ... ผมต้องการเพิ่มกลไกมุมทแยง"):
-
-  ยืนยันปัญหาด้วยการรันโค้ดจริง: EC52-02 ได้ผล "ปลอดภัย (SAFE) 0 จุด" ทั้งที่มีจุดเสี่ยงชัดเจน
-  ROOT CAUSE (ยืนยันด้วย front-face cells ของ Phase 1B ระดับ pixel - ไม่ใช่การเดา):
-    ที่ FRONT view ช่วง x=683-836 "แถวหน้า" (กล่องม่วง TGT1G) สูงเพียง 110-112px (ชั้นเดียว)
-    แต่คอลัมน์ถัดไปทางขวา (x>=837) แถวหน้าสูง 203-208px (2 ชั้น) -> ขั้นบันไดลดลง 45.1%
-    ซึ่งเป็นความเสี่ยงจริงชัดเจน (กล่องเขียว GSETA แถวหลังโผล่ให้เห็นผ่านช่องที่แถวหน้าขาดไป)
-    แต่ "เส้นขอบบนกองสินค้า" (cargo_top_y) ที่ช่วง x เดียวกันวัดได้ 299-340px เพราะถูกกล่องเขียว
-    GSETA "แถวหลัง" (สูง 201px) บังเต็มพื้นที่พอดี -> ความสูงคอลัมน์ที่ระบบวัดได้ = 317px เทียบ
-    เพื่อนบ้าน 341px = ต่างกันเพียง 7% ต่ำกว่าเกณฑ์ STEP_DOWN ทุกกลไก (20%) มาก
-    ทำไม detect_step_down_hidden_behind (v25.23/70) ที่ทำเรื่อง "กล่องซ่อนหลัง" ก็ยังจับไม่ได้:
-    กลไกนั้นหา "จุดกระโดดคมชัดของ cargo_top_y ภายในคอลัมน์" แต่กรณีนี้ cargo_top_y ราบเรียบ
-    ต่อเนื่องสนิท (แถวหลังต่อเนื่องตลอด) ความไม่ต่อเนื่องอยู่ที่ "พื้นผิวแถวหน้า" ซึ่งเป็นข้อมูล
-    ภายในกองสินค้า ไม่ปรากฏบนเส้นขอบบนเลยแม้แต่น้อย -> ไม่มีกลไกใดในระบบมองเห็นได้เลย
-
-  สิ่งที่เพิ่มเข้ามา (กลไกมุมทแยง / front_row_stepdown):
-    ใช้ "หน้ากล่อง (front-face)" ที่ Phase 1B คำนวณไว้อยู่แล้ว (ไม่ render ภาพเพิ่ม ไม่กระทบ
-    memory) - หน้ากล่องในมุมมอง isometric คือสี่เหลี่ยมด้านขนานที่มีมุมทแยงชัดเจน และแยก
-    "แถวหน้า/แถวหลัง" ได้จากขอบล่าง (แถวหน้าอยู่ใกล้ผู้ชมกว่า ขอบล่างจึงต่ำกว่าเสมอ)
-    (1) _frontrow_surface_groups() - จัดกลุ่ม front-face ที่ x ทับซ้อนกัน แล้วเลือกชิ้นที่
-        ขอบล่างต่ำที่สุดเป็นตัวแทน "พื้นผิวแถวหน้า" ของกลุ่มนั้น
-    (2) detect_front_row_stepdown() - เทียบกลุ่มที่ติดกันตามแนว x หาขั้นบันไดของแถวหน้า
-    (3) Guard สำคัญ: flag เฉพาะเมื่อ silhouette "ไม่ได้" ลดลงตาม (< 15%) -> รับประกันว่ากลไกนี้
-        เพิ่มเฉพาะจุดที่กลไกเดิมมองไม่เห็นเท่านั้น ไม่มีทางซ้ำซ้อนกับกลไกเดิมได้เลย
-    (4) Guard เสริม: ฝั่งเตี้ยต้องมีแถวหลังที่สูงกว่าบังอยู่จริง >= 60px (พิสูจน์ว่าเป็นโพรงที่
-        ถูกซ่อน ไม่ใช่ขอบกองปกติ) + หน้ากล่องต้องมี area >= 3000 (กันเศษ sliver)
-
-  ผลทดสอบ (เมื่อเปิดใช้งาน): EC52-02 = 0 -> 1 จุด ตรวจพบถูกต้อง (front_h=112 vs เพื่อนบ้าน 204,
-  drop=45.1%, hidden_by_rear_row=228px) และวาดกรอบตรงตำแหน่งคอลัมน์แถวหน้าที่ขาดไปพอดี
-  (ยืนยันด้วยภาพ marked จริง)
-
-  ── รอบที่ 2 (v25.93b) หลังผู้ใช้ยืนยัน ground-truth 11-Sep-2026 ──────────────────
-  รอบแรกกลไกนี้ตรวจจับ EC52-02 ได้ถูกต้อง แต่เพิ่มจุดใหม่ในไฟล์ที่ยืนยันแล้วอีก 10 จุด
-  (CC19 2, CC45 1, KB03 2, PB01 5) - ผู้ใช้ยืนยันว่า "ไม่มีความเสี่ยง" ทั้ง 10 จุด
-  วิเคราะห์คุณลักษณะทั้ง 11 จุด (1 จริง + 10 false-positive) พบตัวแยก 2 ตัวที่มีเหตุผล
-  ทางกายภาพรองรับ (ไม่ใช่การจูนตัวเลขลอยๆ) - ดู docstring เต็มที่ _FRONTROW_MIN_COLOR_DIST:
-    (1) color_dist  - สีเหนือพื้นผิวแถวหน้าต้องต่างจากสีหน้ากล่อง (>=100)
-        EC52=442 (ม่วง->เขียว คนละ SKU = โพรงจริง) | false-positive 8 จุด = 5-54
-        (สีเดียวกันต่อขึ้นไป = Phase 1B แตกหน้ากล่องเป็นชิ้น = artifact ไม่ใช่โพรง)
-    (2) hidden_ratio - โพรงต้องลึก >=60% ของความสูงรวม
-        EC52=0.671 (ลึก 228px ~2 ชั้นกล่อง) | CC19=0.404/0.509 (ลึก 78/89px ตื้นกว่า
-        1 ชั้นกล่องของตัวเอง = depth-offset ของแถวหลังตามมุมมอง isometric ล้วนๆ)
-  ต้องผ่านทั้ง 2 ข้อพร้อมกัน (AND) - ยืนยันว่าจำเป็นทั้งคู่: ใช้ (1) เดี่ยวเหลือ FP 2 จุด,
-  ใช้ (2) เดี่ยวเหลือ FP 4 จุด, ใช้ร่วมกันเหลือ FP 0 จุด และ EC52 ยังตรวจพบถูกต้อง
-
-  ผลทดสอบสุดท้าย (regression 5 ไฟล์ เทียบ v25.92 ทุกจุด):
-    EC52-02  0 -> 1  (ตรวจพบถูกต้อง กรอบตรงตำแหน่งที่ผู้ใช้ระบุ - ยืนยันด้วยภาพ marked)
-    CC19-all 2 -> 2  (ไม่เปลี่ยน - ปฏิเสธด้วย hidden_ratio 0.404/0.509)
-    CC45-all 2 -> 2  (ไม่เปลี่ยน - ปฏิเสธด้วย color_dist=8)
-    KB03-01  1 -> 1  (ไม่เปลี่ยน - ปฏิเสธด้วย hidden_ratio=0.562 / color_dist=5)
-    PB01-02  2 -> 2  (ไม่เปลี่ยน - ปฏิเสธด้วย color_dist=15,15 / hidden_ratio=0.493,0.559,0.559)
-  -> ไม่มี regression แม้แต่จุดเดียว และได้จุดเสี่ยงใหม่ที่ต้องการเพิ่มมา 1 จุดตามเป้าหมาย
-
-  ข้อจำกัดที่ต้องบอกตรงไปตรงมา: threshold ทั้ง 2 ค่าคาลิเบรตจากชุดข้อมูล 11 จุด (true 1 : false
-  10) เท่านั้น - margin ของ color_dist กว้างมาก (442 vs 54 สูงสุดของ FP) จึงมั่นใจได้สูง แต่
-  margin ของ hidden_ratio แคบกว่า (EC52=0.671 vs CC19=0.509 ที่ต้องกัน, threshold=0.60 อยู่
-  กึ่งกลาง) - ถ้าพบไฟล์ที่โพรงจริงแต่ตื้นกว่า 60% อาจตรวจไม่พบ แนะนำให้ส่งไฟล์ที่มีจุดเสี่ยง
-  ลักษณะนี้เพิ่มอีก 2-3 ไฟล์เพื่อยืนยัน/ปรับ threshold ให้แม่นยำขึ้น
-================================================================================
 v25.92 (ผู้ใช้แจ้งเพิ่มเติม 11-Sep-2026 พร้อมแนบไฟล์ CC19-all opt2.pdf - 2 ประเด็น):
 
   ประเด็นที่ 1: "หน้าที่ 1 เป็น front view ใช้การวิเคราะห์ตามระบบได้"
@@ -7658,243 +7598,6 @@ def _suppress_inter_container_empty_space_risks(risks, view_result, view_label, 
     return kept
 
 
-
-# ============================================================================
-# v25.93 NEW: "Front-Row Step-Down" (กลไกมุมทแยง) - ตรวจขั้นบันไดของ "แถวหน้า"
-# ที่ถูกกล่องแถวหลังที่สูงกว่าบังจนซ่อนหายไปจากเส้นขอบบน (silhouette)
-# ============================================================================
-# ปัญหาที่แก้ (ผู้ใช้แจ้ง 11-Sep-2026 พร้อมแนบ EC52-02 + ภาพวงกลมจุดเสี่ยง): "ไม่มีกรอบวาด
-# บริเวณที่เสี่ยง ... ผมต้องการเพิ่มกลไกมุมทแยง"
-#
-# ยืนยันด้วยการรันโค้ดจริง: EC52-02 = SAFE (0 hazards) ทั้งที่มีจุดเสี่ยงชัดเจน
-# ROOT CAUSE (ยืนยันด้วยข้อมูล pixel จริงจาก front-face cells ของ Phase 1B):
-#   ที่ FRONT view ช่วง x=683-836 "แถวหน้า" (front row, กล่องม่วง TGT1G) มีความสูงเพียง
-#   110-112px (กล่องชั้นเดียว) ในขณะที่คอลัมน์ถัดไปทางขวา (x=837 เป็นต้นไป) แถวหน้าสูงถึง
-#   203-208px (2 ชั้น) -> เป็นขั้นบันไดลดลงถึง 46% ซึ่งเป็นความเสี่ยงจริงชัดเจน
-#   แต่ "เส้นขอบบนกองสินค้า" (cargo_top_y / silhouette) ที่ช่วง x เดียวกันกลับวัดได้ 299-340px
-#   เพราะถูก "กล่องแถวหลัง" (rear row - กล่องเขียว GSETA ที่สูง 201px) บังเต็มพื้นที่พอดี
-#   -> ความสูงที่ระบบวัดได้ = 317px เทียบเพื่อนบ้าน 341px = ต่างกันเพียง 7% เท่านั้น
-#   ต่ำกว่าเกณฑ์ STEP_DOWN ทุกกลไก (20%) มาก จึงไม่มีกลไกใดตรวจพบเลยแม้แต่กลไกเดียว
-#
-# ทำไม detect_step_down_hidden_behind (v25.23/70) ที่ออกแบบมาเพื่อกรณี "กล่องซ่อนหลัง" ก็ยัง
-# จับไม่ได้: กลไกนั้นหา "จุดกระโดดคมชัดของ cargo_top_y ภายในคอลัมน์" - แต่กรณีนี้ cargo_top_y
-# ราบเรียบต่อเนื่องสนิท (เพราะแถวหลังต่อเนื่องตลอด ไม่มีรอยกระโดด) ความไม่ต่อเนื่องอยู่ที่
-# "พื้นผิวแถวหน้า" ซึ่งเป็นข้อมูลภายในกองสินค้า ไม่ปรากฏบนเส้นขอบบนเลยแม้แต่น้อย
-#
-# FIX (กลไกมุมทแยง - ใช้ "หน้ากล่องแถวหน้า" ที่ Phase 1B คำนวณไว้อยู่แล้ว ไม่ต้องคำนวณใหม่):
-#   หน้ากล่อง (front-face) แต่ละชิ้นในมุมมอง isometric คือสี่เหลี่ยมด้านขนานที่มี "มุมทแยง"
-#   ชัดเจน และตำแหน่งความลึก (แถวหน้า/แถวหลัง) แยกได้จาก "ขอบล่าง" ของหน้ากล่อง - แถวหน้าอยู่
-#   ใกล้ผู้ชมกว่า ขอบล่างจึงต่ำกว่า (y มากกว่า) เสมอในภาพ isometric
-#   (1) จัดกลุ่ม front-face ที่ x ทับซ้อนกัน -> ในแต่ละกลุ่มเลือกชิ้นที่ "ขอบล่างต่ำที่สุด"
-#       เป็นตัวแทนของแถวหน้า แล้ววัดความสูงพื้นผิวแถวหน้า (front-row surface height)
-#   (2) เทียบกลุ่มที่ติดกันตามแนว x - ถ้าลดลงเกินเกณฑ์ = ขั้นบันไดของแถวหน้าจริง
-#   (3) Guard สำคัญ: flag เฉพาะเมื่อ "silhouette ไม่ได้ลดลงตาม" (ต่ำกว่าเกณฑ์ STEP_DOWN เดิม)
-#       -> รับประกันว่ากลไกนี้ "เพิ่มเฉพาะจุดที่กลไกเดิมมองไม่เห็นเท่านั้น" ไม่มีทางไปซ้ำซ้อน
-#       หรือขัดแย้งกับกลไกเดิมได้เลยแม้แต่จุดเดียว (additive-only by construction)
-# ⚠️ v25.93: สวิตช์เปิด/ปิดกลไกมุมทแยง - ตั้งเป็น False (ปิด) ไว้ก่อนโดยเจตนา
-# เหตุผล (บอกตรงไปตรงมา): กลไกนี้ "ตรวจจับ EC52-02 ได้ถูกต้องแล้ว" (front-row drop=45.1% ตรง
-# ตำแหน่งกล่องเขียว GSETA พอดี) แต่การรัน regression กับไฟล์ที่ผู้ใช้ยืนยันผลไปแล้ว 4 ไฟล์ พบว่า
-# มันเพิ่มจุดตรวจจับใหม่ในทุกไฟล์ (CC19 2->4, CC45 2->3, KB03 1->3, PB01 2->7) ซึ่งยังไม่มี
-# ground-truth จากผู้ใช้ว่าจุดใหม่เหล่านั้น "ถูกหรือผิด" - การเปิดใช้งานทันทีจึงเสี่ยงทำให้ไฟล์ที่
-# เคยผ่านการยืนยันแล้วเกิด false-positive โดยไม่ได้ตั้งใจ
-# ตั้ง _FRONTROW_ENABLED = True เมื่อผู้ใช้ยืนยัน ground-truth ของ 4 ไฟล์นั้นแล้ว (ดูรายละเอียด
-# ตัวเลขที่วัดได้จริงทั้งหมดในคำตอบที่ส่งให้ผู้ใช้ - พร้อมปรับ threshold ให้ตรงตามที่ยืนยัน)
-_FRONTROW_ENABLED = True
-
-_FRONTROW_MIN_DROP_RATIO = 0.30        # ขั้นบันไดแถวหน้าขั้นต่ำ (วัดจริง EC52 = 46%)
-_FRONTROW_MAX_SILHOUETTE_DROP = 0.15   # silhouette ต้อง "ไม่" ลดลงเกินนี้ (ถ้าลดลงมาก กลไกเดิม
-# เห็นอยู่แล้ว ไม่ต้องซ้ำ - วัดจริง EC52 silhouette drop = 7% เท่านั้น)
-_FRONTROW_MIN_HIDDEN_PX = 60           # ฝั่งเตี้ยต้องมีแถวหลังที่สูงกว่าบังอยู่จริงอย่างน้อยเท่านี้
-# (วัดจริง EC52: silhouetteH 299 - frontH 110 = 189px) - ยืนยันว่าเป็น "โพรงที่ถูกบัง" จริง
-_FRONTROW_MIN_FACE_AREA = 3000         # หน้ากล่องต้องใหญ่พอ (กันเศษ sliver/noise)
-
-# --- v25.93b: 2 guard ที่เพิ่มหลังผู้ใช้ยืนยัน ground-truth (11-Sep-2026) ---
-# ผู้ใช้ยืนยันว่าจุดที่กลไกรอบแรกเพิ่มมาในไฟล์ CC19/CC45/KB03/PB01 (รวม 10 จุด) "ไม่มีความเสี่ยง"
-# ทั้งหมด (false-positive ล้วน) เหลือเพียง EC52-02 จุดเดียวที่เป็นความเสี่ยงจริง - วิเคราะห์
-# คุณลักษณะของทั้ง 11 จุดแล้วพบตัวแยก 2 ตัวที่มีเหตุผลทางกายภาพรองรับ (ไม่ใช่แค่จูนตัวเลข):
-#
-# (1) _FRONTROW_MIN_COLOR_DIST - "สีที่อยู่เหนือพื้นผิวแถวหน้า" ต้องต่างจาก "สีหน้ากล่องแถวหน้า"
-#     เหตุผลเชิงกายภาพ: ถ้าต่างกันมาก แปลว่ามีกล่องคนละใบ/คนละ SKU (แถวหลัง) โผล่ผ่านช่องที่
-#     แถวหน้าขาดไปจริง = โพรงจริง | ถ้า "สีเหมือนกัน" แปลว่าสิ่งที่อยู่เหนือคือกล่องสีเดียวกัน
-#     SKU เดียวกันต่อขึ้นไป -> นั่นคือ Phase 1B แตกหน้ากล่องสูงใบเดียวออกเป็นหลายชิ้น (face
-#     fragmentation) ค่า front_h ที่วัดได้จึงเป็น artifact ไม่ใช่พื้นผิวแถวหน้าจริง
-#     ยืนยันด้วยข้อมูลจริงทั้ง 11 จุด: EC52 (จริง) = 442 (ม่วง->เขียว คนละ SKU ชัดเจน)
-#     เทียบกับ false-positive 8 จุดที่ได้เพียง 5-54 (สีเดียวกันแทบทั้งหมด) - ห่างกันมาก
-#
-# (2) _FRONTROW_MIN_HIDDEN_RATIO - โพรงต้องลึกอย่างน้อย 60% ของความสูงรวม ณ ตำแหน่งนั้น
-#     เหตุผลเชิงกายภาพ: ในมุมมอง isometric "แถวหลัง" ถูกวาดสูงกว่าแถวหน้าบนหน้ากระดาษเสมอ
-#     แม้สูงเท่ากันจริง (depth offset) ทำให้เกิดค่า hidden เล็กน้อยได้เป็นปกติ - โพรงที่เป็น
-#     ความเสี่ยงจริงต้องลึกกว่านั้นมาก (อย่างน้อย ~1 ชั้นกล่องเต็ม)
-#     ยืนยันด้วยข้อมูลจริง: EC52 = 0.671 (โพรงลึก 228px ~2 ชั้นกล่อง) | CC19 = 0.404/0.509
-#     (โพรงลึกเพียง 78/89px ตื้นกว่า 1 ชั้นกล่องของตัวเอง = depth offset ล้วนๆ)
-#
-# ต้องผ่าน "ทั้ง 2 ข้อพร้อมกัน" (AND) - ยืนยันด้วยข้อมูลจริงว่าจำเป็นทั้งคู่:
-#     ใช้ (1) อย่างเดียว -> เหลือ false-positive 2 จุด (CC19 ทั้ง FRONT/BACK)
-#     ใช้ (2) อย่างเดียว -> เหลือ false-positive 4 จุด (CC45, KB03, PB01 x2)
-#     ใช้ทั้งคู่ร่วมกัน   -> false-positive = 0 จุด และ EC52 ยังคงตรวจพบถูกต้อง
-_FRONTROW_MIN_COLOR_DIST = 100         # EC52=442 | false-positive สูงสุด=54 (margin กว้างมาก)
-_FRONTROW_MIN_HIDDEN_RATIO = 0.60      # EC52=0.671 | false-positive สูงสุดที่ต้องกัน=0.509
-_FRONTROW_COLOR_PROBE_PX = 30          # ระยะสแกนหาสีเหนือพื้นผิวแถวหน้า
-_FRONTROW_MIN_WIDTH_PX = 40            # ความกว้างขั้นต่ำของกลุ่ม
-
-
-def _frontrow_surface_groups(cells, down_factor, local_floor_y, cargo_top_y,
-                             min_area=_FRONTROW_MIN_FACE_AREA):
-    """v25.93 NEW: จัดกลุ่ม front-face ตาม x ที่ทับซ้อนกัน แล้วคืน "พื้นผิวแถวหน้า" ของแต่ละกลุ่ม
-    คืน list ของ dict {x0,x1,front_h,silh_h,color,area} เรียงตาม x (ดู docstring เต็มด้านบน)"""
-    faces = []
-    for c in cells:
-        if c.get('kind') != 'front':
-            continue
-        if c.get('area', 0) < min_area:
-            continue
-        if _p1b_is_structural_container_color(c['color']):
-            continue
-        x0 = int(c['x'] * down_factor); x1 = int((c['x'] + c['w']) * down_factor)
-        y0 = int(c['y'] * down_factor); y1 = int((c['y'] + c['h']) * down_factor)
-        if (x1 - x0) < _FRONTROW_MIN_WIDTH_PX:
-            continue
-        faces.append({"x0": x0, "x1": x1, "y0": y0, "y1": y1,
-                      "color": c['color'], "area": c['area']})
-    if not faces:
-        return []
-    faces.sort(key=lambda f: f["x0"])
-    # union-find จัดกลุ่มตาม x-overlap
-    n = len(faces); parent = list(range(n))
-    def find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]; a = parent[a]
-        return a
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb: parent[ra] = rb
-    for i in range(n):
-        for j in range(i + 1, n):
-            ov = min(faces[i]["x1"], faces[j]["x1"]) - max(faces[i]["x0"], faces[j]["x0"])
-            narrow = min(faces[i]["x1"] - faces[i]["x0"], faces[j]["x1"] - faces[j]["x0"])
-            if narrow > 0 and ov / narrow >= 0.6:
-                union(i, j)
-    groups = {}
-    for i in range(n):
-        groups.setdefault(find(i), []).append(faces[i])
-    out = []
-    for members in groups.values():
-        # ตัวแทน "แถวหน้า" = ชิ้นที่ขอบล่างต่ำที่สุด (y1 มากที่สุด) = ใกล้ผู้ชมที่สุด
-        rep = max(members, key=lambda f: f["y1"])
-        xm = (rep["x0"] + rep["x1"]) // 2
-        if not (0 <= xm < len(local_floor_y)) or local_floor_y[xm] < 0:
-            continue
-        floor = float(local_floor_y[xm])
-        front_h = floor - rep["y0"]
-        silh_h = (floor - float(cargo_top_y[xm])
-                  if (0 <= xm < len(cargo_top_y) and cargo_top_y[xm] >= 0) else None)
-        if front_h <= 0:
-            continue
-        out.append({"x0": rep["x0"], "x1": rep["x1"], "front_h": front_h,
-                    "silh_h": silh_h, "color": rep["color"], "area": rep["area"]})
-    out.sort(key=lambda g: g["x0"])
-    return out
-
-
-def _frontrow_color_above(region, cargo_mask, x0, x1, top_y,
-                          probe=_FRONTROW_COLOR_PROBE_PX):
-    """v25.93b NEW: หา "สีของสิ่งที่อยู่เหนือพื้นผิวแถวหน้า" (median ของ pixel สินค้าชิ้นแรกที่พบ
-    เมื่อไล่ขึ้นจากขอบบนของหน้ากล่องแถวหน้า) - ใช้แยก "โพรงจริง (มีกล่องคนละ SKU โผล่ผ่าน)" ออก
-    จาก "face fragmentation (กล่องสีเดียวกันต่อขึ้นไป)" ดู docstring เต็มด้านบน
-    คืน None ถ้าเก็บตัวอย่างได้ไม่พอ (fail-safe -> ผู้เรียกใช้จะไม่ flag)"""
-    if region is None or cargo_mask is None or top_y is None:
-        return None
-    cols = []
-    for x in range(max(0, x0 + 5), min(region.shape[1], x1 - 5)):
-        for y in range(max(0, int(top_y) - probe), max(0, int(top_y) - 2)):
-            if 0 <= y < cargo_mask.shape[0] and cargo_mask[y, x]:
-                cols.append(region[y, x].astype(np.float64))
-                break
-    if len(cols) < 8:
-        return None
-    return np.median(np.array(cols), axis=0)
-
-
-def detect_front_row_stepdown(view_result, view_label, cells, down_factor):
-    """v25.93 NEW: กลไก "มุมทแยง" - ตรวจขั้นบันไดของแถวหน้าที่ถูกแถวหลังบังจนซ่อนหาย
-    ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EC52-02)"""
-    risks = []
-    if not _FRONTROW_ENABLED:
-        return risks          # v25.93: ปิดไว้ก่อนจนกว่าผู้ใช้จะยืนยัน ground-truth (ดู flag ด้านบน)
-    lfy = view_result.get("local_floor_y"); cty = view_result.get("cargo_top_y")
-    if lfy is None or cty is None or not cells:
-        return risks
-    groups = _frontrow_surface_groups(cells, down_factor, lfy, cty)
-    if len(groups) < 2:
-        return risks
-    ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
-    for i in range(len(groups) - 1):
-        a, b = groups[i], groups[i + 1]
-        tall, short = (a, b) if a["front_h"] >= b["front_h"] else (b, a)
-        if tall["front_h"] <= 0:
-            continue
-        drop = 1 - (short["front_h"] / tall["front_h"])
-        if drop < _FRONTROW_MIN_DROP_RATIO:
-            continue
-        # Guard 1: silhouette ต้องไม่ลดลงตาม (ถ้าลดลง กลไกเดิมเห็นอยู่แล้ว - ไม่ flag ซ้ำ)
-        if tall["silh_h"] is None or short["silh_h"] is None or tall["silh_h"] <= 0:
-            continue
-        silh_drop = 1 - (short["silh_h"] / tall["silh_h"])
-        if silh_drop >= _FRONTROW_MAX_SILHOUETTE_DROP:
-            continue
-        # Guard 2: ฝั่งเตี้ยต้องมีแถวหลังที่สูงกว่าบังอยู่จริง (พิสูจน์ว่าเป็นโพรงที่ถูกซ่อน)
-        hidden_px = short["silh_h"] - short["front_h"]
-        if hidden_px < _FRONTROW_MIN_HIDDEN_PX:
-            continue
-        # Guard 3 (v25.93b): โพรงต้องลึกพอ - ไม่ใช่แค่ depth-offset ของแถวหลังตามมุมมอง
-        # isometric (ดู docstring ที่ _FRONTROW_MIN_HIDDEN_RATIO)
-        hidden_ratio = hidden_px / short["silh_h"] if short["silh_h"] > 0 else 0.0
-        if hidden_ratio < _FRONTROW_MIN_HIDDEN_RATIO:
-            print(f"[FRONT_ROW_STEPDOWN] ปฏิเสธ view={view_label} "
-                  f"x=[{short['x0']},{short['x1']}] hidden_ratio={hidden_ratio:.3f} < "
-                  f"{_FRONTROW_MIN_HIDDEN_RATIO} -> โพรงตื้นเกินไป (เป็น depth-offset ของ"
-                  f"แถวหลังตามมุมมอง isometric ไม่ใช่ชั้นกล่องที่ขาดหายจริง)")
-            continue
-        xm = (short["x0"] + short["x1"]) // 2
-        floor_y = lfy[xm] if 0 <= xm < len(lfy) and lfy[xm] >= 0 else None
-        if floor_y is None:
-            continue
-        top_y = floor_y - short["front_h"]
-        # Guard 4 (v25.93b): สีเหนือพื้นผิวแถวหน้าต้อง "ต่างจาก" สีหน้ากล่องแถวหน้า
-        # (ถ้าสีเดียวกัน = กล่อง SKU เดียวกันต่อขึ้นไป = Phase 1B แตกหน้ากล่องเป็นชิ้นๆ
-        #  ค่า front_h ที่วัดได้เป็น artifact ไม่ใช่พื้นผิวแถวหน้าจริง)
-        col_above = _frontrow_color_above(view_result.get("region"),
-                                          view_result.get("cargo_mask"),
-                                          short["x0"], short["x1"], top_y)
-        if col_above is None:
-            continue
-        col_dist = float(np.sqrt(np.sum(
-            (col_above - np.array(short["color"], dtype=np.float64)) ** 2)))
-        if col_dist < _FRONTROW_MIN_COLOR_DIST:
-            print(f"[FRONT_ROW_STEPDOWN] ปฏิเสธ view={view_label} "
-                  f"x=[{short['x0']},{short['x1']}] color_dist={col_dist:.0f} < "
-                  f"{_FRONTROW_MIN_COLOR_DIST} (สีเหนือ={tuple(int(q) for q in col_above)} "
-                  f"vs หน้ากล่อง={short['color']}) -> กล่องสีเดียวกันต่อขึ้นไป = "
-                  f"face fragmentation ไม่ใช่โพรงจริง")
-            continue
-        abs_box = (ox + short["x0"], oy + top_y, ox + short["x1"], oy + floor_y)
-        print(f"[FRONT_ROW_STEPDOWN] view={view_label} x=[{short['x0']},{short['x1']}] "
-              f"front_h={short['front_h']:.0f} vs neighbour {tall['front_h']:.0f} "
-              f"drop={drop:.1%} (silhouette drop={silh_drop:.1%} - กลไกเดิมมองไม่เห็น) "
-              f"hidden_by_rear_row={hidden_px:.0f}px ratio={hidden_ratio:.3f} "
-              f"color_dist={col_dist:.0f}")
-        risks.append({
-            "risk_type": "STEP_DOWN_RISK", "subtype": "front_row_stepdown",
-            "view": view_label, "mark_view": view_label,
-            "mark_stack_idx": None, "mark_x_range": (short["x0"], short["x1"]),
-            "taller_height_px": tall["front_h"], "shorter_height_px": short["front_h"],
-            "drop_ratio": drop, "abs_box": abs_box,
-            "silhouette_drop_ratio": silh_drop, "hidden_px": hidden_px,
-            "hidden_ratio": hidden_ratio, "color_dist": col_dist,
-        })
-    return risks
-
-
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -7923,22 +7626,12 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         front_hi, down_factor = render_hires_crop(page, front_origin, matrix_scale)
         back_hi, _ = render_hires_crop(page, back_origin, matrix_scale)
         phase1b = compute_phase1b_columns({"front": front_hi, "back": back_hi}, down_factor=down_factor)
-        # v25.93 NEW: เก็บ front-face cells ไว้ใช้กับกลไกมุมทแยง (detect_front_row_stepdown)
-        # ใช้ภาพ hi-res ชุดเดิมที่ Phase 1B ใช้อยู่แล้ว ไม่ render เพิ่ม (ไม่กระทบ memory เลย)
-        try:
-            _fr_cells = {"FRONT": _p1b_front_faces(front_hi)[1],
-                         "BACK": _p1b_front_faces(back_hi)[1]}
-        except Exception as _e:
-            print(f"[FRONT_ROW_STEPDOWN] เก็บ cells ไม่สำเร็จ ({_e}) - ข้ามกลไกมุมทแยง")
-            _fr_cells = None
         del front_hi, back_hi  # ปล่อย memory ของ hi-res crop ทันทีหลังใช้เสร็จ
     except Exception as e:
         print(f"PHASE1B hi-res crop ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
         phase1b = {"front": None, "back": None}
         front_precrop = None
         back_precrop = None
-        _fr_cells = None
-        down_factor = 1.0
 
     front = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"),
@@ -7982,12 +7675,6 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     # marker ซ้ำซ้อน 2 กรอบสำหรับสถานการณ์ทางกายภาพเดียวกัน (นับ hazardCount เกินจริงด้วย) เก็บ
     # เฉพาะ pairwise/pairwise_floor_jump ไว้ (มี guard ครบชุดเดียวกับ tail_stepdown อยู่แล้วหลัง
     # v25.57 - เลือกอันเดียวพอ ไม่ต้องมี 2 กรอบซ้อนกันสำหรับ edge case เดียวกัน)
-    # v25.93 NEW: กลไก "มุมทแยง" (front-row step-down) - เพิ่มเฉพาะจุดที่กลไกเดิมมองไม่เห็น
-    # (silhouette ถูกกล่องแถวหลังบังไว้) - ดู docstring เต็มที่ detect_front_row_stepdown
-    if _fr_cells:
-        risks += detect_front_row_stepdown(front, "FRONT", _fr_cells.get("FRONT"), down_factor)
-        risks += detect_front_row_stepdown(back, "BACK", _fr_cells.get("BACK"), down_factor)
-
     risks = _dedup_overlapping_stepdown_risks(risks)
     # v25.79 NEW: dedup STEP_DOWN_RISK(pairwise) ที่ค่าความสูงฝั่งเตี้ยกว่าถูกปนเปื้อนจาก
     # silhouette_notch ตำแหน่งเดียวกัน - ดู docstring เต็มที่ _dedup_stepdown_corrupted_by_
@@ -8118,17 +7805,10 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     try:
         hi_region, down_factor = render_hires_crop(page, origin, matrix_scale)
         cols = compute_phase1b_columns_single(hi_region, down_factor=down_factor)
-        # v25.93 NEW: เก็บ cells ไว้ใช้กับกลไกมุมทแยง (ใช้ภาพเดิม ไม่ render เพิ่ม)
-        try:
-            _fr_cells_single = _p1b_front_faces(hi_region)[1]
-        except Exception:
-            _fr_cells_single = None
         del hi_region
     except Exception as e:
         print(f"[SINGLE_VIEW] hi-res crop ล้มเหลว, fallback seam-based เดิม: {e}")
         cols = None
-        _fr_cells_single = None
-        down_factor = 1.0
 
     view = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=cols, precrop=precrop)
@@ -8147,9 +7827,6 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
     # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
-    # v25.93 NEW: กลไกมุมทแยง - ดู docstring ที่ detect_front_row_stepdown
-    if _fr_cells_single:
-        risks += detect_front_row_stepdown(view, "FRONT", _fr_cells_single, down_factor)
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
@@ -8364,8 +8041,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.93",
-            "benchmarkMode": "v25_93b_front_row_stepdown_color_and_depth_guards",
+            "checkerVersion": "V25.92",
+            "benchmarkMode": "v25_92_inter_container_gap_exclusion_single_view_tail_stepdown",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
