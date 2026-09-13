@@ -2,83 +2,6 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v25.98 (ผู้ใช้สั่งให้ implement หลังยืนยันภาพ 13-Sep-2026) - แก้ false-negative ของ
-EC52-02 ที่ค้างมาตั้งแต่ v25.93 ได้สำเร็จ:
-
-ที่มาของสัญญาณ: ผู้ใช้ถาม "front view ที่ idx0 ไม่เห็น top face ของด้านใน ใช่หรือไม่
-ถ้าใช่ จุดนั้นคือกล่องเตี้ยหรือไม่มีกล่องมาวางค้ำ" -> ทดสอบด้วยภาพความละเอียดสูง + pixel
-จริงแล้วพบว่า "กลับทิศ" 2 จุด แต่ intuition แกนหลักถูกต้อง (เรื่องนี้ตัดสินที่ผิวบน):
-  (1) จุดเสี่ยงไม่ใช่ "ไม่เห็น top face" แต่คือ "เห็น top face 2 ชั้น และห่างกันมาก"
-      -> ไฟล์เต็มตู้ที่ปลอดภัยกลับ "ไม่เห็น top face เลย" (n=0 ทุกคอลัมน์) เพราะกล่อง
-         วางชนเพดานตู้ ไม่มีผิวบนใดถูกเปิดโล่ง (ยืนยันด้วยภาพ EC51-01 FRONT idx0:
-         กล่อง DITHC ซ้อนกันชนรางเพดานพอดี)
-  (2) ผู้ใช้ระบุ "ด้านนอกสูงกว่าด้านใน" แต่ภาพจริงพิสูจน์ว่ากลับกัน:
-         EC52-02 FRONT idx0 (floor=566): ชมพู TGT1G-D1 h=328px (แถวใน/ไกล)
-                                          เขียว GSETA-D1 h=246px (แถวนอก/ใกล้)
-         ช่องว่างอยู่ "เหนือแถวนอก" (เหนือกองเขียวไม่มีอะไรวางค้ำ 82px)
-      -> ไม่กระทบตัวสัญญาณ เพราะวัดจาก "ระยะห่างระหว่าง 2 ชั้น" ไม่ขึ้นกับว่าชั้นไหน
-         เป็นแถวไหน
-
-ROOT CAUSE ของจุดบอดเดิม (ยืนยันตั้งแต่ v25.97): ระบบทั้งหมดทำงานบน cargo_top_y =
-"พิกเซลบนสุดของแต่ละคอลัมน์" = เส้นเงารอบนอก (outer silhouette) -> ข้อมูลความลึกถูกทิ้ง
-ทั้งหมด -> ช่องว่างที่อยู่ "ใต้เส้นเงา" (interior void) มองไม่เห็นโดยโครงสร้าง
-(EC52-02: find_peaks คืน [] ไม่มี prominence แม้แต่จุดเดียว, pairwise drop สูงสุด 12.2%,
- cross-view ตรงกันทุกคู่, hidden_behind 0 จุด - ทุกกลไกมองไม่เห็นพร้อมกันหมด)
-FIX: เพิ่ม detect_dual_topface_gap() ที่วัดจาก "ผิวบน" (top face) แทน "เส้นเงา"
-
-วิธีทำงาน: ในภาพ isometric ผิวบนของกล่องปรากฏเป็น parallelogram ที่กว้างกว่าสูง
-(aspect >= 1.3, กว้าง >= 70% ของคอลัมน์) - ถ้าในคอลัมน์เดียวเห็นผิวบน >= 2 ชั้น แสดงว่า
-มี 2 แถว (ตามความลึกตู้) ที่ผิวบนถูกเปิดโล่งทั้งคู่:
-  - 2 แถวสูงเท่ากัน -> หลังคาชิดกัน (แค่ depth-offset ธรรมชาติ)
-  - แถวหนึ่งเตี้ยลง  -> หลังคาห่างกันมาก = ความสูงของช่องว่างเหนือแถวที่เตี้ย
-
-ทำไม threshold 60px จึงมี margin กว้างทั้ง 2 ฝั่ง (ยืนยันจาก EC52-02 เองซึ่งมีคอลัมน์ที่
-เห็นผิวบน 2 ชั้นถึง 3 คอลัมน์ แต่แยกกันขาด):
-  idx=0 (ท้ายรถ) roof_h=[328,246] gap=82px <- มีระดับหายไปจริง = ช่องว่าง
-  idx=1          roof_h=[342,316] gap=26px <- depth-offset ปกติของ 2 แถวที่สูงเท่ากัน
-  idx=4          roof_h=[340,314] gap=26px <- depth-offset ปกติ
-26px คือระยะธรรมชาติ / 82px ~ 3 เท่าของ 26px -> 60px อยู่กึ่งกลางพอดี
-
-*** ขอบเขต: FRONT view เท่านั้น (ตัดสินใจจาก regression จริง ไม่ใช่การเดา) ***
-เปิด BACK ตอนแรกแล้วพบ false-positive เชิงระบบทันที 11 จุด - ยืนยันด้วยตัวเลขที่ซ้ำกันเป๊ะ
-ข้ามไฟล์ที่ไม่เกี่ยวข้องกันเลย (คนละ SKU คนละสินค้า เป็นไปไม่ได้ทางสถิติถ้าเป็นการวัดจริง):
-  EB90-01/02/03, EC20-01 BACK idx0 x=(674,799) บน=334px ล่าง=256px gap=78
-  EC51-01/02/03      BACK idx0 x=(681,799) บน=334px ล่าง=256px gap=78
-ค่า 334/256/78 และช่วง x ซ้ำกันข้าม 7 ไฟล์ = geometric artifact ของการเรนเดอร์ BACK view
-ที่คอลัมน์ริมซ้ายสุดของรถรุ่นเดียวกัน (TTKA6WH) ไม่ใช่ความสูงสินค้าจริง (รูปแบบเดียวกับที่
-v25.71 เคยพิสูจน์ไว้กับ apex_fallback n_samples=67 ซ้ำข้าม 4 ไฟล์)
-หลักฐานชี้ขาด: EC51-01/EC51-03 คือไฟล์ที่ผู้ใช้ยืนยันเองว่า "ปลอดภัย" (Cargo 95.1%,
-Unused Floor 0) -> ถ้าเปิด BACK จะเกิด false-positive กับไฟล์ที่ยืนยันแล้วทันที
-ในขณะที่ FRONT view สะอาด 100% -> จำกัดที่ FRONT ซึ่งตรงกับขอบเขตที่คาลิเบรตไว้พอดี
-
-ทำไมวิธีนี้ปลอดภัยกว่า v25.94 (ที่เคยถูกปิดเพราะ false-positive 4 ไฟล์) อย่างมีนัยสำคัญ:
-  v25.94 เทียบ "ความสูงของ facet ระดับที่ 2" ข้ามคอลัมน์ -> พังเมื่อจำนวน facet ที่มองเห็น
-  ต่างกัน (edge-column bias) เพราะคอลัมน์ท้ายสุดอยู่ริมสุดของภาพ ทำให้ ladder ไม่ aligned
-  v25.98 วัด "ระยะห่างระหว่าง 2 facet ภายในคอลัมน์เดียวกัน" -> ไม่เทียบข้ามคอลัมน์เลย
-  จึงไม่มี edge-column bias โดยโครงสร้าง และมีสเกลอ้างอิงในตัว (depth-offset ของคอลัมน์นั้นเอง)
-
-REGRESSION (รันจริงครบ 18 ไฟล์ v25.97 -> v25.98):
-  ไม่เปลี่ยนแปลง 15 ไฟล์ | เปลี่ยนแปลง 3 ไฟล์ | *** จุดเดิมที่สูญหาย = 0 ***
-  EC52-02   0 -> 1 จุด (FRONT idx0 gap=82px)  <== เป้าหมายหลัก แก้สำเร็จ
-            ตรวจสอบภาพ marked แล้วว่ากรอบส้มวาดคร่อมช่องว่างเหนือกองเขียว GSETA พอดี
-            (abs_box=(682,488,807,570) = ตั้งแต่ยอดชมพูลงมาถึงยอดเขียว)
-  EC05-01   1 -> 2 จุด (เพิ่ม FRONT idx1 gap=81px) - ไฟล์นี้มีความเสี่ยงจริงที่ยืนยันแล้ว
-            (hidden_behind BACK idx2 drop=42.4%) จุดใหม่น่าจะเป็นตำแหน่งกายภาพเดียวกัน
-            มองจากคนละมุม แต่ยังไม่ได้พิสูจน์ - รอผู้ใช้ยืนยัน
-  GC06      3 -> 4 จุด (เพิ่ม FRONT idx2 gap=65px) - *** ผู้ใช้ยังไม่เคยยืนยันสถานะของ
-            GC06 -> เป็นจุดใหม่ที่ยังไม่มี ground-truth ต้องให้ผู้ใช้ตรวจสอบ ***
-  ไฟล์ที่ผู้ใช้ยืนยันว่าปลอดภัยทั้งหมดยังคง 0 จุดเหมือนเดิม (EC51-01/02/03, EC01-02/04,
-  EC10-01, EC16-01, EC09, EC19-01, EC20-01/02, EB90-01/02/03) - ไม่มี false-positive ใหม่เลย
-  unit-test 24 ข้อผ่านครบ (ขอบเขต view 3 / threshold 5 / รูปทรง top-face 2 / สีโครงสร้าง 1 /
-  ผิวบนชั้นเดียว 2 / corner-dup 1 / กล่องข้อความ 2 / กลไกเดิมยังอยู่ 8)
-
-ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
-  - คาลิเบรตจากไฟล์ที่มี ground-truth เพียง 2 ไฟล์ที่เป็น "เสี่ยงจริง" (EC52-02, EC05-01)
-  - threshold 60px ผูกกับ matrix_scale=3 (ค่าที่ระบบใช้เสมอในปัจจุบัน)
-  - BACK view ถูกปิดไว้ = ถ้าช่องว่างภายในปรากฏเฉพาะฝั่ง BACK จะยังตรวจไม่พบ
-    (ต้องแก้ artifact ของ BACK ก่อนจึงจะเปิดได้ - เป็นงานรอบถัดไป)
-  - GC06 FRONT idx2 เป็นจุดใหม่ที่ยังไม่มีใครยืนยัน ควรตรวจสอบก่อน deploy
-================================================================================
 v25.97 (ผู้ใช้สั่ง 13-Sep-2026):
 
 [1] "ec52-02 ที่ไปปิดกลไกของ v25.94 - ให้ลบออกไปเลย"
@@ -8193,203 +8116,7 @@ def _analyse_per_container(front, back, records_front, records_back, n_container
     # จึงไม่ได้รับผลกระทบจากการแบ่งตู้ - เรียกครั้งเดียวกับทั้ง view ตามเดิม
     all_risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     all_risks += detect_step_down_hidden_behind(back, records_back, "BACK")
-
-    # v25.98: ตรวจช่องว่างภายในระดับคอลัมน์ (ไม่เปรียบเทียบข้ามคอลัมน์ จึงไม่ต้องแบ่งตู้)
-    all_risks += detect_dual_topface_gap(front, records_front, "FRONT")
-    all_risks += detect_dual_topface_gap(back, records_back, "BACK")
     return all_risks
-
-
-# ============================================================================
-# v25.98 NEW: DUAL TOP-FACE GAP (แก้ false-negative ของ EC52-02 ที่ค้างมาตั้งแต่ v25.93)
-# ============================================================================
-# ที่มา: ผู้ใช้ถาม "front view ที่ idx0 ไม่เห็น top face ของด้านใน ใช่หรือไม่ ถ้าใช่ จุดนั้นคือ
-# กล่องเตี้ยหรือไม่มีกล่องมาวางค้ำ" -> ทดสอบด้วยภาพ+pixel จริงแล้วพบว่า "กลับทิศ":
-#   จุดเสี่ยงไม่ใช่ "ไม่เห็น top face" แต่คือ "เห็น top face 2 ชั้น และห่างกันมาก"
-#
-# ROOT CAUSE ของจุดบอดเดิม (ยืนยันแล้วตั้งแต่ v25.97): ระบบทั้งหมดทำงานบน cargo_top_y =
-# "พิกเซลบนสุดของแต่ละคอลัมน์" ซึ่งเป็นตัวเลขตัวเดียวต่อคอลัมน์ = เส้นเงารอบนอก (outer
-# silhouette) -> ข้อมูลความลึกถูกทิ้งทั้งหมด -> ช่องว่างที่อยู่ "ใต้เส้นเงา" (interior void)
-# มองไม่เห็นเลยโดยโครงสร้าง (EC52-02: find_peaks คืน [] ไม่มี prominence แม้แต่จุดเดียว)
-#
-# สัญญาณใหม่ที่แก้จุดบอดนี้ได้ (วัดจาก "ผิวบน" ไม่ใช่ "เส้นเงา"): ในภาพ isometric ผิวบนของ
-# กล่อง (top face) ปรากฏเป็น parallelogram ที่ "กว้างกว่าสูง" - ถ้าในคอลัมน์เดียวมองเห็น
-# top face ตั้งแต่ 2 ชั้น แสดงว่ามี 2 แถว (ตามความลึกตู้) ที่ผิวบนถูกเปิดโล่งทั้งคู่
-#   - ถ้า 2 แถวสูงเท่ากัน  -> หลังคาชิดกัน (ห่างกันแค่ depth-offset ธรรมชาติ)
-#   - ถ้าแถวหนึ่งเตี้ยลง   -> หลังคาห่างกันมาก = ความสูงของช่องว่างเหนือแถวที่เตี้ย
-#
-# ยืนยันด้วยภาพความละเอียดสูง (EC52-02 FRONT idx0 ท้ายรถ, floor=566):
-#   top-face #1 (ชมพู TGT1G-D1) h=328px  <- แถวใน (ไกล) ยังสูงเต็ม
-#   top-face #2 (เขียว GSETA-D1) h=246px  <- แถวนอก (ใกล้) เตี้ยกว่า
-#   ระหว่าง 2 เส้นนี้ = ว่างเปล่า 82px (เหนือกองเขียวไม่มีอะไรวางค้ำเลย)
-# หมายเหตุที่ต้องบันทึกตรงไปตรงมา: ผู้ใช้เข้าใจตอนแรกว่า "ด้านนอกสูงกว่าด้านใน" แต่ภาพจริง
-# พิสูจน์ว่ากลับกัน (นอก 246px < ใน 328px) - ช่องว่างอยู่ "เหนือแถวนอก" ไม่ใช่เหนือแถวใน
-# (ไม่กระทบตัวสัญญาณ เพราะวัดจาก "ระยะห่างระหว่าง 2 ชั้น" ไม่ขึ้นกับว่าชั้นไหนเป็นแถวไหน)
-#
-# ทำไมไฟล์เต็มตู้ที่ปลอดภัยจึงไม่ติดเลย (n_topface=0 ทุกคอลัมน์): กล่องวางชนเพดานตู้ ทำให้
-# ไม่มีผิวบนใดถูกเปิดโล่งเลย มองเห็นแต่หน้ากล่อง (front face) เท่านั้น
-# -> "ไม่เห็น top face" = สัญญาณของความปลอดภัย ไม่ใช่ความเสี่ยง (ตรงข้ามกับสมมติฐานตั้งต้น)
-# ยืนยันด้วยภาพ EC51-01 FRONT idx0: กล่อง DITHC ซ้อนกันชนรางเพดานตู้พอดี (แถบเหลืองมะกอก
-# ติดหลังคาน้ำเงิน) -> ตรวจไม่พบ top-face แม้แต่ชั้นเดียว
-#
-# ผลคาลิเบรตจริง 9 ไฟล์ / 51 คอลัมน์ (FRONT view):
-#   EC52-02  [เสี่ยงจริง]  FRONT idx0 (ท้ายรถ) gap=82px   <- ตรวจพบถูกต้อง
-#   EC05-01  [เสี่ยงจริง]  FRONT idx1          gap=81px   <- ตรวจพบถูกต้อง
-#   EC51-01 / EC51-03 / EC01-04 / EC10-01 / EC16-01 / EC09 / EB91-01 [ปลอดภัย] -> 0 จุด
-#   false-positive = 0 จาก 49 คอลัมน์ปลอดภัย | true-positive = 2 จาก 2 ไฟล์
-#
-# ทำไม threshold 60px จึงมี margin กว้างทั้ง 2 ฝั่ง (ยืนยันจาก EC52-02 เองซึ่งมีคอลัมน์ที่
-# เห็น top-face 2 ชั้นถึง 3 คอลัมน์ แต่แยกกันขาด):
-#   idx=0 (ท้ายรถ) roof_h=[328,246] gap=82px  <- มีระดับหายไปจริง = ช่องว่าง
-#   idx=1          roof_h=[342,316] gap=26px  <- depth-offset ปกติของ 2 แถวที่สูงเท่ากัน
-#   idx=4          roof_h=[340,314] gap=26px  <- depth-offset ปกติ
-# 26px คือระยะธรรมชาติ / 82px ~ 3 เท่าของ 26px -> 60px อยู่กึ่งกลางพอดี
-#
-# ทำไมวิธีนี้ปลอดภัยกว่า v25.94 (ที่เคยถูกปิดเพราะ false-positive 4 ไฟล์) อย่างมีนัยสำคัญ:
-#   v25.94 เทียบ "ความสูงของ facet ระดับที่ 2" ข้ามคอลัมน์ -> พังเมื่อจำนวน facet ที่มองเห็น
-#   ต่างกัน (edge-column bias) เพราะคอลัมน์ท้ายสุดอยู่ริมสุดของภาพ ทำให้ ladder ไม่ aligned
-#   v25.98 วัด "ระยะห่างระหว่าง 2 facet ภายในคอลัมน์เดียวกัน" -> ไม่เทียบข้ามคอลัมน์เลย
-#   จึงไม่มี edge-column bias โดยโครงสร้าง และมีสเกลอ้างอิงในตัว (depth-offset ของคอลัมน์นั้นเอง)
-#
-# ข้อจำกัดที่ต้องบอกตรงไปตรงมา: คาลิเบรตจาก 9 ไฟล์ (2 เสี่ยง / 7 ปลอดภัย) ซึ่งยังเป็นกลุ่ม
-# ตัวอย่างเล็ก และ threshold 60px ผูกกับ matrix_scale=3 (ค่าที่ระบบใช้เสมอในปัจจุบัน)
-# *** ขอบเขต: FRONT view เท่านั้น (ยืนยันด้วย regression จริง 18 ไฟล์) ***
-# ROOT CAUSE ที่ต้องจำกัด: BACK view มี "artifact เชิงระบบ" ที่ให้ค่าเดิมซ้ำข้ามไฟล์ที่ไม่
-# เกี่ยวข้องกันเลย - ยืนยันด้วยตัวเลขจริงจาก regression (คนละ SKU คนละสินค้าโดยสิ้นเชิง แต่ได้
-# ค่าเหมือนกันเป๊ะทุกหลัก ซึ่งเป็นไปไม่ได้ทางสถิติถ้าเป็นการวัดจริง):
-#   EB90-01 BACK idx0 x=(674,799) บน=334px ล่าง=256px gap=78  (สีเขียว)
-#   EB90-02 BACK idx0 x=(674,799) บน=334px ล่าง=256px gap=78  (สีเขียว)
-#   EB90-03 BACK idx0 x=(674,799) บน=334px ล่าง=256px gap=78  (สีเขียว)
-#   EC20-01 BACK idx0 x=(674,799) บน=334px ล่าง=256px gap=78  (สีฟ้า)
-#   EC51-01 BACK idx0 x=(681,799) บน=334px ล่าง=256px gap=78  (ชมพู/แดง)
-#   EC51-02 BACK idx0 x=(681,799) บน=334px ล่าง=256px gap=78  (ชมพู/แดง)
-#   EC51-03 BACK idx0 x=(681,799) บน=334px ล่าง=256px gap=78  (ชมพู/ชมพู)
-# ค่า 334/256/78 และช่วง x=(674..681, 799) ซ้ำกันข้าม 7 ไฟล์ = geometric artifact ของการ
-# เรนเดอร์ BACK view ที่คอลัมน์ริมซ้ายสุดของรถรุ่นเดียวกัน (TTKA6WH) ไม่ใช่ความสูงสินค้าจริง
-# (รูปแบบเดียวกับที่ v25.71 เคยพิสูจน์ไว้กับ apex_fallback n_samples=67 ซ้ำข้าม 4 ไฟล์)
-# หลักฐานชี้ขาด: EC51-01/EC51-03 เป็นไฟล์ที่ผู้ใช้ยืนยันเองว่า "ปลอดภัย" (Cargo 95.1%,
-# Unused Floor 0) -> ถ้าเปิด BACK จะเกิด false-positive กับไฟล์ที่ยืนยันแล้วทันที
-# ในขณะที่ FRONT view ตรวจแล้วสะอาด 100% (false-positive = 0 จาก 49 คอลัมน์ปลอดภัย)
-# -> จำกัดไว้ที่ FRONT view เท่านั้น ซึ่งตรงกับขอบเขตที่คาลิเบรตไว้จริงพอดี
-_DUAL_TOPFACE_ENABLED_VIEWS = ("FRONT",)
-_DUAL_TOPFACE_MIN_GAP_PX = 60      # ระยะห่างขั้นต่ำระหว่าง 2 top-face จึงถือว่ามีช่องว่างจริง
-_DUAL_TOPFACE_MIN_ASPECT = 1.3     # parallelogram ของผิวบนต้อง "กว้างกว่าสูง" ชัดเจน
-_DUAL_TOPFACE_MIN_WIDTH_FRAC = 0.7 # ต้องกว้าง >=70% ของคอลัมน์ (เป็นผิวบนจริง ไม่ใช่เศษข้าง)
-_DUAL_TOPFACE_MIN_AREA = 700
-_DUAL_TOPFACE_MIN_COLOR_PX = 800
-_DUAL_TOPFACE_MERGE_TOL_PX = 12    # ยุบ facet ที่ห่างกัน <12px (ผิวเดียวกันที่แตกเป็นชิ้น)
-
-
-def _find_visible_top_faces(region, x0, x1):
-    """v25.98: หา 'ผิวบน' (top face) ที่มองเห็นได้ในคอลัมน์ x0..x1 เรียงจากบนลงล่าง
-    คืน [(top_y, color), ...] - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล"""
-    colw = max(1, x1 - x0)
-    lo, hi = x0 + 6, x1 - 6
-    if hi <= lo or region is None:
-        return []
-    sub = region[:, lo:hi].reshape(-1, 3)
-    try:
-        cols, cnts = np.unique(sub, axis=0, return_counts=True)
-    except Exception:
-        return []
-    out = []
-    for i in np.argsort(-cnts)[:12]:
-        c = tuple(int(q) for q in cols[i])
-        if int(cnts[i]) < _DUAL_TOPFACE_MIN_COLOR_PX:
-            continue
-        if _p1b_is_structural_container_color(c):
-            continue
-        if max(c) < 50 or min(c) > 240:
-            continue
-        mask = ((region[:, :, 0] == c[0]) & (region[:, :, 1] == c[1])
-                & (region[:, :, 2] == c[2]))
-        mask[:, :lo] = False
-        mask[:, hi:] = False
-        lab, nn = ndimage.label(mask, structure=np.ones((3, 3), int))
-        if nn == 0:
-            continue
-        for li, sl in enumerate(ndimage.find_objects(lab), start=1):
-            if sl is None:
-                continue
-            ys_, xs_ = sl
-            w = xs_.stop - xs_.start
-            h = ys_.stop - ys_.start
-            area = int((lab[sl] == li).sum())
-            if area < _DUAL_TOPFACE_MIN_AREA or h <= 0:
-                continue
-            if (w / h) < _DUAL_TOPFACE_MIN_ASPECT:
-                continue
-            if w < _DUAL_TOPFACE_MIN_WIDTH_FRAC * colw:
-                continue
-            out.append((int(ys_.start), c))
-    out.sort()
-    merged = []
-    for t, c in out:
-        if merged and (t - merged[-1][0]) < _DUAL_TOPFACE_MERGE_TOL_PX:
-            continue
-        merged.append((t, c))
-    return merged
-
-
-def detect_dual_topface_gap(view_result, records, view_label):
-    """v25.98 NEW: ตรวจ 'ช่องว่างภายใน' (interior void) ที่เส้นเงารอบนอกมองไม่เห็น
-    โดยวัดระยะห่างระหว่างผิวบน (top face) 2 ชั้นที่มองเห็นได้ในคอลัมน์เดียวกัน
-    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก EC52-02/EC05-01)"""
-    if view_result is None or not records:
-        return []
-    if view_label not in _DUAL_TOPFACE_ENABLED_VIEWS:
-        return []          # ดู docstring ที่ _DUAL_TOPFACE_ENABLED_VIEWS (BACK มี artifact เชิงระบบ)
-    region = view_result.get("region")
-    lfy = view_result.get("local_floor_y")
-    if region is None or lfy is None:
-        return []
-    ox = view_result.get("crop_origin_x", 0)
-    oy = view_result.get("crop_origin_y", 0)
-    risks = []
-    for rec in records:
-        if rec.get("is_corner_duplicate"):
-            continue
-        x0, x1 = rec["x_range"]
-        xm = (x0 + x1) // 2
-        if not (0 <= xm < len(lfy)) or lfy[xm] < 0:
-            continue
-        floor_y = float(lfy[xm])
-        faces = _find_visible_top_faces(region, x0, x1)
-        if len(faces) < 2:
-            continue
-        # หา "ช่องว่างที่กว้างที่สุด" ระหว่าง 2 ผิวบนที่อยู่ติดกันในลำดับบน->ล่าง
-        best = None
-        for k in range(len(faces) - 1):
-            gap = faces[k + 1][0] - faces[k][0]
-            if best is None or gap > best[0]:
-                best = (gap, k)
-        if best is None or best[0] < _DUAL_TOPFACE_MIN_GAP_PX:
-            continue
-        gap_px, k = best
-        upper_y, upper_c = faces[k]
-        lower_y, lower_c = faces[k + 1]
-        upper_h = floor_y - upper_y
-        lower_h = floor_y - lower_y
-        print(f"[DUAL_TOPFACE] {view_label} idx={rec['idx']} x=({x0},{x1}) "
-              f"ผิวบน {len(faces)} ชั้น: บน={upper_h:.0f}px{upper_c} "
-              f"ล่าง={lower_h:.0f}px{lower_c} -> ช่องว่าง {gap_px}px "
-              f"(เกณฑ์ {_DUAL_TOPFACE_MIN_GAP_PX}px) ==> FLAG")
-        risks.append({
-            "risk_type": "EMPTY_SPACE_RISK", "subtype": "dual_topface_gap",
-            "view": view_label, "mark_view": view_label,
-            "mark_stack_idx": rec["idx"], "mark_x_range": (x0, x1),
-            "pos_range": rec.get("pos_range"),
-            "abs_box": (ox + x0, oy + upper_y, ox + x1, oy + lower_y),
-            "gap_px": int(gap_px),
-            "upper_height_px": round(upper_h, 1),
-            "lower_height_px": round(lower_h, 1),
-            "n_top_faces": len(faces),
-            "reason": (f"พบผิวบนของสินค้า {len(faces)} ชั้นในตำแหน่งเดียวกัน "
-                       f"ห่างกัน {gap_px}px (สูง {upper_h:.0f}px กับ {lower_h:.0f}px) "
-                       f"บ่งชี้ว่ามีกองที่เตี้ยกว่าโดยไม่มีสินค้าวางค้ำด้านบน "
-                       f"เกิดพื้นที่ว่างภายใน เสี่ยงสินค้าล้ม/เลื่อนเข้าไปในช่องว่าง"),
-        })
-    return risks
 
 
 def _analyse_whole_view(front, back, records_front, records_back):
@@ -8416,10 +8143,6 @@ def _analyse_whole_view(front, back, records_front, records_back):
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     if not _single_stack:
         risks += detect_rear_empty_risk(records_front, records_back, front, back)
-
-    # v25.98 NEW: ช่องว่างภายในที่เส้นเงารอบนอกมองไม่เห็น (ดู detect_dual_topface_gap)
-    risks += detect_dual_topface_gap(front, records_front, "FRONT")
-    risks += detect_dual_topface_gap(back, records_back, "BACK")
     return risks
 
 
@@ -8665,8 +8388,6 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
     # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
-    # v25.98: ช่องว่างภายใน (ทำงานภายในคอลัมน์เดียว ใช้ได้กับโหมดวิวเดียวตามปกติ)
-    risks += detect_dual_topface_gap(view, records, "FRONT")
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
@@ -8882,8 +8603,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.98",
-            "benchmarkMode": "v25_98_dual_topface_gap",
+            "checkerVersion": "V25.97",
+            "benchmarkMode": "v25_97_per_container_analysis",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -8896,3 +8617,4 @@ def process_request(request):
         print("CRITICAL ERROR DETAILS:\n", err_trace)
         gc.collect()
         return ({"error": str(e), "trace": err_trace[-500:]}, 500, headers)
+
