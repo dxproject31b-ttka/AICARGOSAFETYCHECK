@@ -2,6 +2,49 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.02 (ผู้ใช้ทดสอบ v26.01 กับ GC06 แล้วแจ้ง 2 ประเด็น 13-Sep-2026):
+
+ประเด็นที่ 1: "gc06 - กรอบส้มสูงเกินไป"
+  ROOT CAUSE (ยืนยันด้วย pixel จริง): detect_tailzone_wall_exposure ใช้ roof_y ซึ่งคำนวณจาก
+  percentile 8 ของ "ทั้ง view" เป็นขอบบนของเขตสแกน - ในรถที่บางช่วงโหลดสูงกว่าช่วงอื่นมาก
+  (โดยเฉพาะรถ 2 ตู้ที่ตู้หนึ่งโหลดสูงกว่าอีกตู้) roof_y จะเป็นยอดของ "ตู้ที่สูงที่สุด" ไม่ใช่
+  ยอดของเขตท้ายรถที่กำลังตรวจ:
+    GC06: roof_y ทั้ง view = 86  แต่ยอดสินค้าจริงในเขตท้าย = 324 (ต่ำกว่า 238px)
+          -> กรอบสูง 513px ทั้งที่บริเวณที่เห็นผนังจริงมีแค่ y=320..580 (260px)
+  FIX 2 ชั้น:
+    (ก) จำกัดขอบบนของเขตสแกนด้วย "ยอดสินค้าสูงสุดที่พบในเขตนั้นเอง" (+margin 40px)
+    (ข) วาดกรอบเฉพาะช่วงที่ "พบผนังจริง" (แถวที่มีผนัง >= 3 จุด) ไม่ใช่ทั้งความสูงสินค้า
+  ผล: GC06 กรอบส้ม 513px -> 272px (ตรงกับบริเวณผนังจริง)
+  ผลข้างเคียงที่ดี: การวัดแม่นขึ้นด้วย เพราะไม่นับพื้นที่เหนือสินค้าที่ไม่เกี่ยวข้อง
+  (GC06 ผนัง 6.2% -> 10.4%, EC52-02 4.1% -> 5.1%, EC05-01 6.6% -> 8.2%)
+
+ประเด็นที่ 2: "back view ไม่มีการวิเคราะห์วาดกรอบเลย"
+  ROOT CAUSE: guard _APEX_PARTIAL_CUT_MIN_SAMPLES (v25.84) ตัดสินจาก "คอลัมน์อ้างอิง
+  (ตัวสูงกว่า)" ว่าไม่น่าเชื่อถือ แล้วทิ้งทั้งคู่ - แต่ตัวที่เตี้ยเองวัดได้ดีมาก:
+    GC06 BACK ตู้ที่ 2: idx8(183px, apex_partial_cut, n=11) <-> idx9(76.1px, direct, n=39)
+                        drop=58.4%  -> ถูกทิ้งเพราะ n=11 < 15
+    plateau ของคอลัมน์อื่น = [195,196,183,183] spread=6.6% (นิ่งมาก)
+    idx9 ต่ำกว่า plateau median 59.8% -> ความเอนเอียงจากการวัดอธิบายไม่ได้เลย
+  FIX: เพิ่ม _apex_guard_plateau_override() - ถ้าตัวที่เตี้ยเชื่อถือได้ (direct/
+  cross_view_filled และ n>=25) และเบี่ยงเบนจาก plateau ที่นิ่ง (spread<=12%, >=3 คอลัมน์)
+  เกิน 40% ให้ flag ต่อโดยใช้ plateau เป็นตัวอ้างอิงแทนคอลัมน์ที่ไม่น่าเชื่อถือ
+  ขอบเขตแคบมาก (ต้องผ่านครบ 4 เงื่อนไข) จึงไม่กระทบไฟล์ที่ guard เดิมคุ้มครองอยู่ -
+  EA03-01 (ไฟล์ที่ guard นี้ถูกสร้างขึ้นมาแก้) มี shorter เป็น apex_partial_cut n=3
+  ไม่ใช่ direct จึงไม่เข้าเงื่อนไขนี้เลย ยังคงถูก suppress เหมือนเดิมทุกประการ
+  ผล: GC06 BACK พบ STEP_DOWN_RISK/pairwise idx=8 (ตรงกับที่ผู้ใช้ยืนยันว่า
+       "กองเตี้ยกว่าเพื่อนบ้าน")
+
+REGRESSION (12 ไฟล์):
+  GC06     4 -> 5 จุด (เพิ่ม BACK pairwise idx=8 = เป้าหมาย) + กรอบส้มสูงลดลงถูกต้อง
+  EC52-02  1 จุด (tailzone)           EC05-01  2 จุด        EC58-02  4 จุด
+  EB91-01  1 จุด (silhouette เดิม, tailzone ผ่าน [กล่องใหญ่กินเต็มความลึก])
+  EC51-01 / EC01-04 / EC09 / EC16-01 / EC19-01 / EC20-02 / EC10-01 = 0 จุดทั้งหมด
+  *** ไม่มี false-positive ใหม่ | จุดเดิมไม่สูญหาย ***
+
+ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
+  - GC06 BACK ตรวจพบ 1 จุด (idx=8) แต่ผู้ใช้เคยวงไว้ 2 บริเวณ - อีกจุดยังไม่ถูกตรวจพบ
+  - tailzone ยังเป็น FRONT view เท่านั้นตามเงื่อนไขที่ผู้ใช้กำหนด
+================================================================================
 v25.97 (ผู้ใช้สั่ง 13-Sep-2026):
 
 [1] "ec52-02 ที่ไปปิดกลไกของ v25.94 - ให้ลบออกไปเลย"
@@ -5925,6 +5968,56 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
     return True
 
 
+# v26.02 NEW: ทางออกฉุกเฉินของ apex guard เมื่อ "ตัวเตี้ยเชื่อถือได้ แต่ตัวอ้างอิงไม่ได้"
+# ดู docstring เต็มที่จุดใช้งานจริงใน detect_step_down_pairwise (FIX #2) สำหรับหลักฐาน+เหตุผล
+# (พบจริงจาก GC06 BACK ตู้ที่ 2 - ผู้ใช้ยืนยันเองว่า "กองเตี้ยกว่าเพื่อนบ้าน")
+_APEX_GUARD_OVERRIDE_MIN_DEVIATION = 0.40   # ต่ำกว่า plateau เกินนี้ = ความเอนเอียงอธิบายไม่ได้
+_APEX_GUARD_OVERRIDE_MAX_SPREAD = 0.12      # plateau ต้องนิ่งจริง (GC06 วัดได้ 6.6%)
+_APEX_GUARD_OVERRIDE_MIN_PLATEAU = 3        # ต้องมีคอลัมน์อ้างอิงอย่างน้อยเท่านี้
+
+
+def _apex_guard_plateau_override(records, shorter_rec, view_result):
+    """v26.02: คืน dict ถ้าควร "ข้าม" apex guard (ตัวเตี้ยเชื่อถือได้ + เตี้ยกว่า plateau
+    ที่นิ่งอย่างสุดขั้ว) หรือ None ถ้าไม่เข้าเงื่อนไข - ดู docstring เต็มด้านบน"""
+    if shorter_rec.get("height_source") not in ("direct", "cross_view_filled"):
+        return None
+    if shorter_rec.get("n_samples", 0) < STEP_DOWN_MIN_RELIABLE_SAMPLES:
+        return None
+    h = shorter_rec.get("height_px")
+    if not h or h <= 0:
+        return None
+    others = [r["height_px"] for r in records
+              if r["idx"] != shorter_rec["idx"] and r.get("height_px")
+              and not r.get("is_corner_duplicate")
+              and r.get("height_source") in ("direct", "cross_view_filled",
+                                             "apex_partial_cut", "cross_view_corrected")]
+    if len(others) < _APEX_GUARD_OVERRIDE_MIN_PLATEAU:
+        return None
+    arr = np.array(others, dtype=float)
+    for _ in range(3):
+        if len(arr) < _APEX_GUARD_OVERRIDE_MIN_PLATEAU:
+            break
+        med = np.median(arr)
+        mad = max(float(np.median(np.abs(arr - med))), 2.0)
+        keep = np.abs(arr - med) < 2.5 * mad
+        if keep.sum() < _APEX_GUARD_OVERRIDE_MIN_PLATEAU or keep.sum() == len(arr):
+            break
+        arr = arr[keep]
+    if len(arr) < _APEX_GUARD_OVERRIDE_MIN_PLATEAU:
+        return None
+    plateau = float(np.median(arr))
+    if plateau <= 0:
+        return None
+    spread = (float(arr.max()) - float(arr.min())) / plateau
+    if spread > _APEX_GUARD_OVERRIDE_MAX_SPREAD:
+        return None
+    deviation = 1.0 - (h / plateau)
+    if deviation < _APEX_GUARD_OVERRIDE_MIN_DEVIATION:
+        return None
+    return {"plateau": plateau, "spread": spread, "deviation": deviation,
+            "n_plateau": int(len(arr))}
+
+
 def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
@@ -6151,7 +6244,28 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         # ใดก็ตามที่ n_samples ต่ำขนาดนี้ไม่ควรถูกใช้เป็นค่าอ้างอิงหรือเป้าหมายเลย
         if (taller_rec.get("height_source") == "apex_partial_cut"
                 and taller_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
-            continue
+            # v26.02 FIX #2 (ผู้ใช้แจ้ง "gc06 back view ไม่มีการวิเคราะห์วาดกรอบเลย"):
+            # guard นี้ (v25.84) ตัดสินจาก "คอลัมน์อ้างอิง (ตัวสูงกว่า)" ว่าไม่น่าเชื่อถือ
+            # แล้วทิ้งทั้งคู่ - แต่ถ้า "ตัวที่เตี้ย" เองวัดได้น่าเชื่อถือเต็มที่ และเตี้ยกว่า
+            # plateau ของคอลัมน์อื่นที่นิ่งมากอย่างสุดขั้ว การทิ้งไปทั้งคู่ทำให้พลาดความเสี่ยง
+            # จริงที่ชัดเจนที่สุดในไฟล์ ยืนยันด้วย pixel จริงจาก GC06 BACK ตู้ที่ 2:
+            #   idx8(183px, apex_partial_cut, n=11) <-> idx9(76.1px, direct, n=39) drop=58.4%
+            #   plateau ของคอลัมน์อื่น = [195,196,183,183] spread=6.6% (นิ่งมาก)
+            #   idx9 ต่ำกว่า plateau median 59.8% -> ความเอนเอียงจากการวัดอธิบายไม่ได้
+            # FIX: ถ้าตัวที่เตี้ยเชื่อถือได้ (direct/cross_view_filled และ n>=เกณฑ์ปกติ) และ
+            # เบี่ยงเบนจาก plateau ที่นิ่งเกิน _APEX_GUARD_OVERRIDE_MIN_DEVIATION ให้ flag ต่อ
+            # โดยไม่ต้องพึ่งคอลัมน์อ้างอิงที่ไม่น่าเชื่อถือ (ใช้ plateau เป็นตัวอ้างอิงแทน)
+            # ขอบเขตแคบมาก: ต้องผ่านครบทั้ง 4 เงื่อนไข จึงไม่กระทบไฟล์ที่ guard เดิมคุ้มครองอยู่
+            # (EA03-01 ที่ guard นี้สร้างขึ้นมาแก้: shorter เป็น apex_partial_cut n=3 ไม่ใช่
+            #  direct จึงไม่เข้าเงื่อนไขนี้เลย ยังคงถูก suppress เหมือนเดิมทุกประการ)
+            _ov = _apex_guard_plateau_override(records, shorter_rec, view_result)
+            if not _ov:
+                continue
+            print(f"[APEX_GUARD_OVERRIDE] {view_label} idx={shorter_rec['idx']} "
+                  f"h={shorter_h:.1f} เตี้ยกว่า plateau({_ov['plateau']:.1f}px "
+                  f"spread={_ov['spread']:.1%}) ถึง {_ov['deviation']:.1%} "
+                  f"-> ข้าม apex guard (ตัวอ้างอิง n={taller_rec.get('n_samples')} ไม่น่าเชื่อถือ "
+                  f"แต่ตัวเตี้ยเชื่อถือได้ n={shorter_rec.get('n_samples')})")
         if (shorter_rec.get("height_source") == "apex_partial_cut"
                 and shorter_rec.get("n_samples", 999) < _APEX_PARTIAL_CUT_MIN_SAMPLES):
             continue
@@ -8190,6 +8304,8 @@ _TAILZONE_SPAN_FRAC = 0.20          # เขตท้ายรถ = 20% แร�
 _TAILZONE_MIN_WIDTH_PX = 60
 _TAILZONE_ROOF_PERCENTILE = 8
 _TAILZONE_MIN_SAMPLES = 500
+_TAILZONE_ZONE_TOP_MARGIN_PX = 40   # v26.02: เผื่อเหนือยอดสินค้าในเขต (ดู FIX #1)
+_TAILZONE_WALL_ROW_MIN_PX = 3       # v26.02: แถวที่มีผนัง >= นี้ ถือว่าเป็นแถวผนังจริง
 _TAILZONE_TF_MIN_ASPECT = 1.25      # parallelogram ผิวบนต้องกว้างกว่าสูง
 _TAILZONE_TF_MIN_WIDTH_FRAC = 0.55
 _TAILZONE_TF_MIN_AREA = 600
@@ -8282,8 +8398,26 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
     if floor_y <= roof_y:
         return []
 
+    # v26.02 FIX #1 (ผู้ใช้แจ้ง "gc06 - กรอบส้มสูงเกินไป"): เดิมใช้ roof_y ซึ่งคำนวณจาก
+    # percentile ของ "ทั้ง view" เป็นขอบบนของเขตสแกน - พบว่าในรถที่บางช่วงโหลดสูงกว่าช่วงอื่น
+    # มาก (โดยเฉพาะรถ 2 ตู้ที่ตู้หนึ่งโหลดสูงกว่าอีกตู้) roof_y จะเป็นยอดของ "ตู้ที่สูงที่สุด"
+    # ไม่ใช่ยอดของเขตท้ายรถที่กำลังตรวจ ทำให้เขตสแกน (และกรอบที่วาด) สูงเกินจริงมาก
+    # ยืนยันด้วย pixel จริงจาก GC06: roof_y ทั้ง view = 86 แต่ยอดสินค้าจริงในเขตท้าย = 324
+    # (ต่ำกว่า 238px) -> กรอบสูง 513px ทั้งที่บริเวณที่เห็นผนังจริงมีแค่ y=320..580 (260px)
+    # FIX: จำกัดขอบบนของเขตสแกนด้วย "ยอดสินค้าสูงสุดที่พบในเขตนั้นเอง" (เผื่อ margin เล็กน้อย
+    # ให้ครอบคลุมผนังที่อยู่เหนือยอดสินค้าขึ้นไปได้) - ทำให้ทั้งการวัดและกรอบตรงกับบริเวณจริง
+    zone_tops = [cty[x] for x in range(zx0, zx1)
+                 if 0 <= x < len(cty) and cty[x] >= 0]
+    if zone_tops:
+        zone_top = int(min(zone_tops))
+        roof_y = max(roof_y, zone_top - _TAILZONE_ZONE_TOP_MARGIN_PX)
+    if floor_y <= roof_y:
+        return []
+
     n_box = n_wall = n_white = 0
+    wall_rows = []          # v26.02: เก็บแถวที่พบผนังจริง เพื่อใช้กำหนดขอบเขตกรอบ
     for yy in range(roof_y, min(floor_y, reg.shape[0]), 2):
+        row_wall = 0
         for xx in range(zx0, zx1, 2):
             if cm[yy, xx]:
                 n_box += 1
@@ -8291,8 +8425,11 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
             px = reg[yy, xx]
             if _p1b_is_structural_container_color(px):
                 n_wall += 1
+                row_wall += 1
             elif int(px[0]) > 230 and int(px[1]) > 230 and int(px[2]) > 230:
                 n_white += 1
+        if row_wall >= _TAILZONE_WALL_ROW_MIN_PX:
+            wall_rows.append(yy)
     total = n_box + n_wall + n_white
     if total < _TAILZONE_MIN_SAMPLES:
         return []
@@ -8313,11 +8450,19 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
 
     ox = view_result.get("crop_origin_x", 0)
     oy = view_result.get("crop_origin_y", 0)
+    # v26.02 FIX #1: วาดกรอบเฉพาะช่วงที่ "พบผนังจริง" (ไม่ใช่ทั้งความสูงของสินค้า)
+    if wall_rows:
+        box_y0 = max(roof_y, wall_rows[0] - 6)
+        box_y1 = min(floor_y, wall_rows[-1] + 6)
+    else:
+        box_y0, box_y1 = roof_y, floor_y
+    if box_y1 <= box_y0:
+        box_y0, box_y1 = roof_y, floor_y
     return [{
         "risk_type": "EMPTY_SPACE_RISK", "subtype": "tailzone_wall_exposure",
         "view": view_label, "mark_view": view_label,
         "mark_stack_idx": None, "mark_x_range": (zx0, zx1), "pos_range": None,
-        "abs_box": (ox + zx0, oy + roof_y, ox + zx1, oy + floor_y),
+        "abs_box": (ox + zx0, oy + box_y0, ox + zx1, oy + box_y1),
         "wall_pct": round(wall_pct, 1), "box_pct": round(box_pct, 1), "n_top_faces": n_tf,
         "reason": (f"บริเวณท้ายรถมองเห็นผนังตู้โผล่ {wall_pct:.1f}% "
                    f"(เมื่อวางเต็มจะเห็นเพียง ~1.5%) และเป็นการวางกล่องเล็กหลายแถว "
@@ -8815,8 +8960,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.01",
-            "benchmarkMode": "v26_01_tailzone_wall_exposure",
+            "checkerVersion": "V26.02",
+            "benchmarkMode": "v26_02_box_bounds_plus_apex_override",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
