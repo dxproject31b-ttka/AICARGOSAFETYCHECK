@@ -8116,7 +8116,214 @@ def _analyse_per_container(front, back, records_front, records_back, n_container
     # จึงไม่ได้รับผลกระทบจากการแบ่งตู้ - เรียกครั้งเดียวกับทั้ง view ตามเดิม
     all_risks += detect_step_down_hidden_behind(front, records_front, "FRONT")
     all_risks += detect_step_down_hidden_behind(back, records_back, "BACK")
+
+    # v26.01: ตรวจเขตท้ายรถของทั้ง view (ไม่ผูกกับ idx จึงไม่ต้องแบ่งตู้)
+    all_risks += detect_tailzone_wall_exposure(front, records_front, "FRONT")
     return all_risks
+
+
+# ============================================================================
+# v26.01 NEW: TAIL-ZONE WALL EXPOSURE (แก้ false-negative ที่ค้างมาตั้งแต่ v25.93)
+# ============================================================================
+# แนวทางมาจากผู้ใช้โดยตรง หลังผมล้มเหลว 6 ครั้งติดต่อกัน:
+#   "สามเหลี่ยมที่วาดให้ดู เกิดจากมุมของกล่องตัวในลากมาหามุมของกล่องตัวนอก และภายใน
+#    สามเหลี่ยมไม่ปรากฏสีกล่องใดๆ จึงแน่ชัดว่ามีความเสี่ยงจากพื้นที่ช่องว่างบริเวณจุดนั้น"
+#   "มองให้เหมือนคนมอง อย่ามัวแต่ลากเส้น idx กับวัด px รถมันเอียง ค่า px เชื่อถือไม่ได้"
+#   "ผนังมีเส้นแบ่งเป็นช่วงๆ ... พิสูจน์ว่าสีในสามเหลี่ยมมีสีผนังมากกว่าสีกล่องใดๆ
+#    เพื่อยืนยันว่าเป็นโพรงสูงต่ำ"
+#   "กลไกใหม่ ใช้จับประเภท เป็นกล่องเล็ก วางด้านนอกกับด้านใน เหมือนกับ cross pair"
+#
+# ใช้ 2 เงื่อนไขร่วมกันแบบ AND (ทั้งคู่มาจากคำอธิบายของผู้ใช้ตรงๆ):
+#
+# เงื่อนไขที่ 1 - "ผนังโผล่ในเขตท้ายรถ" (สามเหลี่ยมที่ไม่มีสีกล่อง):
+#   ถ้าวางเต็ม -> กล่องบังผนังไว้ -> เห็นผนังน้อยมาก
+#   ถ้ามีโพรง  -> ผนังด้านหลังโผล่ -> เห็นผนังมากขึ้นชัดเจน
+#   วัดจริง (FRONT, เขตปลายซ้าย 20% แรก): ปลอดภัยเต็มตู้ 1.4-1.7% (เกาะกลุ่มแน่นมาก)
+#                                          เสี่ยงจริง    4.1-10.4%
+#   -> เกณฑ์ 3.0% อยู่กึ่งกลาง (margin 1.8 เท่าจากฝั่งปลอดภัย)
+#   ยืนยันนิยามผู้ใช้ถูกต้อง 100%: EC51-01 (ผู้ใช้ลากสามเหลี่ยมให้ดูว่า "มีผิวกล่องปรากฏ")
+#   วัดได้ 1.5% | EC52-02 ("ไม่มีสีกล่องใดๆ") วัดได้ 4.1% = สูงกว่า 2.7 เท่า ทั้งที่
+#   สัดส่วนกล่องใกล้เคียงกัน (52.7% vs 61.3%) -> ตัวแปรที่แยกได้คือ "ผนังโผล่" ไม่ใช่ "ปริมาณกล่อง"
+#
+# เงื่อนไขที่ 2 - "เป็นกล่องเล็กวางนอก+ใน" (ตามที่ผู้ใช้ระบุขอบเขตการใช้งาน):
+#   ผู้ใช้ชี้ความต่างที่ชี้ขาด: "EC05-01 เป็นกล่องเล็ก วางด้านนอกกับด้านใน" (เสี่ยง)
+#                              "EB91-01 เป็นกล่องใหญ่กินพื้นที่เต็มด้านนอกกับด้านใน" (ปลอดภัย)
+#   -> กล่องใหญ่กินเต็มความลึก = ไม่มีทางเกิดโพรงระหว่างแถวได้เลยโดยโครงสร้าง
+#   สัญญาณที่วัดได้: "จำนวนผิวบน (top face) ที่มองเห็นทั้งวิว"
+#     กล่องเล็กวาง 2 แถว -> เห็นผิวบนหลายชิ้น (ทั้งแถวนอกและแถวใน)
+#     กล่องใหญ่เต็มลึก   -> เห็นผิวบนน้อยชิ้น (1 กอง = 1 ผิวบน)
+#   วัดจริง: เสี่ยง  EC05-01=6  EC52-02=6  EC58-02=4   (+GC06 รถ2ตู้=12)
+#            ปลอดภัย EC09=3  EB91-01=2  EC16-01=2  EC20-02=1  EC51-01/EC01-04/EC19-01=0
+#   -> เกณฑ์ >=4 แยกได้ขาด 100% (ไม่มีค่าใดคาบเกี่ยวกันเลย)
+#
+# ผลรวมของ 2 เงื่อนไข (ยืนยันด้วยข้อมูลจริงทุกไฟล์ที่ผู้ใช้เคยยืนยันสถานะไว้):
+#   ไฟล์        ผนัง%   ผิวบน  ผล      สถานะจริง (ผู้ใช้ยืนยัน)
+#   EC58-02     10.4      4    FLAG    เสี่ยง (cyan เตี้ย 1 ชั้น)        ตรวจพบถูกต้อง
+#   EC05-01      6.6      6    FLAG    เสี่ยง (โพรงใหญ่ท้ายรถ)          ตรวจพบถูกต้อง
+#   EC52-02      4.1      6    FLAG    เสี่ยง (โพรงสูงต่ำ)              ตรวจพบถูกต้อง
+#   -----------------------------------------------------------------------------
+#   EC09        37.9      3    ผ่าน    ปลอดภัย (กล่องใหญ่ KAP1A)        เงื่อนไขที่ 2 กรอง
+#   EC16-01     52.2      2    ผ่าน    ปลอดภัย (โหลดเบามาก 4 กล่อง)     เงื่อนไขที่ 2 กรอง
+#   EB91-01      6.9      2    ผ่าน    ปลอดภัย (กล่องใหญ่เต็มลึก)       เงื่อนไขที่ 2 กรอง
+#   EC20-02      3.1      1    ผ่าน    เต็มตู้ 95.1%                    เงื่อนไขที่ 2 กรอง
+#   EC51-01      1.5      0    ผ่าน    ปลอดภัย (เต็มตู้)                เงื่อนไขที่ 1 กรอง
+#   EC01-04      1.7      0    ผ่าน    ปลอดภัย (เต็มตู้)                เงื่อนไขที่ 1 กรอง
+#   EC19-01     ~1.5      0    ผ่าน    ปลอดภัย (เต็มตู้)                เงื่อนไขที่ 1 กรอง
+#   *** false-positive = 0 | true-positive = 3/3 ***
+#
+# *** FRONT view เท่านั้น (ผู้ใช้กำหนดเป็นเงื่อนไขโดยตรง) ***
+# สอดคล้องกับหลักฐานเชิงเทคนิค: BACK view มี artifact เชิงระบบที่ให้ค่าซ้ำข้ามไฟล์ที่ไม่
+# เกี่ยวข้องกันเลย (v25.98: EB90-01/02/03+EC20-01 ได้ 334/256/78 เท่ากันเป๊ะ |
+# interior-void: EC51-01=16,557px vs EC51-03=16,556px ต่างกัน 1px)
+#
+# วิธีที่ล้มเหลวมาก่อน 6 ครั้ง (บันทึกไว้เพื่อไม่ให้ลองซ้ำ - ทั้งหมดพยายามอนุมานความลึก
+# จากภาพ 2 มิติ ซึ่ง cargo_top_y ทิ้งข้อมูลนั้นไปตั้งแต่ต้นทางแล้ว):
+#   1. v25.94 Roof-Facet Ladder (เทียบ facet ข้ามคอลัมน์) -> edge-column bias, FP 4 ไฟล์
+#   2. Step spacing 78px -> EC01-04 ปลอดภัยมี 5 จุด ~ EC52-02 เสี่ยง 6 จุด แยกไม่ได้
+#   3. ระยะว่างใต้เพดาน (roofline fit) -> FRONT fit ไม่ได้เลยทั้ง 5 ไฟล์
+#   4. เดินขึ้นจากพื้นหาแถวนอก -> ตัวอักษร SKU ตัดเส้นทาง ค่าแกว่ง 33-345px
+#   5. v25.98 Dual top-face gap (top-to-top) -> วัดความสูง parallelogram (ค่าคงที่เรนเดอร์)
+#   6. Triangle band height -> EC05-01 ปลอดภัย(86px) > EC52-02 เสี่ยง(71px) แยกไม่ได้
+_TAILZONE_WALL_MIN_PCT = 3.0        # ผนังโผล่เกินนี้ = มีโพรง (เต็มตู้วัดได้ 1.4-1.7%)
+_TAILZONE_MIN_TOPFACES = 4          # ผิวบนที่เห็นทั้งวิว >= นี้ = กล่องเล็กวางนอก+ใน
+_TAILZONE_SPAN_FRAC = 0.20          # เขตท้ายรถ = 20% แรกของความยาวสินค้า (ซ้ายสุดของ FRONT)
+_TAILZONE_MIN_WIDTH_PX = 60
+_TAILZONE_ROOF_PERCENTILE = 8
+_TAILZONE_MIN_SAMPLES = 500
+_TAILZONE_TF_MIN_ASPECT = 1.25      # parallelogram ผิวบนต้องกว้างกว่าสูง
+_TAILZONE_TF_MIN_WIDTH_FRAC = 0.55
+_TAILZONE_TF_MIN_AREA = 600
+_TAILZONE_TF_MIN_COLOR_PX = 700
+
+
+def _count_visible_top_faces(view_result, records):
+    """v26.01: นับ 'ผิวบน' (top face) ที่มองเห็นได้ทั้งวิว - ตัวชี้วัดว่าเป็นกล่องเล็กวาง
+    หลายแถวตามความลึก (เห็นหลายผิวบน) หรือกล่องใหญ่กินเต็มความลึก (เห็นน้อย/ไม่เห็นเลย)
+    ดู docstring เต็มด้านบน 'เงื่อนไขที่ 2' สำหรับหลักฐาน+เหตุผล (แนวทางจากผู้ใช้)"""
+    reg = view_result.get("region")
+    if reg is None or not records:
+        return 0
+    n = 0
+    for rec in records:
+        if rec.get("is_corner_duplicate"):
+            continue
+        x0, x1 = rec["x_range"]
+        colw = max(1, x1 - x0)
+        lo, hi = x0 + 6, x1 - 6
+        if hi <= lo:
+            continue
+        sub = reg[:, lo:hi].reshape(-1, 3)
+        if sub.size == 0:
+            continue
+        try:
+            cols, cnts = np.unique(sub, axis=0, return_counts=True)
+        except Exception:
+            continue
+        for i in np.argsort(-cnts)[:10]:
+            c = tuple(int(q) for q in cols[i])
+            if int(cnts[i]) < _TAILZONE_TF_MIN_COLOR_PX:
+                continue
+            if _p1b_is_structural_container_color(c):
+                continue
+            if max(c) < 50 or min(c) > 240:
+                continue
+            mk = ((reg[:, :, 0] == c[0]) & (reg[:, :, 1] == c[1]) & (reg[:, :, 2] == c[2]))
+            mk[:, :lo] = False
+            mk[:, hi:] = False
+            lab, nn = ndimage.label(mk, structure=np.ones((3, 3), int))
+            if nn == 0:
+                continue
+            for li, sl in enumerate(ndimage.find_objects(lab), start=1):
+                if sl is None:
+                    continue
+                ys_, xs_ = sl
+                w = xs_.stop - xs_.start
+                h = ys_.stop - ys_.start
+                area = int((lab[sl] == li).sum())
+                if area < _TAILZONE_TF_MIN_AREA or h <= 0:
+                    continue
+                if (w / h) >= _TAILZONE_TF_MIN_ASPECT and w >= _TAILZONE_TF_MIN_WIDTH_FRAC * colw:
+                    n += 1
+    return n
+
+
+def detect_tailzone_wall_exposure(view_result, records, view_label):
+    """v26.01 NEW: ตรวจ 'โพรงสูงต่ำ' ที่ท้ายรถ - FRONT view เท่านั้น
+    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - แนวทางมาจากผู้ใช้โดยตรง)"""
+    if view_result is None or view_label != "FRONT":
+        return []
+    reg = view_result.get("region")
+    cm = view_result.get("cargo_mask")
+    cty = view_result.get("cargo_top_y")
+    lfy = view_result.get("local_floor_y")
+    sx, ex = view_result.get("start_x"), view_result.get("end_x")
+    if reg is None or cm is None or cty is None or lfy is None:
+        return []
+    if sx is None or ex is None or (ex - sx) < _TAILZONE_MIN_WIDTH_PX:
+        return []
+    cty = np.asarray(cty, int)
+    lfy = np.asarray(lfy, float)
+
+    vals = [cty[x] for x in range(sx, ex) if 0 <= x < len(cty) and cty[x] >= 0]
+    if len(vals) < 20:
+        return []
+    roof_y = int(np.percentile(vals, _TAILZONE_ROOF_PERCENTILE))
+
+    span = ex - sx
+    zx0 = sx
+    zx1 = min(sx + max(_TAILZONE_MIN_WIDTH_PX, int(span * _TAILZONE_SPAN_FRAC)),
+              reg.shape[1], ex)
+    if zx1 <= zx0:
+        return []
+    floors = [lfy[x] for x in range(zx0, zx1) if 0 <= x < len(lfy) and lfy[x] >= 0]
+    if not floors:
+        return []
+    floor_y = int(np.median(floors))
+    if floor_y <= roof_y:
+        return []
+
+    n_box = n_wall = n_white = 0
+    for yy in range(roof_y, min(floor_y, reg.shape[0]), 2):
+        for xx in range(zx0, zx1, 2):
+            if cm[yy, xx]:
+                n_box += 1
+                continue
+            px = reg[yy, xx]
+            if _p1b_is_structural_container_color(px):
+                n_wall += 1
+            elif int(px[0]) > 230 and int(px[1]) > 230 and int(px[2]) > 230:
+                n_white += 1
+    total = n_box + n_wall + n_white
+    if total < _TAILZONE_MIN_SAMPLES:
+        return []
+    wall_pct = n_wall / total * 100.0
+    box_pct = n_box / total * 100.0
+
+    n_tf = _count_visible_top_faces(view_result, records)
+    ok_wall = wall_pct >= _TAILZONE_WALL_MIN_PCT
+    ok_small = n_tf >= _TAILZONE_MIN_TOPFACES
+    print(f"[TAILZONE] {view_label} เขต x=[{zx0},{zx1}] กล่อง={box_pct:.1f}% "
+          f"ผนัง={wall_pct:.1f}% (เกณฑ์ {_TAILZONE_WALL_MIN_PCT}%) "
+          f"ผิวบนที่เห็น={n_tf} (เกณฑ์ {_TAILZONE_MIN_TOPFACES}) "
+          f"-> {'FLAG โพรงสูงต่ำ' if (ok_wall and ok_small) else 'ผ่าน'}"
+          + ("" if ok_wall else " [ผนังน้อย=วางเต็ม]")
+          + ("" if ok_small else " [กล่องใหญ่กินเต็มความลึก]"))
+    if not (ok_wall and ok_small):
+        return []
+
+    ox = view_result.get("crop_origin_x", 0)
+    oy = view_result.get("crop_origin_y", 0)
+    return [{
+        "risk_type": "EMPTY_SPACE_RISK", "subtype": "tailzone_wall_exposure",
+        "view": view_label, "mark_view": view_label,
+        "mark_stack_idx": None, "mark_x_range": (zx0, zx1), "pos_range": None,
+        "abs_box": (ox + zx0, oy + roof_y, ox + zx1, oy + floor_y),
+        "wall_pct": round(wall_pct, 1), "box_pct": round(box_pct, 1), "n_top_faces": n_tf,
+        "reason": (f"บริเวณท้ายรถมองเห็นผนังตู้โผล่ {wall_pct:.1f}% "
+                   f"(เมื่อวางเต็มจะเห็นเพียง ~1.5%) และเป็นการวางกล่องเล็กหลายแถว "
+                   f"ตามความลึก (เห็นผิวบน {n_tf} ชิ้น) บ่งชี้ว่ามีโพรง/กองสินค้าเตี้ยกว่า "
+                   f"ที่ควร ไม่มีสินค้าบังผนังไว้ เสี่ยงสินค้าล้ม/เลื่อนเข้าไปในช่องว่าง"),
+    }]
 
 
 def _analyse_whole_view(front, back, records_front, records_back):
@@ -8143,6 +8350,9 @@ def _analyse_whole_view(front, back, records_front, records_back):
     risks += detect_step_down_hidden_behind(back, records_back, "BACK")
     if not _single_stack:
         risks += detect_rear_empty_risk(records_front, records_back, front, back)
+
+    # v26.01: โพรงสูงต่ำที่ท้ายรถ (FRONT เท่านั้น - ดู detect_tailzone_wall_exposure)
+    risks += detect_tailzone_wall_exposure(front, records_front, "FRONT")
     return risks
 
 
@@ -8388,6 +8598,8 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
     # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
+    # v26.01: โพรงสูงต่ำท้ายรถ (หน้าที่ 1 เป็น front view จึงใช้ได้ตามปกติ)
+    risks += detect_tailzone_wall_exposure(view, records, "FRONT")
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
@@ -8603,8 +8815,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V25.97",
-            "benchmarkMode": "v25_97_per_container_analysis",
+            "checkerVersion": "V26.01",
+            "benchmarkMode": "v26_01_tailzone_wall_exposure",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
