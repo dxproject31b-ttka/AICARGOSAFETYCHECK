@@ -2,6 +2,78 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.06 (ผู้ใช้แนบ RD06-01 พร้อมวงกลม/ลากเส้นบนภาพ 14-Sep-2026 และระบุแนวทางเอง):
+  "พิสูจน์ว่าเป็นกล่องชั้นเดียว และเป็นประเภทกล่องใหญ่ (ไม่มีวางด้านนอกกับด้านใน)
+   1. ทั้งภาพปรากฏ side face จำนวน 1 กล่อง"
+  "พิสูจน์ว่า ไม่สูงต่ำต่างระดับ - แนวโน้มความสูงของทุกกล่อง อยู่แนวโน้มไล่เลี่ยกัน"
+  "เสนอว่าตำแหน่งใดเป็นกล่องใหญ่ side face ที่ไม่ใช่ด้านนอกกับด้านใน
+   ส่วนของ cross-view ไม่ต้องไปจับ"
+
+ผู้ใช้ถูกต้อง 100% - ยืนยันด้วยความสูงดิบรายคอลัมน์ (ยังไม่ผ่าน reconcile):
+  BACK : 167.0, 167.0, 167.0, 105.0   <- 3 ตัวแรกเท่ากันเป๊ะ (spread 0.0%)
+  FRONT: 230.0, 235.0, 229.5, 168.0   <- 3 ตัวแรกไล่เลี่ยกัน (spread 2.3%)
+
+ROOT CAUSE ของ false-positive (STEP_DOWN_RISK/cross_view FRONT idx0 drop=54.9%)
+เป็นปัญหา 2 ชั้นซ้อนกัน:
+  (1) คอลัมน์สุดท้ายของทั้ง 2 view อยู่ "หลัง apex ทั้งคอลัมน์"
+      FRONT apex=1075 vs idx3 x=(1104,1178) | BACK apex=957 vs idx3 x=(984,1059)
+      docstring ของ compute_stack_heights_px เขียนไว้เองว่าข้อมูลหลังจุดยอด isometric
+      "เอียงคนละทิศ, height ผิดเพี้ยนเป็นระบบ" แต่ v25.72 ให้ label="direct" (เชื่อถือได้)
+      จึงไม่มี guard ใดกรองเลย - วัด profile จริงเห็นชัด: BACK x=949->167px ไล่ลงถึง
+      x=1054->77px (เรียวลงต่อเนื่องตาม geometric taper ของ silhouette ปลายแถว)
+  (2) FRONT กับ BACK วัดกล่องใบเดียวกันได้ต่างกัน 38% อย่างเป็นระบบ (230 vs 167 คงที่
+      ทั้งแถว) เพราะกล่องลึกเพียง 745mm (31% ของตู้ 2400mm) ทำให้ local_floor_y ของ
+      FRONT ไปจับเส้นพื้นคนละเส้นกับตำแหน่งที่กล่องวางจริง
+  -> reconcile เอา 2 ค่านี้มาปนกัน -> เทียบ FRONT idx0=232.8 กับ BACK idx3=104.9
+     -> drop 54.9% -> flag ผิดพลาด
+  ไฟล์นี้เปิดเผยจุดบอดเพราะมีเพียง 4 คอลัมน์ (คอลัมน์ปลายคิดเป็น 25% ของข้อมูล เทียบ
+  ไฟล์ปกติ 7-10 คอลัมน์ที่ปลายแถวเป็นแค่ 10%) จึงไม่เคยเห็นปัญหานี้มาก่อน
+
+FIX (ใช้สัญญาณของผู้ใช้ตรงๆ - Large-Box Single-Row Guard):
+  สัญญาณที่ 1 "ทั้งภาพปรากฏ side face จำนวน 1 กล่อง"
+    -> นับ side face ที่เป็นสีกล่องจริง (ไม่นับสีโครงสร้างตู้) ทั้ง view
+       กล่องใหญ่วางแถวเดียว = เห็นด้านข้างแค่ใบปลายสุด | วางนอก+ใน = เห็นหลายใบ
+  สัญญาณที่ 2 "ตำแหน่งใดเป็นกล่องใหญ่"
+    -> นับผิวบน (top face) ที่มองเห็นใน "แต่ละคอลัมน์" แล้วเอาค่าสูงสุด
+       กล่องใหญ่กินเต็มลึก = ไม่เกิน 1 ชิ้น/คอลัมน์ | เล็กวางนอก+ใน = หลายชิ้น
+  ทั้ง 2 สัญญาณต้องผ่านพร้อมกัน (AND) และเป็นจริงทั้ง FRONT+BACK จึงระงับ cross_view
+
+ยืนยันด้วยข้อมูลจริงครบทุกไฟล์ (แยกได้ขาด ไม่มีค่าใดคาบเกี่ยวกัน):
+  ไฟล์      view   side  ผิวบน/คอลัมน์          เข้าเงื่อนไข  สถานะจริง
+  RD06-01   FRONT   0    [0,0,0,0]      max=0   ใช่          ปลอดภัย (ผู้ใช้ยืนยัน)
+  RD06-01   BACK    0    [0,0,0,0]      max=0   ใช่
+  EB91-01   FRONT   0    [1,1,0,0,0,0]  max=1   ใช่          ปลอดภัย (กล่องใหญ่เต็มลึก)
+  EB91-01   BACK    0    [0,0,0,0,0]    max=0   ใช่
+  --------------------------------------------------------------------------------
+  EB66-01   FRONT   1    max=2                  ไม่          ปลอดภัย (0 จุดอยู่แล้ว)
+  EC05-01   FRONT   8    max=3                  ไม่          เสี่ยง (กล่องเล็กนอก+ใน)
+  EC05-01   BACK    6    max=2                  ไม่
+  GC06      FRONT   0    max=3                  ไม่          เสี่ยง (รถ 2 ตู้)
+  GC06      BACK    0    max=2                  ไม่
+
+REGRESSION (รันจริง 5 ไฟล์ v26.05 -> v26.06):
+  RD06-01   1 -> 0 จุด  (cross_view FRONT idx0 หายไป = เป้าหมาย)
+  EB91-01   1 -> 1 จุด  (เข้าเงื่อนไขแต่ไม่มี cross_view อยู่แล้ว -> ไม่กระทบ)
+  EB66-01   0 -> 0 จุด  |  EC05-01  2 -> 2 จุด  |  GC06  5 -> 5 จุด
+  *** จุดที่เพิ่มใหม่ (false-positive) = 0 | จุดเดิมที่สูญหาย = 1 (คือ FP ที่ตั้งใจแก้) ***
+
+ขอบเขตแคบมาก (ตามที่ผู้ใช้กำหนด): ปิดเฉพาะ subtype "cross_view" เท่านั้น
+  - pairwise / pairwise_floor_jump / tail_stepdown / hidden_behind ยังทำงานครบทุกกลไก
+    (เป็นการเทียบภายใน view เดียวกัน ไม่ได้รับผลจาก cross-view offset เชิงระบบ)
+  - EMPTY_SPACE_RISK (กรอบส้ม) ไม่ถูกแตะเลยแม้แต่จุดเดียว
+
+ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
+  - รอบนี้มีไฟล์ให้ regression-test เพียง 5 ไฟล์ (RD06-01/EB91-01/EB66-01/EC05-01/GC06)
+    ซึ่งครอบคลุมทั้ง 2 ฝั่งของเกณฑ์ (side 0-1 vs 6-8 | ผิวบน 0-1 vs 2-3) แต่ยังไม่ได้
+    ยืนยันกับไฟล์ชุดใหญ่ (EC51-*, EC01-*, EC10-01, EC16-01, EC09, EC19-01, EC20-*,
+    EB90-*) ในรอบนี้ -> guard นี้ "ระงับอย่างเดียว" ไม่เคยเพิ่มการตรวจจับใหม่เลย จึงไม่มี
+    ทางสร้าง false-positive ใหม่ได้โดยโครงสร้าง แต่ควรรันยืนยันว่าไม่ไปลบจุดเสี่ยงจริง
+    ของไฟล์เหล่านั้นก่อน deploy
+  - RD06-01 ยังเหลือ root cause เชิงลึกที่ยังไม่ได้แก้: คอลัมน์ที่อยู่หลัง apex ทั้งคอลัมน์
+    ยังคงได้ label "direct" (เชื่อถือได้เต็มที่) ทั้งที่ค่าเพี้ยนเป็นระบบ - guard นี้แก้ที่
+    "ปลายทาง" (ไม่ให้ cross_view จับ) ไม่ได้แก้ที่ต้นทาง (การวัดความสูง) ถ้าไฟล์อื่นมี
+    คอลัมน์หลัง apex แล้วถูก pairwise จับแทน จะยังเป็นปัญหาอยู่
+================================================================================
 v26.05 (ผู้ใช้เลือก "แนวทางที่ 1" + วาดสามเหลี่ยม EC05-01 มายืนยัน 13-Sep-2026:
 "กล่องสีม่วงเตี้ยจึงเห็นสีผนัง หมายความว่า เข้ากลไก-เสี่ยง ต้องวาดกรอบ"):
 แก้ทั้ง false-positive และ false-negative พร้อมกันได้สำเร็จ
@@ -4474,9 +4546,17 @@ def compute_phase1b_columns(regions, down_factor=1.0):
         print(f"[P1B] FRONT after reconcile: {len(front_cols)} cols, "
               f"cx={[round(c['cx'],1) for c in front_cols]}")
 
+        # v26.06: นับ side face ที่เป็น "สีกล่องจริง" (ไม่นับสีโครงสร้างตู้) ไว้ต่อ view -
+        # ใช้เป็นสัญญาณที่ 1 ของ Large-Box Single-Row Guard (ดู _is_large_box_single_row)
+        # คำนวณตรงนี้เพราะมี all_cells ของทั้ง 2 view อยู่แล้ว ไม่ต้อง classify ซ้ำ
+        def _n_cargo_sides(cells):
+            return len([c for c in cells if c.get("kind") == "side"
+                        and not _p1b_is_structural_container_color(c["color"])])
         return {
             "front": [_p1b_scale_col(c, down_factor) for c in front_cols],
             "back": [_p1b_scale_col(c, down_factor) for c in back_cols],
+            "n_side_front": _n_cargo_sides(front_all),
+            "n_side_back": _n_cargo_sides(back_all),
         }
     except Exception as e:
         print(f"PHASE1B column-detection ล้มเหลว, fallback เป็น seam-based เดิม: {e}")
@@ -8265,9 +8345,12 @@ def _analyse_per_container(front, back, records_front, records_back, n_container
               f"BACK {len(rb)} คอลัมน์ x=[{rb[0]['x_range'][0]},{rb[-1]['x_range'][1]}]")
         sub = []
         single = _is_single_stack_sparse_load(rf, rb)
+        # v26.06: กล่องใหญ่วางแถวเดียว -> ไม่ให้ cross_view จับ (ดู _is_large_box_single_row)
+        large_box = (_is_large_box_single_row(front, rf, "FRONT")
+                     and _is_large_box_single_row(back, rb, "BACK"))
         sub += detect_step_down_pairwise(rf, "FRONT", view_result=front)
         sub += detect_step_down_pairwise(rb, "BACK", view_result=back)
-        if not single:
+        if not single and not large_box:
             sub += detect_step_down_crossview(rf, rb, front_result=front, back_result=back)
         _tail = (detect_tail_stepdown(rf, "FRONT", view_result=front)
                  + detect_tail_stepdown(rb, "BACK", view_result=back))
@@ -8598,6 +8681,147 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
     }]
 
 
+# ============================================================================
+# v26.06 NEW: LARGE-BOX SINGLE-ROW GUARD (ตัดกรอบแดง cross_view ที่กล่องใหญ่แถวเดียว)
+# ============================================================================
+# แนวทางมาจากผู้ใช้โดยตรง (14-Sep-2026) หลังแนบ RD06-01 พร้อมวงกลม/ลากเส้นบนภาพ:
+#   "พิสูจน์ว่าเป็นกล่องชั้นเดียว และเป็นประเภทกล่องใหญ่ (ไม่มีวางด้านนอกกับด้านใน)
+#    1. ทั้งภาพปรากฏ side face จำนวน 1 กล่อง"
+#   "พิสูจน์ว่า ไม่สูงต่ำต่างระดับ
+#    1. แนวโน้มความสูงของทุกกล่อง อยู่แนวโน้มไล่เลี่ยกัน"
+#   "เสนอว่าตำแหน่งใดเป็นกล่องใหญ่ side face ที่ไม่ใช่ด้านนอกกับด้านใน
+#    ส่วนของ cross-view ไม่ต้องไปจับ"
+#
+# ROOT CAUSE ของ false-positive ที่ RD06-01 (ยืนยันด้วย pixel จริง):
+#   ผู้ใช้ยืนยันว่าไฟล์นี้ปลอดภัย (4 กล่องขนาดเท่ากัน วางเรียง 1 ชั้น) แต่ระบบ flag
+#   STEP_DOWN_RISK/cross_view FRONT idx0 drop=54.9%
+#   วัดความสูงดิบรายคอลัมน์ (ยังไม่ผ่าน reconcile) พบว่าผู้ใช้ถูกต้อง 100%:
+#     BACK : 167.0, 167.0, 167.0, 105.0   <- 3 ตัวแรกเท่ากันเป๊ะ (spread 0.0%)
+#     FRONT: 230.0, 235.0, 229.5, 168.0   <- 3 ตัวแรกไล่เลี่ยกัน (spread 2.3%)
+#   ปัญหา 2 ชั้นซ้อนกัน:
+#   (1) คอลัมน์สุดท้ายของทั้ง 2 view อยู่ "หลัง apex ทั้งคอลัมน์" (FRONT apex=1075 vs
+#       idx3 x=(1104,1178) | BACK apex=957 vs idx3 x=(984,1059)) - docstring ของ
+#       compute_stack_heights_px เขียนไว้เองว่าข้อมูลหลังจุดยอด isometric "เอียงคนละทิศ,
+#       height ผิดเพี้ยนเป็นระบบ" แต่ v25.72 ให้ label="direct" (เชื่อถือได้) จึงไม่มี guard ใด
+#       กรองเลย - วัด profile จริงเห็นชัด: BACK x=949->167px ไล่ลงถึง x=1054->77px
+#       (เรียวลงต่อเนื่องตาม geometric taper ของ silhouette ปลายแถว ไม่ใช่กล่องเตี้ยจริง)
+#   (2) FRONT กับ BACK วัดกล่องใบเดียวกันได้ต่างกัน 38% อย่างเป็นระบบ (230 vs 167 คงที่ทั้งแถว)
+#       เพราะกล่องลึกเพียง 745mm (31% ของตู้ 2400mm) ทำให้ local_floor_y ของ FRONT
+#       ไปจับเส้นพื้นคนละเส้นกับตำแหน่งที่กล่องวางจริง
+#   -> reconcile เอา 2 ค่านี้มาปนกัน (FRONT idx1/idx2 ถูกเขียนทับเป็น 167 แต่ idx0 ยังเป็น
+#      232.8) -> เทียบกับ BACK idx3=104.9 -> drop 54.9% -> flag ผิดพลาด
+#   ไฟล์นี้เปิดเผยจุดบอดเพราะมีเพียง 4 คอลัมน์ (คอลัมน์ปลายคิดเป็น 25% ของข้อมูล เทียบไฟล์ปกติ
+#   7-10 คอลัมน์ที่ปลายแถวเป็นแค่ 10%) จึงไม่เคยเห็นปัญหานี้มาก่อน
+#
+# FIX (ใช้สัญญาณของผู้ใช้ตรงๆ - จำแนกเป็นราย view ว่า "เป็นกล่องใหญ่วางแถวเดียว" หรือไม่):
+#   สัญญาณที่ 1 "ทั้งภาพปรากฏ side face จำนวน 1 กล่อง" -> นับ side face ที่เป็นสีกล่องจริง
+#     (ไม่นับสีโครงสร้างตู้) ทั้ง view - กล่องใหญ่วางแถวเดียวจะเห็นด้านข้างแค่ใบปลายสุดเท่านั้น
+#     ส่วนการวางนอก+ใน จะเห็นด้านข้างของกล่องหลายใบพร้อมกัน
+#   สัญญาณที่ 2 "ตำแหน่งใดเป็นกล่องใหญ่" -> นับ "ผิวบน (top face)" ที่มองเห็นในแต่ละคอลัมน์
+#     กล่องใหญ่กินเต็มความลึก = เห็นผิวบนไม่เกิน 1 ชิ้นต่อคอลัมน์
+#     กล่องเล็กวางนอก+ใน      = เห็นผิวบนหลายชิ้นในคอลัมน์เดียว (ทั้งแถวนอกและแถวใน)
+#   ทั้ง 2 สัญญาณต้องผ่านพร้อมกัน (AND) และต้องเป็นจริง "ทั้ง FRONT และ BACK" จึงจะถือว่า
+#   งานนี้เป็นกล่องใหญ่วางแถวเดียวทั้งคัน -> ปิดเฉพาะ cross_view (ตามที่ผู้ใช้ระบุ)
+#
+# ยืนยันด้วยข้อมูลจริงครบทุกไฟล์ที่มี (แยกได้ขาด ไม่มีค่าใดคาบเกี่ยวกัน):
+#   ไฟล์      view   side  ผิวบนต่อคอลัมน์            เข้าเงื่อนไข  สถานะจริง
+#   RD06-01   FRONT   0    [0,0,0,0]                  ใช่          ปลอดภัย (ผู้ใช้ยืนยัน)
+#   RD06-01   BACK    0    [0,0,0,0]                  ใช่
+#   EB91-01   FRONT   0    [1,1,0,0,0,0]              ใช่          ปลอดภัย (กล่องใหญ่เต็มลึก)
+#   EB91-01   BACK    0    [0,0,0,0,0]                ใช่
+#   ------------------------------------------------------------------------------
+#   EB66-01   FRONT   1    [0,0,2,2,0,0,0]  max=2     ไม่          ปลอดภัย (0 จุดอยู่แล้ว)
+#   EC05-01   FRONT   8    [1,2,3]          max=3     ไม่          เสี่ยง (กล่องเล็กนอก+ใน)
+#   EC05-01   BACK    6    [2,2,0]          max=2     ไม่
+#   GC06      FRONT   0    [1,3,2,0,0,0,3,3,0,0] max=3 ไม่         เสี่ยง (รถ 2 ตู้)
+#   GC06      BACK    0    [1,2,0,0,2,0,0,0,0,0] max=2 ไม่
+#   *** RD06-01 = FP หายไป | EB91-01 ไม่มี cross_view อยู่แล้ว (ไม่กระทบ)
+#       EC05-01 / GC06 / EB66-01 ไม่เข้าเงื่อนไขเลย -> จุดเสี่ยงจริงอยู่ครบทุกจุด ***
+#
+# ขอบเขตแคบมาก (ตามที่ผู้ใช้กำหนด): ปิดเฉพาะ subtype "cross_view" เท่านั้น
+#   - pairwise / pairwise_floor_jump / tail_stepdown / hidden_behind ยังทำงานครบทุกกลไก
+#     (เป็นการเทียบภายใน view เดียวกัน ไม่ได้รับผลจาก cross-view offset เชิงระบบ)
+#   - EMPTY_SPACE_RISK (กรอบส้ม) ไม่ถูกแตะเลยแม้แต่จุดเดียว
+_LARGEBOX_MAX_SIDE_FACES = 1      # side face สีกล่องจริงทั้ง view (วัดจริง: ปลอดภัย 0-1 | เสี่ยง 6-8)
+_LARGEBOX_MAX_TOPFACES_PER_COL = 1  # ผิวบนสูงสุดต่อคอลัมน์ (วัดจริง: ปลอดภัย 0-1 | เสี่ยง 2-3)
+_LARGEBOX_TF_MIN_ASPECT = 1.25    # parallelogram ผิวบนต้องกว้างกว่าสูง (ใช้เกณฑ์เดียวกับ v26.01)
+_LARGEBOX_TF_MIN_WIDTH_FRAC = 0.55
+_LARGEBOX_TF_MIN_AREA = 600
+_LARGEBOX_TF_MIN_COLOR_PX = 700
+
+
+def _max_topfaces_per_column(view_result, records):
+    """v26.06: คืนจำนวนผิวบน (top face) สูงสุดที่พบใน "คอลัมน์ใดคอลัมน์หนึ่ง" ของ view นี้
+    - ใช้เกณฑ์เดียวกับ _count_visible_top_faces (v26.01) ทุกประการ ต่างกันแค่นับแยกรายคอลัมน์
+    แล้วเอาค่าสูงสุด (แทนการรวมทั้ง view) เพื่อตอบคำถามของผู้ใช้ว่า "ตำแหน่งใดเป็นกล่องใหญ่"
+    ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล"""
+    reg = view_result.get("region") if view_result else None
+    if reg is None or not records:
+        return 0
+    best = 0
+    for rec in records:
+        if rec.get("is_corner_duplicate"):
+            continue
+        x0, x1 = rec["x_range"]
+        colw = max(1, x1 - x0)
+        lo, hi = x0 + 6, x1 - 6
+        if hi <= lo:
+            continue
+        sub = reg[:, lo:hi].reshape(-1, 3)
+        if sub.size == 0:
+            continue
+        try:
+            cols, cnts = np.unique(sub, axis=0, return_counts=True)
+        except Exception:
+            continue
+        n = 0
+        for i in np.argsort(-cnts)[:10]:
+            c = tuple(int(q) for q in cols[i])
+            if int(cnts[i]) < _LARGEBOX_TF_MIN_COLOR_PX:
+                continue
+            if _p1b_is_structural_container_color(c):
+                continue
+            if max(c) < 50 or min(c) > 240:
+                continue
+            mk = ((reg[:, :, 0] == c[0]) & (reg[:, :, 1] == c[1]) & (reg[:, :, 2] == c[2]))
+            mk[:, :lo] = False
+            mk[:, hi:] = False
+            lab, nn = ndimage.label(mk, structure=np.ones((3, 3), int))
+            if nn == 0:
+                continue
+            for li, sl in enumerate(ndimage.find_objects(lab), start=1):
+                if sl is None:
+                    continue
+                ys_, xs_ = sl
+                w = xs_.stop - xs_.start
+                h = ys_.stop - ys_.start
+                area = int((lab[sl] == li).sum())
+                if area < _LARGEBOX_TF_MIN_AREA or h <= 0:
+                    continue
+                if (w / h) >= _LARGEBOX_TF_MIN_ASPECT and w >= _LARGEBOX_TF_MIN_WIDTH_FRAC * colw:
+                    n += 1
+        best = max(best, n)
+    return best
+
+
+def _is_large_box_single_row(view_result, records, view_label):
+    """v26.06: True ถ้า view นี้เป็น "กล่องใหญ่วางแถวเดียว" (ไม่มีการวางนอก+ใน)
+    ตามสัญญาณ 2 ตัวที่ผู้ใช้ระบุ - ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล"""
+    if view_result is None or not records:
+        return False
+    n_side = view_result.get("n_cargo_side_faces")
+    if n_side is None:
+        return False   # ไม่มีข้อมูล (เช่น PHASE 1B ล้มเหลว) -> ไม่ตัดสิน (fail-safe ใช้เส้นทางเดิม)
+    if n_side > _LARGEBOX_MAX_SIDE_FACES:
+        return False
+    max_tf = _max_topfaces_per_column(view_result, records)
+    ok = max_tf <= _LARGEBOX_MAX_TOPFACES_PER_COL
+    print(f"[LARGEBOX] {view_label} side_face={n_side} (เกณฑ์ <={_LARGEBOX_MAX_SIDE_FACES}) "
+          f"ผิวบนสูงสุดต่อคอลัมน์={max_tf} (เกณฑ์ <={_LARGEBOX_MAX_TOPFACES_PER_COL}) "
+          f"-> {'กล่องใหญ่วางแถวเดียว' if ok else 'มีการวางนอก+ใน/หลายแถว'}")
+    return ok
+
+
 def _analyse_whole_view(front, back, records_front, records_back):
     """v25.97: เส้นทางเดิม (ทั้ง view เป็นตู้เดียว) - แยกออกมาเป็นฟังก์ชันเพื่อให้
     per-container fallback กลับมาใช้ได้ตรงๆ โดยไม่ต้องคัดลอกโค้ด
@@ -8606,9 +8830,18 @@ def _analyse_whole_view(front, back, records_front, records_back):
     # v25.96: โหลดเบาบางกองเดียว -> ระงับ cross_view + color_anomaly
     _single_stack = _is_single_stack_sparse_load(records_front, records_back)
 
+    # v26.06: กล่องใหญ่วางแถวเดียวทั้งคัน -> ไม่ให้ cross_view จับ (ตามที่ผู้ใช้ระบุ)
+    # ต้องเป็นจริงทั้ง 2 view จึงจะปิด (ดู docstring เต็มที่ _is_large_box_single_row)
+    _large_box = (_is_large_box_single_row(front, records_front, "FRONT")
+                  and _is_large_box_single_row(back, records_back, "BACK"))
+    if _large_box:
+        print("[LARGEBOX] ทั้ง FRONT และ BACK เป็นกล่องใหญ่วางแถวเดียว (ไม่มีการวางนอก+ใน) "
+              "-> ระงับ cross_view (ความต่างระหว่าง 2 มุมกล้องเป็นความคลาดเคลื่อนของการวัด "
+              "ไม่ใช่ขั้นสูงต่ำจริง) - กลไกอื่นยังทำงานครบทุกตัว")
+
     risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
     risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
-    if not _single_stack:
+    if not _single_stack and not _large_box:
         risks += detect_step_down_crossview(records_front, records_back,
                                             front_result=front, back_result=back)
 
@@ -8669,6 +8902,11 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     back = process_view_with_height_on_image(
         full_img, doc, "back", page_idx=page_idx, override_cols=phase1b.get("back"),
         precrop=back_precrop)
+
+    # v26.06: แนบจำนวน side face (สีกล่องจริง) เข้า view_result เพื่อให้
+    # _is_large_box_single_row ใช้ได้ (ดู docstring เต็มที่ _LARGEBOX_MAX_SIDE_FACES)
+    front["n_cargo_side_faces"] = phase1b.get("n_side_front")
+    back["n_cargo_side_faces"] = phase1b.get("n_side_back")
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -9087,8 +9325,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.05",
-            "benchmarkMode": "v26_05_sloped_topline_cut_when_smooth",
+            "checkerVersion": "V26.06",
+            "benchmarkMode": "v26_06_large_box_single_row_guard",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
