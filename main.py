@@ -7980,8 +7980,6 @@ def detect_silhouette_notch_risk(view_result, view_label):
         baseline_y = int(min(vals[left_base_idx], vals[right_base_idx]))
         if y_notch <= baseline_y:
             continue
-        if (y_notch - baseline_y) < _NOTCH_MIN_SCAN_HEIGHT_PX=30: # ← v26.08
-	    continue
         colors_sampled = []
         for yy in range(baseline_y, y_notch, 3):
             if 0 <= yy < region.shape[0] and 0 <= x_notch < region.shape[1]:
