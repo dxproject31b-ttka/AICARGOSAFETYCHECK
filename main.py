@@ -2,6 +2,70 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.08 (ผู้ใช้สั่ง 15-Sep-2026): "ไฟล์ที่นำมาเข้าโปรแกรมหากเป็นแบบประเภท wireframe จะไม่
+สามารถวิเคราะห์ได้ ดังนั้นผมจึงสร้างโปรแกรมลงสี เป็น code อีกชุดสำหรับรันบน colab แต่ความ
+ต้องการแท้จริงคือ ต้องการให้โปรแกรมหลัก เมื่อพบไฟล์ประเภท wireframe ให้ทำการลงสีและนำเข้า
+กระบวนการวิเคราะห์ต่อไป ช่วยผนวก code การลงสี เชื่อมต่อเข้าไปในโปรแกรมหลักด้วย"
+
+สิ่งที่ทำ: ผนวก MaxLoad Pro Manifest Colorizer v29.8 (ที่ผู้ใช้พัฒนาและทดสอบบน Colab จน
+ใช้งานได้จริงแล้ว) เข้ามาเป็น "ด่านหน้าสุด" ของ pipeline โดยไม่แตะตรรกะการวิเคราะห์เดิม
+เลยแม้แต่บรรทัดเดียว:
+    PDF เข้า -> ตรวจว่าเป็น wireframe ไหม -> ถ้าใช่ ลงสี -> เข้า pipeline เดิมทั้งหมด
+
+โครงสร้างที่เพิ่มเข้ามา (ดูรายละเอียดเต็มที่ COLORIZER SECTION):
+  1. โมดูลลงสีทั้งชุด (IsoScene + seed/grow + demote/promote/repair ทุกตัว v29.1-v29.8)
+     คงไว้ทุกบรรทัด ตัดเฉพาะส่วนที่ผูกกับ Colab: google.colab.files.upload() /
+     matplotlib / run() / pip-install ตอน import / process_pdf ที่อ่านเขียนไฟล์บนดิสก์
+  2. _detect_wireframe_pdf()        - ตรวจจับไฟล์ wireframe อัตโนมัติ
+  3. colorize_wireframe_pdf_bytes() - ลงสีแบบทำงานในหน่วยความจำล้วน (พอร์ตจาก process_pdf)
+  4. prepare_pdf_for_analysis()     - ด่านหน้า fail-safe ต่อเข้า process_request
+
+เกณฑ์ตรวจจับ wireframe (วัดด้วย vivid_cargo_mask ตัวเดียวกับที่ pipeline วิเคราะห์ใช้จริง
+จึงเป็นการวัด "สิ่งที่ระบบมองเห็นได้จริง" โดยตรง ไม่ใช่การอนุมานทางอ้อม):
+  สัดส่วนพิกเซลสีสดสูงสุดของ 3 หน้าแรก < 0.2%  =  wireframe
+  วัดจริงจากไฟล์ทดสอบ: wireframe = 0.0000%  |  ไฟล์ที่ลงสีแล้ว = 10.4053%
+  -> เกณฑ์ 0.2% อยู่กึ่งกลางโดยห่างจากทั้ง 2 ฝั่งมาก (52 เท่าจากฝั่งที่มีสี)
+
+ยืนยันความเข้ากันได้ของสี (วัดด้วยตัวจำแนกของโปรแกรมหลักเอง):
+  สีที่ colorizer ผลิต        vivid_cargo?  structural?  ผลการจำแนก
+  (0,255,255) cyan สว่าง          ใช่          ไม่        กล่องสินค้า  ถูกต้อง
+  (0,216,216) cyan เข้ม           ใช่          ไม่        กล่องสินค้า  ถูกต้อง
+  (245,242,155) ครีม              ไม่          ใช่        โครงสร้างตู้ ถูกต้อง
+  -> ไม่ต้องปรับ threshold สีใดๆ ในโปรแกรมหลักเลยแม้แต่ค่าเดียว
+
+ผลทดสอบ end-to-end ผ่าน process_request (เส้นทางเดียวกับใช้งานจริง):
+  ไฟล์ wireframe:  v26.07 = HTTP 500 (วิเคราะห์ไม่ได้เลย)
+                   v26.08 = HTTP 200  พบ 8 จุด  FRONT 11 คอลัมน์ / BACK 10 คอลัมน์
+                   colorizer ลงสีได้ front 22 boxes / back 18 boxes จาก 47 regions
+                   ตรวจพบ step-down ที่ตั้งที่เตี้ยกว่าจริง (drop 43.5% ตรงกับที่ออกแบบไว้)
+  ไฟล์ปกติ:        v26.07 = HTTP 200 พบ 2 จุด, 7 คอลัมน์
+                   v26.08 = HTTP 200 พบ 2 จุด, 7 คอลัมน์  *** ตรงกันเป๊ะทุกค่า ***
+                   ยืนยันด้วยว่า bytes ไม่ถูกแตะเลย (out is pdf -> True)
+
+ความปลอดภัย (fail-safe ทุกชั้น - ไม่มีทางทำให้ระบบล้มเหลว):
+  - ไม่มี opencv ติดตั้ง        -> ปิดโมดูลลงสี ระบบเดิมทำงานปกติทุกประการ
+  - ตรวจ wireframe ไม่สำเร็จ    -> ถือว่าไม่ใช่ wireframe ใช้ไฟล์เดิม
+  - ลงสีไม่สำเร็จ/ไม่พบภาพ      -> คืน bytes เดิม ปล่อยให้ pipeline เดิมทำงาน
+  - ไฟล์ปกติ                    -> ผ่านด่านนี้โดยไม่ถูกแตะเลยแม้แต่ byte เดียว
+
+output fields ใหม่ (additive - ไม่กระทบ key เดิมที่ WebApp/GAS ใช้อยู่):
+  wireframeDetected / wireframeColorized / colorizerVersion / colorizerNote
+
+requirements.txt: เพิ่ม opencv-python-headless>=4.8,<5
+  (ใช้ headless เพราะไม่ต้องการ GUI - ขนาดเล็กกว่า opencv-python ปกติมาก
+   เหมาะกับ Cloud Function ที่มีข้อจำกัดเรื่อง memory - ดูประวัติ v25.15 HTTP 500 จาก OOM)
+
+ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
+  - ทดสอบด้วย PDF ที่สร้างขึ้นเอง 2 ไฟล์ (wireframe / colored) เพราะไม่มีไฟล์ manifest
+    จริงแบบ wireframe ให้ทดสอบในรอบนี้ - ผู้ใช้ยืนยันแล้วว่าผลลัพธ์จาก Colab ใช้งานกับ
+    โปรแกรมหลักได้จริง จึงเน้นทดสอบ "การเชื่อมต่อ" เป็นหลัก (ตรวจจับ -> ลงสี -> วิเคราะห์)
+  - แนะนำให้ทดสอบกับไฟล์ wireframe จริงชุดใหญ่ก่อน deploy เพื่อยืนยันว่าเกณฑ์ 0.2%
+    ครอบคลุมทุกกรณี (ปรับได้ที่ _WIREFRAME_MAX_VIVID_FRAC จุดเดียว)
+  - กลไก color_anomaly (ต้องมี SKU >= 4 สี) จะไม่ทำงานกับไฟล์ที่ผ่านการลงสี เพราะ
+    colorizer ใช้สีกล่องเพียง 2 เฉด (cyan สว่าง/เข้ม) ไม่ได้แยกตาม SKU จริง - กลไกอื่น
+    ทั้งหมด (pairwise / cross_view / hidden_behind / tail_stepdown / silhouette_notch /
+    tailzone / largebox) ยังทำงานครบทุกตัว
+================================================================================
 v26.07 (ผู้ใช้ชี้จุดด้วยลูกศรบนภาพ BACK view ของ EA10-01 แล้วสั่งทดสอบ 15-Sep-2026):
   "เมื่อลากเส้นแล้ว พบว่าบริเวณภายในที่ลูกศรชี้ เกิดสีขาว ทั้งๆที่ถ้ามีกล่องวางสูง
    จะไม่มีทางเกิดสีขาวได้"
@@ -1524,15 +1588,31 @@ CHANGELOG (สรุปจาก session พัฒนา Phase 1-3 + Rule Engine
 import base64
 import io
 import json
+import math
+import os
 import re
+import sys
 import gc
 import traceback
+from collections import Counter
 
 import numpy as np
 import PIL.Image
 import PIL.ImageDraw
+from PIL import Image
 import fitz  # PyMuPDF
 import functions_framework
+
+# v26.08 NEW: opencv ใช้เฉพาะโมดูลลงสี wireframe (ดู COLORIZER SECTION ด้านล่าง)
+# ถ้าไม่มี opencv ติดตั้งอยู่ ระบบจะทำงานได้ตามปกติทุกประการ เพียงแต่ไฟล์ wireframe
+# จะวิเคราะห์ไม่ได้เหมือนเดิม (fail-safe - ไม่ทำให้ทั้งระบบล้มเหลว)
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except Exception as _cv2_err:  # pragma: no cover
+    cv2 = None
+    _CV2_AVAILABLE = False
+    print(f"[COLORIZER] ไม่พบ opencv ({_cv2_err}) - ปิดโมดูลลงสี wireframe")
 from scipy import ndimage
 from scipy.signal import find_peaks
 from scipy.ndimage import median_filter
@@ -9238,6 +9318,1638 @@ def risk_abs_box(risk, result):
 
 
 # ============================================================================
+# v26.08 NEW: COLORIZER SECTION - ลงสีไฟล์ wireframe อัตโนมัติก่อนวิเคราะห์
+# ============================================================================
+# ที่มา (ผู้ใช้แจ้ง 15-Sep-2026): "ไฟล์ที่นำมาเข้าโปรแกรมหากเป็นแบบประเภท wireframe
+# จะไม่สามารถวิเคราะห์ได้ ดังนั้นผมจึงสร้างโปรแกรมลงสี เป็น code อีกชุดสำหรับรันบน colab
+# แต่ความต้องการแท้จริงคือ ต้องการให้โปรแกรมหลัก เมื่อพบไฟล์ประเภท wireframe ให้ทำการ
+# ลงสีและนำเข้ากระบวนการวิเคราะห์ต่อไป"
+#
+# ปัญหาที่แก้: ระบบวิเคราะห์ทั้งหมดตั้งอยู่บน vivid_cargo_mask (สีสดของกล่องสินค้า) และ
+# _p1b_is_structural_container_color (สีโครงสร้างตู้) - ไฟล์ manifest แบบ wireframe เป็น
+# ภาพเส้นขาว-ดำล้วน ไม่มีสีใดๆ เลย ทำให้ทุกกลไกตรวจไม่พบสินค้าแม้แต่ชิ้นเดียว
+#
+# วิธีแก้: ผนวกโมดูลลงสี (MaxLoad Pro Manifest Colorizer v29.8 ซึ่งผู้ใช้พัฒนาและทดสอบ
+# บน Colab จนใช้งานได้จริงแล้ว) เข้ามาเป็นขั้นตอน "ก่อน" กระบวนการวิเคราะห์เดิมทั้งหมด
+#   PDF เข้า -> ตรวจว่าเป็น wireframe ไหม -> ถ้าใช่ ลงสี -> ส่ง PDF ที่ลงสีแล้วเข้า
+#   pipeline เดิมทุกประการ (ไม่แตะตรรกะการวิเคราะห์เลยแม้แต่บรรทัดเดียว)
+#
+# สิ่งที่ตัดออกจากต้นฉบับ Colab (เฉพาะส่วนที่ผูกกับ Colab เท่านั้น):
+#   google.colab.files.upload() / matplotlib การแสดงผล / run() / pip-install ตอน import
+#   / process_pdf ที่อ่าน-เขียนไฟล์บนดิสก์ (เปลี่ยนเป็นทำงานในหน่วยความจำล้วน)
+# ตรรกะการลงสีทั้งหมด (IsoScene, seed/grow, demote/promote/repair ทุกตัว, v29.1-v29.8)
+# คงไว้ทุกบรรทัด ไม่แก้ไขแม้แต่ค่าเดียว
+#
+# ยืนยันความเข้ากันได้ของสี (วัดด้วยตัวจำแนกของโปรแกรมหลักเอง):
+#   สีที่ colorizer ผลิต        vivid_cargo?  structural?  ผลการจำแนก
+#   (0,255,255) cyan สว่าง          ใช่          ไม่        กล่องสินค้า  ถูกต้อง
+#   (0,216,216) cyan เข้ม           ใช่          ไม่        กล่องสินค้า  ถูกต้อง
+#   (245,242,155) ครีม              ไม่          ใช่        โครงสร้างตู้ ถูกต้อง
+#   -> ครีมเข้าเกณฑ์ R=G, R-B=90 (อยู่ในช่วง 75-125) ของ _p1b_is_structural_container_color
+#      พอดี | cyan มี B-R=255 เกินเพดาน 125 จึงไม่ถูกเข้าใจผิดว่าเป็นโครงสร้าง
+#   -> ไม่ต้องปรับ threshold สีใดๆ ในโปรแกรมหลักเลย
+#   นอกจากนี้ตัวอักษร SKU สีดำถูกรักษาไว้ (paint() เขียน original_black กลับทับเสมอ)
+#   ทำให้ Phase 1B ยังใช้ text_px / tilt_px แยกแยะหน้ากล่องได้ตามปกติ
+#
+# ตรวจสอบแล้วว่าไม่มีชื่อฟังก์ชัน/ตัวแปรใดชนกับโปรแกรมหลักเลยแม้แต่ชื่อเดียว
+# (250 ชื่อในโปรแกรมหลัก vs 110 ชื่อในโมดูลลงสี - intersection = 0)
+# ============================================================================
+
+COLORIZER_VERSION = "v29.8"
+COLOR_BOX_CYAN = np.array([255, 255, 0], dtype=np.float32)
+COLOR_CREAM = np.array([155, 242, 245], dtype=np.uint8)
+SHADE_TOP, SHADE_RIGHT, SHADE_LEFT = 1.10, 1.00, 0.85
+
+ISO_SLANT = math.degrees(math.atan(0.5))
+DIR_TOL = 11.0
+FACE_TOP, FACE_LEFT, FACE_RIGHT, FACE_OTHER = "TOP", "LEFT", "RIGHT", "OTHER"
+
+TILT_MIN_DEG = 7.0
+ANCHOR_TILT_PX = 400
+ANCHOR_TILT_CNT = 2
+SKU_TEXT_MIN = 150
+GROUND_MIN_FRAC = 0.50
+MIN_DEMOTE_AREA_FRAC = 0.0035
+# --- v28: silhouette-rim rule -------------------------------------------
+# A thin strip that lies on the OUTER SILHOUETTE of the drawing (open sky
+# directly above it, or open ground directly below it) and carries no SKU
+# label is truck shell / floor rim - never cargo.  These strips are far too
+# small to reach MIN_DEMOTE_AREA_FRAC, so v27 never examined them and they
+# survived straight out of the v19 growing stage.
+RIM_MAX_FACE_FRAC = 0.35   # vs median labelled face area
+RIM_EXTERIOR_MIN = 0.55    # fraction of boundary open to background
+
+
+class IsoScene:
+    def __init__(self, img_bgr):
+        self.img = img_bgr
+        self.h, self.w = img_bgr.shape[:2]
+        self._split_ink(); self._flood_interior(); self._label_regions(); self._count_text()
+        self._face_cache = {}; self._below_cache = {}
+
+    def _split_ink(self):
+        gray = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
+        self.gray = gray
+        self.original_black = gray < 135
+        black = (gray < 140).astype(np.uint8) * 255
+        n, lab, st, _ = cv2.connectedComponentsWithStats(black, connectivity=8)
+        cad = np.zeros_like(gray); txt = np.zeros_like(gray)
+        for k in range(1, n):
+            tw, th = st[k, 2], st[k, 3]; ak = st[k, 4]
+            asp = float(tw) / (th + 1e-5)
+            is_text = ((tw <= 160 and th <= 35 and ak < 950) or (th < 18 and tw <= 170)
+                       or (tw <= 200 and th <= 55 and ak < 3500 and asp > 0.25))
+            if is_text and not (th > 55 or tw > 200 or ak >= 3500):
+                txt[lab == k] = 255
+            else:
+                cad[lab == k] = 255
+        self.cad_lines, self.text_mask = cad, txt
+
+    def _flood_interior(self):
+        sealed = cv2.dilate(self.cad_lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+        flood = (255 - sealed).copy()
+        m = np.zeros((self.h + 2, self.w + 2), np.uint8)
+        for sd in [(0, 0), (self.w - 1, 0), (0, self.h - 1), (self.w - 1, self.h - 1),
+                   (self.w // 2, 0), (self.w // 2, self.h - 1)]:
+            if flood[sd[1], sd[0]] == 255:
+                cv2.floodFill(flood, m, sd, 50)
+        self.sealed_cad, self.inside = sealed, flood == 255
+
+    def _label_regions(self):
+        n, lab, st, cen = cv2.connectedComponentsWithStats(
+            self.inside.astype(np.uint8) * 255, connectivity=4)
+        self.n, self.labels, self.stats, self.cent = n, lab, st, cen
+
+    def _count_text(self):
+        self.text_px = np.bincount(self.labels[self.text_mask == 255], minlength=self.n)
+        black = (self.gray < 140).astype(np.uint8) * 255
+        n, lab, st, _ = cv2.connectedComponentsWithStats(black, connectivity=8)
+        self.tilt_px = np.zeros(self.n, np.int64)
+        self.tilt_cnt = np.zeros(self.n, np.int64)
+        self.horiz_px = np.zeros(self.n, np.int64)
+        for k in range(1, n):
+            tw, th, ak = st[k, 2], st[k, 3], st[k, 4]
+            if not (20 < ak < 4000 and tw <= 220 and th <= 60):
+                continue
+            pts = cv2.findNonZero((lab == k).astype(np.uint8))
+            if pts is None or len(pts) < 5:
+                continue
+            a = abs(cv2.minAreaRect(pts)[2])
+            if a > 45: a = 90 - a
+            cy = min(st[k, 1] + th // 2, self.h - 1); cx = min(st[k, 0] + tw // 2, self.w - 1)
+            rid = int(self.labels[cy, cx])
+            if rid == 0: continue
+            if a >= TILT_MIN_DEG:
+                self.tilt_px[rid] += ak; self.tilt_cnt[rid] += 1
+            else:
+                self.horiz_px[rid] += ak
+
+    def area(self, r): return int(self.stats[r, 4])
+    def bx(self, r): return int(self.stats[r, 0])
+    def by(self, r): return int(self.stats[r, 1])
+    def bw(self, r): return int(self.stats[r, 2])
+    def bh(self, r): return int(self.stats[r, 3])
+
+    def face_type(self, rid):
+        if rid in self._face_cache: return self._face_cache[rid]
+        x0, y0 = self.bx(rid), self.by(rid)
+        sub = (self.labels[y0:y0 + self.bh(rid), x0:x0 + self.bw(rid)] == rid).astype(np.uint8) * 255
+        cnts, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            self._face_cache[rid] = FACE_OTHER; return FACE_OTHER
+        c = max(cnts, key=cv2.contourArea); peri = cv2.arcLength(c, True)
+        if peri <= 0:
+            self._face_cache[rid] = FACE_OTHER; return FACE_OTHER
+        ap = cv2.approxPolyDP(c, 0.012 * peri, True).reshape(-1, 2)
+        wd = wu = wv = wh = 0.0
+        for i in range(len(ap)):
+            p, q = ap[i], ap[(i + 1) % len(ap)]
+            dx, dy = float(q[0] - p[0]), float(q[1] - p[1]); ln = math.hypot(dx, dy)
+            if ln < 6: continue
+            ang = math.degrees(math.atan2(dy, dx)) % 180.0
+            if abs(ang - ISO_SLANT) <= DIR_TOL: wd += ln
+            elif abs(ang - (180.0 - ISO_SLANT)) <= DIR_TOL: wu += ln
+            elif abs(ang - 90.0) <= DIR_TOL: wv += ln
+            elif ang <= DIR_TOL or ang >= 180.0 - DIR_TOL: wh += ln
+        tot = wd + wu + wv + wh
+        if tot <= 0: ft = FACE_OTHER
+        elif wv / tot < 0.12 and (wd + wu) / tot > 0.55: ft = FACE_TOP
+        elif wv / tot >= 0.12 and wd >= wu: ft = FACE_LEFT
+        elif wv / tot >= 0.12: ft = FACE_RIGHT
+        else: ft = FACE_OTHER
+        self._face_cache[rid] = ft
+        return ft
+
+    def below(self, rid, gap_lo=4, gap_hi=22):
+        if rid in self._below_cache: return self._below_cache[rid]
+        x0, y0, ww, hh = self.bx(rid), self.by(rid), self.bw(rid), self.bh(rid)
+        sub = self.labels[y0:y0 + hh, x0:x0 + ww] == rid
+        cnt = Counter()
+        if sub.any():
+            has = sub.any(axis=0)
+            low = hh - 1 - np.argmax(sub[::-1, :], axis=0)
+            step = max(1, ww // 90)
+            for cx in range(0, ww, step):
+                if not has[cx]: continue
+                gy, gx = y0 + int(low[cx]), x0 + cx
+                for g in range(gap_lo, gap_hi):
+                    yy = gy + g
+                    if yy >= self.h: break
+                    v = int(self.labels[yy, gx])
+                    if v != 0 and v != rid:
+                        cnt[v] += 1; break
+        self._below_cache[rid] = cnt
+        return cnt
+
+    def support_fraction(self, rid, target):
+        c = self.below(rid); tot = sum(c.values())
+        if tot == 0: return 0.0
+        return sum(v for k, v in c.items() if k in target) / tot
+
+    def _probe(self, rid, upward, gap=26):
+        x0, y0, w, h = self.bx(rid), self.by(rid), self.bw(rid), self.bh(rid)
+        sub = self.labels[y0:y0 + h, x0:x0 + w] == rid
+        if not sub.any():
+            return 0.0
+        hasc = sub.any(axis=0)
+        edge = np.argmax(sub, axis=0) if upward else h - 1 - np.argmax(sub[::-1, :], axis=0)
+        step = max(1, w // 80)
+        tot = bg = 0
+        for cx in range(0, w, step):
+            if not hasc[cx]:
+                continue
+            tot += 1
+            gy, gx = y0 + int(edge[cx]), x0 + cx
+            hit = False
+            for g in range(4, gap):
+                yy = gy - g if upward else gy + g
+                if yy < 0 or yy >= self.h:
+                    break
+                if int(self.labels[yy, gx]) not in (0, rid):
+                    hit = True
+                    break
+            if not hit:
+                bg += 1
+        return bg / tot if tot else 0.0
+
+    def exterior_fraction(self, rid):
+        """How exposed this region is to open background above or below."""
+        return max(self._probe(rid, True), self._probe(rid, False))
+
+    def median_face_area(self):
+        if getattr(self, "_medface", None) is None:
+            lab = [self.area(r) for r in range(1, self.n)
+                   if self.text_px[r] > 1200 and self.face_type(r) != FACE_OTHER]
+            self._medface = float(np.median(lab)) if lab else float(self.h * self.w * 0.008)
+        return self._medface
+
+    def horizontal_neighbours(self, rid, reach=26):
+        x0, y0, ww, hh = self.bx(rid), self.by(rid), self.bw(rid), self.bh(rid)
+        sub = self.labels[y0:y0 + hh, x0:x0 + ww] == rid
+        left, right = Counter(), Counter()
+        rows = sub.any(axis=1); step = max(1, hh // 70)
+        for ry in range(0, hh, step):
+            if not rows[ry]: continue
+            cols = np.where(sub[ry])[0]
+            for side, cnt, d in ((cols[0], left, -1), (cols[-1], right, +1)):
+                for g in range(3, reach):
+                    xx = x0 + int(side) + d * g
+                    if xx < 0 or xx >= self.w: break
+                    v = int(self.labels[y0 + ry, xx])
+                    if v != 0 and v != rid:
+                        cnt[v] += 1; break
+        return left, right
+
+
+def _seed_front(S):
+    h, w = S.h, S.w; box = set()
+    for i in range(1, S.n):
+        cx, cy = S.cent[i]; area = S.area(i)
+        aspect = S.bw(i) / (S.bh(i) + 1e-5); bottom = S.by(i) + S.bh(i); txt = S.text_px[i]
+        is_roof = (cy < h * 0.18) or (cx > w * 0.44 and cy < h * 0.21)
+        rules = [(cy > h * 0.64 and cx < w * 0.42 and aspect > 1.50 and txt < 50),
+                 (cy > h * 0.73 and txt < 50), (area > h * w * 0.08),
+                 (cy > h * 0.55 and aspect > 2.5 and txt < 10),
+                 (cy > h * 0.60 and cx > w * 0.50 and aspect > 1.8 and txt < 50),
+                 (bottom > h * 0.82 and aspect > 1.2 and txt < 30),
+                 (cy > h * 0.60 and S.bw(i) > w * 0.30 and txt < 20)]
+        if txt >= 4 and not (is_roof or any(rules)) and area < h * w * 0.08:
+            box.add(i)
+    return box
+
+
+def _grow_front(S, box):
+    h, w = S.h, S.w; changed = True
+    while changed:
+        changed = False
+        for i in list(box):
+            bx_i, by_i, bw_i, bh_i = S.bx(i), S.by(i), S.bw(i), S.bh(i)
+            area_i, bottom_i = S.area(i), by_i + bh_i
+            for j in range(1, S.n):
+                if j in box: continue
+                bx_j, by_j, bw_j, bh_j = S.bx(j), S.by(j), S.bw(j), S.bh(j)
+                aspect_j = bw_j / (bh_j + 1e-5); area_j = S.area(j)
+                cx_j, cy_j = S.cent[j]; bottom_j = by_j + bh_j
+                if cx_j < w * 0.35 and cy_j < h * 0.65 and aspect_j < 0.70: continue
+                if cy_j < h * 0.18: continue
+                if cx_j > w * 0.44 and cy_j < h * 0.27: continue
+                if bottom_j > h * 0.85 and S.text_px[j] < 30: continue
+                if cy_j > h * 0.75 and aspect_j > 1.2 and S.text_px[j] < 30: continue
+                if cy_j > h * 0.60 and bw_j > w * 0.30 and S.text_px[j] < 20: continue
+                if bottom_j > bottom_i + 12 and (aspect_j > 1.5 or area_j > h * w * 0.03): continue
+                ov_v = min(bottom_i, bottom_j) - max(by_i, by_j)
+                is_side = (abs((bx_j + bw_j) - bx_i) <= 7 and ov_v > 0.20 * min(bh_i, bh_j))
+                if is_side and (bh_j > bh_i * 1.3 or area_j > area_i * 2.5): is_side = False
+                ov_h = min(bx_i + bw_i, bx_j + bw_j) - max(bx_i, bx_j)
+                is_top = (abs(bottom_j - by_i) <= 18 and ov_h > 0.20 * min(bw_i, bw_j) and aspect_j > 1.05)
+                if is_top and (bw_j > bw_i * 1.5 or area_j > area_i * 2.5): is_top = False
+                if is_side or is_top:
+                    box.add(j); changed = True
+    return box
+
+
+def _is_wedge(S, rid, eps=0.025):
+    x0, y0 = S.bx(rid), S.by(rid)
+    sub = (S.labels[y0:y0 + S.bh(rid), x0:x0 + S.bw(rid)] == rid).astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts: return False
+    c = max(cnts, key=cv2.contourArea); peri = cv2.arcLength(c, True)
+    if peri <= 0: return False
+    return len(cv2.approxPolyDP(c, eps * peri, True)) == 3
+
+
+def _seed_back(S):
+    h, w = S.h, S.w; min_area = max(100, int(h * w * 0.00004)); box = set()
+    for i in range(1, S.n):
+        if S.area(i) < min_area or _is_wedge(S, i): continue
+        bw_, bh_ = S.bw(i), S.bh(i); cx, cy = S.cent[i]
+        aspect = bw_ / (bh_ + 1e-5); bottom = S.by(i) + bh_; txt = S.text_px[i]
+        if aspect > 3.0 or S.area(i) > h * w * 0.04: continue
+        if cy > h * 0.78 and txt < 20: continue
+        if cy > h * 0.68 and aspect > 1.8 and txt < 20: continue
+        if bottom > h * 0.85 and txt < 30: continue
+        if cy > h * 0.65 and bw_ > w * 0.25 and txt < 20: continue
+        if txt >= 4:
+            box.add(i); continue
+        ys, xs = np.where(S.labels == i)
+        if len(xs):
+            xmax = xs.max(); rys = ys[xs >= xmax - 3]
+            rh = (rys.max() - rys.min() + 1) if len(rys) else 0
+            if cx > w * 0.50 and rh < bh_ * 0.25: continue
+        if txt >= 1: box.add(i)
+    return box
+
+
+def _grow_back(S, box):
+    h, w = S.h, S.w; min_area = max(100, int(h * w * 0.00004)); changed = True
+    while changed:
+        changed = False
+        for i in list(box):
+            bx_i, by_i, bw_i, bh_i = S.bx(i), S.by(i), S.bw(i), S.bh(i)
+            for j in range(1, S.n):
+                if j in box or S.area(j) < min_area: continue
+                bx_j, by_j, bw_j, bh_j = S.bx(j), S.by(j), S.bw(j), S.bh(j)
+                cx_j, cy_j = S.cent[j]; asp_j = bw_j / (bh_j + 1e-5)
+                if cy_j > h * 0.80 and S.text_px[j] < 20: continue
+                if cy_j > h * 0.70 and asp_j > 1.8 and S.text_px[j] < 20: continue
+                if (by_j + bh_j) > h * 0.85 and S.text_px[j] < 30: continue
+                if cy_j > h * 0.65 and bw_j > w * 0.25 and S.text_px[j] < 20: continue
+                ov_v = min(by_i + bh_i, by_j + bh_j) - max(by_i, by_j)
+                is_side = (abs((bx_j + bw_j) - bx_i) <= 8 and ov_v > 0.15 * min(bh_i, bh_j))
+                is_side2 = (abs(bx_j - (bx_i + bw_i)) <= 8 and ov_v > 0.15 * min(bh_i, bh_j))
+                ov_h = min(bx_i + bw_i, bx_j + bw_j) - max(bx_i, bx_j)
+                is_top = (abs((by_j + bh_j) - by_i) <= 22 and ov_h > 0.15 * min(bw_i, bw_j))
+                if is_side or is_side2:
+                    if bh_j > bh_i * 1.5 or S.area(j) > S.area(i) * 2.5:
+                        is_side = is_side2 = False
+                    ys, xs = np.where(S.labels == j)
+                    if len(xs):
+                        if is_side:
+                            xmin = xs.min(); l = ys[xs <= xmin + 3]
+                            if (l.max() - l.min() + 1 if len(l) else 0) < bh_j * 0.25: is_side = False
+                        if is_side2:
+                            xmax = xs.max(); r = ys[xs >= xmax - 3]
+                            if (r.max() - r.min() + 1 if len(r) else 0) < bh_j * 0.25: is_side2 = False
+                if is_top and (bw_j > bw_i * 1.5 or asp_j > 3.0 or S.area(j) > S.area(i) * 2.5):
+                    is_top = False
+                if (is_side or is_side2 or is_top) and not _is_wedge(S, j):
+                    box.add(j); changed = True
+    return box
+
+
+def grounded_cargo(S):
+    min_area = max(80, int(S.h * S.w * 0.0005))
+    grounded = set()
+    for r in range(1, S.n):
+        if S.area(r) < min_area: continue
+        ft = S.face_type(r)
+        if ft in (FACE_LEFT, FACE_RIGHT) and S.text_px[r] >= SKU_TEXT_MIN:
+            grounded.add(r); continue
+        if S.tilt_px[r] >= ANCHOR_TILT_PX and S.tilt_cnt[r] >= ANCHOR_TILT_CNT:
+            grounded.add(r)
+    changed = True
+    while changed:
+        changed = False
+        for r in range(1, S.n):
+            if r in grounded or S.area(r) < min_area: continue
+            if S.support_fraction(r, grounded) >= GROUND_MIN_FRAC:
+                grounded.add(r); changed = True
+    return grounded
+
+
+def demote_unsupported_planes(S, box, report):
+    grounded = grounded_cargo(S); S.grounded = grounded
+    min_area = S.h * S.w * MIN_DEMOTE_AREA_FRAC
+    for r in sorted(box, key=lambda x: -S.area(x)):
+        if S.face_type(r) != FACE_TOP or S.area(r) < min_area: continue
+        if r in grounded: continue
+        box.discard(r)
+        report.append(dict(action="demote", region=int(r), face=FACE_TOP, area=int(S.area(r)),
+                           support=round(S.support_fraction(r, grounded), 3),
+                           text_px=int(S.text_px[r]),
+                           reason="ungrounded plane -> truck floor", defect_class="OVERPAINT"))
+    return box
+
+
+def demote_silhouette_rim(S, box, report):
+    """v28 - remove unlabelled slivers lying on the outer silhouette.
+
+    Fixes the two circled defects:
+      AC05-03 front r27/r13 - cyan rim strip along the top ridge
+      AA02-01 front r278    - cyan floor strip at the base of the stack
+    In both cases the very same physical band was painted CREAM elsewhere
+    (r1/r36, r281), so the drawing was internally inconsistent - proof that
+    these are colouring artefacts and not real cargo.
+    """
+    med = S.median_face_area()
+    for r in sorted(box, key=lambda x: S.area(x)):
+        if S.text_px[r] > 0:
+            continue                      # any SKU ink -> leave alone
+        if S.area(r) >= RIM_MAX_FACE_FRAC * med:
+            continue                      # full-size face -> leave alone
+        ext = S.exterior_fraction(r)
+        if ext < RIM_EXTERIOR_MIN:
+            continue                      # enclosed by cargo -> genuine face
+        box.discard(r)
+        report.append(dict(action="demote_rim", region=int(r), face=S.face_type(r),
+                           area=int(S.area(r)), exterior=round(ext, 2),
+                           rel_face=round(S.area(r) / med, 3),
+                           reason="unlabelled sliver on outer silhouette",
+                           defect_class="OVERPAINT"))
+    return box
+
+
+def promote_supported_faces(S, box, report):
+    max_box = S.h * S.w * 0.05
+    changed, rounds = True, 0
+    while changed and rounds < 12:
+        changed = False; rounds += 1
+        for j in range(1, S.n):
+            if j in box or S.area(j) > max_box: continue
+            ft = S.face_type(j)
+            if ft == FACE_TOP and S.area(j) > 400:
+                if (S.text_px[j] == 0 and S.area(j) < RIM_MAX_FACE_FRAC * S.median_face_area()
+                        and S.exterior_fraction(j) >= RIM_EXTERIOR_MIN):
+                    continue
+                if S.support_fraction(j, box) >= 0.55:
+                    box.add(j); changed = True
+                    report.append(dict(action="promote", region=int(j), face=ft,
+                                       area=int(S.area(j)), reason="top face resting on cargo",
+                                       defect_class="MISS"))
+                    continue
+            narrow = min(S.bw(j), S.bh(j))
+            if narrow <= max(6, int(0.035 * min(S.h, S.w))) and S.area(j) > 150:
+                left, right = S.horizontal_neighbours(j)
+                lt, rt = sum(left.values()), sum(right.values())
+                if lt and rt:
+                    lb = sum(v for k, v in left.items() if k in box) / lt
+                    rb = sum(v for k, v in right.items() if k in box) / rt
+                    if lb >= 0.6 and rb >= 0.6 and S.exterior_fraction(j) < RIM_EXTERIOR_MIN:
+                        box.add(j); changed = True
+                        report.append(dict(action="promote", region=int(j), face=ft,
+                                           area=int(S.area(j)),
+                                           reason="narrow face flanked by cargo",
+                                           defect_class="MISS"))
+    return box
+
+
+def _shade_for(S, rid):
+    asp = S.bw(rid) / (S.bh(rid) + 1e-5); cx = S.cent[rid][0]
+    k = SHADE_TOP if asp > 1.25 else (SHADE_LEFT if cx < S.w * 0.48 else SHADE_RIGHT)
+    return np.clip(COLOR_BOX_CYAN * k, 0, 255).astype(np.uint8)
+
+
+def paint(S, box):
+    canvas = np.ones_like(S.img, dtype=np.uint8) * 255
+    canvas[S.inside] = COLOR_CREAM
+    for r in box:
+        canvas[S.labels == r] = _shade_for(S, r)
+    canvas[S.original_black] = S.img[S.original_black]
+    return canvas
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    S = IsoScene(img_bgr); report = []
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    baseline = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(baseline),
+                         final_boxes=len(box), actions=report, box=sorted(box))
+    return out
+
+
+def colorize_front_view(i): return colorize_view(i, "front")
+def colorize_back_view(i): return colorize_view(i, "back")
+
+
+# ===========================================================================
+#  v29 - TARGETED REPAIR OF THE REVIEWER-MARKED DEFECTS ONLY
+# ---------------------------------------------------------------------------
+#  Everything above this line is v28, byte for byte.  Nothing in the v28
+#  pipeline is modified, re-tuned or re-ordered - the two functions below run
+#  AFTER it and touch only regions that satisfy very narrow conditions, so a
+#  view with no marked defect comes out pixel-identical to v28.
+#
+#  Design note
+#    An earlier attempt added a broad "occluded face" rule.  It repainted ~25
+#    regions nobody had asked about and damaged parts of v28 that were already
+#    correct.  The rules below were instead derived from, and validated
+#    against, the 18 circled spots only.
+#
+#  The hard part is telling a real cargo face apart from the TRUCK TOP RAIL,
+#  because both are small cream shapes sitting on CYAN boxes.  Measured across
+#  all 8 files the rail gives itself away in two ways:
+#    * its segments repeat, so each one touches another cream segment of
+#      almost the same size            ->  chain > 0
+#    * an isolated rail piece is fully exposed to background above AND fully
+#      supported below AND far smaller than a real face
+#                                      ->  ext >= .99 and sup >= .99 and rel < .15
+#  A real cargo face is instead ringed by CYAN over most of its boundary.
+# ===========================================================================
+
+# --- MISS repair (17 of the 18 marked spots) -------------------------------
+PROMO_MIN_AREA  = 300
+PROMO_REL_MAX   = 0.65   # a fragment is never as big as a whole face
+PROMO_SUP_MIN   = 0.50   # it must rest on cargo
+PROMO_CBOX_MIN  = 0.54   # and be ringed by cargo  (lowest marked spot = 0.55)
+PROMO_EXT_ALT   = 0.57   # ...unless it is plainly enclosed
+RAIL_EXT, RAIL_SUP, RAIL_REL = 0.99, 0.99, 0.15
+
+# --- OVERPAINT repair (AA02-01 back) ---------------------------------------
+DEMOTE_SUP_MAX  = 0.05   # rests on nothing at all
+DEMOTE_EXT_MIN  = 0.55
+DEMOTE_REL_MIN  = 0.30   # a real deck plane, not a speck
+DEMOTE_REL_MAX  = 0.90
+DEMOTE_TXT_MIN  = 300    # must carry a dimension callout
+
+_DIRS = ((0, 1), (0, -1), (1, 0), (-1, 0),
+         (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
+def _ring(S, rid, box, reach=18):
+    """(fraction of boundary facing cargo, Counter of touching region ids)"""
+    m = (S.labels == rid).astype(np.uint8)
+    er = cv2.erode(m, np.ones((3, 3), np.uint8))
+    ys, xs = np.where((m - er).astype(bool))
+    if len(ys) == 0:
+        return 0.0, Counter()
+    step = max(1, len(ys) // 350)
+    ys, xs = ys[::step], xs[::step]
+    tot = hit = 0
+    touch = Counter()
+    for y, x in zip(ys, xs):
+        tot += 1
+        near_box = False
+        seen = set()
+        for dy, dx in _DIRS:
+            for g in range(2, reach):
+                yy, xx = y + dy * g, x + dx * g
+                if yy < 0 or yy >= S.h or xx < 0 or xx >= S.w:
+                    break
+                v = int(S.labels[yy, xx])
+                if v == rid or v == 0:
+                    continue
+                seen.add(v)
+                if v in box:
+                    near_box = True
+                break
+        for v in seen:
+            touch[v] += 1
+        if near_box:
+            hit += 1
+    return (hit / tot if tot else 0.0), touch
+
+
+def repair_marked_faces(S, box, report):
+    """Paint the cargo faces that were circled as MISS."""
+    med = S.median_face_area()
+    cand = [r for r in range(1, S.n)
+            if r not in box and S.area(r) >= PROMO_MIN_AREA
+            and S.text_px[r] == 0 and S.area(r) / med < PROMO_REL_MAX]
+    candset = set(cand)
+    for r in cand:
+        sup = S.support_fraction(r, box)
+        if sup < PROMO_SUP_MIN:
+            continue
+        cbox, touch = _ring(S, r, box)
+        if cbox < PROMO_CBOX_MIN:
+            continue
+        ar = S.area(r)
+        chain = [k for k in touch
+                 if k in candset and 0.35 <= S.area(k) / ar <= 2.8 and touch[k] >= 4]
+        ext = S.exterior_fraction(r)
+        if chain and ext >= PROMO_EXT_ALT:
+            continue                      # repeating rail segment
+        if ext >= RAIL_EXT and sup >= RAIL_SUP and ar / med < RAIL_REL:
+            continue                      # isolated rail piece
+        box.add(r)
+        report.append(dict(action="repair_face", region=int(r), area=int(ar),
+                           rel=round(ar / med, 3), sup=round(sup, 2),
+                           cbox=round(cbox, 2), ext=round(ext, 2),
+                           defect_class="MISS"))
+    return box
+
+
+def repair_marked_planes(S, box, report):
+    """Un-paint a deck plane that rests on nothing (circled OVERPAINT).
+
+    v28's rim rule skips anything carrying text, so a floor plane with a
+    horizontal dimension callout printed across it stayed CYAN.  Here text is
+    allowed - but ONLY when none of it is tilted.  Tilted ink means an in-plane
+    SKU label, i.e. real cargo.  Relaxing `tilt_px == 0` to `< 400` was tested
+    and it wrongly stripped three truck wall panels on AB03-01 back
+    (tilt_px 131-269) that v28 had already got right.
+    """
+    med = S.median_face_area()
+    for r in sorted(box, key=lambda x: -S.area(x)):
+        if S.tilt_px[r] > 0:
+            continue
+        if S.text_px[r] < DEMOTE_TXT_MIN:
+            continue
+        if not (DEMOTE_REL_MIN <= S.area(r) / med < DEMOTE_REL_MAX):
+            continue
+        if S.support_fraction(r, box - {r}) > DEMOTE_SUP_MAX:
+            continue
+        if S.exterior_fraction(r) < DEMOTE_EXT_MIN:
+            continue
+        box.discard(r)
+        report.append(dict(action="repair_plane", region=int(r),
+                           area=int(S.area(r)), rel=round(S.area(r) / med, 3),
+                           defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v29(img_bgr, view="front", trace=False):
+    S = IsoScene(img_bgr)
+    report = []
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    # ---- v28 pipeline, untouched ----------------------------------------
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    v28box = set(box)
+    # ---- v29 targeted repair --------------------------------------------
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v28box=sorted(v28box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v291(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v291(i, "front")
+def colorize_back_view(i):  return colorize_v291(i, "back")
+
+
+# ===========================================================================
+#  v29.1 - TRUCK TOP-RAIL guard  (AC05-01 front, 2 circled spots)
+# ---------------------------------------------------------------------------
+#  The container's top rail is a long thin parallelogram strip that runs along
+#  the upper silhouette and rests on the box top faces below it.  Two of them
+#  were painted CYAN on AC05-01 front: r1 (5,216 px) came from the v29 repair
+#  rule itself, r2 (14,122 px) came straight out of v28.
+#
+#  Separating a rail from a genuinely occluded box top face is delicate -
+#  measured over all 8 files, "what is below me", "open sky above me" and the
+#  left/right neighbour pattern are IDENTICAL for both.  The one thing that
+#  does separate them is the shape of the strip itself:
+#
+#                       ext    sup    aspect   fill
+#     rail   (cream)   1.00   1.00     4.33    0.90
+#     rail   (cream)   1.00   1.00    10.95    0.96
+#     box top (cyan)    1.00   1.00     4.44    0.83   <- AC05-01 back r2
+#     box top (cyan)    0.92   0.91     9.75    0.94   <- AB03-02 back r47
+#
+#  A rail is a machine-drawn constant-width band, so it fills its bounding
+#  parallelogram almost completely.  An occluded box face is a clipped
+#  polygon and leaves more slack.  The FILL margin is only 0.90 vs 0.83, so
+#  every other condition is kept deliberately strict to stop this rule from
+#  reaching anything else - verified region-by-region over all 16 views.
+# ===========================================================================
+RAIL_EXT_MIN  = 0.99
+RAIL_SUP_MIN  = 0.99
+RAIL_ASP_MIN  = 4.0
+RAIL_FILL_MIN = 0.86
+RAIL_REL_MAX  = 1.00
+
+
+def _strip_shape(S, rid):
+    """(aspect, fill) of the region's minimum-area rectangle."""
+    m = (S.labels == rid).astype(np.uint8)
+    pts = cv2.findNonZero(m)
+    if pts is None or len(pts) < 6:
+        return 0.0, 0.0
+    (w, h) = cv2.minAreaRect(pts)[1]
+    if w < h:
+        w, h = h, w
+    if h <= 0:
+        return 0.0, 0.0
+    return w / h, S.area(rid) / (w * h)
+
+
+def demote_top_rail(S, box, report):
+    """Un-paint the container top rail (circled OVERPAINT on AC05-01 front)."""
+    med = S.median_face_area()
+    for r in sorted(box, key=lambda x: -S.area(x)):
+        if S.text_px[r] != 0:
+            continue
+        if S.area(r) / med >= RAIL_REL_MAX:
+            continue
+        if S.exterior_fraction(r) < RAIL_EXT_MIN:
+            continue
+        if S.support_fraction(r, box - {r}) < RAIL_SUP_MIN:
+            continue
+        asp, fill = _strip_shape(S, r)
+        if asp < RAIL_ASP_MIN or fill < RAIL_FILL_MIN:
+            continue
+        box.discard(r)
+        report.append(dict(action="demote_rail", region=int(r), area=int(S.area(r)),
+                           rel=round(S.area(r) / med, 3), asp=round(asp, 2),
+                           fill=round(fill, 2), defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v291(img_bgr, view="front", trace=False):
+    S = IsoScene(img_bgr)
+    report = []
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    prev = set(box)
+    box = demote_top_rail(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v29box=sorted(prev), box=sorted(box))
+    return out
+
+
+# ===========================================================================
+#  v29.3 - ENCLOSED-FACE rule  (CC45-01 front, จุดที่วงกลมเหลืองไว้)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    หน้าบนกล่อง DITHC-P1 กลางกองซ้าย (region 241, 232 x 144 px) ยังเป็นครีม
+#    ทั้งที่อยู่กลางกองสินค้าและมีป้าย SKU เอียงพาดอยู่
+#
+#  สาเหตุ (ไล่ทีละสเตจแล้ว)
+#    v29 repair_marked_faces ต้องการ support_fraction >= 0.50 แต่ตอนที่ถึงคิว
+#    region นี้ ชิ้นที่รองอยู่ข้างใต้ยังไม่ถูกลงสีเช่นกัน -> sup วัดได้แค่ 0.35
+#    จึงตกเกณฑ์  เป็น "miss แบบลูกโซ่": พลาดชิ้นล่างทำให้พลาดชิ้นบนตามไปด้วย
+#    (วัดตอนจบ pipeline sup ขึ้นเป็น 0.92 แล้ว - สายเกินไป)
+#
+#  หลักฟิสิกส์ที่ใช้แยก  -  ENCLOSURE
+#    พื้นตู้ / ผนัง / คานบน ต้องสัมผัสเส้นขอบนอกของภาพเสมอ จึงมี
+#    exterior_fraction สูง (ที่วัดได้จริงคือ >= 0.55 ทุกชิ้น)
+#    ส่วนหน้ากล่องที่จมอยู่กลางกอง จะไม่มีทางมองเห็นพื้นหลังเลย -> ext ~ 0
+#    ดังนั้น "ext ต่ำมาก + ถูกล้อมด้วย cyan" = cargo แน่นอน ไม่ใช่โครงตู้
+#
+#  ความเสี่ยงต่อของเดิม  -  วัดครบทั้ง 4 ไฟล์ที่มี
+#    region ที่ยังเป็นครีมและมี ext < 0.25 ทั้งหมดมีแค่ "ชิ้นเดียว" คือ r241
+#    ของ CC45  อีก 3 ไฟล์ (KB03-01 / KB03-02 / PB01) ไม่มีเลยแม้แต่ชิ้นเดียว
+#    กฎนี้จึงเข้าไม่ถึงงานที่ v29.2 ทำถูกอยู่แล้ว
+#
+#  ทำเป็นลูปจนนิ่ง (fixed point) เพื่อให้ miss แบบลูกโซ่คลายตัวได้ทั้งกอง
+# ===========================================================================
+ENC_EXT_MAX   = 0.25   # ต้องจมอยู่ในกอง แทบไม่เห็นพื้นหลังเลย
+ENC_MIN_AREA  = 300
+ENC_REL_MAX   = 1.00   # ไม่ใหญ่เกินหน้ากล่องมาตรฐาน
+ENC_CBOX_MIN  = 0.55   # ขอบส่วนใหญ่ติดกับ cargo
+ENC_SUP_MIN   = 0.30   # ยังต้องมีอะไรรองอยู่ข้างใต้บ้าง
+
+
+def repair_enclosed_faces(S, box, report):
+    """Paint faces buried inside the stack that the chained-support test missed."""
+    med = S.median_face_area()
+    pool = [r for r in range(1, S.n)
+            if r not in box and S.area(r) >= ENC_MIN_AREA
+            and S.area(r) / med < ENC_REL_MAX
+            and S.exterior_fraction(r) <= ENC_EXT_MAX]
+    changed, rounds = True, 0
+    while changed and rounds < 6:
+        changed, rounds = False, rounds + 1
+        for r in list(pool):
+            if r in box:
+                continue
+            sup = S.support_fraction(r, box)
+            if sup < ENC_SUP_MIN:
+                continue
+            cbox, _ = _ring(S, r, box)
+            if cbox < ENC_CBOX_MIN:
+                continue
+            box.add(r)
+            changed = True
+            report.append(dict(action="repair_enclosed", region=int(r),
+                               area=int(S.area(r)), rel=round(S.area(r) / med, 3),
+                               sup=round(sup, 2), cbox=round(cbox, 2),
+                               ext=round(S.exterior_fraction(r), 2),
+                               reason="face fully enclosed by cargo",
+                               defect_class="MISS"))
+    return box
+
+
+def colorize_v293(img_bgr, view="front", trace=False):
+    S = IsoScene(img_bgr)
+    report = []
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    v292box = set(box)
+    # ---- v29.3 -----------------------------------------------------------
+    box = repair_enclosed_faces(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v292box=sorted(v292box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v293(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v293(i, "front")
+def colorize_back_view(i):  return colorize_v293(i, "back")
+
+
+# ===========================================================================
+#  v29.4 - GROUND-BAND CONSISTENCY  (จุดที่วงเหลืองบน PB01-02 front / KB03-02 front)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    แถบพื้นตู้ที่ทอดยาวตามแนวขอบล่างของภาพ ถูกลงสี CYAN เป็นบางช่วง
+#      PB01-02 front : r234 r229 r213 r202 r187  (5 ช่วงติดกัน)
+#      KB03-02 front : r330                      (1 ช่วง)
+#
+#  หลักฐานว่าเป็นพื้น ไม่ใช่ cargo  -  ตัววาดเองขัดแย้งกันเอง
+#    แถบนี้ถูกซอยเป็นสี่เหลี่ยมด้านขนานขนาดเท่า ๆ กัน เรียงไล่ตามแนว isometric
+#    (ก้าวละ dx=+132, dy=-66  ->  ความชัน -0.5 พอดี) และ "ช่วงข้างเคียงบนแถบ
+#    เดียวกัน" ถูกลงเป็นครีมไว้แล้ว
+#      PB01  r267 ครีม  vs  r234/229/213/202/187 ฟ้า
+#      KB03  r248 r262 r291 r321 r344 r351 ครีม  vs  r330 ฟ้า
+#    ช่วงเดียวกันบนแถบเดียวกันเป็นได้อย่างเดียวเท่านั้น จึงเป็น artefact ชัดเจน
+#
+#  ทำไม v29.3 ปล่อยผ่านทุกด่าน  (ไล่เช็กมาแล้วทีละด่าน)
+#    demote_unsupported_planes  ต้อง area >= 0.0035*h*w = 11,382 px  แต่ได้ 7,0xx
+#    demote_silhouette_rim      ต้อง area <  0.35*med   =  6,336 px  แต่ได้ 7,0xx
+#                               และ r330 ยังติด text_px=33 จากเส้นบอกระยะที่พาดทับ
+#    demote_top_rail            ต้อง text_px == 0 และ sup >= 0.99
+#    repair_marked_planes       ต้อง text_px >= 300 และ rel 0.30-0.90
+#    -> ตกร่องระหว่างเกณฑ์พอดี  การไปขยับ threshold เดิมเสี่ยงพังของที่ถูกอยู่
+#       จึงเพิ่มกฎใหม่ที่ตัดสินด้วย "ความสม่ำเสมอของแถบ" แทนขนาดล้วน ๆ
+#
+#  กฎ
+#    region จะโดนถอดสีก็ต่อเมื่อครบทุกข้อ
+#      1. tilt_px == 0            ไม่มีป้าย SKU เอียงอยู่บนนั้น (พื้นไม่มีป้าย)
+#      2. probe ลงล่าง >= 0.60    ขอบล่างเปิดสู่พื้นหลัง = อยู่บนเส้นขอบล่างของภาพ
+#      3. rel area <= 0.60        ไม่ใช่หน้ากล่องเต็มใบ
+#      4. มีเพื่อนร่วมแถบ >= 2 ชิ้น ที่ขนาด/สัดส่วนเท่ากันและศูนย์กลางเรียงตาม
+#         แนว isometric (|ความชัน| = 0.5 +- 0.12)
+#      5. ในเพื่อนร่วมแถบนั้น มีอย่างน้อย 1 ชิ้นที่เป็นครีมอยู่แล้ว
+#    ตัดสินจาก box ชุดเดิมทั้งหมดในรอบเดียว ไม่ให้ผลลัพธ์ไหลต่อกันเป็นลูกโซ่
+#
+#  ผลกระทบที่วัดแล้ว - ดูสรุปท้ายไฟล์
+# ===========================================================================
+GB_DOWN_MIN  = 0.60    # ขอบล่างต้องเปิดสู่พื้นหลัง
+GB_REL_MAX   = 0.60    # ไม่ใช่หน้ากล่องเต็มใบ
+GB_MIN_AREA  = 800
+GB_AREA_LO, GB_AREA_HI = 0.55, 1.80    # ช่วงที่ถือว่า "ขนาดเท่ากัน"
+GB_SIDE_LO, GB_SIDE_HI = 0.60, 1.70    # ช่วงที่ถือว่า "สัดส่วนกรอบเท่ากัน"
+GB_SLOPE     = 0.50    # ความชันแนว isometric ของแถบพื้น
+GB_SLOPE_TOL = 0.12
+GB_RUN_MIN   = 2       # ต้องมีเพื่อนร่วมแถบอย่างน้อย 2 ชิ้น
+
+
+def _ground_band_pool(S):
+    """regions ที่นั่งอยู่บนเส้นขอบล่างของภาพและไม่มีป้าย SKU เอียง."""
+    pool, med = [], S.median_face_area()
+    for r in range(1, S.n):
+        if S.area(r) < GB_MIN_AREA or S.tilt_px[r] != 0:
+            continue
+        if S.area(r) / med > GB_REL_MAX:
+            continue
+        if S._probe(r, False) < GB_DOWN_MIN:
+            continue
+        pool.append(r)
+    return pool
+
+
+def _band_siblings(S, r, pool):
+    """ชิ้นอื่นบนแถบเดียวกัน: ขนาดเท่ากัน + ศูนย์กลางเรียงตามแนว isometric."""
+    ar, wr, hr = S.area(r), S.bw(r), S.bh(r)
+    cxr, cyr = S.cent[r]
+    out = []
+    for q in pool:
+        if q == r:
+            continue
+        if not (GB_AREA_LO <= S.area(q) / ar <= GB_AREA_HI):
+            continue
+        if not (GB_SIDE_LO <= S.bw(q) / wr <= GB_SIDE_HI):
+            continue
+        if not (GB_SIDE_LO <= S.bh(q) / hr <= GB_SIDE_HI):
+            continue
+        dx = S.cent[q][0] - cxr
+        dy = S.cent[q][1] - cyr
+        if abs(dx) < 0.5 * wr:          # ต้องเป็นคนละช่วงจริง ๆ
+            continue
+        if abs(abs(dy / dx) - GB_SLOPE) > GB_SLOPE_TOL:
+            continue
+        out.append(q)
+    return out
+
+
+def demote_ground_band(S, box, report):
+    """ถอดสีช่วงของแถบพื้นตู้ที่ถูกระบายฟ้าไว้ ทั้งที่ช่วงข้างเคียงเป็นครีม."""
+    pool = _ground_band_pool(S)
+    if len(pool) < GB_RUN_MIN + 1:
+        return box
+    frozen = set(box)
+    med = S.median_face_area()
+    for r in sorted(frozen, key=lambda x: -S.area(x)):
+        if r not in pool:
+            continue
+        sib = _band_siblings(S, r, pool)
+        if len(sib) < GB_RUN_MIN:
+            continue
+        cream = [q for q in sib if q not in frozen]
+        if not cream:
+            continue
+        box.discard(r)
+        report.append(dict(action="demote_band", region=int(r), area=int(S.area(r)),
+                           rel=round(S.area(r) / med, 3),
+                           run=len(sib) + 1, cream_siblings=len(cream),
+                           down=round(S._probe(r, False), 2),
+                           reason="floor band segment - neighbours on same band are cream",
+                           defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v295(img_bgr, view="front", trace=False):
+    S = IsoScene(img_bgr)
+    report = []
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    v294box = set(box)
+    # ---- v29.4 ----------------------------------------------------------
+    box = demote_ground_band(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v294box=sorted(v294box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v295(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v295(i, "front")
+def colorize_back_view(i):  return colorize_v295(i, "back")
+
+
+# ============================================================================
+#  PDF DRIVER
+# ============================================================================
+# ============================================================================
+#  v29.2 - PAGE-1-ONLY DRIVER  (colour logic below/above this line untouched)
+# ----------------------------------------------------------------------------
+#  ปัญหาที่แก้
+#    v29.1 สมมติว่า "หน้า 2 = ภาพ front (ซ้าย) + ภาพ back (ขวา)" เสมอ
+#    แต่ไฟล์จริงหลายใบ หน้า 2 คือหน้า "By Placement" ที่มีภาพย่อย 6 รูป
+#    (1000 x 789 / 1000 x 813) ซึ่งใหญ่พอจะผ่านตัวกรอง >350 x >200 ทั้งหมด
+#    ผลคือ v29.1
+#       - เอาภาพ front ที่ลงสีแล้วไปทับ thumbnail รูปที่ 1 ของ By Placement
+#       - เอา thumbnail รูปที่ 2 ไปลงสีแบบ "back" ทั้งที่เป็นภาพคนละชนิด
+#    ตรวจแล้ว: KB03-01 (6 รูป/หน้า 2), PB01 (6 รูป/หน้า 2) โดน, KB03-02 ไม่โดน
+#
+#  กติกาใหม่
+#    1. ลงสี "หน้าที่ 1 เท่านั้น" เสมอ  - หน้า 1 คือภาพ front view ภาพเดียว
+#       เลือกด้วยขนาดพิกเซลใหญ่สุดบนหน้า (ไม่ใช่ "ภาพแรกที่เจอ")
+#    2. หน้า 2 จะถูกแตะก็ต่อเมื่อผ่านการตรวจว่าเป็น wireframe pair ของจริง
+#       (_is_classic_pair) เท่านั้น  ถ้าไม่ใช่ -> ปล่อยทั้งหน้าไว้เหมือนเดิม
+#       ตั้ง PAGE2_MODE = "never" ถ้าต้องการบังคับไม่แตะหน้า 2 เลย
+#    3. หน้า 3 เป็นต้นไป ไม่แตะ (เหมือนเดิม)
+# ============================================================================
+
+# ===========================================================================
+#  v29.6 - CLOSE CLIPPED SILHOUETTE  (เคส KB03-02 back view)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    กล่องคอลัมน์ซ้ายของ back view ไม่ถูกลงสี  เพราะ MaxLoad Pro พิมพ์แบบ
+#    "Partial Placement Printing" แล้วตัดภาพกลางคัน  ขอบตั้งของกล่องซ้ายสุด
+#    จึงหายไปทั้งเส้น  รูปทรงเลย "เปิด" และ flood fill รั่วจากพื้นหลังเข้ามา
+#
+#  ทำไม dilate ปิดไม่ได้
+#    ทดสอบ kernel 3,5,7,9,11,13,15 แล้วไม่มีค่าไหนปิดได้  เพราะช่องโหว่คือ
+#    เส้นที่ "ไม่ถูกวาด" ยาว 390 px ไม่ใช่รอยต่อเส้นกว้างไม่กี่พิกเซล
+#
+#  วิธีแก้ตามที่ผู้ใช้ระบุ  -  ลากเส้นจากมุมบนถึงมุมล่าง
+#    มุมล่าง  หาได้ตรง ๆ จากจุดที่ "เส้น silhouette ล่างสิ้นสุด" ทางซ้าย
+#             (จุดต่ำสุดของภาพ CAD)  ->  วัดได้ x=614, y=1331
+#    มุมบน    ไม่เดาด้วยเรขาคณิต แต่ใช้ "การทดสอบปิดผนึกจริง"
+#             ไล่ปลายบนขึ้นทีละ 5 px แล้ว flood fill ซ้ำ วัดพื้นที่ที่ปิดได้
+#             เลือกจุดที่ได้พื้นที่มากที่สุด  ->  y=941
+#             ค่าที่ได้ตรงกับเส้นที่ผู้ใช้วาดมือไว้ (939) ห่างกัน 2 px
+#
+#  ผลการวัดตอนไล่ปลายบน (ยืนยันว่าเส้นพาดกล่อง 2 ใบซ้อนกันจริง)
+#      ปลายบน y=1140   inside 0.1072 -> 0.1164   ปิดกล่องล่างได้
+#      ปลายบน y= 941   inside        -> 0.1272   ปิดกล่องบนได้อีกใบ
+#      ปลายบน y< 941   ไม่เพิ่มอีก (อิ่มตัว)      เลยมุมบนไปแล้ว
+#
+#  ความปลอดภัย
+#    ทำงานก่อนเข้า pipeline เดิม โดยแก้ที่ "ภาพ" อย่างเดียว  ตรรกะลงสีทั้งหมด
+#    ไม่ถูกแตะ  และจะลงมือก็ต่อเมื่อปิดแล้วได้พื้นที่เพิ่ม >= SEAL_MIN_GAIN
+#    วัดครบทุก view ของทุกไฟล์ที่มี  มีเพียง KB03-02 back เท่านั้นที่เข้าเงื่อนไข
+# ===========================================================================
+SEAL_MIN_GAIN = 0.005     # ต้องปิดพื้นที่ได้อย่างน้อย 0.5% ของภาพจึงจะลงมือ
+SEAL_VERT_RUN = 120       # ถ้ามีเส้นตั้งยาวเท่านี้อยู่แล้ว = ปิดอยู่แล้ว ไม่ต้องทำ
+SEAL_STEP = 5
+SEAL_WIDTH = 3
+
+
+def _cad_mask(img_bgr):
+    """คัดเฉพาะเส้น CAD ออกจากตัวอักษร (ตรรกะเดียวกับ IsoScene._split_ink)."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    black = (gray < 140).astype(np.uint8) * 255
+    n, lab, st, _ = cv2.connectedComponentsWithStats(black, connectivity=8)
+    cad = np.zeros_like(gray)
+    for k in range(1, n):
+        tw, th, ak = st[k, 2], st[k, 3], st[k, 4]
+        asp = float(tw) / (th + 1e-5)
+        is_text = ((tw <= 160 and th <= 35 and ak < 950) or (th < 18 and tw <= 170)
+                   or (tw <= 200 and th <= 55 and ak < 3500 and asp > 0.25))
+        if not (is_text and not (th > 55 or tw > 200 or ak >= 3500)):
+            cad[lab == k] = 255
+    return cad
+
+
+def _inside_fraction(cad, bar=None):
+    h, w = cad.shape
+    c = cad if bar is None else cad.copy()
+    if bar is not None:
+        x, y0, y1 = bar
+        cv2.line(c, (x, y0), (x, y1), 255, SEAL_WIDTH)
+    sealed = cv2.dilate(c, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    flood = (255 - sealed).copy()
+    m = np.zeros((h + 2, w + 2), np.uint8)
+    for sd in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+               (w // 2, 0), (w // 2, h - 1)]:
+        if flood[sd[1], sd[0]] == 255:
+            cv2.floodFill(flood, m, sd, 50)
+    return (flood == 255).mean()
+
+
+def _has_vertical_edge(cad, x, tol=4):
+    """มีเส้นตั้งยาวอยู่แถว ๆ คอลัมน์นี้แล้วหรือยัง."""
+    h, w = cad.shape
+    for xx in range(max(0, x - tol), min(w, x + tol + 1)):
+        ys = np.where(cad[:, xx] > 0)[0]
+        if len(ys) < SEAL_VERT_RUN:
+            continue
+        brk = np.where(np.diff(ys) > 3)[0]
+        for grp in np.split(ys, brk + 1):
+            if len(grp) >= SEAL_VERT_RUN:
+                return True
+    return False
+
+
+def close_clipped_silhouette(img_bgr):
+    """ลากเส้นปิดรูปทรงที่ถูกตัดกลางคัน  คืน (ภาพใหม่, ข้อมูลเส้น หรือ None)."""
+    cad = _cad_mask(img_bgr)
+    ys, xs = np.where(cad > 0)
+    if len(ys) == 0:
+        return img_bgr, None
+    low = np.full(cad.shape[1], -1, np.int64)
+    for x in range(cad.shape[1]):
+        col = np.where(cad[:, x] > 0)[0]
+        if len(col):
+            low[x] = col.max()
+    ybase = int(low.max())
+    cand = np.where(low >= ybase - 5)[0]
+    if len(cand) == 0:
+        return img_bgr, None
+
+    base = _inside_fraction(cad)
+    best = None
+    for xc in (int(cand.min()), int(cand.max())):     # ลองทั้งปลายซ้ายและขวา
+        if _has_vertical_edge(cad, xc):
+            continue                                   # มีขอบตั้งอยู่แล้ว
+        ybot = int(low[xc])
+        for ytop in range(ybot - SEAL_STEP, int(ys.min()) - 1, -SEAL_STEP):
+            gain = _inside_fraction(cad, (xc, ytop, ybot)) - base
+            if best is None or gain > best[0] + 1e-6:
+                best = (gain, xc, ytop, ybot)
+    if best is None or best[0] < SEAL_MIN_GAIN:
+        return img_bgr, None
+
+    gain, xc, ytop, ybot = best
+    out = img_bgr.copy()
+    cv2.line(out, (xc, ytop), (xc, ybot), (0, 0, 0), SEAL_WIDTH)
+    return out, dict(action="close_silhouette", x=int(xc), y_top=int(ytop),
+                     y_bottom=int(ybot), length=int(ybot - ytop),
+                     sealed_gain=round(float(gain), 5),
+                     reason="clipped drawing - missing vertical box edge redrawn")
+
+
+def colorize_v296(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    if trace:
+        out, tr = colorize_v295(img_bgr, view, trace=True)
+        if seal:
+            tr["actions"].insert(0, seal)
+            tr["seal"] = seal
+        return out, tr
+    return colorize_v295(img_bgr, view, trace=False)
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v296(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v296(i, "front")
+def colorize_back_view(i):  return colorize_v296(i, "back")
+
+
+# ===========================================================================
+#  v29.7 - END-DECK WEDGE  (จุดที่วงเหลืองไว้บน KB03-02 back)
+# ---------------------------------------------------------------------------
+#  ผลตรวจวงเหลืองทั้ง 4 จุดบน back view (แปลงพิกัดด้วย affine จากภาพที่วงมา)
+#    C1  หน้าบนกล่อง NAPTA            ครีม -> ต้องเป็นฟ้า   v29.6 แก้ให้แล้ว
+#    C2  หน้าบนกล่อง MACOA-OE         ครีม -> ต้องเป็นฟ้า   v29.6 แก้ให้แล้ว
+#    C4  กล่องคอลัมน์ซ้าย              ขาว  -> ต้องเป็นฟ้า   v29.6 แก้ให้แล้ว
+#    C3  พื้นตู้ปลายขวา (r65)          ฟ้า  -> ต้องเป็นครีม  <-- v29.7 แก้จุดนี้
+#  (C1/C2/C4 หายไปเองเพราะเส้นปิด silhouette ของ v29.6 ทำให้ flood fill
+#   ไม่รั่วอีกต่อไป  ภาพที่ผู้ใช้วงมาเป็นสถานะก่อนมีเส้นปิด)
+#
+#  r65 คืออะไร
+#    พื้นตู้ส่วนที่ยื่นพ้นกล่องใบสุดท้ายทางขวา  ในมุมมอง isometric จะถูกขอบ
+#    ภาพตัดจนเหลือเป็น "สามเหลี่ยม"  ไม่ใช่สี่เหลี่ยมด้านขนานเหมือนหน้ากล่อง
+#
+#  ทำไมด่านเดิมจับไม่ได้ (วัดค่าจริงแล้วทุกด่าน)
+#    _seed_back / _grow_back  มี _is_wedge กันอยู่แล้ว แต่ใช้ eps=0.025
+#         ตัวอักษร "846 (mm) (0-0)" ที่พิมพ์ทับทำให้เส้นขอบแตก
+#         -> นับได้ 7 จุดยอด ไม่ใช่ 3  จึงรอดออกมาเป็น cyan ตั้งแต่ต้น
+#    repair_marked_planes  ต้อง sup <= 0.05 แต่ r65 ได้ 0.57
+#                          และต้อง ext >= 0.55 แต่ r65 ได้ 0.41
+#    demote_top_rail       ต้อง text_px == 0 แต่ r65 มี 915
+#    demote_ground_band    ต้องมีเพื่อนร่วมแถบขนาดเท่ากัน แต่ r65 อยู่โดด ๆ
+#
+#  ตัวแยกที่ใช้  -  จำนวนจุดยอดที่ eps=0.04 บวกกับ "ไม่มีป้าย SKU เอียง"
+#    สแกน cyan region ทุกใบใน 5 views ที่ผ่านเกณฑ์ tilt==0 และ text>=300
+#         KB03-02 front r287  6 จุดยอด   หน้ากล่องจริง  เก็บไว้
+#         KB03-02 front r186  4 จุดยอด   หน้ากล่องจริง  เก็บไว้
+#         KB03-01 front r240/r231/r126/r207  4 จุดยอด ทั้งหมด  เก็บไว้
+#         PB01    front r232  5 จุดยอด, r227/r179/r204  4 จุดยอด  เก็บไว้
+#         KB03-02 back  r65   3 จุดยอด   <-- ใบเดียวในทั้งหมด
+#    หน้ากล่องเป็นสี่เหลี่ยมด้านขนานเสมอ พื้นตู้ที่ถูกตัดเป็นสามเหลี่ยม
+#
+#  เงื่อนไข text_px >= 300 จำเป็นต้องคงไว้
+#    ถ้าตัดออก KB03-02 front r137 (สามเหลี่ยม, txt=0, rel 0.26) จะโดนไปด้วย
+#    ทั้งที่ v29.6 ลงสีถูกอยู่แล้ว
+# ===========================================================================
+WEDGE_EPS = 0.04        # ยอมให้เส้นขอบแตกจากตัวอักษรที่พิมพ์ทับ
+WEDGE_REL_LO = 0.25     # ต้องเป็นระนาบใหญ่ ไม่ใช่เศษเล็ก ๆ
+WEDGE_REL_HI = 1.10
+WEDGE_TXT_MIN = 300     # ต้องมีตัวเลขบอกระยะพาดอยู่
+
+
+def _poly_vertices(S, rid, eps=WEDGE_EPS):
+    x0, y0 = S.bx(rid), S.by(rid)
+    sub = (S.labels[y0:y0 + S.bh(rid), x0:x0 + S.bw(rid)] == rid).astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return 0
+    c = max(cnts, key=cv2.contourArea)
+    peri = cv2.arcLength(c, True)
+    if peri <= 0:
+        return 0
+    return len(cv2.approxPolyDP(c, eps * peri, True))
+
+
+def demote_end_deck_wedge(S, box, report):
+    """ถอดสีพื้นตู้ปลายตู้ที่ถูกขอบภาพตัดจนเหลือเป็นสามเหลี่ยม."""
+    med = S.median_face_area()
+    for r in sorted(box, key=lambda x: -S.area(x)):
+        if S.tilt_px[r] != 0:
+            continue                       # มีป้าย SKU เอียง = cargo แน่นอน
+        if S.text_px[r] < WEDGE_TXT_MIN:
+            continue                       # ต้องมีตัวเลขบอกระยะพาดอยู่
+        rel = S.area(r) / med
+        if not (WEDGE_REL_LO <= rel < WEDGE_REL_HI):
+            continue
+        if _poly_vertices(S, r) != 3:
+            continue                       # หน้ากล่องเป็นสี่เหลี่ยมด้านขนาน
+        box.discard(r)
+        report.append(dict(action="demote_wedge", region=int(r), area=int(S.area(r)),
+                           rel=round(rel, 3), text_px=int(S.text_px[r]),
+                           vertices=3,
+                           reason="clipped end-of-deck triangle - not a cargo face",
+                           defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v297(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    S = IsoScene(img_bgr)
+    report = []
+    if seal:
+        report.append(seal)
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    box = demote_ground_band(S, box, report)
+    v296box = set(box)
+    # ---- v29.7 ----------------------------------------------------------
+    box = demote_end_deck_wedge(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v296box=sorted(v296box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v297(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v297(i, "front")
+def colorize_back_view(i):  return colorize_v297(i, "back")
+
+
+# ===========================================================================
+#  v29.8 - ORPHAN CASCADE  (จุดสุดท้ายที่วงไว้บน KB03-02 back)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    สลิเวอร์ฟ้าเล็ก ๆ (r143, 1409 px) ลอยอยู่ตรงปลายสามเหลี่ยมพื้นตู้ด้านขวา
+#    บริเวณนั้นไม่มีกล่องเลย ต้องเป็นพื้นล้วน
+#
+#  สาเหตุ  -  ผลข้างเคียงลูกโซ่จาก v29.7
+#    ไล่ทีละสเตจแล้วได้ภาพชัด
+#      สเตจ 5  repair_marked_faces  เติม r143 เป็นฟ้า
+#              เพราะตอนนั้นวัด support ได้ 1.00  (นั่งอยู่บน r65 เต็ม ๆ)
+#              และ r65 ยังเป็นฟ้าอยู่ ณ เวลานั้น
+#      สเตจ 10 demote_end_deck_wedge (กฎใหม่ของ v29.7) ถอด r65 ออกเป็นครีม
+#      ผลลัพธ์ r143 กลายเป็น "ลูกกำพร้า" - ฐานที่เคยรองรับหายไปแล้ว
+#              วัดใหม่ตอนจบ: sup = 0.00,  ext = 0.89,  txt = 0,  tilt = 0
+#              below(r143) = {65: 69}  คือนั่งอยู่บน r65 ที่เป็นครีมไปแล้ว
+#
+#  หลักการแก้
+#    ไม่ไปยุ่งกับกฎเดิมเลย แต่เพิ่มสเตจปิดท้ายที่ทำสิ่งเดียว
+#    "region ใดถูกรับเข้ามาด้วยการทดสอบ support  ต้องผ่านการทดสอบ support
+#     อีกครั้งหลังการถอดสีทั้งหมดจบลง"
+#    ถ้าฐานหายไปแล้วก็ต้องถอดตาม  และทำเป็นลูปจนนิ่ง เผื่อมีซ้อนกันหลายชั้น
+#
+#    เก็บรายชื่อจาก report ของสเตจที่รับเข้าด้วย support โดยตรง
+#      promote          (top face resting on cargo / narrow face flanked by cargo)
+#      repair_face      (v29 targeted repair)
+#      repair_enclosed  (v29.3 enclosed face)
+#    สเตจที่รับเข้าด้วยเหตุผลอื่น เช่น _seed/_grow ไม่ถูกแตะ
+#
+#  กันไม่ให้กระทบของเดิม
+#    ต้อง txt == 0 และ tilt == 0    มีหมึก SKU = cargo จริง ไม่ยุ่ง
+#    ต้อง ext >= RIM_EXTERIOR_MIN   หน้าที่จมอยู่กลางกองจะมี ext ต่ำ ไม่โดน
+#                                    (กฎ v29.3 ที่ซ่อม CC45 r241 ไว้จึงปลอดภัย)
+#    สแกนครบ 5 views ของ 4 ไฟล์แล้ว มีเพียง r143 ใบเดียวที่เข้าเงื่อนไข
+# ===========================================================================
+ORPHAN_SUP_MIN = PROMO_SUP_MIN       # ใช้เกณฑ์เดียวกับตอนรับเข้า (0.50)
+ORPHAN_EXT_MIN = RIM_EXTERIOR_MIN    # ต้องเปิดสู่พื้นหลัง (0.55)
+_SUPPORT_ADMITTED = ("promote", "repair_face", "repair_enclosed")
+
+
+def demote_orphans(S, box, report):
+    """ถอดสี region ที่เคยรับเข้าด้วย support แต่ฐานรองรับถูกถอดไปแล้ว."""
+    admitted = {a["region"] for a in report
+                if a.get("action") in _SUPPORT_ADMITTED and "region" in a}
+    if not admitted:
+        return box
+    changed, rounds = True, 0
+    while changed and rounds < 8:
+        changed, rounds = False, rounds + 1
+        for r in sorted(admitted & box, key=lambda x: S.area(x)):
+            if S.text_px[r] != 0 or S.tilt_px[r] != 0:
+                continue                       # มีหมึก SKU = cargo จริง
+            if S.exterior_fraction(r) < ORPHAN_EXT_MIN:
+                continue                       # จมอยู่กลางกอง ไม่ใช่ลูกกำพร้า
+            sup = S.support_fraction(r, box - {r})
+            if sup >= ORPHAN_SUP_MIN:
+                continue                       # ยังมีฐานรองรับอยู่
+            box.discard(r)
+            changed = True
+            report.append(dict(action="demote_orphan", region=int(r),
+                               area=int(S.area(r)), sup=round(sup, 2),
+                               ext=round(S.exterior_fraction(r), 2),
+                               reason="support was removed by a later demotion",
+                               defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v298(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    S = IsoScene(img_bgr)
+    report = []
+    if seal:
+        report.append(seal)
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    box = demote_ground_band(S, box, report)
+    box = demote_end_deck_wedge(S, box, report)
+    v297box = set(box)
+    # ---- v29.8 ----------------------------------------------------------
+    box = demote_orphans(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v297box=sorted(v297box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v298(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v298(i, "front")
+def colorize_back_view(i):  return colorize_v298(i, "back")
+
+
+# ============================================================================
+#  v29.5 - ROTATION-AWARE PAGE-2 PAIR  (แก้เคส Front บน / Back ล่าง)
+# ----------------------------------------------------------------------------
+#  อาการ
+#    ไฟล์ 2 หน้าแบบ KB03-02 ที่หน้า 2 วาง Front ไว้ด้านบน Back ไว้ด้านล่าง
+#    v29.4 ไม่ทับ front ที่ลงสีแล้ว และไม่ลงสี back ให้เลย
+#
+#  สาเหตุ 2 ชั้น
+#    1. v29.4 ตั้ง PAGE2_MODE = "never" ไว้ จึงข้ามหน้า 2 ทั้งหน้าตั้งแต่ต้น
+#       เหตุผลเดิมคือคอลัมน์ซ้ายของ back view วาดมาไม่มีเส้นขอบ  แต่ตรวจซ้ำ
+#       แล้วพบว่าส่วนที่เหลือของภาพลงสีได้ปกติ (370 regions -> 27 กล่อง)
+#       การทิ้งทั้งหน้าจึงเสียมากกว่าได้  ->  กลับไปใช้ "auto"
+#    2. _is_classic_pair ของ v29.2 ตัดสินจาก bbox ดิบของ PDF ตรง ๆ
+#       แต่หน้าเหล่านี้ตั้ง /Rotate 90 ไว้  (mediabox 612x792 -> แสดงผล 792x612)
+#       ในพิกัดดิบภาพทั้งคู่อยู่ "แถวเดียวกัน ซ้าย-ขวา" (y0 = 328.6 ทั้งคู่)
+#       แต่บนจอที่หมุนแล้วมันคือ "บน-ล่าง"  โค้ดเดิมบังเอิญผ่านเงื่อนไขแถว
+#       แต่ถ้าไฟล์ไหนไม่หมุน แล้ววางซ้อนกันบน-ล่างจริง ๆ จะตกเงื่อนไขทันที
+#
+#  วิธีแก้
+#    ย้ายการตัดสินทั้งหมดไปทำใน "พิกัดที่ผู้ใช้เห็นจริง" โดยคูณ bbox ด้วย
+#    page.rotation_matrix ก่อน แล้วเรียงตามลำดับการอ่าน (บน->ล่าง, ซ้าย->ขวา)
+#    ภาพแรกในลำดับนั้นคือ Front เสมอ ภาพที่สองคือ Back  ไม่ว่าหน้าจะหมุนกี่องศา
+#    และรับคู่ได้ทั้งสองผัง
+#      - แบบแถว   : y ทับกันมาก, x แยกกัน   (Front ซ้าย  / Back ขวา)
+#      - แบบคอลัมน์: x ทับกันมาก, y แยกกัน   (Front บน   / Back ล่าง)
+#    ส่วนหน้า By Placement ยังถูกปฏิเสธเหมือนเดิม เพราะมี 6 ภาพและขนาดพิกเซล
+#    เล็กกว่า wireframe หน้า 1 ครึ่งหนึ่ง
+# ============================================================================
+
+PAGE2_MODE = "auto"          # "auto" = แตะเฉพาะ wireframe pair, "never" = ไม่แตะหน้า 2
+
+MIN_IMG_W, MIN_IMG_H = 350, 200
+PAIR_DIM_TOL = 0.02          # ขนาดพิกเซลต้องเท่ากับภาพหน้า 1 (+-2%)
+PAIR_OVERLAP_MIN = 0.55      # สัดส่วนการทับกันในแกนที่ใช้จัดเรียง
+
+
+def _disp_rect(page, bbox):
+    """bbox ของภาพในพิกัดที่แสดงผลจริง (รวมผลของ /Rotate)."""
+    return fitz.Rect(bbox) * page.rotation_matrix
+
+
+def _large_images(page):
+    """ภาพใหญ่บนหน้า เรียงตามลำดับการอ่านบนจอ: บน->ล่าง แล้วซ้าย->ขวา."""
+    infos = []
+    for i in page.get_image_info(xrefs=True):
+        if i.get("width", 0) <= MIN_IMG_W or i.get("height", 0) <= MIN_IMG_H:
+            continue
+        r = _disp_rect(page, i["bbox"])
+        i["disp"] = (r.x0, r.y0, r.x1, r.y1)
+        infos.append(i)
+    infos.sort(key=lambda i: (round(i["disp"][1], 1), round(i["disp"][0], 1)))
+    return infos
+
+
+def _page1_wireframe(doc, page):
+    """xref + BGR ของภาพ front view บนหน้า 1 (เลือกภาพที่ใหญ่ที่สุด)."""
+    best = None
+    for info in page.get_images(full=True):
+        xref = info[0]
+        try:
+            raw = doc.extract_image(xref)
+        except Exception:
+            continue
+        img = cv2.cvtColor(np.array(Image.open(io.BytesIO(raw["image"]))),
+                           cv2.COLOR_RGB2BGR)
+        h, w = img.shape[:2]
+        if w <= MIN_IMG_W or h <= MIN_IMG_H:
+            continue
+        if best is None or w * h > best[1].shape[0] * best[1].shape[1]:
+            best = (xref, img)
+    return best
+
+
+def _overlap(a0, a1, b0, b1):
+    """สัดส่วนการทับกันของสองช่วง เทียบกับช่วงที่สั้นกว่า."""
+    lo, hi = max(a0, b0), min(a1, b1)
+    span = min(a1 - a0, b1 - b0)
+    if span <= 0:
+        return 0.0
+    return max(0.0, hi - lo) / span
+
+
+def _is_classic_pair(imgs, ref_shape):
+    """หน้า 2 เป็น front/back wireframe คู่จริงหรือไม่ (รับทั้งแถวและคอลัมน์).
+
+    เงื่อนไขครบทุกข้อ:
+      - มีภาพใหญ่ 2 ภาพพอดี              (By Placement มี 6)
+      - ขนาดพิกเซลของทั้งคู่เท่ากับภาพ wireframe หน้า 1  (thumbnail เล็กกว่าครึ่ง)
+      - เรียงต่อกันเป็นแถว หรือ เป็นคอลัมน์ ในพิกัดที่แสดงผลจริง
+    """
+    if len(imgs) != 2 or ref_shape is None:
+        return False
+    rh, rw = ref_shape[:2]
+    for i in imgs:
+        if abs(i["width"] - rw) > PAIR_DIM_TOL * rw:
+            return False
+        if abs(i["height"] - rh) > PAIR_DIM_TOL * rh:
+            return False
+    (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1) = imgs[0]["disp"], imgs[1]["disp"]
+    row = (_overlap(ay0, ay1, by0, by1) >= PAIR_OVERLAP_MIN
+           and _overlap(ax0, ax1, bx0, bx1) < 0.25)
+    col = (_overlap(ax0, ax1, bx0, bx1) >= PAIR_OVERLAP_MIN
+           and _overlap(ay0, ay1, by0, by1) < 0.25)
+    return row or col
+
+
+def _pair_layout(imgs):
+    (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1) = imgs[0]["disp"], imgs[1]["disp"]
+    if _overlap(ax0, ax1, bx0, bx1) >= PAIR_OVERLAP_MIN:
+        return "Front บน / Back ล่าง"
+    return "Front ซ้าย / Back ขวา"
+
+
+# ============================================================================
+# v26.08: WIREFRAME DETECTION + IN-MEMORY DRIVER
+# ============================================================================
+# เกณฑ์ตรวจจับ: วัด "สัดส่วนพิกเซลสีสด" (vivid_cargo_mask ที่กรองลูกศรออกแล้ว - ตัวเดียว
+# กับที่ pipeline วิเคราะห์ใช้จริง) ของหน้าแรกๆ ของ PDF
+#   ไฟล์ปกติที่ลงสีมาแล้ว : ไดอะแกรมมีพื้นที่สีสดเป็นสัดส่วนสูง (หลาย % ของหน้า)
+#   ไฟล์ wireframe        : เส้นดำบนพื้นขาวล้วน แทบไม่มีพิกเซลสีสดเลย (~0%)
+# เลือกเกณฑ์ 0.2% เพราะเป็นค่าที่ห่างจากทั้ง 2 ฝั่งมาก (wireframe ~0% / ไฟล์สีหลาย %)
+# หมายเหตุ: ใช้ vivid_cargo_mask ตัวเดียวกับ pipeline จริง จึงเป็นการวัด "สิ่งที่ระบบ
+# วิเคราะห์มองเห็นได้จริง" โดยตรง ไม่ใช่การอนุมานทางอ้อม - ถ้าระบบมองไม่เห็นสีสดเลย
+# ก็แปลว่าวิเคราะห์ไม่ได้จริง ซึ่งตรงกับนิยามของปัญหาที่ผู้ใช้ระบุพอดี
+_WIREFRAME_MAX_VIVID_FRAC = 0.002   # ต่ำกว่านี้ทุกหน้า = wireframe
+_WIREFRAME_DETECT_SCALE = 2         # render ย่อสำหรับตรวจเท่านั้น (ประหยัด memory)
+_WIREFRAME_DETECT_MAX_PAGES = 3     # ตรวจ 3 หน้าแรกพอ (ไดอะแกรมอยู่หน้า 1-2 เสมอ)
+_WIREFRAME_DETECT_MIN_BLOB = 60     # ที่ scale 2 ใช้ blob เล็กกว่า default (150 ที่ scale 3)
+
+
+def _detect_wireframe_pdf(pdf_bytes, max_pages=_WIREFRAME_DETECT_MAX_PAGES):
+    """v26.08: True ถ้า PDF นี้เป็นแบบ wireframe (ไม่มีสีสดให้ระบบวิเคราะห์จับได้เลย)
+    คืนค่า (is_wireframe: bool, max_vivid_fraction: float)
+    ดู docstring เต็มด้านบนสำหรับเหตุผลการเลือกเกณฑ์"""
+    doc = None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        n_check = min(len(doc), max_pages)
+        best = 0.0
+        for idx in range(n_check):
+            try:
+                mat = fitz.Matrix(_WIREFRAME_DETECT_SCALE, _WIREFRAME_DETECT_SCALE)
+                pix = doc[idx].get_pixmap(matrix=mat)
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n)
+                if pix.n == 4:
+                    img = img[:, :, :3]
+                img = np.ascontiguousarray(img)
+                cargo = (vivid_cargo_mask(img, min_blob_size=_WIREFRAME_DETECT_MIN_BLOB)
+                         & (~arrow_mask(img)))
+                frac = float(cargo.mean())
+                best = max(best, frac)
+                del img, cargo, pix
+            except Exception as e:
+                print(f"[WIREFRAME_DETECT] หน้า {idx} ตรวจไม่สำเร็จ: {e}")
+        is_wf = best < _WIREFRAME_MAX_VIVID_FRAC
+        print(f"[WIREFRAME_DETECT] สัดส่วนพิกเซลสีสดสูงสุด {best:.4%} "
+              f"(เกณฑ์ {_WIREFRAME_MAX_VIVID_FRAC:.1%}) -> "
+              f"{'เป็น wireframe (ต้องลงสีก่อน)' if is_wf else 'ไฟล์มีสีอยู่แล้ว (วิเคราะห์ได้เลย)'}")
+        return is_wf, best
+    except Exception as e:
+        print(f"[WIREFRAME_DETECT] ตรวจไม่สำเร็จ ({e}) -> ถือว่าไม่ใช่ wireframe (fail-safe)")
+        return False, -1.0
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+def colorize_wireframe_pdf_bytes(pdf_bytes):
+    """v26.08 NEW: ลงสี PDF wireframe แบบทำงานในหน่วยความจำล้วน (ไม่แตะไฟล์บนดิสก์)
+    พอร์ตจาก process_pdf() ของต้นฉบับ Colab - ตรรกะเหมือนกันทุกประการ ต่างแค่
+    อ่าน/เขียนผ่าน bytes แทน path และตัดส่วนแสดงผล matplotlib ออก
+    คืนค่า (pdf_bytes_ใหม่ หรือ None ถ้าทำไม่ได้, info: dict)"""
+    if not _CV2_AVAILABLE:
+        return None, {"ok": False, "reason": "ไม่มี opencv ติดตั้งอยู่"}
+    doc = None
+    info = {"ok": False, "views": [], "page2": None}
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if len(doc) == 0:
+            info["reason"] = "PDF ว่างเปล่า"
+            return None, info
+
+        # ---- หน้า 1 : front view (บังคับทำเสมอ) ----
+        hit = _page1_wireframe(doc, doc[0])
+        if hit is None:
+            info["reason"] = "ไม่พบภาพ wireframe บนหน้า 1"
+            return None, info
+        xref, img = hit
+        front_shape = img.shape
+        out, tr = colorize_v298(img, "front", trace=True)
+        _, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        front_bytes = enc.tobytes()
+        doc[0].replace_image(xref, stream=front_bytes)
+        info["views"].append({"view": "front", "regions": tr["regions"],
+                              "boxes": tr["final_boxes"]})
+        del out, img
+
+        # ---- หน้า 2 : แตะเฉพาะเมื่อเป็น wireframe pair ของจริง ----
+        if len(doc) > 1 and PAGE2_MODE != "never":
+            page = doc[1]
+            imgs = _large_images(page)
+            if _is_classic_pair(imgs, front_shape):
+                page.replace_image(imgs[0]["xref"], stream=front_bytes)
+                raw = doc.extract_image(imgs[1]["xref"])
+                img2 = cv2.cvtColor(
+                    np.array(Image.open(io.BytesIO(raw["image"]))), cv2.COLOR_RGB2BGR)
+                out2, tr2 = colorize_v298(img2, "back", trace=True)
+                _, enc2 = cv2.imencode(".jpg", out2, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                page.replace_image(imgs[1]["xref"], stream=enc2.tobytes())
+                info["views"].append({"view": "back", "regions": tr2["regions"],
+                                      "boxes": tr2["final_boxes"]})
+                info["page2"] = _pair_layout(imgs)
+                del out2, img2
+            elif imgs:
+                info["page2"] = f"ข้ามหน้า 2 (พบ {len(imgs)} ภาพ ไม่ใช่ wireframe pair)"
+
+        new_bytes = doc.tobytes(garbage=4, deflate=True, clean=True)
+        info["ok"] = True
+        for v in info["views"]:
+            print(f"[COLORIZER] {v['view']:5s} regions={v['regions']:4d} "
+                  f"-> boxes={v['boxes']}")
+        if info["page2"]:
+            print(f"[COLORIZER] หน้า 2: {info['page2']}")
+        return new_bytes, info
+    except Exception as e:
+        print(f"[COLORIZER] ลงสีล้มเหลว: {e}")
+        info["reason"] = str(e)
+        return None, info
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+        gc.collect()
+
+
+def prepare_pdf_for_analysis(pdf_bytes):
+    """v26.08 NEW: ด่านหน้าของ pipeline - ตรวจว่าเป็น wireframe ไหม ถ้าใช่ให้ลงสีก่อน
+    คืนค่า (pdf_bytes ที่พร้อมวิเคราะห์, info: dict)
+    ออกแบบให้ "ไม่มีทางทำให้ระบบล้มเหลว" - ถ้าตรวจไม่ได้/ลงสีไม่สำเร็จ จะคืน bytes เดิม
+    เสมอ แล้วปล่อยให้ pipeline เดิมทำงานตามปกติทุกประการ"""
+    info = {"wireframe_detected": False, "colorized": False,
+            "vivid_fraction": None, "colorizer_version": None, "note": ""}
+    try:
+        is_wf, frac = _detect_wireframe_pdf(pdf_bytes)
+        info["vivid_fraction"] = round(frac, 6) if frac >= 0 else None
+        if not is_wf:
+            return pdf_bytes, info
+        info["wireframe_detected"] = True
+        if not _CV2_AVAILABLE:
+            info["note"] = "พบไฟล์ wireframe แต่ไม่มี opencv ติดตั้ง จึงลงสีไม่ได้"
+            print(f"[COLORIZER] {info['note']}")
+            return pdf_bytes, info
+        new_bytes, cinfo = colorize_wireframe_pdf_bytes(pdf_bytes)
+        if new_bytes is None:
+            info["note"] = f"ลงสีไม่สำเร็จ ({cinfo.get('reason', '')}) - ใช้ไฟล์เดิม"
+            print(f"[COLORIZER] {info['note']}")
+            return pdf_bytes, info
+        info["colorized"] = True
+        info["colorizer_version"] = COLORIZER_VERSION
+        info["views"] = cinfo.get("views", [])
+        info["note"] = "ลงสีสำเร็จ - ส่งเข้ากระบวนการวิเคราะห์ตามปกติ"
+        print(f"[COLORIZER] {info['note']} ({len(pdf_bytes)} -> {len(new_bytes)} bytes)")
+        return new_bytes, info
+    except Exception as e:
+        info["note"] = f"ด่านเตรียมไฟล์ล้มเหลว ({e}) - ใช้ไฟล์เดิม"
+        print(f"[COLORIZER] {info['note']}")
+        return pdf_bytes, info
+
+
+# ============================================================================
 # Main HTTP handler (Cloud Function entry point) - คง output contract เดิมของ v24.36
 # ============================================================================
 
@@ -9264,6 +10976,12 @@ def process_request(request):
         if "," in base64_str:
             base64_str = base64_str.split(",", 1)[1]
         pdf_bytes = base64.b64decode(base64_str)
+
+        # v26.08 NEW: ด่านหน้าสุดของ pipeline - ถ้าเป็นไฟล์ wireframe (ไม่มีสีสดเลย)
+        # ให้ลงสีก่อน แล้วส่ง PDF ที่ลงสีแล้วเข้ากระบวนการเดิมทั้งหมด
+        # (ดู COLORIZER SECTION ด้านบนสำหรับหลักฐาน+เหตุผล - ผู้ใช้สั่งโดยตรง)
+        # ออกแบบให้ fail-safe: ไฟล์ปกติจะผ่านด่านนี้ไปโดยไม่ถูกแตะเลยแม้แต่ byte เดียว
+        pdf_bytes, prep_info = prepare_pdf_for_analysis(pdf_bytes)
 
         # v25.91 FIX (Critical - แก้ HTTP 500 ที่ผู้ใช้แจ้ง 11-Sep-2026 พร้อมไฟล์ตัวอย่าง 3 ไฟล์):
         # เดิมใช้ _find_diagram_page_idx ซึ่ง "fallback ไป index 1 แบบตายตัว" เมื่อหา Front/Back
@@ -9414,14 +11132,20 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.07",
-            "benchmarkMode": "v26_07_notch_prominence_10",
+            "checkerVersion": "V26.08",
+            "benchmarkMode": "v26_08_wireframe_colorizer_integrated",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
             "analysisMode": analysis_mode,
             "analysisPageIndex": diagram_page_idx,
             "analysisPageReason": target.get("reason", ""),
+            # v26.08 NEW (additive - ไม่กระทบ key เดิมที่ WebApp/GAS ใช้อยู่):
+            # บอกว่าไฟล์นี้ถูกตรวจพบว่าเป็น wireframe และถูกลงสีก่อนวิเคราะห์หรือไม่
+            "wireframeDetected": prep_info.get("wireframe_detected", False),
+            "wireframeColorized": prep_info.get("colorized", False),
+            "colorizerVersion": prep_info.get("colorizer_version"),
+            "colorizerNote": prep_info.get("note", ""),
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
