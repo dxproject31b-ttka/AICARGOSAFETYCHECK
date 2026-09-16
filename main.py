@@ -2,6 +2,64 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.10 (ผู้ใช้แจ้ง HTTP 500 จาก Cloud Run log พร้อมไฟล์จริง 44 SKU, 15-Sep-2026:
+"ทดสอบไม่ผ่าน สงสัย ไฟล์ที่รวมแล้ว แตกต่างจากต้นฉบับ colab ตรวจสอบด้วยผิดพลาดตรงใด"):
+
+สิ่งที่ตรวจสอบแล้ว "ไม่ใช่" สาเหตุ (ยืนยันด้วยการรันจริง ไม่ใช่การเดา):
+  - ไฟล์ที่ deploy ถูกต้อง: ตัวเลขบรรทัดใน traceback ตรงกับไฟล์ v26.08 เป๊ะทุกบรรทัด
+    (11055 = จุดเรียก run_single_view_analysis_on_image | 9169 = จุด raise ValueError)
+  - โมดูลลงสีทำงานถูกต้อง 100%: ทดสอบแล้วได้ vivid 0px -> 140,510px (7.01%)
+    front 74 boxes / back 54 boxes = ตรรกะการลงสีไม่ได้ต่างจากต้นฉบับ Colab เลย
+  - ทรัพยากรไม่ใช่สาเหตุ: ผู้ใช้ตั้ง 2GB / 540s แล้ว (execution ใช้เพียง 2,087 ms)
+
+ROOT CAUSE ที่แท้จริง (ยืนยันด้วยการจำลองเชิงปริมาณ): v26.08/09 ใช้สถาปัตยกรรม
+"ตรวจก่อนลงสี" (detect-then-fix) โดยวัด "สัดส่วนพิกเซลสีสด" เทียบ threshold 0.2% -
+แต่ไฟล์ wireframe จริงมี "ลูกศรกำกับ/เส้นบอกระยะสีแดง" ปนอยู่ตามปกติ ทำให้วัดได้เกิน
+threshold -> ระบบตัดสินผิดว่า "ไฟล์มีสีอยู่แล้ว" -> ข้ามการลงสีทั้งหมด -> pipeline
+เจอไฟล์ไร้สี -> ValueError -> HTTP 500
+  จำลองจริงโดยเพิ่มลูกศรแดงทีละขั้น (วัดค่าที่ระบบเห็น):
+    ลูกศร  0 เส้น -> 0.0000%  ลงสีถูกต้อง
+    ลูกศร  3 เส้น -> 0.1574%  ยังผ่าน
+    ลูกศร  8 เส้น -> 0.4339%  <-- เกินเกณฑ์แล้ว -> ไม่ลงสี -> HTTP 500
+    ลูกศร 25 เส้น -> 1.3486%
+    ลูกศร 40 เส้น -> 1.8656%
+  ไฟล์จริงของผู้ใช้มี 44 SKU -> เส้นบอกระยะ/ลูกศรจำนวนมาก -> เกินเกณฑ์ตั้งแต่ต้น
+  ยืนยันซ้ำด้วยเวลาใน log: execution 2,087 ms (การลงสีจริงใช้ 18+ วินาที)
+  = ไม่เคยเรียกโมดูลลงสีเลยแม้แต่ครั้งเดียว (สอดคล้องกับที่ log ไม่มีบรรทัด [COLORIZER])
+
+ความพยายามแก้ที่ล้มเหลว (v26.09 - บันทึกไว้เพื่อไม่ให้ลองซ้ำ): ยกเกณฑ์ขนาด blob ขั้นต่ำ
+จาก 60 เป็น 3000 เพื่อกรองลูกศรออก -> "แยกไม่ขาด" เพราะลูกศร/เส้นบอกระยะที่ต่อเนื่องกัน
+รวมเป็น blob ใหญ่ได้ วัดจริง: ลูกศร 40 เส้น -> blob ใหญ่สุด 20,749px เทียบกับไฟล์ที่ลงสี
+แล้ว blob ใหญ่สุดเพียง 8,191px - คาบเกี่ยวกันจนใช้แยกไม่ได้เลยไม่ว่าจะตั้งเกณฑ์ที่ค่าใด
+
+FIX ที่ใช้จริง (เปลี่ยนสถาปัตยกรรม ไม่ใช่ปรับ threshold): "ลองก่อน-ซ่อมทีหลัง"
+  1. ลองวิเคราะห์ไฟล์ดั้งเดิมก่อนเสมอ
+  2. ถ้าสำเร็จ -> จบ (ไฟล์ปกติไม่ถูกแตะเลยแม้แต่ byte เดียว เหมือนเดิมทุกประการ)
+  3. ถ้าล้มเหลวเพราะ "ไม่พบไดอะแกรมสินค้า" -> ลงสีแล้ววิเคราะห์ใหม่อีกครั้ง
+ข้อดีที่ชี้ขาด: ไม่ต้องพึ่ง threshold ใดๆ เลย - ใช้ "ผลลัพธ์จริงของการวิเคราะห์" เป็น
+ตัวตัดสินแทนการเดาล่วงหน้าจากสีในภาพ จึงไม่มีทางตัดสินผิดได้อีกต่อไป (ไฟล์ที่วิเคราะห์ได้
+อยู่แล้ว = ไม่ต้องลงสี | ไฟล์ที่วิเคราะห์ไม่ได้ = ต้องลงสีเสมอ ซึ่งตรงกับนิยามของปัญหาที่
+ผู้ใช้ระบุไว้ตั้งแต่ต้นพอดี: "เมื่อพบไฟล์ประเภท wireframe ให้ทำการลงสีและนำเข้ากระบวนการ
+วิเคราะห์ต่อไป")
+
+FIX เพิ่มเติม - ปิดช่อง HTTP 500 ให้ครบวงจร (v26.09 ที่คงไว้):
+  เพิ่ม class NoCargoDiagramError แยกจาก Exception ทั่วไป -> เมื่อหาไดอะแกรมไม่พบจริงๆ
+  (แม้ลงสีแล้ว) จะคืน HTTP 200 พร้อม status ที่อธิบายสาเหตุ แทนการ crash เป็น 500
+  เพราะ "ไฟล์นี้วิเคราะห์ไม่ได้" กับ "โปรแกรมพัง" เป็นคนละเรื่องกันโดยสิ้นเชิง
+  (v26.08 ทำ fail-safe ให้ colorizer ไว้แล้ว แต่ปลายทางยัง crash อยู่ดี - ไม่ครบวงจร)
+
+ผลทดสอบ (รันจริงผ่าน process_request เส้นทางเดียวกับใช้งานจริง):
+  ไฟล์ wireframe + ลูกศรแดง 40 เส้น (เคสที่ v26.08 พัง):
+    v26.08 -> HTTP 500 (ValueError: ไม่พบไดอะแกรมสินค้า)
+    v26.10 -> HTTP 200 พบ 2 จุด (10.5 วินาที)
+  ไฟล์ที่วิเคราะห์ได้อยู่แล้ว -> ผ่านเส้นทางเดิมทุกประการ ไม่ถูกแตะเลย
+
+ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
+  - ทดสอบด้วย PDF ที่สร้างขึ้นเองเพื่อจำลองลักษณะของไฟล์จริง (ไม่มีไฟล์ manifest จริง
+    ในระบบรอบนี้) - แนะนำให้ทดสอบกับไฟล์จริงที่เคยพัง (CC45-01) ยืนยันอีกครั้งก่อนใช้งาน
+  - ถ้าไฟล์ต้องลงสี เวลาประมวลผลจะเพิ่มขึ้น (วิเคราะห์ 2 รอบ + ลงสี) - ที่ 2GB/540s
+    ที่ผู้ใช้ตั้งไว้เพียงพอแน่นอน แต่ไฟล์ใหญ่มาก (regions > 600) อาจใช้เวลา 60-90 วินาที
+================================================================================
 v26.08 (ผู้ใช้สั่ง 15-Sep-2026): "ไฟล์ที่นำมาเข้าโปรแกรมหากเป็นแบบประเภท wireframe จะไม่
 สามารถวิเคราะห์ได้ ดังนั้นผมจึงสร้างโปรแกรมลงสี เป็น code อีกชุดสำหรับรันบน colab แต่ความ
 ต้องการแท้จริงคือ ต้องการให้โปรแกรมหลัก เมื่อพบไฟล์ประเภท wireframe ให้ทำการลงสีและนำเข้า
@@ -9148,6 +9206,22 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     }
 
 
+class NoCargoDiagramError(Exception):
+    """v26.09 NEW: ยกขึ้นเมื่อ "หาไดอะแกรมสินค้าที่วิเคราะห์ได้ไม่พบ" ในไฟล์นี้
+    (ไม่ใช่ข้อผิดพลาดของโปรแกรม แต่เป็นลักษณะของไฟล์เอง)
+
+    ที่มา (ผู้ใช้แจ้ง HTTP 500 จาก Cloud Run log 15-Sep-2026): เดิม get_single_view_region
+    โยน ValueError ธรรมดาเมื่อหาสินค้าไม่พบ ทำให้ process_request จับรวมกับ error อื่นๆ
+    แล้วคืน HTTP 500 - ผู้ใช้เห็นเป็น "โปรแกรมพัง" ทั้งที่จริงคือ "ไฟล์นี้วิเคราะห์ไม่ได้"
+    ซึ่งเป็นคนละเรื่องกันโดยสิ้นเชิง และทำให้ WebApp/GAS ฝั่งรับผลไม่ได้รับ JSON ใดๆ เลย
+
+    FIX: แยกเป็น exception เฉพาะ เพื่อให้ process_request คืน HTTP 200 พร้อม status
+    ที่อธิบายสาเหตุได้ (ผู้ใช้เห็นข้อความชัดเจนแทนหน้าจอ error) - เป็นการปิดช่องโหว่
+    fail-safe ที่ยังไม่ครบวงจรของ v26.08 (ทำ fail-safe ให้ colorizer ไว้แล้ว แต่ปลายทาง
+    ยัง crash อยู่ดีเมื่อไฟล์ไม่มีสีให้วิเคราะห์)
+    """
+
+
 def get_single_view_region(full_img, pad=_SINGLE_VIEW_PAD_PX):
     """v25.91 NEW: หากรอบ (region) ของไดอะแกรม isometric บน "หน้าที่ 1" โดยไม่พึ่ง label
     Front/Back เลย (เพราะไฟล์กลุ่มนี้ไม่มี label ดังกล่าวอยู่ในหน้าใดเลย)
@@ -9166,7 +9240,11 @@ def get_single_view_region(full_img, pad=_SINGLE_VIEW_PAD_PX):
     cargo = vivid_cargo_mask(full_img) & (~arrow_mask(full_img))
     ys, xs = np.nonzero(cargo)
     if len(xs) < _SINGLE_VIEW_MIN_CARGO_PX:
-        raise ValueError(f"หน้าที่ 1 ไม่พบไดอะแกรมสินค้า (vivid cargo เพียง {len(xs)}px)")
+        # v26.09: ยกเป็น NoCargoDiagramError เพื่อให้ process_request แยกแยะได้ว่าเป็น
+        # "ไฟล์ที่วิเคราะห์ไม่ได้" (ไม่ใช่บั๊ก) แล้วคืน HTTP 200 พร้อมคำอธิบายแทนการ crash
+        # (ดู docstring เต็มที่ class NoCargoDiagramError)
+        raise NoCargoDiagramError(
+            f"หน้าที่ 1 ไม่พบไดอะแกรมสินค้า (vivid cargo เพียง {len(xs)}px)")
 
     H, W, _ = full_img.shape
     x0 = max(0, int(xs.min()) - pad)
@@ -10801,7 +10879,24 @@ def _pair_layout(imgs):
 _WIREFRAME_MAX_VIVID_FRAC = 0.002   # ต่ำกว่านี้ทุกหน้า = wireframe
 _WIREFRAME_DETECT_SCALE = 2         # render ย่อสำหรับตรวจเท่านั้น (ประหยัด memory)
 _WIREFRAME_DETECT_MAX_PAGES = 3     # ตรวจ 3 หน้าแรกพอ (ไดอะแกรมอยู่หน้า 1-2 เสมอ)
-_WIREFRAME_DETECT_MIN_BLOB = 60     # ที่ scale 2 ใช้ blob เล็กกว่า default (150 ที่ scale 3)
+# v26.09 FIX (ผู้ใช้แจ้ง HTTP 500 จาก Cloud Run log 15-Sep-2026 - ยืนยันด้วยการจำลองจริง):
+# ROOT CAUSE: เดิมใช้ min_blob_size=60 ซึ่งเล็กเกินไป ทำให้ "ลูกศรกำกับ/เส้นบอกระยะสีแดง"
+# ที่มีอยู่ในไฟล์ wireframe ตามปกติ ถูกนับเป็น "สีสดของกล่องสินค้า" -> ระบบตัดสินผิดว่า
+# "ไฟล์มีสีอยู่แล้ว" -> ข้ามการลงสีทั้งหมด -> pipeline เจอไฟล์ไร้สี -> ValueError -> HTTP 500
+# ยืนยันด้วยการจำลองจริง (เพิ่มลูกศรแดงทีละขั้น วัดค่าที่ระบบเห็น):
+#   ลูกศร 0 เส้น -> 0.0000%  (ต่ำกว่าเกณฑ์ 0.2% -> ลงสีถูกต้อง)
+#   ลูกศร 3 เส้น -> 0.1574%  (ยังผ่าน)
+#   ลูกศร 8 เส้น -> 0.4339%  <-- เกินเกณฑ์แล้ว -> ไม่ลงสี -> HTTP 500
+#   ลูกศร 25 เส้น -> 1.3486%
+# ไฟล์จริงของผู้ใช้มี 44 SKU -> เส้นบอกระยะ/ลูกศรจำนวนมาก -> เกินเกณฑ์ตั้งแต่ต้น
+# ยืนยันซ้ำด้วยเวลาใน log: execution 2,087 ms (การลงสีจริงใช้ 18+ วินาที) = ไม่เคยลงสีเลย
+#
+# FIX: แยก "สีสดของกล่องสินค้าจริง" ออกจาก "ลูกศร/เส้นบอกระยะ" ด้วยขนาดของ blob -
+# หน้ากล่องสินค้าในไดอะแกรมเป็นพื้นที่ทึบขนาดใหญ่ (หลายพันพิกเซล) ส่วนลูกศร/เส้นเป็นเส้นบาง
+# (blob เล็กมาก) การยกเกณฑ์ขนาด blob ขั้นต่ำจึงกรองลูกศรออกได้โดยไม่กระทบกล่องจริงเลย
+# ทั้งยังสอดคล้องกับหลักการเดิมของระบบ (vivid_cargo_mask มี min_blob_size เป็นพารามิเตอร์
+# อยู่แล้วเพื่อกรอง noise - เพียงแต่ค่าที่ใช้ตอนตรวจ wireframe ต่ำเกินไป)
+_WIREFRAME_DETECT_MIN_BLOB = 3000   # ที่ scale 2: กล่องสินค้าจริง >> 3000px | ลูกศร/เส้น << 3000px
 
 
 def _detect_wireframe_pdf(pdf_bytes, max_pages=_WIREFRAME_DETECT_MAX_PAGES):
@@ -10953,6 +11048,63 @@ def prepare_pdf_for_analysis(pdf_bytes):
 # Main HTTP handler (Cloud Function entry point) - คง output contract เดิมของ v24.36
 # ============================================================================
 
+def _run_analysis_pipeline(pdf_bytes):
+    """v26.10 NEW: รวมขั้นตอน "เลือกหน้า -> render -> วิเคราะห์" ไว้ที่เดียว เพื่อให้เรียกซ้ำได้
+    (ครั้งที่ 1 = ไฟล์ดั้งเดิม, ครั้งที่ 2 = ไฟล์ที่ลงสีแล้ว) - ดู docstring ที่ process_request
+    สำหรับเหตุผลของการเปลี่ยนสถาปัตยกรรมเป็น "ลองก่อน-ซ่อมทีหลัง" (try-then-fix)
+    คืนค่า (result, meta) หรือโยน NoCargoDiagramError ถ้าไฟล์นี้วิเคราะห์ไม่ได้"""
+    target = _resolve_diagram_target(pdf_bytes)
+    analysis_mode = target["mode"]
+    diagram_page_idx = target["page_idx"]
+    print(f"Using diagram_page_idx={diagram_page_idx} mode={analysis_mode} "
+          f"({target['reason']})")
+
+    full_img, doc, page = render_full_page(pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
+
+    if analysis_mode == "dual_view":
+        ok_cargo, cargo_reason = _dual_view_regions_have_cargo(full_img, doc, diagram_page_idx)
+        if not ok_cargo:
+            print(f"[PAGE_VALIDATE] page[{diagram_page_idx}] ผ่าน text-layer แต่ไม่ผ่าน "
+                  f"pixel-check: {cargo_reason} -> เปลี่ยนไปใช้หน้าที่ 1 เท่านั้น")
+            analysis_mode = "single_view_page1"
+            diagram_page_idx = _SINGLE_VIEW_PAGE_IDX
+            target["layout"] = "SINGLE_VIEW_PAGE1"
+            target["reason"] = f"pixel-check ไม่ผ่าน ({cargo_reason})"
+            try:
+                doc.close()
+            except Exception:
+                pass
+            full_img, doc, page = render_full_page(
+                pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
+
+    if analysis_mode == "dual_view":
+        front_bb = _word_bbox_rotated(page, "Front")
+        back_bb = _word_bbox_rotated(page, "Back")
+        if front_bb and back_bb:
+            fx0, fy0, fx1, fy1 = front_bb
+            bx0, by0, bx1, by1 = back_bb
+            f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+            b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            layout = "LEFT_RIGHT" if abs(f_cx - b_cx) > abs(f_cy - b_cy) else "TOP_BOTTOM"
+        else:
+            layout = "TOP_BOTTOM"
+    else:
+        layout = "SINGLE_VIEW_PAGE1"
+
+    if analysis_mode == "dual_view":
+        result = run_full_analysis_on_image(
+            full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
+    else:
+        result = run_single_view_analysis_on_image(
+            full_img, doc, page_idx=diagram_page_idx, matrix_scale=3, pdf_bytes=pdf_bytes)
+
+    return result, {
+        "full_img": full_img, "doc": doc, "layout": layout,
+        "analysis_mode": analysis_mode, "page_idx": diagram_page_idx,
+        "reason": target.get("reason", ""),
+    }
+
+
 @functions_framework.http
 def process_request(request):
     if request.method == "OPTIONS":
@@ -10981,80 +11133,62 @@ def process_request(request):
         # ให้ลงสีก่อน แล้วส่ง PDF ที่ลงสีแล้วเข้ากระบวนการเดิมทั้งหมด
         # (ดู COLORIZER SECTION ด้านบนสำหรับหลักฐาน+เหตุผล - ผู้ใช้สั่งโดยตรง)
         # ออกแบบให้ fail-safe: ไฟล์ปกติจะผ่านด่านนี้ไปโดยไม่ถูกแตะเลยแม้แต่ byte เดียว
-        pdf_bytes, prep_info = prepare_pdf_for_analysis(pdf_bytes)
+        # v26.10 FIX (ผู้ใช้แจ้ง HTTP 500 จาก Cloud Run log 15-Sep-2026 พร้อมไฟล์จริง 44 SKU):
+        # ROOT CAUSE ที่ยืนยันด้วยการจำลองจริง: v26.08/09 ใช้สถาปัตยกรรม "ตรวจก่อนลงสี"
+        # (detect-then-fix) โดยวัด "สัดส่วนพิกเซลสีสด" เทียบ threshold - แต่ไฟล์ wireframe จริง
+        # มี "ลูกศรกำกับ/เส้นบอกระยะสีแดง" ปนอยู่ตามปกติ ทำให้วัดได้เกิน threshold -> ระบบตัดสิน
+        # ผิดว่า "ไฟล์มีสีอยู่แล้ว" -> ข้ามการลงสี -> pipeline เจอไฟล์ไร้สี -> HTTP 500
+        # ยืนยันด้วยการจำลอง (เพิ่มลูกศรแดงทีละขั้น): 0 เส้น=0.0000% | 3 เส้น=0.1574% |
+        # 8 เส้น=0.4339% (เกินเกณฑ์ 0.2% แล้ว) | 25 เส้น=1.3486% | 40 เส้น=1.8656%
+        # ยืนยันซ้ำด้วยเวลาใน log ของผู้ใช้: execution 2,087 ms (การลงสีจริงใช้ 18+ วินาที)
+        # = ไม่เคยเรียกโมดูลลงสีเลยแม้แต่ครั้งเดียว
+        # ทดลองแก้ด้วยการยกเกณฑ์ขนาด blob (v26.09) แล้วพบว่า "แยกไม่ขาด" เพราะลูกศร/เส้นบอกระยะ
+        # ที่ต่อเนื่องกันรวมเป็น blob ใหญ่ได้ (วัดจริง: ลูกศร 40 เส้น -> blob ใหญ่สุด 20,749px
+        # เทียบกับไฟล์ที่ลงสีแล้ว blob ใหญ่สุดเพียง 8,191px - คาบเกี่ยวกันจนใช้แยกไม่ได้)
+        #
+        # FIX (เปลี่ยนสถาปัตยกรรม ไม่ใช่ปรับ threshold): "ลองก่อน-ซ่อมทีหลัง" (try-then-fix)
+        #   1. ลองวิเคราะห์ไฟล์ดั้งเดิมก่อนเสมอ
+        #   2. ถ้าสำเร็จ -> จบ (ไฟล์ปกติไม่ถูกแตะเลยแม้แต่ byte เดียว เหมือนเดิมทุกประการ)
+        #   3. ถ้าล้มเหลวเพราะ "ไม่พบไดอะแกรมสินค้า" -> ลงสีแล้ววิเคราะห์ใหม่อีกครั้ง
+        # ข้อดีที่ชี้ขาด: ไม่ต้องพึ่ง threshold ใดๆ เลย - ใช้ "ผลลัพธ์จริงของการวิเคราะห์"
+        # เป็นตัวตัดสินแทนการเดาล่วงหน้าจากสีในภาพ จึงไม่มีทางตัดสินผิดได้อีกต่อไป
+        # (ไฟล์ที่วิเคราะห์ได้อยู่แล้ว = ไม่ต้องลงสี | ไฟล์ที่วิเคราะห์ไม่ได้ = ต้องลงสีเสมอ
+        #  ซึ่งตรงกับนิยามของปัญหาที่ผู้ใช้ระบุไว้ตั้งแต่ต้นพอดี)
+        prep_info = {"wireframe_detected": False, "colorized": False,
+                     "colorizer_version": None, "note": ""}
+        _original_pdf = pdf_bytes
+        try:
+            result, meta = _run_analysis_pipeline(pdf_bytes)
+        except NoCargoDiagramError as _first_err:
+            print(f"[RETRY] วิเคราะห์ไฟล์ดั้งเดิมไม่สำเร็จ ({_first_err}) "
+                  f"-> ลองลงสีแล้ววิเคราะห์ใหม่")
+            prep_info["wireframe_detected"] = True
+            if not _CV2_AVAILABLE:
+                prep_info["note"] = "ต้องลงสีแต่ไม่มี opencv ติดตั้ง"
+                raise
+            _colored, _cinfo = colorize_wireframe_pdf_bytes(pdf_bytes)
+            if _colored is None:
+                prep_info["note"] = f"ลงสีไม่สำเร็จ ({_cinfo.get('reason', '')})"
+                print(f"[RETRY] {prep_info['note']}")
+                raise
+            pdf_bytes = _colored
+            prep_info["colorized"] = True
+            prep_info["colorizer_version"] = COLORIZER_VERSION
+            prep_info["views"] = _cinfo.get("views", [])
+            prep_info["note"] = "ลงสีสำเร็จแล้ววิเคราะห์ใหม่"
+            print(f"[RETRY] ลงสีสำเร็จ ({len(_original_pdf)} -> {len(pdf_bytes)} bytes) "
+                  f"-> วิเคราะห์ใหม่")
+            result, meta = _run_analysis_pipeline(pdf_bytes)
+        full_img = meta["full_img"]
+        doc = meta["doc"]
+        layout = meta["layout"]
+        analysis_mode = meta["analysis_mode"]
+        diagram_page_idx = meta["page_idx"]
+        target = {"reason": meta["reason"]}
 
-        # v25.91 FIX (Critical - แก้ HTTP 500 ที่ผู้ใช้แจ้ง 11-Sep-2026 พร้อมไฟล์ตัวอย่าง 3 ไฟล์):
-        # เดิมใช้ _find_diagram_page_idx ซึ่ง "fallback ไป index 1 แบบตายตัว" เมื่อหา Front/Back
-        # ไม่เจอ โดยไม่ตรวจสอบเลยว่าหน้านั้นเป็นไดอะแกรม Front/Back จริงหรือไม่ -> ไฟล์ที่หน้าที่ 2
-        # เป็น "By Placement" (ตาราง 6 ช่องย่อย) จะพังทั้งไฟล์ (HTTP 500)
-        # เปลี่ยนเป็น _resolve_diagram_target ซึ่งตรวจสอบทุกหน้าด้วยกฎ 4 ชั้น แล้วเลือกโหมด:
-        #   dual_view         -> พฤติกรรมเดิมทุกประการ (ไฟล์ปกติไม่ได้รับผลกระทบเลย)
-        #   single_view_page1 -> ใช้หน้าที่ 1 เท่านั้น ตามกฎที่ผู้ใช้กำหนด
-        # (ดู docstring เต็มที่ _resolve_diagram_target/_validate_dual_view_page)
-        target = _resolve_diagram_target(pdf_bytes)
-        analysis_mode = target["mode"]
-        diagram_page_idx = target["page_idx"]
-        print(f"Using diagram_page_idx={diagram_page_idx} mode={analysis_mode} "
-              f"({target['reason']})")
-
-        # v25.17 FIX: extract_sku_from_pdf รับ page_idx เพื่อสแกนหน้าที่ถูกต้อง
-        # (auto-detect ด้วย _find_sku_page_idx ถ้าไม่ระบุ — แต่ส่งค่าชัดเจนจะดีกว่า)
-        sku_list = extract_sku_from_pdf(pdf_bytes, page_idx=None)  # auto-detect แยกต่างหาก
+        sku_list = extract_sku_from_pdf(pdf_bytes, page_idx=None)
         sku_str = ", ".join(sku_list) if sku_list else ""
 
-        # v25.15 FIX (Critical): full_img ของ pipeline หลักกลับไปใช้ matrix_scale=3 (ค่าเดิม
-        # ก่อน v25.14) - v25.14 เคยเปลี่ยนเป็น scale=4 เพื่อแก้ Bug#1 แต่ทำให้ Cloud Function ใช้
-        # memory เกิน limit จน HTTP 500 ทุกไฟล์เมื่อใช้งานจริง (ดู docstring
-        # run_full_analysis_on_image/render_hires_crop) ตอนนี้ PHASE 1B render เฉพาะ region เล็กๆ
-        # ที่ scale=4 แยกต่างหาก (ไม่กระทบ pipeline หลัก) จึงไม่จำเป็นต้องยก full_img ทั้งหน้าขึ้น
-        # scale=4 อีกต่อไป
-        # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
-        full_img, doc, page = render_full_page(pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
-
-        # v25.91 NEW: ชั้นที่ 5 (pixel-level) - แม้หน้าจะผ่านการตรวจ text-layer ครบ 4 ชั้นแล้ว
-        # ก็ยังต้องยืนยันว่ากรอบ front/back ที่คำนวณได้ "มีสินค้าจริงทั้ง 2 ฝั่ง" ก่อนเชื่อว่าเป็น
-        # ไดอะแกรม Front/Back จริง - ถ้าไม่ผ่าน ให้ตกไปใช้หน้าที่ 1 เช่นกัน (ดู
-        # _dual_view_regions_have_cargo) - ไม่กระทบไฟล์ปกติเพราะทั้ง 2 ฝั่งมีสินค้าเต็มอยู่แล้ว
-        if analysis_mode == "dual_view":
-            ok_cargo, cargo_reason = _dual_view_regions_have_cargo(full_img, doc, diagram_page_idx)
-            if not ok_cargo:
-                print(f"[PAGE_VALIDATE] page[{diagram_page_idx}] ผ่าน text-layer แต่ไม่ผ่าน "
-                      f"pixel-check: {cargo_reason} -> เปลี่ยนไปใช้หน้าที่ 1 เท่านั้น")
-                analysis_mode = "single_view_page1"
-                diagram_page_idx = _SINGLE_VIEW_PAGE_IDX
-                target["layout"] = "SINGLE_VIEW_PAGE1"
-                target["reason"] = f"pixel-check ไม่ผ่าน ({cargo_reason})"
-                try:
-                    doc.close()
-                except Exception:
-                    pass
-                full_img, doc, page = render_full_page(
-                    pdf_bytes, page_idx=diagram_page_idx, matrix_scale=3)
-
-        # layout label (เก็บไว้เพื่อ output contract เดิม - อนุมานจากทิศทาง Front/Back label)
-        if analysis_mode == "dual_view":
-            front_bb = _word_bbox_rotated(page, "Front")
-            back_bb = _word_bbox_rotated(page, "Back")
-            if front_bb and back_bb:
-                fx0, fy0, fx1, fy1 = front_bb
-                bx0, by0, bx1, by1 = back_bb
-                f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
-                b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-                layout = "LEFT_RIGHT" if abs(f_cx - b_cx) > abs(f_cy - b_cy) else "TOP_BOTTOM"
-            else:
-                layout = "TOP_BOTTOM"
-        else:
-            # v25.91: โหมดหน้าที่ 1 หน้าเดียว - ไม่มี layout Front/Back ให้จำแนก
-            layout = "SINGLE_VIEW_PAGE1"
-
-        # v25.17 FIX: ใช้ diagram_page_idx แทน hardcode 1
-        # v25.91 FIX: แยกเส้นทางตามโหมดที่ตรวจสอบได้ (ดู _resolve_diagram_target)
-        if analysis_mode == "dual_view":
-            result = run_full_analysis_on_image(full_img, doc, page_idx=diagram_page_idx, pdf_bytes=pdf_bytes, matrix_scale=3)
-        else:
-            result = run_single_view_analysis_on_image(
-                full_img, doc, page_idx=diagram_page_idx, matrix_scale=3,
-                pdf_bytes=pdf_bytes)
         risks = result["risks"]
 
         img = PIL.Image.fromarray(full_img).convert("RGB")
@@ -11132,8 +11266,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.08",
-            "benchmarkMode": "v26_08_wireframe_colorizer_integrated",
+            "checkerVersion": "V26.10",
+            "benchmarkMode": "v26_10_try_then_colorize",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -11146,6 +11280,34 @@ def process_request(request):
             "wireframeColorized": prep_info.get("colorized", False),
             "colorizerVersion": prep_info.get("colorizer_version"),
             "colorizerNote": prep_info.get("note", ""),
+        }, 200, headers)
+    except NoCargoDiagramError as e:
+        # v26.09: ไฟล์นี้วิเคราะห์ไม่ได้ (ไม่ใช่บั๊กของโปรแกรม) - คืน HTTP 200 พร้อมคำอธิบาย
+        # แทนการ crash เป็น HTTP 500 (ดู docstring เต็มที่ class NoCargoDiagramError)
+        print(f"[NO_CARGO] {e}")
+        gc.collect()
+        return ({
+            "status": "วิเคราะห์ไม่ได้ (ไม่พบไดอะแกรมสินค้าที่มีสี)",
+            "hazardCount": 0,
+            "layout": "UNKNOWN",
+            "actionRequired": (
+                "ไม่สามารถวิเคราะห์ไฟล์นี้ได้\n"
+                f"สาเหตุ: {e}\n\n"
+                "แนวทางแก้ไข:\n"
+                "  • ถ้าเป็นไฟล์ wireframe (ภาพเส้นขาว-ดำ) ระบบจะลงสีให้อัตโนมัติ - "
+                "กรณีนี้อาจลงสีไม่สำเร็จ โปรดตรวจสอบ log ที่ขึ้นต้นด้วย [COLORIZER]\n"
+                "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
+            ),
+            "processedImageUrl": "",
+            "checkerVersion": "V26.10",
+            "benchmarkMode": "v26_10_try_then_colorize",
+            "analysisMode": "failed_no_cargo",
+            "analysisPageIndex": -1,
+            "analysisPageReason": str(e),
+            "wireframeDetected": prep_info.get("wireframe_detected", False) if "prep_info" in dir() else False,
+            "wireframeColorized": prep_info.get("colorized", False) if "prep_info" in dir() else False,
+            "colorizerVersion": prep_info.get("colorizer_version") if "prep_info" in dir() else None,
+            "colorizerNote": prep_info.get("note", "") if "prep_info" in dir() else "",
         }, 200, headers)
     except Exception as e:
         err_trace = traceback.format_exc()
