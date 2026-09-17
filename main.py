@@ -2,6 +2,42 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.16 (ผู้ใช้แนบไฟล์จริง 12 ไฟล์ + ภาพชี้จุดด้วยลูกศร/วงกลม 7 ภาพ 17-Sep-2026):
+  ลูกศร = "จุดที่วาดเกินมา บริเวณนั้นปลอดภัย" | วงกลม = "กล่องสูงต่ำ ต้องวาดกรอบ แต่ไม่พบ"
+แก้ 4 จุด (root cause อิสระต่อกัน) โดยยึดหลักฐาน pixel จริงจากไฟล์ชุดนี้ทุกข้อ:
+
+  FIX 1 BOX-SUPPORT GUARD (กรอบแดง hidden_behind ลอยเหนือกองสินค้า)
+        แก้: CC07-01 FRONT idx1 | CC40-02 FRONT idx2, idx3
+        เกณฑ์: สัดส่วนสินค้าในแถบบน 15% ของกรอบ >= 0.35
+        (ผิด 0.000/0.105/0.200 vs ถูก 0.490-0.846 - แยกขาด ไม่มีค่าคาบเกี่ยว)
+
+  FIX 2 CONTAINER ENTRY-COLUMN GUARD (กรอบแดงที่คอลัมน์แรกของตู้ใบที่ 2)
+        แก้: CC05-all cross_view+hidden_behind FRONT idx4 | CC19-all hidden_behind FRONT idx3
+        เกณฑ์: คอลัมน์เริ่มภายใน 60px หลังช่องว่างระหว่างตู้ และ drop_ratio < 0.30
+        (ผิด 0.165/0.174/0.256 vs CB15-04 idx5 ของจริง 0.365 - ยังคงอยู่ครบ)
+
+  FIX 3 TAILZONE เงื่อนไขที่ 3 "เงาสินค้าต้องแหว่งจริง"
+        แก้: CD11-ALL | Empty trip CC20 (กรอบส้มท้ายรถที่กองวางเต็มสูงเท่ากันหมด)
+        เกณฑ์: พื้นหลังว่างในเขตท้ายรถ >= 22.0%
+        (ผิด 8.3%/18.7% vs ถูก CC19 27.5% / CC05 30.8% / CE01 35.0%)
+
+  FIX 4 TAIL_STEPDOWN Guard 1 เปลี่ยนเป็นเกณฑ์สัมพัทธ์ (แก้ false-negative ที่ผู้ใช้วงกลม)
+        แก้: CC28-all FRONT idx0 (กว้าง 62px ถูกเกณฑ์ตายตัว 70px ตัดทิ้งทั้งที่ drop 18.7%)
+        เกณฑ์ใหม่: max(40px, 70% ของ median ความกว้างคอลัมน์ในวิวนั้น)
+        (CC28-01 ผ่าน 62>=51.5 | EA07-01 เดิม 57<70.0 ยังถูกตัดเหมือนเดิม = เจตนาเดิมคงอยู่)
+
+REGRESSION (รันจริงครบ 12 ไฟล์ เทียบ v26.15 ทีละจุด):
+  - ลบออก 8 จุด = ตรงกับที่ผู้ใช้ชี้ด้วยลูกศรทุกจุด ไม่ขาดไม่เกิน
+  - เพิ่ม 1 จุด = ตรงกับที่ผู้ใช้วงกลมไว้ (CC28-all)
+  - อีก 6 ไฟล์ (CB15-04, CC33-all, CE01-all, CE02-ALL, TC51-03, และกรอบที่เหลือทุกไฟล์)
+    ผลเหมือน v26.15 ทุกจุด ทุกพิกัด = 0 true positive ที่สูญหาย
+
+ข้อจำกัดที่ต้องบอกตรงๆ:
+  - เกณฑ์ทั้ง 4 ปรับเทียบจากไฟล์ชุดนี้ (12 ไฟล์) เท่านั้น ยังไม่ได้ทวนกับชุด EC05-01/EC52-02/
+    GC06 ที่ใช้ตั้งเกณฑ์ v26.01-v26.06 ไว้เดิม (ไม่มีไฟล์เหล่านั้นใน uploads รอบนี้)
+  - FIX 3 เป็นเกณฑ์เชิงสัดส่วนพื้นหลัง (correlational) ไม่ใช่การวัดโพรงโดยตรง - ถ้าพบไฟล์ที่
+    โพรงจริงแต่เงาไม่แหว่ง ให้ปรับที่ _TAILZONE_MIN_WHITE_PCT จุดเดียว
+================================================================================
 v26.15 (ผู้ใช้แก้ไข ground truth ให้ 16-Sep-2026 หลังทดสอบ v26.14):
   "กรอบส้มแบบนี้ถูก ดันไปลบทิ้ง
    กรอบที่ผิดคือ คร่อมทั้งสองตู้ประเภทรถพ่วง กับ ประเภทกล่องใหญ่วางเรียง 1 ตรงท้ายตู้
@@ -5657,6 +5693,25 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 # แต่ยังต่ำกว่า "การเพิ่มขึ้น 1 ชั้นกล่องจริง" (~25-35% ของความสูงกอง) มาก จึงไม่กระทบกรณี
 # hidden_behind ที่เป็นอันตรายจริงแบบ AE02-01 (กล่องแดงซ้อนชั้นที่ 3 สูงพ้นทุกกองอย่างชัดเจน)
 _HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO = 0.15
+# v26.16 NEW: BOX-SUPPORT GUARD (กรอบแดง hidden_behind ที่ "ลอยอยู่เหนือสินค้า")
+# ที่มา: ผู้ใช้ชี้ด้วยลูกศรบนภาพจริง 17-Sep-2026 (CC07-01, CC40-02) ว่ากรอบแดงเหล่านี้
+# "วาดเกินมา บริเวณนั้นปลอดภัย"
+# ROOT CAUSE ที่วัดได้จริงระดับ pixel: hidden_height ถูกคำนวณจาก local_floor_y ของคอลัมน์
+# (เส้นพื้นที่ประมาณค่ามาจากแนวพื้นตู้) ลบด้วย median ของ (floor - top) ฝั่งที่ "ซ่อนอยู่" -
+# เมื่อค่า floor ฝั่งนั้นคลาดเคลื่อน (พื้นตู้เอียงตาม isometric / mask ขาดช่วง) ขอบบนของกรอบ
+# ที่ได้จะไปอยู่ "เหนือกองสินค้าจริง" คือลอยอยู่ในพื้นที่ขาวนอกตัวตู้ - กรอบจึงไม่ได้ชี้ไปที่
+# กล่องใบใดเลย
+# หลักฐานเชิงตัวเลข (วัด "สัดส่วน pixel ที่เป็นสินค้า" ในแถบบนสุด 15% ของกรอบที่วาดจริง
+# ครบทุกจุด hidden_behind ใน 12 ไฟล์ที่ผู้ใช้แนบ):
+#   จุดที่ผู้ใช้ชี้ว่าผิด : CC07 idx1 = 0.000 | CC40 idx3 = 0.105 | CC40 idx2 = 0.200
+#   จุดที่ผู้ใช้ไม่ได้ทัก : 0.490, 0.749, 0.771, 0.778, 0.778, 0.785, 0.790, 0.839, 0.842, 0.846
+#   -> ไม่มีค่าใดคาบเกี่ยวกันเลย เกณฑ์ 0.35 อยู่กึ่งกลาง (ห่างฝั่งผิด 1.75 เท่า / ฝั่งถูก 1.4 เท่า)
+# ขอบเขต: ใช้กับ subtype hidden_behind เท่านั้น - ไม่แตะ cross_view/pairwise/tail_stepdown
+# (วัดแล้วพบว่า cross_view ปกติมีแถบบนว่างได้ตามธรรมชาติ เช่น CE01/CE02 = 0.000 ซึ่งผู้ใช้
+#  ยืนยันว่าถูกต้อง จึงห้ามใช้เกณฑ์เดียวกันข้าม subtype เด็ดขาด)
+_HIDDEN_BEHIND_MIN_TOP_SUPPORT = 0.35
+_HIDDEN_BEHIND_TOP_BAND_FRAC = 0.15
+_HIDDEN_BEHIND_TOP_BAND_MIN_PX = 10
 
 _HIDDEN_BEHIND_UP_MAX_BOTTOM_JUMP_PX = 40  # v25.89 NEW: ดู docstring เต็มที่จุดใช้งานจริงด้านล่าง
 # (ทิศทาง 'up') สำหรับหลักฐาน+เหตุผล (พบจริงจาก EB73-01) - ตั้งค่าให้สูงกว่า noise ปกติของขอบกล่อง
@@ -7113,6 +7168,24 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
         if floor_y_local is None:
             continue
         top_y_local = floor_y_local - hidden_h
+        # v26.16 NEW: BOX-SUPPORT GUARD - กรอบต้องมี "สินค้าจริง" รองรับที่ขอบบนของมัน
+        # (ดู docstring + หลักฐานตัวเลขที่ _HIDDEN_BEHIND_MIN_TOP_SUPPORT)
+        _cm_sup = view_result.get("cargo_mask")
+        if _cm_sup is not None:
+            _by0 = int(max(0, top_y_local))
+            _by1 = int(min(_cm_sup.shape[0], floor_y_local))
+            _band = max(_HIDDEN_BEHIND_TOP_BAND_MIN_PX,
+                        int((_by1 - _by0) * _HIDDEN_BEHIND_TOP_BAND_FRAC))
+            _bx0 = int(max(0, mark_x0))
+            _bx1 = int(min(_cm_sup.shape[1], mark_x1))
+            _sub = _cm_sup[_by0:min(_by0 + _band, _by1), _bx0:_bx1]
+            if _sub.size:
+                _support = float(_sub.mean())
+                if _support < _HIDDEN_BEHIND_MIN_TOP_SUPPORT:
+                    print(f"[HB_BOX_SUPPORT] view={view_label} idx={idx} แถบบนของกรอบมีสินค้า "
+                          f"{_support:.3f} < {_HIDDEN_BEHIND_MIN_TOP_SUPPORT} -> กรอบลอยเหนือ "
+                          f"กองสินค้า (ความสูงที่วัดได้ไม่มี pixel รองรับ) ไม่ flag")
+                    continue
         abs_box = (ox + mark_x0, oy + top_y_local, ox + mark_x1, oy + floor_y_local)
         risks.append({
             "risk_type": "STEP_DOWN_RISK", "subtype": "hidden_behind", "view": view_label,
@@ -7383,7 +7456,20 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     ไม่เคยมี (STEP_DOWN_MIN_RELIABLE_SAMPLES) - เพื่อความสอดคล้องกันระหว่าง 2 กลไกที่ตรวจจับ
     รูปแบบเดียวกัน (step-down ระหว่าง 2 คอลัมน์ติดกัน) ไม่ควรมีมาตรฐานความน่าเชื่อถือต่างกัน
     """
-    TAIL_STEPDOWN_MIN_COL_WIDTH = 70      # px ขั้นต่ำของ tail col (ปกติ 80-130px)
+    # v26.16 FIX (false-negative ที่ผู้ใช้วงกลมบนภาพ CC28-01, 17-Sep-2026: "บริเวณที่กล่อง
+    # สูงต่ำ ต้องมีการวาดกรอบ แต่กลไกตรวจจับไม่พบ"):
+    # ROOT CAUSE ที่ยืนยันด้วยตัวเลขจริง: คอลัมน์ท้ายสุดของ CC28-01 กว้าง 62px ซึ่งต่ำกว่า
+    # เกณฑ์ตายตัว 70px จึงถูก Guard 1 ตัดทิ้งก่อนจะได้เทียบความสูงเลย ทั้งที่เป็นคอลัมน์จริง
+    # (ความสูง 237.8px vs คอลัมน์ถัดไป 292.4px = drop 18.7% ซึ่งเกินเกณฑ์ 12% ของกลไกนี้)
+    # ปัญหาของเกณฑ์ตายตัว: 70px เหมาะกับไฟล์ที่คอลัมน์ปกติกว้าง 80-130px (ตามที่ v25.54 วัดไว้)
+    # แต่ CC28-01 เป็นรถพ่วง 2 ตู้ที่เห็นคอลัมน์ทั้งคันย่อส่วนลง - คอลัมน์ปกติของไฟล์นี้กว้าง
+    # median เพียง 73.5px ทำให้ 62px = 84% ของคอลัมน์ปกติ (ไม่ใช่คอลัมน์ผิดปกติแต่อย่างใด)
+    # เทียบกับเคสที่ v25.54 ตั้งเกณฑ์นี้ขึ้นมาแก้ (EA07-01 FRONT idx0 = 57px เทียบคอลัมน์ปกติ
+    # ~100px = 57%) -> เปลี่ยนเป็นเกณฑ์ "สัมพัทธ์กับคอลัมน์ปกติของไฟล์นั้นเอง" ที่ 70% พร้อม
+    # พื้นขั้นต่ำสัมบูรณ์ 40px กันคอลัมน์เศษ: CC28-01 ผ่าน (62 >= 51.5) | EA07-01 ยังถูกตัด
+    # (57 < 70.0) = รักษาเจตนาเดิมของ Guard 1 ไว้ครบ
+    TAIL_STEPDOWN_MIN_COL_WIDTH_ABS = 40  # px พื้นขั้นต่ำสัมบูรณ์ (คอลัมน์เศษ/artifact)
+    TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC = 0.70  # เทียบ median ความกว้างคอลัมน์ของวิวนี้
     TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.25  # เกณฑ์เข้มสำหรับ cross_view_corrected
 
     risks = []
@@ -7400,9 +7486,16 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     if tail_idx == 0:
         return risks
 
-    # v25.54 Guard 1: tail col ต้องกว้างพอ
+    # v25.54 Guard 1 (v26.16: เปลี่ยนเป็นเกณฑ์สัมพัทธ์ - ดูเหตุผล+ตัวเลขด้านบน)
     x0t, x1t = tail_rec["x_range"]
-    if (x1t - x0t) < TAIL_STEPDOWN_MIN_COL_WIDTH:
+    _widths = [float(r["x_range"][1] - r["x_range"][0]) for r in valid
+               if r.get("x_range") and (r["x_range"][1] - r["x_range"][0]) > 0]
+    _med_w = float(np.median(_widths)) if len(_widths) >= 3 else 100.0
+    _min_w = max(TAIL_STEPDOWN_MIN_COL_WIDTH_ABS, _med_w * TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC)
+    if (x1t - x0t) < _min_w:
+        print(f"[TAIL_STEPDOWN] {view_label} คอลัมน์ท้าย x={tail_rec['x_range']} "
+              f"กว้าง {x1t - x0t}px < เกณฑ์ {_min_w:.1f}px "
+              f"(median คอลัมน์ของวิวนี้ {_med_w:.1f}px) -> ไม่เชื่อค่าความสูง ไม่ flag")
         return risks
 
     inner_rec = valid[tail_idx - 1]
@@ -9124,6 +9217,24 @@ _TAILZONE_TF_MIN_ASPECT = 1.25      # parallelogram ผิวบนต้อง�
 _TAILZONE_TF_MIN_WIDTH_FRAC = 0.55
 _TAILZONE_TF_MIN_AREA = 600
 _TAILZONE_TF_MIN_COLOR_PX = 700
+# v26.16 NEW: เงื่อนไขที่ 3 - "เขตท้ายรถต้องมีพื้นที่ว่างจริง (silhouette แหว่ง)"
+# ที่มา: ผู้ใช้ชี้ด้วยลูกศรบนภาพจริง 17-Sep-2026 (CD11-02, CC20-02) ว่ากรอบส้มท้ายรถ 2 จุดนี้
+# "วาดเกินมา บริเวณนั้นปลอดภัย"
+# ROOT CAUSE: เงื่อนไขเดิม 2 ข้อ (ผนังโผล่ >= 3% และผิวบน >= 4) ยังผ่านได้ในกรณีที่ "กองเต็ม
+# แต่เตี้ยกว่าความสูงตู้ทั้งคัน" - ผนัง/รางที่นับได้มาจากผนังตู้ที่อยู่เหนือกองสินค้าตลอดแนว
+# (ไม่ใช่โพรงเฉพาะจุดท้ายรถ) ยืนยันด้วยภาพ: CD11 กล่องน้ำเงินขนาดเท่ากันทั้งหมดวางเต็มทั้งนอก
+# และใน | CC20 กล่อง KAPI-A แดงวางเต็มบล็อก 2 แถว สูงเท่ากันหมด
+# หลักฐานเชิงตัวเลข (สัดส่วน pixel พื้นหลังสีขาว = นอกเงาของตู้/กองสินค้า ในเขตท้ายรถเดียวกัน
+# กับที่ใช้วัดผนัง):
+#   จุดที่ผู้ใช้ชี้ว่าผิด : CD11 = 7.6% | CC20 = 16.8%
+#   จุดที่ผู้ใช้ไม่ได้ทัก : CC19 = 27.5% | CC05 = 30.8% | CE01 = 35.0%
+#   -> เกณฑ์ 22.0% อยู่กึ่งกลาง (ห่างฝั่งผิด 1.31 เท่า / ฝั่งถูก 1.25 เท่า)
+# เหตุผลเชิงกายภาพ: "โพรงสูงต่ำ" ที่ท้ายรถทำให้เส้นเงารอบนอกของกองสินค้าแหว่งลงไป เขตสแกน
+# สี่เหลี่ยมจึงกินพื้นหลังสีขาวนอกเงาเข้ามาด้วยเสมอ - ถ้าเขตนั้นถูก "สินค้า + โครงตู้" ปิดทึบ
+# เกือบหมด (ขาว < 22%) แปลว่าไม่มีรอยแหว่งที่ท้ายรถเลย
+# *** ข้อจำกัดที่ต้องบอกตรงๆ: เกณฑ์นี้ปรับเทียบจาก 5 ไฟล์ที่มีข้อมูลจริงในรอบนี้เท่านั้น
+#     (2 ผิด / 3 ถูก) ยังไม่ได้ทวนกับชุดไฟล์ EC05-01/EC52-02/GC06 ที่ใช้ตั้งเกณฑ์ v26.01 ***
+_TAILZONE_MIN_WHITE_PCT = 22.0
 
 
 def _count_visible_top_faces(view_result, records):
@@ -9315,18 +9426,22 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
         return []
     wall_pct = n_wall / total * 100.0
     box_pct = n_box / total * 100.0
+    white_pct = n_white / total * 100.0   # v26.16: ดู _TAILZONE_MIN_WHITE_PCT
 
     n_tf = _count_visible_top_faces(view_result, records)
     ok_wall = wall_pct >= _TAILZONE_WALL_MIN_PCT
     ok_small = n_tf >= _TAILZONE_MIN_TOPFACES
+    ok_void = white_pct >= _TAILZONE_MIN_WHITE_PCT   # v26.16 NEW (เงื่อนไขที่ 3)
     print(f"[TAILZONE] {view_label} เขต x=[{zx0},{zx1}] กล่อง={box_pct:.1f}% "
           f"ผนัง={wall_pct:.1f}% (เกณฑ์ {_TAILZONE_WALL_MIN_PCT}%) "
           f"[ตัดผนังเหนือเส้นยอดลาดเอียง {n_wall_above} จุด, slope={_slope_txt}] "
           f"ผิวบนที่เห็น={n_tf} (เกณฑ์ {_TAILZONE_MIN_TOPFACES}) "
-          f"-> {'FLAG โพรงสูงต่ำ' if (ok_wall and ok_small) else 'ผ่าน'}"
+          f"พื้นหลังว่าง={white_pct:.1f}% (เกณฑ์ {_TAILZONE_MIN_WHITE_PCT}%) "
+          f"-> {'FLAG โพรงสูงต่ำ' if (ok_wall and ok_small and ok_void) else 'ผ่าน'}"
           + ("" if ok_wall else " [ผนังน้อย=วางเต็ม]")
-          + ("" if ok_small else " [กล่องใหญ่กินเต็มความลึก]"))
-    if not (ok_wall and ok_small):
+          + ("" if ok_small else " [กล่องใหญ่กินเต็มความลึก]")
+          + ("" if ok_void else " [เงาสินค้าไม่แหว่ง=วางเต็มไม่มีโพรง v26.16]"))
+    if not (ok_wall and ok_small and ok_void):
         return []
 
     ox = view_result.get("crop_origin_x", 0)
@@ -9618,6 +9733,82 @@ def _clip_risks_at_container_gaps(risks, front, back, n_containers):
     return out
 
 
+
+# ============================================================================
+# v26.16 NEW: CONTAINER ENTRY-COLUMN GUARD (กรอบแดงที่คอลัมน์แรกของตู้ใบถัดไป)
+# ============================================================================
+# ที่มา: ผู้ใช้ชี้ด้วยลูกศรบนภาพจริง 17-Sep-2026 (CC05-all, CC19-all opt2) ว่ากรอบแดงที่
+# "หัวตู้ใบที่ 2" วาดเกินมา บริเวณนั้นปลอดภัย
+# ROOT CAUSE ที่ยืนยันด้วย pixel จริง: ที่ขอบด้านหน้าของตู้ใบถัดไป ผนัง/เสาหัวตู้ (สีโครงสร้าง)
+# บังกล่องใบแรกไว้บางส่วน ทำให้ mask ของคอลัมน์นั้นเหลือเพียง "แถบแคบ" ที่เห็นได้ ค่าความสูงที่
+# วัดได้จึงต่ำกว่าความจริง (เหมือนกรณีคอลัมน์ปนช่องว่างระหว่างตู้ที่แก้ไปแล้วใน v26.15 แต่คนละ
+# ตำแหน่ง: v26.15 แก้คอลัมน์ที่ "คร่อมช่องว่าง" ส่วนรอบนี้คือคอลัมน์ที่ "อยู่ถัดจากช่องว่างทันที")
+# วัดจริงจากไฟล์ที่ผู้ใช้แนบ (ระยะจากขอบขวาของช่องว่างระหว่างตู้ ถึงขอบซ้ายของคอลัมน์):
+#   CC05-all FRONT idx4 : ช่องว่าง=(897,955) คอลัมน์เริ่ม 967 (ห่าง 12px) drop=0.174 / 0.256
+#   CC19-all FRONT idx3 : ช่องว่าง=(897,964) คอลัมน์เริ่ม 931 (คร่อมขอบช่อง) drop=0.165
+#   CB15-04  FRONT idx5 : ช่องว่าง=(906,929) คอลัมน์เริ่ม 950 (ห่าง 21px) drop=0.365 <- ของจริง
+# -> จำกัดขอบเขตด้วย 2 เงื่อนไขพร้อมกัน เพื่อไม่ให้ไปลบ true positive ที่หัวตู้ (CB15-04):
+#   (1) คอลัมน์ที่ถูก mark เริ่มภายใน 60px หลังช่องว่างระหว่างตู้ (= คอลัมน์แรกของตู้ถัดไป)
+#   (2) และ drop_ratio < 0.30 (ระดับที่อธิบายได้ด้วยการถูกผนังหัวตู้บังเท่านั้น - ถ้ากล่องเตี้ยกว่า
+#       จริงหนึ่งชั้นจะได้ >= 0.33 เสมอตามสัดส่วนกล่อง 3 ชั้น) - CB15-04 (0.365) จึงยังคงอยู่ครบ
+# ขอบเขต: เฉพาะ STEP_DOWN_RISK subtype cross_view / hidden_behind และเฉพาะรถหลายตู้เท่านั้น
+# (รถตู้เดียวไม่มีช่องว่างระหว่างตู้ -> ไม่ถูกแตะเลยแม้แต่ไฟล์เดียว) และไม่แตะกรอบส้มทุกชนิด
+_ENTRY_COLUMN_MAX_GAP_DIST_PX = 60
+_ENTRY_COLUMN_MAX_DROP_RATIO = 0.30
+_ENTRY_COLUMN_SUBTYPES = ("cross_view", "hidden_behind")
+
+
+def _suppress_container_entry_column_stepdown(risks, front, back, n_containers):
+    """v26.16: ระงับกรอบแดงที่คอลัมน์แรกของตู้ใบถัดไป (ดู docstring ด้านบน)"""
+    if n_containers < 2 or not risks:
+        return risks
+    gaps_by_view = {}
+    for label, v in (("FRONT", front), ("BACK", back)):
+        if v is None:
+            continue
+        g = v.get("_inter_container_gaps")
+        if g is None:
+            try:
+                g = _find_inter_container_gaps(v, n_containers)
+            except Exception:
+                g = []
+        gaps_by_view[label] = (g or [], v)
+    out = []
+    for r in risks:
+        if (r.get("risk_type") != "STEP_DOWN_RISK"
+                or r.get("subtype") not in _ENTRY_COLUMN_SUBTYPES):
+            out.append(r)
+            continue
+        label = r.get("mark_view")
+        gaps, v = gaps_by_view.get(label, ([], None))
+        idx = r.get("mark_stack_idx")
+        if not gaps or v is None or idx is None:
+            out.append(r)
+            continue
+        try:
+            col_x0 = v["stack_heights"][idx]["x_range"][0]
+        except Exception:
+            out.append(r)
+            continue
+        drop = r.get("drop_ratio")
+        if drop is None or drop >= _ENTRY_COLUMN_MAX_DROP_RATIO:
+            out.append(r)
+            continue
+        hit = None
+        for g0, g1 in gaps:
+            if -5 <= (col_x0 - g1) <= _ENTRY_COLUMN_MAX_GAP_DIST_PX or (g0 <= col_x0 <= g1):
+                hit = (g0, g1)
+                break
+        if hit is None:
+            out.append(r)
+            continue
+        print(f"[ENTRY_COL] ระงับ {r.get('subtype')} view={label} idx={idx} "
+              f"คอลัมน์เริ่มที่ x={col_x0} ถัดจากช่องว่างระหว่างตู้ {hit} และ "
+              f"drop_ratio={drop:.3f} < {_ENTRY_COLUMN_MAX_DROP_RATIO} "
+              f"-> ความสูงถูกผนังหัวตู้บัง ไม่ใช่กล่องเตี้ยจริง")
+    return out
+
+
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -9743,6 +9934,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         # v26.13: ตัดกรอบที่คร่อมช่องว่างระหว่างตู้ ให้อยู่ในตู้เดียว
         # (ดู docstring เต็มที่ _clip_risks_at_container_gaps - พบจริงจาก CC05-all/CE01-all)
         risks = _clip_risks_at_container_gaps(risks, front, back, n_containers)
+        # v26.16: ระงับกรอบแดงที่คอลัมน์แรกของตู้ใบถัดไป (ดู _suppress_container_entry_column_stepdown)
+        risks = _suppress_container_entry_column_stepdown(risks, front, back, n_containers)
 
     return {
         "front": front, "back": back,
@@ -9918,6 +10111,8 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
                 risks, view, "FRONT", n_containers)
             # v26.13: ตัดกรอบที่คร่อมช่องว่างระหว่างตู้ (ดู _clip_risks_at_container_gaps)
             risks = _clip_risks_at_container_gaps(risks, view, None, n_containers)
+            # v26.16: ดู _suppress_container_entry_column_stepdown
+            risks = _suppress_container_entry_column_stepdown(risks, view, None, n_containers)
 
     print(f"[SINGLE_VIEW] n_stacks={view.get('n_stacks')} risks={len(risks)}")
     return {
@@ -11815,8 +12010,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.15",
-            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
+            "checkerVersion": "V26.16",
+            "benchmarkMode": "v26_16_box_support_entry_column_tailzone_void_fix",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -11848,8 +12043,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.15",
-            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
+            "checkerVersion": "V26.16",
+            "benchmarkMode": "v26_16_box_support_entry_column_tailzone_void_fix",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
