@@ -2,59 +2,6 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v26.16 (ผู้ใช้แจ้ง 17-Sep-2026 พร้อม PDF จริง + แก้ความเข้าใจผิดของผมโดยตรง:
-"กรอบแดงที่ชี้คือ ตั้งกองของกล่องตรงนั้น ปลอดภัย แต่ไปวาดกรอบ
- ไม่ใช่ที่คุณเข้าใจหลงประเด็น")
-
-สิ่งที่ผมเข้าใจผิดในรอบก่อน (ต้องบันทึกไว้): ผมไปวัด "สัดส่วนพื้นที่ขาวในกรอบ" แล้วสรุปว่า
-ปัญหาคือ "ขอบกรอบวาดเลยขอบเขตสินค้า" (ปัญหาการวาด) - แต่ผู้ใช้ชี้ว่าเป็น "การตรวจจับผิด"
-(false positive) คือกองตรงนั้นสูงเท่ากันจริง ไม่มีขั้น แต่ระบบดันตรวจพบว่าเป็นจุดเสี่ยง
-เป็นคนละเรื่องกันโดยสิ้นเชิง
-
---- FIX #1: gap-contaminated guard ไม่ครบทุกกลไก (พบจาก CC05-all) ---------------
-ROOT CAUSE (log จริงเป็นหลักฐานชี้ขาด - guard ตรวจเจอแล้วแต่ยัง flag):
-  [GAP_COL] FRONT idx=3 x=(813,967) ถูกช่องว่างระหว่างตู้กินพื้นที่ 38% (เกณฑ์ >=30%)
-            -> ความสูงที่วัดได้ (164.4px) ถูกเจือจาง ไม่น่าเชื่อถือพอจะเทียบข้าม view
-  [TAIL_XVIEW] FRONT idx=3 ยืนยันอิสระผ่าน: 164.4px vs อีก view 112.2px -> คง flag ไว้
-  v26.15 wire _is_gap_contaminated เข้าเฉพาะ detect_step_down_crossview เท่านั้น
-  ไม่ได้ wire เข้า detect_tail_stepdown / detect_step_down_pairwise
-FIX: wire guard เดียวกันเข้าอีก 2 กลไก - ใช้เกณฑ์เดิม 30% ทุกประการ ไม่ปรับค่าใดเลย
-
---- FIX #2: Edge-Column Guard ถูก seam-jump บล็อกทุกครั้ง (พบจาก CC07/CC40) -------
-ROOT CAUSE (ไล่ guard ทีละเงื่อนไขกับไฟล์จริง - guard ตรวจพบถูกต้องครบทุกจุด แต่ถูกบล็อก):
-  CC07 FRONT idx4 h=337.0 plateau=251.8 spread=0.3% dev=33.9% seam_jump=True -> ไม่ suppress
-  CC07 BACK  idx0 h= 84.0 plateau=242.3 spread=6.5% dev=65.3% seam_jump=True -> ไม่ suppress
-  CC40 BACK  idx0 h= 55.5 plateau=276.4 spread=1.2% dev=79.9% seam_jump=True -> ไม่ suppress
-  CC40 BACK  idx6 h=108.3 plateau=276.4 spread=1.2% dev=60.8% seam_jump=True -> ไม่ suppress
-เหตุที่ seam-jump บล็อกผิดพลาด: มันวัดจาก cargo_top_y/local_floor_y ดิบ ซึ่งเป็น "ข้อมูล
-ชุดเดียวกัน" กับที่ให้ค่าความสูงผิดมาตั้งแต่ต้น -> เมื่อการวัดที่คอลัมน์ริมผิดพลาด มันจึงเห็น
-"jump" ที่เกิดจาก artifact ของตัวเอง (ตรรกะวนเป็นวงกลม)
-FIX: ใช้ "อีก view ยืนยันอิสระ" เป็นตัวตัดสินแทน (หลักการเดียวกับ v25.96 ที่ผู้ใช้กำหนดเอง
-ว่า "ถ้า FRONT/BACK ขัดแย้งกันรุนแรงที่ตำแหน่งเดียวกัน -> ไม่ flag")
-ยืนยันด้วยข้อมูลจริง (ความขัดแย้งข้าม view ที่ตำแหน่งเดียวกัน):
-  ผิด : CC07 FRONT idx4(337.0)<->BACK idx0(84.0) 75% | CC40 BACK idx0(55.5)<->FRONT(251.1) 78%
-  ถูก : CC07 FRONT idx0(250.5)<->BACK idx4(250.5) 0.0% | CC05 3 คู่แรก 0.0% ทั้งหมด
-  -> เกณฑ์ 25% แยกขาดสมบูรณ์ (ผิด >=41% | ถูก <=0.0%)
-ปลอดภัยกับ true-positive เดิม: กล่องที่เตี้ยกว่าจริงทางกายภาพ กล้องทั้ง 2 ตัวต้องเห็นตรงกัน
-(ขัดแย้งต่ำ) จึงไม่เข้าเงื่อนไขนี้เลย - guard ทำงานเฉพาะเมื่อ "ไม่มี view ใดยืนยันค่านั้นเลย"
-
-REGRESSION (รันจริง v26.15 -> v26.16):
-  CC05-all  5 -> 4  (tail_stepdown FRONT idx3 คอลัมน์คร่อมช่องว่างระหว่างตู้ หายไป)
-  CC07-all  5 -> 4  (cross_view FRONT idx4 h=337 ที่ไม่มี view ใดยืนยัน หายไป)
-  CE01-all  3 -> 2  (cross_view FRONT idx11 คอลัมน์ริมสุด หายไป)
-  CE02-ALL  2 -> 1  (cross_view FRONT idx7 คอลัมน์ริมสุด หายไป)
-  CD11-ALL  1 -> 1  | TC51-03  1 -> 1  (ไม่เปลี่ยนแปลง)
-  *** false-positive ใหม่ = 0 | ทุกการเปลี่ยนแปลงเป็นการ "ลบ" artifact ที่คอลัมน์ริมเท่านั้น ***
-
-*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา (ยังแก้ไม่ได้ในรอบนี้) ***
-CC40-02 tail_stepdown FRONT idx0 (h=182.5 เทียบเพื่อนบ้าน 270.7) ยังคงอยู่ - ตรวจสอบแล้วพบว่า
-"อีก view ยืนยันค่านี้" (BACK idx5 h=177.5 ต่างกันเพียง 2.7%) จึงไม่เข้าเงื่อนไข FIX #2 เลย
-แปลว่ากล้องทั้ง 2 ตัวเห็นตรงกันว่าตำแหน่งนั้นเตี้ยกว่าจริง ~180px vs 273px
--> ต้องเป็นกรณี "กล่องเล็กวางแถวนอกที่ปลายกอง" (outer-row) ซึ่งเป็นจุดบอด interior-void เดิม
-   ที่ยืนยันไว้ตั้งแต่ v25.97 (cargo_top_y เป็นเส้นเงา 2 มิติ แยกแถวนอก/แถวในไม่ได้)
-   ต้องใช้สัญญาณคนละตัวที่ไม่พึ่ง cargo_top_y - ยังไม่มีข้อมูลเพียงพอจะออกแบบได้อย่างปลอดภัย
-   ในรอบนี้ (การเดาแล้วใส่ guard เสี่ยงลบ true-positive ของไฟล์อื่น)
-================================================================================
 v26.15 (ผู้ใช้แก้ไข ground truth ให้ 16-Sep-2026 หลังทดสอบ v26.14):
   "กรอบส้มแบบนี้ถูก ดันไปลบทิ้ง
    กรอบที่ผิดคือ คร่อมทั้งสองตู้ประเภทรถพ่วง กับ ประเภทกล่องใหญ่วางเรียง 1 ตรงท้ายตู้
@@ -6441,54 +6388,11 @@ def _isolated_pair_no_genuine_jump(records_same_view, view_result):
     return True
 
 
-# v26.16 NEW: เกณฑ์ "อีก view ขัดแย้งรุนแรง" สำหรับ Edge-Column Guard
-# ดู docstring เต็มที่จุดใช้งานจริงใน _is_edge_measurement_outlier (FIX #2) สำหรับหลักฐาน
-# วัดจริง 4 ไฟล์: คอลัมน์ที่ผิด ขัดแย้ง 41-78% | คอลัมน์ที่ถูก ขัดแย้ง 0.0% -> แยกขาดสมบูรณ์
-_EDGE_XVIEW_CONTRADICT_RATIO = 0.25
-_EDGE_XVIEW_MIN_OVERLAP = 0.25
-_EDGE_XVIEW_RELAXED_SPREAD = 0.15   # ผ่อน plateau spread ได้ถึงเท่านี้ เมื่อมี
-# หลักฐานอิสระจากอีก view ยืนยันว่าค่านั้นขัดแย้งรุนแรง (ดู FIX #2b)
-
-
-def _edge_crossview_contradicts(target, other_view_records):
-    """v26.16: True ถ้า "อีก view วัดตำแหน่งเดียวกันได้ค่าต่างจาก target อย่างรุนแรง"
-    = ไม่มีกล้องตัวใดยืนยันความสูงนั้นเลย -> เป็น artifact ของการวัด ไม่ใช่ความจริงทางกายภาพ
-    (ดู docstring เต็มที่จุดใช้งานใน _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล)"""
-    if not other_view_records:
-        return False
-    th = target.get("height_px")
-    pos = target.get("pos_range")
-    if not th or th <= 0 or pos is None:
-        return False
-    p0, p1 = pos
-    best, best_ov = None, 0.0
-    for r in other_view_records:
-        if r.get("is_corner_duplicate") or not r.get("height_px"):
-            continue
-        q0, q1 = r["pos_range"]
-        inter = max(0.0, min(p1, q1) - max(p0, q0))
-        span = max(1e-6, min(p1 - p0, q1 - q0))
-        ov = inter / span
-        if ov > best_ov:
-            best_ov, best = ov, r
-    if best is None or best_ov < _EDGE_XVIEW_MIN_OVERLAP:
-        return False
-    oh = best["height_px"]
-    diff = abs(th - oh) / max(th, oh)
-    if diff >= _EDGE_XVIEW_CONTRADICT_RATIO:
-        print(f"[EDGE_XVIEW] {target.get('view')} idx={target.get('idx')} h={th:.1f} "
-              f"vs อีก view idx={best['idx']} h={oh:.1f} ขัดแย้ง {diff:.0%} "
-              f"(เกณฑ์ >={_EDGE_XVIEW_CONTRADICT_RATIO:.0%}) -> ไม่มี view ใดยืนยันค่านี้เลย "
-              f"= artifact ของการวัด ไม่ใช่กล่องสูง/เตี้ยจริง (ดู FIX v26.16)")
-        return True
-    return False
-
-
 def _is_edge_measurement_outlier(records_same_view, target_idx,
                                   min_plateau_size=_EDGE_OUTLIER_MIN_PLATEAU_SIZE,
                                   plateau_max_spread_ratio=_EDGE_OUTLIER_PLATEAU_MAX_SPREAD_RATIO,
                                   deviation_threshold=_EDGE_OUTLIER_DEVIATION_THRESHOLD,
-                                  view_result=None, other_view_records=None):
+                                  view_result=None):
     """True ถ้า target_idx เป็นคอลัมน์ริมสุดจริงของแถว (idx==0 หรือ idx==max) และความสูงของมัน
     เบี่ยงเบนจาก 'plateau' ของคอลัมน์อื่นที่นิ่งมาก (เชื่อถือได้ + spread ต่ำ) เกิน threshold -
     ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)"""
@@ -6600,18 +6504,7 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
         return False
     p_spread = (arr.max() - arr.min()) / p_median
     if p_spread > plateau_max_spread_ratio:
-        # v26.16 FIX #2b (พบจริงจาก CC40-02 FRONT idx0 ระหว่างทดสอบ): เดิมถ้า plateau spread
-        # เกินเกณฑ์ (10%) จะคืนค่า False ทันที ไม่ทันได้ตรวจ cross-view เลย - พบว่า CC40-02
-        # FRONT idx0 (h=182.5, ผู้ใช้ยืนยันว่ากองตรงนั้นปลอดภัย) มี plateau spread=12.5%
-        # ซึ่งเกิน 10% ไปเพียงเล็กน้อย (เพราะ idx6=251.1 ซึ่งเป็นคอลัมน์ริมอีกฝั่งที่เอนเอียง
-        # เล็กน้อยเช่นกัน ถูกนับรวมใน plateau ด้วย) จึงหลุดทุกด่านออกไป
-        # FIX: ถ้า "อีก view ขัดแย้งรุนแรง" (หลักฐานอิสระจากกล้องอีกตัว ซึ่งแข็งแรงกว่าความนิ่ง
-        # ของ plateau มาก) ให้ผ่อนเกณฑ์ spread เป็น _EDGE_XVIEW_RELAXED_SPREAD ได้
-        # ยืนยันด้วยข้อมูลจริง: CC40 FRONT idx0 spread=12.5% dev=33% ขัดแย้งข้าม view 41%
-        # (FRONT 182.5 vs BACK idx6 108.3) -> ไม่มี view ใดยืนยันค่านี้เลย = artifact
-        if not (p_spread <= _EDGE_XVIEW_RELAXED_SPREAD
-                and _edge_crossview_contradicts(target, other_view_records)):
-            return False  # plateau ไม่นิ่งพอจะเป็นหลักฐานอ้างอิงได้ - ปลอดภัยไว้ก่อน ไม่ suppress
+        return False  # plateau ไม่นิ่งพอจะเป็นหลักฐานอ้างอิงได้ - ปลอดภัยไว้ก่อน ไม่ suppress
     deviation = abs(target["height_px"] - p_median) / p_median
     if deviation < deviation_threshold:
         return False
@@ -6624,36 +6517,6 @@ def _is_edge_measurement_outlier(records_same_view, target_idx,
         if neighbor_rec is not None:
             has_jump = _edge_outlier_has_genuine_seam_jump(view_result, target, neighbor_rec)
             if has_jump:
-                # v26.16 FIX #2 (ผู้ใช้แจ้ง 17-Sep-2026 พร้อม PDF จริง 4 ไฟล์ - ยืนยันว่า
-                # "ตั้งกองของกล่องตรงนั้นปลอดภัย แต่ไปวาดกรอบ"):
-                # ROOT CAUSE (ยืนยันด้วยการไล่ guard ทีละเงื่อนไขกับไฟล์จริง): Edge-Column
-                # Global Consensus Guard ตรวจพบคอลัมน์ริมสุดที่วัดผิดพลาดได้ถูกต้องครบทุกจุด
-                # (plateau นิ่งมาก + deviation สูงมาก) แต่ถูก seam-jump check บล็อกทุกครั้ง:
-                #   CC07 FRONT idx4 h=337.0 plateau=251.8 spread=0.3% dev=33.9% jump=True
-                #   CC07 BACK  idx0 h= 84.0 plateau=242.3 spread=6.5% dev=65.3% jump=True
-                #   CC40 BACK  idx0 h= 55.5 plateau=276.4 spread=1.2% dev=79.9% jump=True
-                #   CC40 BACK  idx6 h=108.3 plateau=276.4 spread=1.2% dev=60.8% jump=True
-                # เหตุที่ seam-jump บล็อกผิดพลาด: มันวัดจาก cargo_top_y/local_floor_y ดิบ ซึ่ง
-                # เป็น "ข้อมูลชุดเดียวกัน" กับที่ให้ค่าความสูงผิดมาตั้งแต่ต้น -> เมื่อการวัดที่
-                # คอลัมน์ริมผิดพลาด มันจึงเห็น "jump" ที่เกิดจาก artifact ของตัวเอง (วนเป็นวงกลม)
-                # FIX: ใช้ "อีก view ยืนยันอิสระ" เป็นตัวตัดสินแทน (หลักการเดียวกับ v25.96
-                # _tail_stepdown_crossview_confirmed ที่ผู้ใช้กำหนดเองว่า "ถ้า FRONT/BACK
-                # ขัดแย้งกันรุนแรงที่ตำแหน่งเดียวกัน -> ไม่ flag") - ถ้าอีก view วัดตำแหน่ง
-                # เดียวกันได้ค่าที่ต่างจาก target อย่างรุนแรง แสดงว่าไม่มีกล้องตัวใดยืนยัน
-                # ความสูงนั้นเลย -> เป็น artifact ไม่ใช่กล่องเตี้ย/สูงจริง -> suppress
-                # ยืนยันด้วยข้อมูลจริง (ความขัดแย้งข้าม view ที่ตำแหน่งเดียวกัน):
-                #   CC07 FRONT idx4(337.0) <-> BACK idx0( 84.0) ขัดแย้ง 75%
-                #   CC40 BACK  idx0( 55.5) <-> FRONT idx6(251.1) ขัดแย้ง 78%
-                #   CC40 BACK  idx6(108.3) <-> FRONT idx0(182.5) ขัดแย้ง 41%
-                # ในขณะที่คอลัมน์ที่วัดถูกต้องทุกตัว ทั้ง 2 view เห็นตรงกันแทบเป๊ะ:
-                #   CC07 FRONT idx0(250.5) <-> BACK idx4(250.5) ขัดแย้ง 0.0%
-                #   CC05 FRONT idx0/1/2 <-> BACK idx7/6/5 ขัดแย้ง 0.0% ทั้ง 3 คู่
-                #   -> เกณฑ์ 25% แยกขาดสมบูรณ์ (ผิด >=41% | ถูก <=0.0%)
-                # ปลอดภัยกับ true-positive เดิม: กล่องที่เตี้ยกว่าจริงทางกายภาพ กล้องทั้ง 2 ตัว
-                # ต้องเห็นตรงกัน (ขัดแย้งต่ำ) จึงไม่เข้าเงื่อนไขนี้เลย - guard นี้ทำงานเฉพาะเมื่อ
-                # "ไม่มี view ใดยืนยันค่านั้นเลย" ซึ่งเป็นไปไม่ได้ถ้าเป็นความจริงทางกายภาพ
-                if _edge_crossview_contradicts(target, other_view_records):
-                    return True
                 return False  # jump จริงที่ seam - ไม่ suppress ปล่อยให้ flag ตามปกติ
     return True
 
@@ -6819,17 +6682,6 @@ def _col_gap_fraction(view_result, x_range):
     return ov / w
 
 
-# v26.16 FIX #1 (ผู้ใช้แจ้ง 17-Sep-2026 พร้อม PDF จริง: "กรอบแดงที่ชี้คือ ตั้งกองของ
-# กล่องตรงนั้นปลอดภัย แต่ไปวาดกรอบ"):
-# ROOT CAUSE (ยืนยันด้วย log จริงจาก CC05-all - เป็นหลักฐานที่ชี้ขาดที่สุด):
-#   [GAP_COL] FRONT idx=3 x=(813,967) ถูกช่องว่างระหว่างตู้กินพื้นที่ 38% (เกณฑ์ >=30%)
-#             -> ความสูงที่วัดได้ (164.4px) ถูกเจือจาง ไม่น่าเชื่อถือพอจะเทียบข้าม view
-#   [TAIL_XVIEW] FRONT idx=3 ยืนยันอิสระผ่าน: 164.4px vs อีก view 112.2px -> คง flag ไว้
-#   -> guard ตรวจพบแล้วว่าคอลัมน์นี้เชื่อถือไม่ได้ แต่ tail_stepdown ยัง flag คอลัมน์เดียวกันนี้
-#      เพราะ v26.15 wire _is_gap_contaminated เข้าเฉพาะ detect_step_down_crossview เท่านั้น
-#      (ไม่ได้ wire เข้า detect_tail_stepdown / detect_step_down_pairwise)
-# FIX: wire guard เดียวกันเข้าอีก 2 กลไกที่เทียบความสูงเหมือนกัน - ใช้เกณฑ์เดิมทุกประการ
-# (30% ที่คาลิเบรตไว้แล้วใน v26.15) ไม่ปรับค่าใดเลย เพียงขยายขอบเขตการบังคับใช้ให้ครบ
 def _is_gap_contaminated(view_result, rec):
     """v26.15: True ถ้าความสูงของคอลัมน์นี้ถูกเจือจางด้วยช่องว่างระหว่างตู้จนเชื่อถือไม่ได้
     (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก CE02/CC05/CE01)"""
@@ -6845,8 +6697,7 @@ def _is_gap_contaminated(view_result, rec):
     return False
 
 
-def detect_step_down_pairwise(records, view_label, view_result=None,
-                               other_view_records=None):
+def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
     risks = []
@@ -6856,10 +6707,6 @@ def detect_step_down_pairwise(records, view_label, view_result=None,
         if a.get("is_corner_duplicate") or b.get("is_corner_duplicate"):
             continue
         if a["height_px"] is None or b["height_px"] is None:
-            continue
-        # v26.16 FIX #1: คอลัมน์ที่คร่อมช่องว่างระหว่างตู้ -> ความสูงถูกเจือจาง ไม่นำมาเทียบ
-        # (ดู docstring เต็มที่ _is_gap_contaminated - พบจริงจาก CC05-all)
-        if _is_gap_contaminated(view_result, a) or _is_gap_contaminated(view_result, b):
             continue
         taller_rec = a if a["height_px"] >= b["height_px"] else b
         shorter_rec = b if taller_rec is a else a
@@ -6891,8 +6738,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None,
             continue
         # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มด้านบนสำหรับ
         # หลักฐาน+เหตุผล (พบจริงจาก EB66-01/EC10-03/EC19-01)
-        if _is_edge_measurement_outlier(records, shorter_rec["idx"], view_result=view_result,
-                                        other_view_records=other_view_records):
+        if _is_edge_measurement_outlier(records, shorter_rec["idx"], view_result=view_result):
             continue
         # v25.72 NEW (สำคัญ - พบจริงจาก AB05-01): เดิม Edge-Column Global Consensus Guard เช็ค
         # เฉพาะฝั่ง "เตี้ยกว่า" (shorter_rec) ว่าเป็น edge-column ที่วัดต่ำผิดปกติหรือไม่ (เช่น
@@ -6907,8 +6753,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None,
         # FIX: ตรวจสอบ taller_rec ด้วยกฎเดียวกัน (ไม่ว่าจะเป็นตัวที่ถูก mark หรือไม่) - ถ้า
         # taller_rec เป็น edge-column ที่เบี่ยงเบนจาก plateau ของคอลัมน์อื่นเกินเกณฑ์เช่นกัน แสดงว่า
         # "ค่าอ้างอิง" ที่ใช้เปรียบเทียบทั้งคู่ไม่น่าเชื่อถือ ไม่ควร flag ความเสี่ยงจากคู่นี้เลย
-        if _is_edge_measurement_outlier(records, taller_rec["idx"], view_result=view_result,
-                                        other_view_records=other_view_records):
+        if _is_edge_measurement_outlier(records, taller_rec["idx"], view_result=view_result):
             continue
         # v25.82 NEW (สำคัญ - พบจริงจาก AC03-02, ผู้ใช้ขอให้ตรวจสอบ "back view วาดกรอบไม่ตรง
         # column") - ดู docstring เต็มที่ _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล: ถ้าฝั่งใด
@@ -7510,8 +7355,7 @@ def _tail_stepdown_crossview_confirmed(risk, records_front, records_back):
     return True
 
 
-def detect_tail_stepdown(records, view_label, view_result=None,
-                          other_view_records=None):
+def detect_tail_stepdown(records, view_label, view_result=None):
     """ตรวจ step-down โซนท้ายตู้ (pos > TAIL_STEPDOWN_REAR_POS_MIN)
 
     v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้เต็ม (EA07-01):
@@ -7563,13 +7407,6 @@ def detect_tail_stepdown(records, view_label, view_result=None,
 
     inner_rec = valid[tail_idx - 1]
 
-    # v26.16 FIX #1: คอลัมน์ที่คร่อมช่องว่างระหว่างตู้ -> ความสูงถูกเจือจาง ไม่นำมาเทียบ
-    # (ดู docstring เต็มที่ _is_gap_contaminated - พบจริงจาก CC05-all ที่ guard ตรวจเจอแล้ว
-    #  แต่ tail_stepdown ยัง flag คอลัมน์เดียวกันนั้นเพราะ v26.15 wire ไม่ครบ)
-    if (_is_gap_contaminated(view_result, tail_rec)
-            or _is_gap_contaminated(view_result, inner_rec)):
-        return risks
-
     # v25.57 NEW Guard 0: ถ้าทั้ง tail_rec และ inner_rec มาจากแหล่งที่ไม่น่าเชื่อถือ (carry-
     # forward/ยังไม่มีการวัดอิสระ) ทั้งคู่ -> ไม่ flag (mirror จาก detect_step_down_pairwise
     # v25.55 FIX#3 - ดู docstring ด้านบนสำหรับหลักฐาน)
@@ -7612,8 +7449,7 @@ def detect_tail_stepdown(records, view_label, view_result=None,
         return risks
     # v25.68 NEW: Edge-Column Global Consensus Guard - ดู docstring เต็มที่
     # _is_edge_measurement_outlier สำหรับหลักฐาน+เหตุผล (พบจริงจาก EC10-03/EB66-01)
-    if _is_edge_measurement_outlier(records, tail_rec["idx"], view_result=view_result,
-                                    other_view_records=other_view_records):
+    if _is_edge_measurement_outlier(records, tail_rec["idx"], view_result=view_result):
         return risks
     # v25.82 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
     # _has_internal_sharp_jump สำหรับหลักฐาน+เหตุผล (พบจริงจาก AC03-02)
@@ -7632,8 +7468,7 @@ def detect_tail_stepdown(records, view_label, view_result=None,
     # "สูงกว่า") ก็อาจเป็น edge-column ที่วัดสูงเกินจริงได้เช่นกัน (inner_rec อาจเป็น idx=0 หรือ
     # idx สุดท้ายได้เช่นกันในไฟล์ที่มีตั้งน้อย) - ถ้า inner_rec เองเป็น edge-outlier ค่าอ้างอิงที่ใช้
     # เปรียบเทียบไม่น่าเชื่อถือ ไม่ควร flag
-    if _is_edge_measurement_outlier(records, inner_rec["idx"], view_result=view_result,
-                                    other_view_records=other_view_records):
+    if _is_edge_measurement_outlier(records, inner_rec["idx"], view_result=view_result):
         return risks
 
     # v25.71 NEW: apex_fallback reliability guard - ดู docstring เต็มที่จุดเดียวกันใน
@@ -7913,12 +7748,8 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             shorter_view_records = records_front if shorter_rec["view"] == "FRONT" else records_back
             taller_vr = front_result if taller_rec["view"] == "FRONT" else back_result
             shorter_vr = front_result if shorter_rec["view"] == "FRONT" else back_result
-            _other_t = records_back if taller_rec["view"] == "FRONT" else records_front
-            _other_s = records_back if shorter_rec["view"] == "FRONT" else records_front
-            if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"],
-                                             view_result=taller_vr, other_view_records=_other_t)
-                    or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"],
-                                                    view_result=shorter_vr, other_view_records=_other_s)):
+            if (_is_edge_measurement_outlier(taller_view_records, taller_rec["idx"], view_result=taller_vr)
+                    or _is_edge_measurement_outlier(shorter_view_records, shorter_rec["idx"], view_result=shorter_vr)):
                 continue
             # v25.82/85 NEW: mirror จาก detect_step_down_pairwise - ดู docstring เต็มที่
             # _has_internal_sharp_jump และ _INTERNAL_JUMP_MAX_RELIABLE_N_SAMPLES สำหรับหลักฐาน+
@@ -9188,16 +9019,12 @@ def _analyse_per_container(front, back, records_front, records_back, n_container
         # v26.06: กล่องใหญ่วางแถวเดียว -> ไม่ให้ cross_view จับ (ดู _is_large_box_single_row)
         large_box = (_is_large_box_single_row(front, rf, "FRONT")
                      and _is_large_box_single_row(back, rb, "BACK"))
-        sub += detect_step_down_pairwise(rf, "FRONT", view_result=front,
-                                         other_view_records=rb)
-        sub += detect_step_down_pairwise(rb, "BACK", view_result=back,
-                                         other_view_records=rf)
+        sub += detect_step_down_pairwise(rf, "FRONT", view_result=front)
+        sub += detect_step_down_pairwise(rb, "BACK", view_result=back)
         if not single and not large_box:
             sub += detect_step_down_crossview(rf, rb, front_result=front, back_result=back)
-        _tail = (detect_tail_stepdown(rf, "FRONT", view_result=front,
-                                      other_view_records=rb)
-                 + detect_tail_stepdown(rb, "BACK", view_result=back,
-                                        other_view_records=rf))
+        _tail = (detect_tail_stepdown(rf, "FRONT", view_result=front)
+                 + detect_tail_stepdown(rb, "BACK", view_result=back))
         sub += [r for r in _tail if _tail_stepdown_crossview_confirmed(r, rf, rb)]
         if not single:
             sub += detect_rear_empty_risk(rf, rb, front, back)
@@ -9683,19 +9510,15 @@ def _analyse_whole_view(front, back, records_front, records_back):
               "-> ระงับ cross_view (ความต่างระหว่าง 2 มุมกล้องเป็นความคลาดเคลื่อนของการวัด "
               "ไม่ใช่ขั้นสูงต่ำจริง) - กลไกอื่นยังทำงานครบทุกตัว")
 
-    risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front,
-                                       other_view_records=records_back)
-    risks += detect_step_down_pairwise(records_back, "BACK", view_result=back,
-                                       other_view_records=records_front)
+    risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
+    risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
     if not _single_stack and not _large_box:
         risks += detect_step_down_crossview(records_front, records_back,
                                             front_result=front, back_result=back)
 
     # v25.96: tail_stepdown ต้องมีการยืนยันอิสระจากอีก view
-    _tail = (detect_tail_stepdown(records_front, "FRONT", view_result=front,
-                                  other_view_records=records_back)
-             + detect_tail_stepdown(records_back, "BACK", view_result=back,
-                                    other_view_records=records_front))
+    _tail = (detect_tail_stepdown(records_front, "FRONT", view_result=front)
+             + detect_tail_stepdown(records_back, "BACK", view_result=back))
     risks += [r for r in _tail
               if _tail_stepdown_crossview_confirmed(r, records_front, records_back)]
 
@@ -11992,8 +11815,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.16",
-            "benchmarkMode": "v26_16_edge_crossview_and_gap_guard",
+            "checkerVersion": "V26.15",
+            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -12025,8 +11848,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.16",
-            "benchmarkMode": "v26_16_edge_crossview_and_gap_guard",
+            "checkerVersion": "V26.15",
+            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
