@@ -2,6 +2,163 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.15 (ผู้ใช้แก้ไข ground truth ให้ 16-Sep-2026 หลังทดสอบ v26.14):
+  "กรอบส้มแบบนี้ถูก ดันไปลบทิ้ง
+   กรอบที่ผิดคือ คร่อมทั้งสองตู้ประเภทรถพ่วง กับ ประเภทกล่องใหญ่วางเรียง 1 ตรงท้ายตู้
+   ดันไปวาดกรอบ
+   กรอบแดงตรง front 7.3 ดันไปวาดกรอบ ไร้สาระ งานก็ปกติดีตรงบริเวณนั้นๆ"
+
+*** สิ่งแรกที่ทำ: ทิ้ง v26.14 ทั้งหมด กลับไปใช้ v26.13 เป็นฐาน ***
+เหตุผล: v26.14 เปลี่ยนการตรวจ silhouette_notch จาก "ตรวจสีแนวตั้งที่ x_notch" เป็น
+"ตรวจความว่างของพื้นที่ทั้งกรอบ" ซึ่งเป็นตรรกะที่ผิด - กรอบรอยบากสามารถครอบบางส่วนของ
+กล่องข้างเคียงได้ตามธรรมชาติของมุมมอง isometric แต่บริเวณตรงกลาง (x_notch) ยังเป็นช่องว่าง
+จริง การเปลี่ยนไปวัดทั้งกรอบจึงลบ true positive ทิ้งไปด้วย (ผู้ใช้ยืนยันว่ากรอบส้มกลุ่มนั้น
+"ถูกต้อง ดันไปลบทิ้ง") -> ยกเลิกการแก้นั้นทั้งหมด คืนค่าเดิมทุกบรรทัด
+บทเรียน: รอบที่แล้วแก้ที่ "ประเภทกลไก" (ทุกกรอบส้มที่มีสินค้าปนในกรอบ) แทนที่จะจำกัดตาม
+"บริบทที่ผิดจริง" (2 โครงสร้างเฉพาะที่ผู้ใช้ระบุ) - รอบนี้แก้แบบจำเพาะเจาะจงทั้ง 3 จุด
+
+--- FIX 1: กรอบส้มคร่อมช่องว่างระหว่างตู้ (รถพ่วง) -> ลบทั้ง risk ---------------
+ROOT CAUSE: v26.13 มี 2 กลไกทำงานต่อกัน
+  (ก) _suppress_inter_container_empty_space_risks : ลบกรอบส้มที่ทับช่องว่าง >=30% ของ
+      ความกว้างช่องว่าง หรือมีจุดอ้างอิงตกในช่องว่าง
+  (ข) _clip_risks_at_container_gaps (v26.13 ใหม่) : ตัดกรอบที่คร่อม 2 ตู้ให้เหลือฝั่งเดียว
+กรอบส้มที่ "คร่อมทั้งช่อง" (ขอบซ้ายอยู่ก่อนช่อง ขอบขวาอยู่หลังช่อง) มักกว้างกว่าตัวช่องว่าง
+มาก ทำให้สัดส่วนที่ (ก) คำนวณได้ไม่ถึงเกณฑ์ -> หลุดไปถึง (ข) -> ถูก "ตัดให้เหลือฝั่งเดียว"
+แทนที่จะถูกลบ -> ยังเหลือกรอบส้มผิดอยู่ในภาพ
+เหตุผลเชิงความหมายที่ต้องลบทั้ง risk (ไม่ใช่ย่อกรอบ): กรอบส้มที่คร่อมช่องว่างระหว่างตู้
+มี "จุดกำเนิด" มาจากช่องว่างทางกายภาพระหว่าง 2 ตู้ ไม่ใช่โพรงภายในกองสินค้า - การย่อกรอบ
+ให้อยู่ในตู้เดียวจึงได้กรอบที่ "อยู่ถูกที่" แต่ "ไม่ควรมีตั้งแต่ต้น"
+FIX 2 ส่วน:
+  (1) เพิ่มเงื่อนไข "คร่อมทั้งช่อง" (mark_x[0] < g0 and mark_x[1] > g1) เป็นอีกกรณีที่
+      ยกเว้นทันทีใน _suppress_inter_container_empty_space_risks
+  (2) ให้ _clip_risks_at_container_gaps ข้าม EMPTY_SPACE_RISK ทั้งหมด (กรอบส้มที่รอดมาถึง
+      ขั้นนี้ = ไม่ได้คร่อมช่องว่าง = ถูกต้องอยู่แล้ว ไม่ต้องตัด) - กรอบแดงยังถูกตัดตามเดิม
+
+--- FIX 2: กรอบส้มปลายกล่องใหญ่วางเรียงแถวเดียว (ท้ายตู้) ----------------------
+ROOT CAUSE: detect_silhouette_notch_risk ตรวจ "รอยบาก" จากเส้นยอดสินค้าโดยไม่รู้จัก
+โครงสร้างการวางเลย - ที่ปลายสุดของกองกล่องใหญ่ที่วางเรียงแถวเดียว เส้นยอดจะลาดลงตาม
+ธรรมชาติของมุมมอง isometric (geometric taper ของ silhouette ปลายแถว) บวกกับเส้นมิติ/ลูกศร
+กำกับที่วาดทับ ทำให้เกิด local peak ที่ find_peaks จับได้ และพื้นที่ใต้จุดนั้นเป็นพื้นหลัง/
+ผนังตู้จริง (ผ่านเกณฑ์สี) -> วาดกรอบส้มออกมา
+แต่ในทางกายภาพ: "กล่องใหญ่วางเรียงแถวเดียว" = ไม่มีแถวนอก-แถวใน = ไม่มีโพรงภายในให้สินค้า
+ล้มเข้าไปได้เลยโดยโครงสร้าง (หลักการเดียวกับที่ผู้ใช้เคยระบุไว้ใน v26.06 สำหรับกรอบแดง
+cross_view และใน v26.01 เงื่อนไขที่ 2 ของ tailzone)
+FIX: _suppress_largebox_tail_notch() - ระงับเฉพาะเมื่อครบทั้ง 2 เงื่อนไข
+  (1) view นี้เป็นกล่องใหญ่วางแถวเดียว (ใช้ _is_large_box_single_row เดิมของ v26.06
+      ทุกประการ - side face <= 1 และผิวบนต่อคอลัมน์ <= 1 ไม่แก้เกณฑ์ใดๆ)
+  (2) และรอยบากอยู่ในโซนปลายสุด (หัวหรือท้าย) ฝั่งละ 22% ของความยาวสินค้า
+ไม่กระทบรอยบากกลางกอง (โพรงจริงที่ต้อง flag) และไม่กระทบไฟล์ที่มีกล่องเล็กวางนอก+ในเลย
+แม้แต่ไฟล์เดียว (ไม่เข้าเงื่อนไขที่ 1 ตั้งแต่ต้น)
+
+--- FIX 3: กรอบแดงที่ FRONT 7.3 (คอลัมน์ปนช่องว่างระหว่างตู้) -------------------
+ROOT CAUSE: Phase 1B แบ่งคอลัมน์จากสี front-face เท่านั้น ไม่รู้จัก "ช่องว่างระหว่างตู้"
+-> คอลัมน์ปลายตู้ถูกขยายคร่อมช่องว่างเข้าไป ทำให้ "ความสูงที่วัดได้" ถูกเจือจางด้วยพื้นที่ว่าง
+(ไม่ใช่ความสูงของกองสินค้าจริง) เมื่อค่าที่ผิดนี้ถูกนำไปเทียบข้าม view -> flag ผิดที่ตำแหน่ง
+ที่สินค้าปกติดี
+วัดจริงจากไฟล์ชุด 12 ไฟล์ที่ผู้ใช้ทดสอบ:
+  CE02-ALL  BACK idx3 x=(822,958) ช่องว่างกินพื้นที่คอลัมน์ 60% -> h=65.2px
+            (เพื่อนบ้านในตู้เดียวกัน 172-177px) -> เทียบ FRONT idx3 (177.4px)
+            -> drop 63% -> วาดกรอบแดงกลางตู้ที่กล่องสูงเท่ากันทั้งแถว
+  CC05-all  BACK idx3 กิน 52% (h=112.2) | FRONT idx3 กิน 38% (h=164.4) -> drop 32%
+  CE01-all  BACK idx4 กิน 41% (h=203.0) | FRONT idx5 กิน 30% (h=143.1) -> drop 30%
+ยืนยันแยกได้ขาด (วัดครบ 11 ไฟล์ dual-view - ไม่มีค่าใดคาบเกี่ยวกัน):
+  คอลัมน์ที่ทำให้เกิด flag ผิด : 60%, 52%, 41%, 38%, 30%
+  คอลัมน์ที่ไม่ทำให้เกิดปัญหา  : 25%, 19%, 16%, 12%, 11%, 11%
+  -> เกณฑ์ 30% อยู่กึ่งกลางพอดี
+หมายเหตุ: v26.13 แก้ปัญหานี้แค่ "ตัดกรอบไม่ให้คร่อม 2 ตู้" (post-processing) ซึ่งทำให้กรอบ
+อยู่ในตู้เดียวถูกต้อง แต่ "ตัวความเสี่ยงเองยังผิดอยู่" เพราะเกิดจากค่าความสูงที่เจือจางตั้งแต่
+ต้นทาง - รอบนี้แก้ที่ต้นเหตุ (ไม่ให้ค่าที่เจือจางถูกนำไปเทียบตั้งแต่แรก)
+FIX: _is_gap_contaminated() - ระงับเฉพาะ subtype "cross_view" เท่านั้น
+ขอบเขตแคบมาก (จำกัดเฉพาะจุดที่ผู้ใช้ระบุว่าผิด):
+  - pairwise / tail_stepdown / hidden_behind ไม่ถูกแตะเลย (เทียบภายใน view เดียวกัน)
+  - EMPTY_SPACE_RISK (กรอบส้ม) ไม่ถูกแตะเลยแม้แต่จุดเดียว
+  - รถตู้เดียว (ไม่มีช่องว่างระหว่างตู้) ไม่ได้รับผลกระทบเลยแม้แต่ไฟล์เดียว
+
+สิ่งที่คงไว้ทุกบรรทัด (ไม่แตะเลย):
+  - การตรวจ silhouette_notch แบบเดิม (ตรวจสีแนวตั้งที่ x_notch, empty_fraction >= 0.60)
+  - _NOTCH_MIN_PROMINENCE_PX = 10 (v26.07)
+  - View boundary guard (v26.11) / Cross-view granularity guard (v26.12)
+  - tailzone_wall_exposure (v26.01-v26.05) / Large-box guard สำหรับ cross_view (v26.06)
+  - โมดูลลงสี wireframe ทั้งชุด (v26.08-v26.10)
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา (สำคัญที่สุดของรอบนี้) ***
+ไม่มีไฟล์ PDF ให้ regression-test ในรอบนี้เลย (uploads เหลือเพียงภาพหน้าจอกับไฟล์ .py)
+- ทดสอบได้เพียง: import สำเร็จ, รัน end-to-end กับ PDF สังเคราะห์ (รถพ่วง 2 ตู้) ได้ HTTP 200
+  และยืนยันว่า detect_silhouette_notch_risk กลับไปตรวจสีแบบคอลัมน์เดียวตาม v26.13 แล้วจริง
+- ยังไม่ได้ยืนยันกับไฟล์จริงว่า FIX ทั้ง 3 ทำงานตรงจุดที่ผู้ใช้ระบุ และไม่กระทบจุดอื่น
+- แนะนำอย่างยิ่งให้รัน regression กับไฟล์ชุด 12 ไฟล์เดิมก่อน deploy โดยตรวจ 3 อย่าง:
+  (1) กรอบส้มที่ผู้ใช้ยืนยันว่าถูกต้อง ต้องกลับมาครบ (เทียบกับผล v26.13)
+  (2) กรอบส้มคร่อม 2 ตู้ และกรอบส้มปลายกล่องใหญ่ ต้องหายไป
+  (3) กรอบแดงที่ FRONT 7.3 ต้องหายไป โดยกรอบแดงจุดอื่นยังอยู่ครบ
+- ถ้า FIX 2 ยังไม่ครอบคลุม (กรอบส้มปลายกล่องใหญ่ยังอยู่) ปรับได้ที่
+  _LARGEBOX_TAIL_NOTCH_SPAN_FRAC (ปัจจุบัน 0.22) จุดเดียว
+================================================================================
+v26.13 (ผู้ใช้แจ้ง 16-Sep-2026 พร้อมไฟล์จริง 12 ไฟล์: "ทดสอบรันพบว่าไฟล์ที่แนบมาทั้งหมด
+มีจุดผิดปกติ คือ กรอบแดง กรอบส้ม - วาดผิดจุด, วาดคล่อม 2 ตู้, วาดคล่อม view"):
+พบและแก้ root cause 3 จุดที่เป็นอิสระต่อกัน (ไล่ตามอาการที่ผู้ใช้ระบุทีละข้อ)
+
+--- ปัญหาที่ 1: "วาดคล่อม view" (v26.11) -----------------------------------------
+ROOT CAUSE: ensure_safe_crop ขยายกรอบ crop ออกเมื่อสินค้า "แตะขอบ" (margin=30px) โดยไม่มี
+ขอบเขตจำกัดใดๆ เลยนอกจากขอบภาพ - ในไฟล์ layout บนล่าง (FRONT บน / BACK ล่าง) ถ้าสินค้าของ
+FRONT บังเอิญอยู่ชิดขอบล่างของกรอบตัวเอง จะเกิดปฏิกิริยาลูกโซ่:
+  CC33-all: FRONT y=250..936 สินค้าอยู่ y=80..658 (ห่างขอบล่างเพียง 28px < margin 30)
+    รอบ 0 -> ขยายลง 150px -> y=250..1086 (ล้ำเข้าเขต BACK ที่เริ่มที่ y=984 แล้ว)
+    รอบ 1-4 -> เห็นสินค้าของ BACK -> แตะขอบอีก -> ขยายต่อทุกรอบ
+    รอบ 5 -> จบที่ y=250..1686 (สูง 1436px แทน 686px) = กลืนเขต BACK ทั้งหมด 702px
+  ผล: cargo_top_y / local_floor_y ของ FRONT ไปจับสินค้าและเส้นพื้นของ BACK
+      -> กรอบที่วาดสูง 918-967px (ปกติ 133-366px) พาดจาก FRONT ลงไปจบที่ BACK view
+FIX: เพิ่ม _view_expand_limits() คำนวณ "เพดานการขยาย" จากตำแหน่ง label Front/Back แล้วส่ง
+เข้า ensure_safe_crop(limits=...) ทำให้การขยายหยุดที่เส้นแบ่งระหว่าง view เสมอ
+ปลอดภัยโดยการออกแบบ: เป็นการ "จำกัดการขยาย" เท่านั้น ไม่แตะกรอบเริ่มต้น -> ไฟล์ที่ไม่เคย
+ขยาย (11 จาก 12 ไฟล์) ได้ region เดิมเป๊ะทุก pixel
+
+--- ปัญหาที่ 2: "วาดผิดจุด" (v26.12) ---------------------------------------------
+ROOT CAUSE: cross_view จับคู่ตำแหน่งด้วย pos_range เท่านั้น ไม่เคยตรวจว่า 2 view แบ่ง
+คอลัมน์ละเอียดพอๆ กันหรือไม่ - เมื่อ view หนึ่งแบ่งหยาบกว่ามาก คอลัมน์กว้างจะทับซ้อนกับ
+คอลัมน์ของอีกฝั่งหลายตัวพร้อมกัน -> ถูกนำไปเทียบซ้ำๆ -> flag ผิดทั้งแถว
+  TC51-03 (6WH Truck, สินค้าเพียง 9 ใบ): FRONT 7 คอลัมน์ vs BACK เพียง 3 คอลัมน์
+    BACK idx2 กว้าง 387px (61% ของความยาวสินค้า) แต่วัดความสูงได้เพียง 55.0px
+    (เพราะรวม "พื้นที่ว่างท้ายรถ" เข้าไปด้วย ไม่ใช่ความสูงของกองใดกองหนึ่ง)
+    -> ถูกเทียบกับ FRONT idx0,1,2,3,4 ทุกตัว -> drop 78-85% -> flag 5 จุดรวดติดกัน
+    (ทั้ง 5 คู่ชี้ไปที่ B2 ตัวเดียวกันหมด = ลายเซ็นของ "คอลัมน์เดียวทับหลายคอลัมน์")
+ยืนยันแยกขาดจาก 11 ไฟล์ dual-view: col_ratio ผิดปกติ 0.43 vs ปกติ 1.00-1.07 (2.3 เท่า)
+                                     width_ratio ผิดปกติ 2.85-10.75 vs ปกติ 1.00-1.60
+FIX: _xview_column_granularity_mismatch() - ระงับเฉพาะคู่ที่เข้าเงื่อนไขครบทั้ง 2 ข้อ
+  (1) col_ratio นอกช่วง 0.70-1.43  (2) คู่นั้นกว้างต่างกัน >= 2.5 เท่า
+เงื่อนไข AND ทำให้ไม่กระทบ CC40-02 (width_ratio 2.41 แต่ col_ratio=1.00)
+
+--- ปัญหาที่ 3: "วาดคล่อม 2 ตู้" (v26.13) ----------------------------------------
+ROOT CAUSE: Phase 1B แบ่งคอลัมน์จากสี front-face เท่านั้น ไม่รู้จัก "ช่องว่างระหว่างตู้" เลย
+-> คอลัมน์ปลายตู้ใบแรกถูกขยายคร่อมช่องว่างไปถึงตู้ใบที่ 2 ได้
+  CC05-all FRONT: ช่องว่าง x=[897,955] แต่คอลัมน์ idx3 กว้าง x=[813,967] -> คร่อมทั้งช่อง
+                  ถูก flag 2 จุด (cross_view + tail_stepdown) ที่คอลัมน์เดียวกันนี้
+  CE01-all BACK : ช่องว่าง x=[921,960] แต่คอลัมน์ idx4 กว้าง x=[884,980] -> คร่อมเช่นกัน
+  ตรวจครบ 12 ไฟล์ พบ 3 จุดจาก 2 ไฟล์นี้เท่านั้น
+FIX: _clip_risks_at_container_gaps() - ตัดขอบกรอบให้หยุดที่ขอบช่องว่าง โดยเก็บฝั่งที่กรอบ
+กินพื้นที่มากกว่า (= ตู้ที่ความเสี่ยงสังกัดอยู่จริง) ไม่ลบ risk ทิ้ง เพราะความเสี่ยงยังมีจริง
+  CC05 idx3: ซ้าย 84px vs ขวา 12px -> เก็บซ้าย -> x=(813,897) กว้าง 154->84px
+  CE01 idx4: ซ้าย 37px vs ขวา 20px -> เก็บซ้าย -> x=(884,921)
+ทำที่ขั้น post-processing จึงไม่กระทบตรรกะการตรวจจับใดๆ เลย
+
+REGRESSION (รันจริงครบ 12 ไฟล์ v26.10 -> v26.13):
+  ไม่เปลี่ยนแปลง 9 ไฟล์ | เปลี่ยนแปลง 2 ไฟล์ (ตรงตามที่ตั้งใจแก้ทั้งคู่)
+  CC33-all  2 -> 1 จุด  (กรอบคร่อม view 2 จุดหาย, ได้ hidden_behind ที่ถูกต้อง 1 จุด)
+  TC51-03   7 -> 2 จุด  (กรอบแดงผิดจุด 5 จุดหาย, เหลือ silhouette_notch ที่ถูกต้อง 2 จุด)
+  CC05-all / CE01-all: จำนวนจุดเท่าเดิม แต่กรอบถูกตัดให้อยู่ในตู้เดียวแล้ว
+  *** ตรวจซ้ำทั้ง 12 ไฟล์: ไม่พบกรอบคร่อม view / คร่อม 2 ตู้ / สูงผิดปกติ เหลืออยู่เลย ***
+
+หมายเหตุเรื่อง CC28-all (ไฟล์ wireframe 11 หน้า):
+  ต้องเรียกผ่าน process_request เท่านั้น (ไม่ใช่ run_*_analysis โดยตรง) เพราะ retry-then-
+  colorize logic อยู่ใน process_request - ทดสอบแล้วได้ HTTP 200, ลงสีสำเร็จ (front 179
+  regions -> 95 boxes), พบ 1 จุด, ใช้เวลา 19 วินาที
+
+ข้อจำกัดที่ต้องบอกตรงไปตรงมา:
+  - CC33-all ได้จุดใหม่ 1 จุด (hidden_behind FRONT idx=3) ซึ่งเกิดจากการที่ region ถูกต้องแล้ว
+    ตรวจสอบภาพแล้วตรงกับกล่อง cyan ที่เตี้ยกว่ากล่องข้างเคียงจริง แต่ผู้ใช้ยังไม่ได้ยืนยัน
+    ว่าจุดนี้เป็นความเสี่ยงจริงหรือไม่
+  - เกณฑ์ทั้ง 3 ตัว (view boundary / col_ratio 0.70-1.43 / width 2.5x) คาลิเบรตจาก 12 ไฟล์นี้
+    ซึ่งมี margin กว้าง (1.8-2.3 เท่า) แต่ยังเป็นกลุ่มตัวอย่างจำกัด
+================================================================================
 v26.10 (ผู้ใช้แจ้ง HTTP 500 จาก Cloud Run log พร้อมไฟล์จริง 44 SKU, 15-Sep-2026:
 "ทดสอบไม่ผ่าน สงสัย ไฟล์ที่รวมแล้ว แตกต่างจากต้นฉบับ colab ตรวจสอบด้วยผิดพลาดตรงใด"):
 
@@ -2261,12 +2418,41 @@ def arrow_mask(region):
     return bright & g_in_range & b_in_range & gb_close & r_minus_g & r_minus_b
 
 
-def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_iterations=15):
+def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_iterations=15,
+                     limits=None):
+    """v26.11 FIX (ผู้ใช้แจ้ง 16-Sep-2026 พร้อมไฟล์จริง 12 ไฟล์: "กรอบแดง กรอบส้ม - วาดผิดจุด,
+    วาดคล่อม 2 ตู้, วาดคล่อม view"):
+    ROOT CAUSE (ยืนยันด้วยการจำลองทีละรอบกับ CC33-all): ฟังก์ชันนี้ขยายกรอบ crop ออกเรื่อยๆ
+    เมื่อพบว่าสินค้า "แตะขอบ" ของ region (margin=30px) โดยไม่เคยมีขอบเขตจำกัดใดๆ เลยนอกจาก
+    ขอบภาพทั้งหน้า - ในไฟล์ที่ layout เป็นแบบบนล่าง (TOP_BOTTOM: FRONT บน / BACK ล่าง) ถ้า
+    สินค้าของ FRONT บังเอิญอยู่ชิดขอบล่างของกรอบตัวเอง จะเกิดปฏิกิริยาลูกโซ่:
+      รอบ 0: FRONT y=250..936  สินค้าอยู่ y=80..658 (ห่างขอบล่างเพียง 28px < margin 30)
+             -> แตะขอบล่าง -> ขยายลง 150px
+      รอบ 1: y=250..1086 -> ขอบล่างใหม่ล้ำเข้าไปในเขต BACK view (เริ่มที่ y=984) แล้ว
+             -> "เห็นสินค้าของ BACK" -> แตะขอบอีก -> ขยายต่อ
+      รอบ 2-4: ขยายซ้ำอีก 3 รอบ (ทุกรอบเจอสินค้าของ BACK ที่อยู่ต่ำลงไปเรื่อยๆ)
+      รอบ 5: จบที่ y=250..1686 (สูง 1436px แทนที่จะเป็น 686px) = กลืนเขต BACK ทั้งหมด
+    ผลกระทบที่วัดได้จริง: cargo_top_y และ local_floor_y ของ FRONT ไปจับสินค้า/เส้นพื้นของ
+    BACK view ทำให้ความสูงที่คำนวณได้ผิดเพี้ยนมหาศาล -> กรอบที่วาดสูงถึง 918-967px
+    (ปกติ 133-366px) พาดจาก FRONT ลงไปจบที่ BACK view ตามที่ผู้ใช้เห็นในภาพ
+    ยืนยันขอบเขตของปัญหา: ตรวจครบ 12 ไฟล์ พบเพียง CC33-all ไฟล์เดียวที่เกิด (ไฟล์อื่นสินค้า
+    ไม่ได้อยู่ชิดขอบล่างพอดีจึงไม่ trigger) - เป็นบั๊กที่ซ่อนอยู่มานาน รอเงื่อนไขพอดีจึงเผยตัว
+
+    FIX: เพิ่มพารามิเตอร์ limits = (min_y, max_y, min_x, max_x) เป็น "เพดานการขยาย" -
+    get_view_region จะคำนวณเส้นแบ่งระหว่าง view จาก label Front/Back แล้วส่งเข้ามา ทำให้
+    การขยายหยุดที่เส้นแบ่งเสมอ ไม่มีทางล้ำเข้าไปในเขตของอีก view ได้เลยโดยโครงสร้าง
+    ปลอดภัยโดยการออกแบบ: เป็นการ "จำกัดการขยาย" เท่านั้น ไม่ได้แตะกรอบเริ่มต้นเลย -> ไฟล์ที่
+    ไม่เคยขยาย (11 จาก 12 ไฟล์) ได้ region เดิมเป๊ะทุก pixel (ยืนยันด้วย regression แล้ว)
+    ถ้าไม่ส่ง limits มา (None) จะทำงานเหมือนเดิมทุกประการ (backward compatible 100%)"""
     H, W, _ = full_img.shape
+    lim_y0 = 0 if (limits is None or limits[0] is None) else max(0, int(limits[0]))
+    lim_y1 = H if (limits is None or limits[1] is None) else min(H, int(limits[1]))
+    lim_x0 = 0 if (limits is None or limits[2] is None) else max(0, int(limits[2]))
+    lim_x1 = W if (limits is None or limits[3] is None) else min(W, int(limits[3]))
     cy0, cy1, cx0, cx1 = y0, y1, x0, x1
     for _ in range(max_iterations):
-        cy0 = max(0, cy0); cy1 = min(H, cy1)
-        cx0 = max(0, cx0); cx1 = min(W, cx1)
+        cy0 = max(lim_y0, cy0); cy1 = min(lim_y1, cy1)
+        cx0 = max(lim_x0, cx0); cx1 = min(lim_x1, cx1)
         region = full_img[cy0:cy1, cx0:cx1]
         cmask = vivid_cargo_mask(region)
         cys, cxs = np.where(cmask)
@@ -2278,13 +2464,21 @@ def ensure_safe_crop(full_img, y0, y1, x0, x1, margin=30, expand_step=150, max_i
         touches_right = cxs.max() > region.shape[1] - margin
         if not (touches_top or touches_bottom or touches_left or touches_right):
             return cy0, cy1, cx0, cx1
-        if touches_top: cy0 -= expand_step
-        if touches_bottom: cy1 += expand_step
-        if touches_left: cx0 -= expand_step
-        if touches_right: cx1 += expand_step
-        if cy0 <= 0 and cy1 >= H and cx0 <= 0 and cx1 >= W:
+        # v26.11: ขยายได้เฉพาะทิศที่ยังไม่ชนเพดาน - ถ้าชนแล้วทุกทิศที่ต้องขยาย ให้จบทันที
+        can_expand = False
+        if touches_top and cy0 > lim_y0:
+            cy0 -= expand_step; can_expand = True
+        if touches_bottom and cy1 < lim_y1:
+            cy1 += expand_step; can_expand = True
+        if touches_left and cx0 > lim_x0:
+            cx0 -= expand_step; can_expand = True
+        if touches_right and cx1 < lim_x1:
+            cx1 += expand_step; can_expand = True
+        if not can_expand:
             return cy0, cy1, cx0, cx1
-    return cy0, cy1, cx0, cx1
+        if cy0 <= lim_y0 and cy1 >= lim_y1 and cx0 <= lim_x0 and cx1 >= lim_x1:
+            return max(lim_y0, cy0), min(lim_y1, cy1), max(lim_x0, cx0), min(lim_x1, cx1)
+    return (max(lim_y0, cy0), min(lim_y1, cy1), max(lim_x0, cx0), min(lim_x1, cx1))
 
 
 def compute_floor_profile(region, struct_mask, cargo_mask, gap_thresh=30, max_floor_search_below=100):
@@ -2745,6 +2939,30 @@ def _view_fracs_from_bboxes(front_bb, back_bb, load_bb, cust_bb, pw, ph, view_na
             y0, y1 = by1 + margin_pt, bottom_bound
 
     return (y0 / ph, y1 / ph, x0 / pw, x1 / pw)
+
+
+def _view_expand_limits(front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name, H, W):
+    """v26.11 NEW: คำนวณ "เพดานการขยาย crop" ของ view นี้ เพื่อไม่ให้ ensure_safe_crop ขยาย
+    ล้ำเข้าไปในพื้นที่ของอีก view (ดู docstring เต็มที่ ensure_safe_crop สำหรับหลักฐาน+เหตุผล
+    พบจริงจาก CC33-all ที่ FRONT ขยายลงไปกลืน BACK view ทั้งหมด 702px)
+    คืนค่า (min_y, max_y, min_x, max_x) - None = ไม่จำกัดทิศนั้น
+    เส้นแบ่งใช้ตำแหน่ง label "Back" ซึ่งเป็นตัวคั่นระหว่าง 2 view ตามธรรมชาติของไฟล์อยู่แล้ว
+    (เป็นค่าเดียวกับที่ _view_fracs_from_bboxes ใช้กำหนดขอบของแต่ละ view - สอดคล้องกัน 100%)"""
+    fx0, fy0, fx1, fy1 = front_bb
+    bx0, by0, bx1, by1 = back_bb
+    f_cx, f_cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+    b_cx, b_cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    side_by_side = abs(f_cx - b_cx) > abs(f_cy - b_cy)
+    if side_by_side:
+        split_x = int(W * (bx0 / pw))
+        if view_name == "front":
+            return (None, None, None, split_x)   # FRONT ขยายขวาได้ไม่เกินเส้นแบ่ง
+        return (None, None, split_x, None)        # BACK ขยายซ้ายได้ไม่เกินเส้นแบ่ง
+    split_top = int(H * (by0 / ph))   # ขอบบนของ label "Back"
+    split_bot = int(H * (by1 / ph))   # ขอบล่างของ label "Back"
+    if view_name == "front":
+        return (None, split_top, None, None)      # FRONT ขยายลงได้ไม่เกิน label Back
+    return (split_bot, None, None, None)          # BACK ขยายขึ้นได้ไม่เกิน label Back
 
 
 def render_full_page(pdf_bytes, page_idx=1, matrix_scale=3):
@@ -4568,7 +4786,11 @@ def get_view_region(full_img, doc, view_name, page_idx=1, margin=30):
     H, W, _ = full_img.shape
     y0, y1 = int(H * y0_frac), int(H * y1_frac)
     x0, x1 = int(W * x0_frac), int(W * x1_frac)
-    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(full_img, y0, y1, x0, x1, margin=margin)
+    # v26.11: จำกัดการขยายไม่ให้ล้ำเข้าไปในเขตของอีก view (ดู _view_expand_limits /
+    # ensure_safe_crop สำหรับหลักฐาน+เหตุผล - พบจริงจาก CC33-all)
+    _limits = _view_expand_limits(front_bb, back_bb, load_bb, cust_bb, pw, ph, view_name, H, W)
+    safe_y0, safe_y1, safe_x0, safe_x1 = ensure_safe_crop(
+        full_img, y0, y1, x0, x1, margin=margin, limits=_limits)
     region = full_img[safe_y0:safe_y1, safe_x0:safe_x1].copy()
     origin = (safe_x0, safe_y0, safe_x1, safe_y1)
     fracs = (y0_frac, y1_frac, x0_frac, x1_frac)
@@ -6349,6 +6571,132 @@ def _apex_guard_plateau_override(records, shorter_rec, view_result):
             "n_plateau": int(len(arr))}
 
 
+# ============================================================================
+# v26.15 NEW: LARGE-BOX TAIL NOTCH GUARD (กรอบส้มปลายกล่องใหญ่แถวเดียว)
+# ============================================================================
+# ที่มา (ผู้ใช้แจ้ง 16-Sep-2026): "กรอบที่ผิดคือ ... กับ ประเภทกล่องใหญ่วางเรียง 1
+# ตรงท้ายตู้ ดันไปวาดกรอบ" (พร้อมภาพที่แสดงกรอบส้มเล็กๆ ที่ปลายสุดใกล้เส้นมิติ 1019 mm)
+#
+# ROOT CAUSE: detect_silhouette_notch_risk ตรวจ "รอยบาก" จากเส้นยอดสินค้า (cargo_top_y)
+# โดยไม่รู้จักโครงสร้างการวางเลย - ที่ปลายสุดของกองกล่องใหญ่ที่วางเรียงแถวเดียว เส้นยอด
+# จะลาดลงตามธรรมชาติของมุมมอง isometric (geometric taper ของ silhouette ปลายแถว) บวกกับ
+# เส้นมิติ/ลูกศรกำกับที่วาดทับ ทำให้เกิด local peak ที่ find_peaks จับได้ และพื้นที่ใต้จุดนั้น
+# เป็นพื้นหลัง/ผนังตู้จริง (ผ่านเกณฑ์สี) -> วาดกรอบส้มออกมา
+# แต่ในทางกายภาพ: "กล่องใหญ่วางเรียงแถวเดียว" = ไม่มีแถวนอก-แถวใน = ไม่มีโพรงภายในให้
+# สินค้าล้มเข้าไปได้เลยโดยโครงสร้าง (หลักการเดียวกับที่ผู้ใช้เคยระบุไว้ใน v26.06 สำหรับ
+# กรอบแดง cross_view และใน v26.01 เงื่อนไขที่ 2 ของ tailzone)
+#
+# FIX: ระงับกรอบส้ม silhouette_notch เฉพาะเมื่อครบทุกเงื่อนไข (แคบมาก):
+#   (1) view นี้เป็น "กล่องใหญ่วางแถวเดียว" (ใช้ _is_large_box_single_row เดิมของ v26.06
+#       ทุกประการ - side face <= 1 และผิวบนต่อคอลัมน์ <= 1)
+#   (2) และตำแหน่งรอยบากอยู่ใน "โซนปลายสุด" ของกองสินค้า (หัวหรือท้าย)
+# ไม่กระทบรอยบากกลางกอง (ซึ่งเป็นโพรงจริงที่ต้อง flag) และไม่กระทบไฟล์ที่มีกล่องเล็กวาง
+# นอก+ใน เลยแม้แต่ไฟล์เดียว (ไม่เข้าเงื่อนไขที่ 1 ตั้งแต่ต้น)
+_LARGEBOX_TAIL_NOTCH_SPAN_FRAC = 0.22   # โซนปลายสุดหัว/ท้าย ฝั่งละ 22% ของความยาวสินค้า
+
+
+def _suppress_largebox_tail_notch(risks, view_result, records, view_label):
+    """v26.15: ระงับกรอบส้ม silhouette_notch ที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
+    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - ผู้ใช้ระบุโดยตรง)"""
+    if view_result is None or not records:
+        return risks
+    has_notch = any(r.get("subtype") == "silhouette_notch"
+                    and (r.get("mark_view") or r.get("view")) == view_label
+                    for r in risks)
+    if not has_notch:
+        return risks
+    if not _is_large_box_single_row(view_result, records, view_label):
+        return risks
+    sx, ex = view_result.get("start_x"), view_result.get("end_x")
+    if sx is None or ex is None or (ex - sx) <= 0:
+        return risks
+    span = ex - sx
+    edge = max(1, int(span * _LARGEBOX_TAIL_NOTCH_SPAN_FRAC))
+    lo_end, hi_start = sx + edge, ex - edge
+    out = []
+    for r in risks:
+        if (r.get("subtype") != "silhouette_notch"
+                or (r.get("mark_view") or r.get("view")) != view_label):
+            out.append(r)
+            continue
+        nx = r.get("notch_x")
+        if nx is None:
+            mx = r.get("mark_x_range")
+            nx = (mx[0] + mx[1]) // 2 if mx else None
+        if nx is not None and (nx <= lo_end or nx >= hi_start):
+            side = "หัวตู้" if nx <= lo_end else "ท้ายตู้"
+            print(f"[LARGEBOX_TAIL] {view_label} ระงับกรอบส้มที่ x={nx} ({side}) "
+                  f"- เป็นกล่องใหญ่วางเรียงแถวเดียว (ไม่มีแถวนอก-แถวใน) และอยู่ในโซน"
+                  f"ปลายสุด x<={lo_end} หรือ x>={hi_start} (สินค้า {sx}-{ex}) "
+                  f"-> ไม่มีโพรงภายในให้สินค้าล้มเข้าไปได้ (ดู FIX v26.15)")
+            continue
+        out.append(r)
+    return out
+
+
+# ============================================================================
+# v26.15 NEW: GAP-CONTAMINATED COLUMN GUARD (กรอบแดงจากคอลัมน์ที่ปนช่องว่างระหว่างตู้)
+# ============================================================================
+# ที่มา (ผู้ใช้แจ้ง 16-Sep-2026): "กรอบแดงตรง front 7.3 ดันไปวาดกรอบ ไร้สาระ
+# งานก็ปกติดีตรงบริเวณนั้นๆ"
+#
+# ROOT CAUSE (ยืนยันด้วยการวัดพิกัดจริงจากไฟล์ชุด 12 ไฟล์): Phase 1B แบ่งคอลัมน์จากสี
+# front-face เท่านั้น ไม่รู้จัก "ช่องว่างระหว่างตู้" ของรถพ่วง -> คอลัมน์ปลายตู้ถูกขยาย
+# คร่อมช่องว่างเข้าไป ทำให้ "ความสูงที่วัดได้" ถูกเจือจางด้วยพื้นที่ว่าง (ไม่ใช่ความสูงของ
+# กองสินค้าจริง) เมื่อค่าที่ผิดนี้ถูกนำไปเทียบข้าม view -> flag ผิดที่ตำแหน่งที่สินค้าปกติดี
+# วัดจริงจากไฟล์ชุดเดียวกับที่ผู้ใช้ทดสอบ:
+#   CE02-ALL  BACK idx3 x=(822,958) ช่องว่างกินพื้นที่คอลัมน์ 60% -> h=65.2px
+#             (เพื่อนบ้านในตู้เดียวกัน 172-177px) -> เทียบ FRONT idx3 (177.4px)
+#             -> drop 63% -> วาดกรอบแดงกลางตู้ที่กล่องสูงเท่ากันทั้งแถว
+#   CC05-all  BACK idx3 กิน 52% (h=112.2) | FRONT idx3 กิน 38% (h=164.4) -> drop 32%
+#   CE01-all  BACK idx4 กิน 41% (h=203.0) | FRONT idx5 กิน 30% (h=143.1) -> drop 30%
+# ยืนยันแยกได้ขาด (วัดครบ 11 ไฟล์ dual-view - ไม่มีค่าใดคาบเกี่ยวกัน):
+#   คอลัมน์ที่ทำให้เกิด flag ผิด : 60%, 52%, 41%, 38%, 30%
+#   คอลัมน์ที่ไม่ทำให้เกิดปัญหา  : 25%, 19%, 16%, 12%, 11%, 11%
+#   -> เกณฑ์ 30% อยู่กึ่งกลางพอดี
+#
+# หมายเหตุสำคัญ: v26.13 แก้ปัญหานี้แค่ "ตัดกรอบไม่ให้คร่อม 2 ตู้" (post-processing) ซึ่งทำให้
+# กรอบอยู่ในตู้เดียวถูกต้อง แต่ "ตัวความเสี่ยงเองยังผิดอยู่" เพราะเกิดจากค่าความสูงที่เจือจาง
+# ตั้งแต่ต้นทาง - รอบนี้แก้ที่ต้นเหตุ (ไม่ให้ค่าที่เจือจางถูกนำไปเทียบตั้งแต่แรก)
+#
+# ขอบเขตแคบมาก (จำกัดเฉพาะจุดที่ผู้ใช้ระบุว่าผิดเท่านั้น):
+#   - ระงับเฉพาะ subtype "cross_view" (การเทียบข้าม view ซึ่งเป็นต้นตอของกรอบแดงที่ 7.3)
+#   - pairwise / tail_stepdown / hidden_behind ไม่ถูกแตะเลย (เทียบภายใน view เดียวกัน)
+#   - EMPTY_SPACE_RISK (กรอบส้ม) ไม่ถูกแตะเลยแม้แต่จุดเดียว
+#   - รถตู้เดียว (ไม่มีช่องว่างระหว่างตู้) ไม่ได้รับผลกระทบเลยแม้แต่ไฟล์เดียว
+_GAP_CONTAMINATED_MAX_FRAC = 0.30
+
+
+def _col_gap_fraction(view_result, x_range):
+    """v26.15: สัดส่วนของคอลัมน์ที่ตกอยู่ใน 'ช่องว่างระหว่างตู้' (0.0 = ไม่คร่อมเลย)"""
+    if view_result is None:
+        return 0.0
+    gaps = view_result.get("_inter_container_gaps")
+    if not gaps:
+        return 0.0
+    x0, x1 = int(x_range[0]), int(x_range[1])
+    w = max(1, x1 - x0)
+    ov = 0
+    for g0, g1 in gaps:
+        ov += max(0, min(x1, g1) - max(x0, g0))
+    return ov / w
+
+
+def _is_gap_contaminated(view_result, rec):
+    """v26.15: True ถ้าความสูงของคอลัมน์นี้ถูกเจือจางด้วยช่องว่างระหว่างตู้จนเชื่อถือไม่ได้
+    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก CE02/CC05/CE01)"""
+    frac = _col_gap_fraction(view_result, rec.get("x_range", (0, 0)))
+    if frac >= _GAP_CONTAMINATED_MAX_FRAC:
+        h = rec.get("height_px")
+        print(f"[GAP_COL] {rec.get('view')} idx={rec.get('idx')} x={rec.get('x_range')} "
+              f"ถูกช่องว่างระหว่างตู้กินพื้นที่ {frac:.0%} (เกณฑ์ >="
+              f"{_GAP_CONTAMINATED_MAX_FRAC:.0%}) -> ความสูงที่วัดได้ "
+              f"({round(h, 1) if h else '-'}px) ถูกเจือจาง ไม่น่าเชื่อถือพอจะเทียบข้าม view "
+              f"(ดู FIX v26.15)")
+        return True
+    return False
+
+
 def detect_step_down_pairwise(records, view_label, view_result=None):
     """เปรียบเทียบตั้งข้างเคียงในview เดียวกัน - ข้าม record ที่ is_corner_duplicate=True
     (ตรวจจากเส้น rail ทางเรขาคณิตจริง ไม่ hardcode ชื่อ view)"""
@@ -7231,6 +7579,65 @@ def _is_single_stack_sparse_load(records_front, records_back):
     return False
 
 
+# v26.12 NEW (ผู้ใช้แจ้ง 16-Sep-2026 พร้อมไฟล์จริง 12 ไฟล์: "กรอบแดง กรอบส้ม - วาดผิดจุด"):
+# ROOT CAUSE (ยืนยันด้วยการวัดครบทั้ง 12 ไฟล์): cross_view จับคู่ "ตำแหน่งความยาวเดียวกัน"
+# ระหว่าง FRONT<->BACK ด้วย pos_range (สัดส่วนตำแหน่ง) เท่านั้น โดยไม่เคยตรวจสอบเลยว่า
+# "ทั้ง 2 view แบ่งคอลัมน์ได้ละเอียดพอๆ กันหรือไม่" - เมื่อ view หนึ่งแบ่งหยาบกว่าอีก view
+# มาก คอลัมน์กว้างของฝั่งที่หยาบจะ "ทับซ้อน" กับคอลัมน์ของอีกฝั่งหลายคอลัมน์พร้อมกัน ทำให้
+# ถูกนำไปเทียบซ้ำๆ กับทุกคอลัมน์ -> flag ผิดพร้อมกันทั้งแถว
+# วัดยืนยันจาก TC51-03 (6WH Truck, สินค้าเพียง 9 ใบ, โหลด 45.7%):
+#   FRONT แบ่งได้ 7 คอลัมน์ | BACK แบ่งได้เพียง 3 คอลัมน์ (ratio 0.43)
+#   BACK idx2 กว้างถึง 387px (= 61% ของความยาวสินค้าทั้งหมด) แต่วัดความสูงได้เพียง 55.0px
+#   (เพราะคอลัมน์กว้างนี้รวม "พื้นที่ว่างท้ายรถ" เข้าไปด้วย ค่าที่วัดได้จึงไม่ใช่ความสูงของ
+#    กองสินค้าใดกองหนึ่งโดยเฉพาะ)
+#   -> ถูกนำไปเทียบกับ FRONT idx0,1,2,3,4 ทุกตัว (ทับซ้อนหมดเพราะกว้างมาก)
+#   -> drop 78%,82%,85%,85%,85% -> flag 5 จุดรวดติดกันทั้งแถว (ทั้งที่สินค้าสูงเท่ากันจริง)
+#   ทั้ง 5 คู่ชี้ไปที่ B2 ตัวเดียวกันหมด = ลายเซ็นของ "คอลัมน์เดียวทับหลายคอลัมน์"
+#
+# ยืนยันว่าแยกได้ขาดจากไฟล์ที่ทำงานถูกต้อง (วัดครบ 11 ไฟล์ที่เป็น dual-view):
+#   ไฟล์            F    B   col_ratio   width_ratio ของคู่ที่ flag
+#   TC51-03         7    3      0.43     2.85-10.75   <-- ผิดปกติทั้ง 2 สัญญาณ
+#   ------------------------------------------------------------------
+#   CC33-all       14   15      1.07     -
+#   CB15-all       11   11      1.00     1.06
+#   CE01-all       12   12      1.00     1.08-1.47
+#   CE02-ALL        8    8      1.00     1.38-1.60
+#   CC05-all        8    8      1.00     1.00
+#   CC07-all        5    5      1.00     1.11
+#   CC40-02         7    7      1.00     2.41 (ไม่ถูก flag อยู่แล้ว - guard อื่นกรองไว้)
+#   CC19/CD11/Empty 3-7 3-7     1.00     -
+#   -> col_ratio: ผิดปกติ 0.43 vs ปกติ 1.00-1.07 (แยกขาด 2.3 เท่า)
+#   -> width_ratio: ผิดปกติ 2.85+ vs ปกติ 1.00-1.60 (แยกขาด 1.8 เท่า)
+#
+# FIX: ระงับเฉพาะ "คู่ที่พิสูจน์ได้ว่าจับคู่ผิด" (ไม่ปิดทั้งไฟล์) โดยต้องเข้าเงื่อนไขครบทั้ง 2 ข้อ:
+#   (1) ทั้ง 2 view แบ่งคอลัมน์ไม่สมดุลกันอย่างรุนแรง (col_ratio นอกช่วง 0.70-1.43)
+#   (2) และคู่นั้นมีความกว้างต่างกันตั้งแต่ 2.5 เท่าขึ้นไป (คอลัมน์กว้างทับคอลัมน์แคบหลายตัว)
+# เงื่อนไข AND ทำให้ไม่กระทบไฟล์ที่ col_ratio ปกติแต่บังเอิญมีคู่กว้างต่างกัน (เช่น CC40-02
+# ที่มี width_ratio 2.41 แต่ col_ratio=1.00 -> ไม่เข้าเงื่อนไขเลย)
+# ขอบเขต: ปิดเฉพาะ subtype "cross_view" เท่านั้น - pairwise / hidden_behind / tail_stepdown
+# ทำงานครบทุกกลไก (เป็นการเทียบภายใน view เดียวกัน ไม่ได้รับผลจากการจับคู่ข้าม view เลย)
+_XVIEW_COL_RATIO_LO = 0.70   # ต่ำกว่านี้ = BACK แบ่งหยาบกว่า FRONT มาก
+_XVIEW_COL_RATIO_HI = 1.43   # สูงกว่านี้ = FRONT แบ่งหยาบกว่า BACK มาก (1/0.70)
+_XVIEW_MAX_WIDTH_RATIO = 2.5  # คู่ที่กว้างต่างกันเกินนี้ = คอลัมน์กว้างทับหลายคอลัมน์
+
+
+def _xview_column_granularity_mismatch(records_front, records_back):
+    """v26.12: True ถ้า 2 view แบ่งคอลัมน์ไม่สมดุลกันอย่างรุนแรง (ดู docstring เต็มด้านบน
+    สำหรับหลักฐาน+เหตุผล - พบจริงจาก TC51-03)"""
+    nf = len([r for r in (records_front or []) if not r.get("is_corner_duplicate")])
+    nb = len([r for r in (records_back or []) if not r.get("is_corner_duplicate")])
+    if nf < 2 or nb < 2:
+        return False
+    ratio = nb / nf
+    bad = ratio < _XVIEW_COL_RATIO_LO or ratio > _XVIEW_COL_RATIO_HI
+    if bad:
+        print(f"[XVIEW_GRANULARITY] FRONT {nf} คอลัมน์ vs BACK {nb} คอลัมน์ "
+              f"(ratio={ratio:.2f} นอกช่วง {_XVIEW_COL_RATIO_LO}-{_XVIEW_COL_RATIO_HI}) "
+              f"-> 2 view แบ่งคอลัมน์ไม่สมดุลกัน การจับคู่ตำแหน่งข้าม view ไม่น่าเชื่อถือ "
+              f"(ดู FIX v26.12)")
+    return bad
+
+
 def detect_step_down_crossview(records_front, records_back, front_result=None, back_result=None):
     """เปรียบเทียบตำแหน่งจริงเดียวกันระหว่าง FRONT<->BACK ด้วยเกณฑ์เดียว (20%) - ข้าม
     record ที่ is_corner_duplicate=True เสมอ (ตรวจจากเส้น rail ทางเรขาคณิตจริง)"""
@@ -7243,6 +7650,9 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
     # ว่าเป็นวัตถุความสูงสม่ำเสมอจริง ความต่างที่วัดได้เป็นความเอนเอียงจาก isometric slope)
     front_isolated_uniform = _isolated_pair_no_genuine_jump(records_front, front_result)
     back_isolated_uniform = _isolated_pair_no_genuine_jump(records_back, back_result)
+    # v26.12: ตรวจครั้งเดียวต่อการเรียก - 2 view แบ่งคอลัมน์สมดุลกันหรือไม่
+    # (ดู docstring เต็มที่ _xview_column_granularity_mismatch - พบจริงจาก TC51-03)
+    _granularity_bad = _xview_column_granularity_mismatch(records_front, records_back)
 
     def _compare(rec_a, records_b_all, view_a_label, view_b_label):
         if rec_a.get("is_corner_duplicate"):
@@ -7261,6 +7671,28 @@ def detect_step_down_crossview(records_front, records_back, front_result=None, b
             shorter_rec = rec_b if taller_rec is rec_a else rec_a
             taller_h = taller_rec["height_px"]
             shorter_h = shorter_rec["height_px"]
+
+            # v26.15: คอลัมน์ที่คร่อมช่องว่างระหว่างตู้ -> ความสูงถูกเจือจาง ไม่นำมาเทียบ
+            # (ดู docstring เต็มที่ _GAP_CONTAMINATED_MAX_FRAC - แก้กรอบแดงที่ FRONT 7.3)
+            _vr_a = front_result if rec_a["view"] == "FRONT" else back_result
+            _vr_b = front_result if rec_b["view"] == "FRONT" else back_result
+            if _is_gap_contaminated(_vr_a, rec_a) or _is_gap_contaminated(_vr_b, rec_b):
+                continue
+
+            # v26.12: ถ้า 2 view แบ่งคอลัมน์ไม่สมดุลกัน "และ" คู่นี้กว้างต่างกันมาก
+            # (คอลัมน์กว้างของฝั่งที่แบ่งหยาบ กำลังทับคอลัมน์แคบของอีกฝั่งหลายตัว)
+            # ให้ถือว่าการจับคู่ตำแหน่งคู่นี้ไม่น่าเชื่อถือ - ไม่ flag
+            # (ดู docstring เต็มที่ _xview_column_granularity_mismatch - พบจริงจาก TC51-03)
+            if _granularity_bad:
+                _wa = rec_a["x_range"][1] - rec_a["x_range"][0]
+                _wb = rec_b["x_range"][1] - rec_b["x_range"][0]
+                _wr = max(_wa, _wb) / max(1, min(_wa, _wb))
+                if _wr >= _XVIEW_MAX_WIDTH_RATIO:
+                    print(f"[XVIEW_GRANULARITY] ข้ามคู่ {rec_a['view']}idx{rec_a['idx']}"
+                          f"(w={_wa}) <-> {rec_b['view']}idx{rec_b['idx']}(w={_wb}) "
+                          f"กว้างต่างกัน {_wr:.1f} เท่า (เกณฑ์ {_XVIEW_MAX_WIDTH_RATIO}) "
+                          f"= คอลัมน์กว้างทับหลายคอลัมน์ จับคู่ตำแหน่งไม่ได้")
+                    continue
             # v25.89 NEW: ถ้าฝั่งใดฝั่งหนึ่งมาจากวิวที่พิสูจน์แล้วว่า "รวมทั้งวิวมีแค่ 2 คอลัมน์
             # และไม่มี genuine jump จริง" (isolated uniform object) ไม่เชื่อถือค่าความสูงรายคอลัมน์
             # ของวิวนั้นพอจะเปรียบเทียบข้าม view ได้ - ไม่ flag (ดู docstring เต็มที่
@@ -8469,6 +8901,18 @@ def _suppress_inter_container_empty_space_risks(risks, view_result, view_label, 
             if ref_x is not None and (g0 - tol) <= ref_x <= (g1 + tol):
                 hit = (g0, g1); break
             if mx:
+                # v26.15 FIX (ผู้ใช้แจ้ง 16-Sep-2026: "กรอบที่ผิดคือ คร่อมทั้งสองตู้
+                # ประเภทรถพ่วง"): เดิมยกเว้นเฉพาะเมื่อกรอบทับช่องว่าง >=30% ของความกว้าง
+                # ช่องว่าง - แต่กรอบส้มที่ "คร่อม" ช่องว่างทั้งช่อง (ขอบซ้ายอยู่ก่อนช่อง
+                # ขอบขวาอยู่หลังช่อง) มักกว้างกว่าตัวช่องว่างมาก ทำให้สัดส่วนที่คำนวณได้
+                # อาจไม่ถึงเกณฑ์ -> หลุดการยกเว้น -> ถูกส่งต่อไปที่ _clip_risks_at_container_gaps
+                # ซึ่ง "ตัดกรอบให้เหลือฝั่งเดียว" แทนที่จะลบทิ้ง -> ยังเหลือกรอบส้มผิดอยู่
+                # ROOT CAUSE เชิงความหมาย: กรอบส้มที่คร่อมช่องว่างระหว่างตู้ มี "จุดกำเนิด"
+                # มาจากช่องว่างทางกายภาพระหว่าง 2 ตู้ (ไม่ใช่โพรงภายในกองสินค้า) จึงต้อง
+                # ปฏิเสธทั้ง risk ไม่ใช่แค่ย่อขนาดกรอบ
+                # FIX: เพิ่มเงื่อนไข "คร่อมทั้งช่อง" เป็นอีกกรณีที่ยกเว้นทันที
+                if mx[0] < g0 and mx[1] > g1:
+                    hit = (g0, g1); break
                 inter = max(0, min(mx[1], g1) - max(mx[0], g0))
                 if inter >= 0.3 * max(1, g1 - g0):
                     hit = (g0, g1); break
@@ -9088,6 +9532,92 @@ def _analyse_whole_view(front, back, records_front, records_back):
     return risks
 
 
+# ============================================================================
+# v26.13 NEW: CLIP RISK BOX AT INTER-CONTAINER GAP (กรอบต้องไม่คร่อม 2 ตู้)
+# ============================================================================
+# ที่มา (ผู้ใช้แจ้ง 16-Sep-2026 พร้อมไฟล์จริง 12 ไฟล์): "กรอบแดง กรอบส้ม - วาดผิดจุด,
+# วาดคล่อม 2 ตู้, วาดคล่อม view"
+#
+# ROOT CAUSE (ยืนยันด้วยการวัดตำแหน่งจริงครบทุกไฟล์): Phase 1B แบ่งคอลัมน์จาก "สีของ
+# front-face" เท่านั้น ไม่เคยรู้จักแนวคิด "ช่องว่างระหว่างตู้" เลย - คอลัมน์ที่อยู่ปลายตู้ใบแรก
+# จึงถูกขยายกว้างคร่อมช่องว่างไปจนถึงจุดเริ่มต้นของตู้ใบที่ 2 ได้ (เพราะไม่มีสีอื่นมาคั่น)
+# เมื่อคอลัมน์นั้นถูก flag เป็นความเสี่ยง กรอบที่วาดจึงพาดข้ามช่องว่างจากตู้หนึ่งไปอีกตู้หนึ่ง
+# วัดยืนยันจากไฟล์จริง:
+#   CC05-all FRONT: ช่องว่างระหว่างตู้ x=[897,955] แต่คอลัมน์ idx3 กว้าง x=[813,967]
+#                   -> คร่อมทั้งช่อง (ซ้ายเลย 897 / ขวาเลย 955) = กรอบพาด 2 ตู้
+#                   ถูก flag 2 จุด (cross_view + tail_stepdown) ที่คอลัมน์เดียวกันนี้
+#   CE01-all BACK : ช่องว่าง x=[921,960] แต่คอลัมน์ idx4 กว้าง x=[884,980] -> คร่อมเช่นกัน
+# ตรวจครบ 12 ไฟล์ พบเพียง 3 จุดจาก 2 ไฟล์นี้เท่านั้น (ไฟล์อื่นคอลัมน์ไม่คร่อมช่องว่างเลย)
+#
+# FIX: ตัด (clip) ขอบกรอบให้หยุดที่ขอบช่องว่าง โดยเก็บไว้เฉพาะ "ฝั่งที่กรอบกินพื้นที่มากกว่า"
+# (= ตู้ที่ความเสี่ยงนั้นสังกัดอยู่จริง) - ไม่ลบ risk ทิ้ง เพราะความเสี่ยงยังมีจริงในตู้นั้น
+# เพียงแต่กรอบเดิมวาดเลยขอบเขตตู้ไป
+#   CC05 idx3: ซ้าย 813-897 = 84px | ขวา 955-967 = 12px -> เก็บฝั่งซ้าย -> (813, 897)
+#   CE01 idx4: ซ้าย 884-921 = 37px | ขวา 960-980 = 20px -> เก็บฝั่งซ้าย -> (884, 921)
+# ทำที่ขั้น post-processing (หลังคำนวณ risks ครบแล้ว) จึงไม่กระทบตรรกะการตรวจจับใดๆ เลย
+# และแก้ทั้ง mark_x_range และ abs_box (ถ้ามี) ให้สอดคล้องกัน
+_CLIP_GAP_MIN_KEEP_PX = 12   # ฝั่งที่เก็บไว้ต้องกว้างพอจะวาดกรอบได้ (ต่ำกว่านี้ = ตัดทิ้งทั้ง risk)
+
+
+def _clip_risks_at_container_gaps(risks, front, back, n_containers):
+    """v26.13: ตัดกรอบที่คร่อมช่องว่างระหว่างตู้ ให้เหลือเฉพาะฝั่งที่อยู่ในตู้เดียว
+    (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - พบจริงจาก CC05-all / CE01-all)"""
+    if n_containers < 2:
+        return risks
+    gaps = {}
+    for vn, vr in (("FRONT", front), ("BACK", back)):
+        gaps[vn] = _find_inter_container_gaps(vr, n_containers) if vr else []
+    if not any(gaps.values()):
+        return risks
+    out = []
+    for r in risks:
+        mx = r.get("mark_x_range")
+        vw = r.get("mark_view") or r.get("view")
+        # v26.15: EMPTY_SPACE_RISK (กรอบส้ม) ถูกจัดการด้วยการ "ปฏิเสธทั้ง risk" ใน
+        # _suppress_inter_container_empty_space_risks ไปแล้ว (ดู FIX v26.15 ที่นั่น)
+        # กรอบส้มที่รอดมาถึงตรงนี้ = ไม่ได้คร่อมช่องว่าง = ถูกต้องอยู่แล้ว ไม่ต้องตัด
+        if r.get("risk_type") == "EMPTY_SPACE_RISK":
+            out.append(r)
+            continue
+        if not mx or vw not in gaps or not gaps[vw]:
+            out.append(r)
+            continue
+        x0, x1 = int(mx[0]), int(mx[1])
+        clipped = False
+        for g0, g1 in gaps[vw]:
+            if not (x0 < g0 and x1 > g1):
+                continue   # ไม่ได้คร่อมช่องนี้
+            left_w = g0 - x0
+            right_w = x1 - g1
+            if left_w >= right_w:
+                nx0, nx1 = x0, g0
+            else:
+                nx0, nx1 = g1, x1
+            if (nx1 - nx0) < _CLIP_GAP_MIN_KEEP_PX:
+                print(f"[CLIP_GAP] ตัด {r.get('subtype')} {vw} idx={r.get('mark_stack_idx')} "
+                      f"ทิ้ง (เหลือกว้างเพียง {nx1-nx0}px หลังตัดที่ช่องว่าง [{g0},{g1}])")
+                clipped = None
+                break
+            print(f"[CLIP_GAP] {r.get('subtype')} {vw} idx={r.get('mark_stack_idx')} "
+                  f"กรอบเดิม x=[{x0},{x1}] คร่อมช่องว่างระหว่างตู้ [{g0},{g1}] "
+                  f"-> ตัดเหลือ x=[{nx0},{nx1}] (เก็บฝั่ง{'ซ้าย' if left_w >= right_w else 'ขวา'} "
+                  f"ซึ่งกว้างกว่า: {max(left_w, right_w)}px vs {min(left_w, right_w)}px)")
+            x0, x1 = nx0, nx1
+            clipped = True
+        if clipped is None:
+            continue
+        if clipped:
+            r = dict(r)
+            r["mark_x_range"] = (x0, x1)
+            ab = r.get("abs_box")
+            if ab:
+                vr = front if vw == "FRONT" else back
+                ox = vr.get("crop_origin_x", 0) if vr else 0
+                r["abs_box"] = (ox + x0, ab[1], ox + x1, ab[3])
+        out.append(r)
+    return out
+
+
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -9158,6 +9688,14 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
             _n_cont = _detect_multi_container_vehicle(pdf_bytes)[0] or 1
         except Exception as _e:
             print(f"[PER_CONTAINER] ตรวจประเภทรถไม่สำเร็จ ({_e}) -> ถือว่าตู้เดียว")
+    # v26.15: คำนวณ "ช่องว่างระหว่างตู้" แล้วแนบเข้า view_result ก่อนวิเคราะห์ เพื่อให้
+    # cross_view รู้ว่าคอลัมน์ใดถูกช่องว่างเจือจางความสูง (ดู _GAP_CONTAMINATED_MAX_FRAC)
+    if _n_cont >= 2:
+        try:
+            front["_inter_container_gaps"] = _find_inter_container_gaps(front, _n_cont)
+            back["_inter_container_gaps"] = _find_inter_container_gaps(back, _n_cont)
+        except Exception as _e:
+            print(f"[GAP_COL] หาช่องว่างระหว่างตู้ไม่สำเร็จ ({_e}) -> ข้าม guard นี้")
     _pc = None
     if _n_cont >= 2:
         try:
@@ -9171,6 +9709,10 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         risks += _analyse_whole_view(front, back, records_front, records_back)
     risks += detect_silhouette_notch_risk(front, "FRONT")
     risks += detect_silhouette_notch_risk(back, "BACK")
+    # v26.15: ระงับกรอบส้มที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
+    # (ดู docstring เต็มที่ _suppress_largebox_tail_notch - ผู้ใช้ระบุโดยตรง)
+    risks = _suppress_largebox_tail_notch(risks, front, records_front, "FRONT")
+    risks = _suppress_largebox_tail_notch(risks, back, records_back, "BACK")
     # v25.75 NEW: ลบบรรทัด comment-out ของ detect_step_down_topface_jump ที่ปิดใช้งานถาวร
     # มาตั้งแต่ v25.65 (ฟังก์ชันเองก็ถูกลบไปแล้วในรอบนี้ - ดู docstring เต็มที่จุดที่เคยมีฟังก์ชัน
     # นั้นอยู่ ใกล้ _floor_linearity_anomaly) ตามคำสั่งผู้ใช้ให้ลบกลไกที่ไม่ใช้งานจริงออก
@@ -9198,6 +9740,9 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     if n_containers >= 2:
         risks = _suppress_inter_container_empty_space_risks(risks, front, "FRONT", n_containers)
         risks = _suppress_inter_container_empty_space_risks(risks, back, "BACK", n_containers)
+        # v26.13: ตัดกรอบที่คร่อมช่องว่างระหว่างตู้ ให้อยู่ในตู้เดียว
+        # (ดู docstring เต็มที่ _clip_risks_at_container_gaps - พบจริงจาก CC05-all/CE01-all)
+        risks = _clip_risks_at_container_gaps(risks, front, back, n_containers)
 
     return {
         "front": front, "back": back,
@@ -9352,6 +9897,8 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     risks += detect_step_down_pairwise(records, "FRONT", view_result=view)
     risks += detect_step_down_hidden_behind(view, records, "FRONT")
     risks += detect_silhouette_notch_risk(view, "FRONT")
+    # v26.15: ระงับกรอบส้มที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
+    risks = _suppress_largebox_tail_notch(risks, view, records, "FRONT")
     # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
     # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
@@ -9369,6 +9916,8 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
         if n_containers >= 2:
             risks = _suppress_inter_container_empty_space_risks(
                 risks, view, "FRONT", n_containers)
+            # v26.13: ตัดกรอบที่คร่อมช่องว่างระหว่างตู้ (ดู _clip_risks_at_container_gaps)
+            risks = _clip_risks_at_container_gaps(risks, view, None, n_containers)
 
     print(f"[SINGLE_VIEW] n_stacks={view.get('n_stacks')} risks={len(risks)}")
     return {
@@ -11266,8 +11815,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.10",
-            "benchmarkMode": "v26_10_try_then_colorize",
+            "checkerVersion": "V26.15",
+            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -11299,8 +11848,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.10",
-            "benchmarkMode": "v26_10_try_then_colorize",
+            "checkerVersion": "V26.15",
+            "benchmarkMode": "v26_15_targeted_orange_and_gap_column_fix",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
