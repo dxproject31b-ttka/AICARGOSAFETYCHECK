@@ -2,6 +2,62 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.21 (ฐาน = v26.17 ตามที่ผู้ใช้สั่ง "v26.18 ลบทิ้ง" - v26.18/19/20 ถูกยกเลิกทั้งหมด)
+ผู้ใช้ชี้ด้วยลูกศร 2 จุดบนภาพผลตรวจ CB15-04 (18-Sep-2026): "วาดกรอบแดงไม่ถูก ตรงนั้นปลอดภัย"
+  ลูกศรที่ 1 -> FRONT idx1 (กรอบบนกองเขียว)
+  ลูกศรที่ 2 -> FRONT idx5 (กรอบบนกองแดง ตู้ใบที่ 2)
+  ไม่ได้ชี้   -> FRONT idx2 (รอยต่อเขียว-ชมพู) = ถูกต้อง ต้องคงไว้
+
+--- FIX: UNBROKEN ISOMETRIC ROOF-LINE GUARD ------------------------------------
+ROOT CAUSE (จุดเดียวกันทั้ง 2 กรอบ): _detect_hidden_behind_split ตัดสินจาก
+"ความสูง = local_floor_y - cargo_top_y" ซึ่ง local_floor_y เป็นเส้นพื้นที่ประมาณ/เกลี่ยมาจาก
+แนวพื้นตู้ (smooth window 41px) จึงคลาดเคลื่อนเฉพาะจุดได้ - เมื่อ floor กระโดดข้างใดข้างหนึ่ง
+ของ seam ค่าความสูงจะกระโดดตาม ทั้งที่ยอดกล่องจริงไม่เปลี่ยนเลยแม้แต่ pixel เดียว
+
+หลักฐาน pixel ตรงจาก CB15-04 FRONT idx5 (ค่าจริงต่อ x):
+    x   : 952  955  958  961 | 964  967  970  973
+  top_y : 220  219  217  216 | 214  213  211  210   <- ต่อเนื่องสนิท ไม่มีขั้นเลย
+  floor : 350  352  358  360 | 439  439  439  439   <- กระโดด 79px ที่ x=964 พอดี
+  h     : 130  133  141  144 | 225  226  228  229   <- jump ทั้งหมดมาจาก floor ล้วนๆ
+
+วัดครบทุกจุด hidden_behind ของไฟล์นี้ด้วยวิธีเดียวกัน (fit เส้นยอดฝั่งซ้าย แล้วดูว่ายอดฝั่งขวา
+ลอยสูงกว่าเส้น isometric เส้นนั้นกี่ px):
+  idx1 (ลูกศรชี้=ผิด) : slope=-0.504 |slope+0.5|=0.004 resid=0.33 excess= 0.0px floor_jump= 3px
+  idx5 (ลูกศรชี้=ผิด) : slope=-0.497 |slope+0.5|=0.003 resid=0.38 excess= 0.0px floor_jump=72px
+  idx2 (ไม่ชี้=ถูก)   : slope=+0.189 |slope+0.5|=0.689 resid=2.60 excess=10.0px floor_jump=18px
+  idx4 (dir=down)     : slope=+0.503 |slope+0.5|=1.003 resid=0.27 excess=58.5px
+  -> ตัวแยกหลัก |slope+0.5| : ผิด 0.003-0.004 | ถูก 0.689 = ห่างกัน 172 เท่า
+  -> ตัวแยกที่ 2 excess     : ผิด 0.0px       | ถูก 10.0px
+
+FIX: ตรวจ "ความต่อเนื่องของหลังคา" จาก cargo_top_y โดยตรง (ไม่พึ่ง local_floor_y เลย จึงไม่ถูก
+floor artifact ตัวต้นเหตุรบกวน) - ระงับเมื่อครบทั้ง 2 เงื่อนไขพร้อมกัน:
+  (1) เส้นยอดฝั่งซ้ายเป็นเส้น isometric สะอาด : |slope+0.5| <= 0.06 และ resid_std <= 1.5
+  (2) และยอดฝั่งขวาอยู่บนเส้นเดียวกันนั้น     : สูงกว่าเส้นไม่เกิน 4.0px
+= "หลังคาทั้ง 2 ฝั่งอยู่ระนาบเดียวกันจริง ไม่มีกล่องใบใดโผล่พ้นขึ้นมา"
+
+*** สำคัญ: หน้าต่างต้องถูก clip ไว้ใน [x0,x1] ของคอลัมน์ Phase1B เสมอ ***
+ถ้าปล่อยให้ล้นออกนอกคอลัมน์ หน้าต่างของ idx5 จะยื่นไปถึง x=919 ซึ่งตกในช่องว่างระหว่างตู้
+(913,931) ทำให้ fit เพี้ยนเป็น slope=-6.902 resid=58.18 แล้ว guard จะไม่ทำงาน
+(ยืนยันด้วยการรันจริงทั้ง 2 แบบ - การ clip จึงเป็นข้อบังคับ ไม่ใช่ทางเลือก)
+fail-safe: ถ้า fit ไม่สำเร็จ หรือจุดข้อมูลไม่ถึง 8 จุด -> ไม่ระงับ (คง flag ไว้) เสมอ
+ขอบเขต: hidden_behind ทิศทาง 'up' เท่านั้น - ไม่แตะ pairwise / cross_view / tail_stepdown /
+กรอบส้มทุกชนิด และไม่แตะทิศทาง 'down' (มี SNR + floor-stability guard ของ v25.70 อยู่แล้ว)
+
+REGRESSION (CB15-04 เทียบ v26.17 ทีละจุด ทุกพิกัด): 5 จุด -> 3 จุด
+  ลบ   : hidden_behind FRONT idx1 (654,589,724,830)   <- ลูกศรที่ 1
+         hidden_behind FRONT idx5 (969,445,1039,671)  <- ลูกศรที่ 2
+  คงไว้: hidden_behind FRONT idx2 (762,543,832,788)   <- ไม่ได้ชี้ ยังอยู่ พิกัดเดิมเป๊ะ
+         silhouette_notch FRONT (744,523,820,576)
+         silhouette_notch BACK (1016,1079,1241,1178)
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+1. รอบนี้มี PDF ให้ทดสอบเพียงไฟล์เดียว (CB15-04) - ยังไม่ได้ regression กับไฟล์อื่นเลย
+   guard นี้แคบมาก (ต้องเป็นเส้น isometric เกือบสมบูรณ์ + ยอดอีกฝั่งอยู่บนเส้นพอดี จึงจะระงับ)
+   แต่ควรรันชุด CC05/CC07/CC19/CC28/CC33/CC40/CD11/CE01/CE02/TC51/CC20 ยืนยันก่อน deploy
+2. v26.18 / v26.19 / v26.20 ถูกทิ้งทั้งหมดตามคำสั่งผู้ใช้ - ไฟล์นี้ต่อยอดจาก v26.17 ล้วนๆ
+   ไม่มีโค้ดใดจาก 3 เวอร์ชันนั้นหลงเหลืออยู่เลย (ตรวจสอบด้วย diff กับ v26.17 แล้ว:
+   เปลี่ยนเฉพาะ 2 จุด คือ บล็อกค่าคงที่ _HB_ISO_* และ guard ใน detect_step_down_hidden_behind)
+================================================================================
 v26.17 (ผู้ใช้แจ้ง 17-Sep-2026 หลังทดสอบ v26.16 พร้อมไฟล์ CB15-04:
         "กรอบส้มวาดคร่อม และกรอบแดง อาจมีผิดผสมเข้ามา"):
 
@@ -5753,6 +5809,51 @@ def compute_stack_heights_px(seams, start_x, end_x, cargo_top_y, margin=6, local
 # แต่ยังต่ำกว่า "การเพิ่มขึ้น 1 ชั้นกล่องจริง" (~25-35% ของความสูงกอง) มาก จึงไม่กระทบกรณี
 # hidden_behind ที่เป็นอันตรายจริงแบบ AE02-01 (กล่องแดงซ้อนชั้นที่ 3 สูงพ้นทุกกองอย่างชัดเจน)
 _HIDDEN_BEHIND_UP_MIN_EXCESS_RATIO = 0.15
+# v26.21 NEW: UNBROKEN ISOMETRIC ROOF-LINE GUARD (กรอบแดง hidden_behind บนกองที่สูงเท่ากันจริง)
+# ที่มา: ผู้ใช้ชี้ด้วยลูกศร 2 จุดบนภาพผลตรวจ CB15-04 (18-Sep-2026): "วาดกรอบแดงไม่ถูก
+# ตรงนั้นปลอดภัย" -> FRONT idx1 และ FRONT idx5 (กรอบที่ 3 ในภาพ) ส่วน idx2 ไม่ได้ชี้ = ถูกต้อง
+#
+# ROOT CAUSE (จุดเดียวกันทั้ง 2 กรอบ): _detect_hidden_behind_split ตัดสินจาก
+# "ความสูง = local_floor_y - cargo_top_y" ซึ่ง local_floor_y เป็นเส้นพื้นที่ประมาณ/เกลี่ยมาจาก
+# แนวพื้นตู้ (smooth window 41px) จึงมีความคลาดเคลื่อนเฉพาะจุดได้ - เมื่อ floor กระโดดข้างใด
+# ข้างหนึ่งของ seam ค่า "ความสูง" จะกระโดดตาม ทั้งที่ยอดกล่องจริงไม่ได้เปลี่ยนเลยแม้แต่ pixel เดียว
+#
+# หลักฐาน pixel ตรงจาก CB15-04 FRONT idx5 (ตารางค่าจริงต่อ x):
+#     x   : 952  955  958  961 | 964  967  970  973
+#   top_y : 220  219  217  216 | 214  213  211  210   <- ต่อเนื่องสนิท ไม่มีขั้นเลย
+#   floor : 350  352  358  360 | 439  439  439  439   <- กระโดด 79px ที่ x=964 พอดี
+#   h     : 130  133  141  144 | 225  226  228  229   <- "jump" ทั้งหมดมาจาก floor ล้วนๆ
+#
+# วัดครบทุกจุด hidden_behind ของไฟล์นี้ด้วยวิธีเดียวกัน (fit เส้นยอดฝั่งซ้าย + ดูว่ายอดฝั่งขวา
+# ลอยสูงกว่าเส้น isometric เส้นนั้นกี่ px) โดยจำกัดหน้าต่างไว้ใน "คอลัมน์ Phase1B เดียวกัน"
+# เท่านั้น เพื่อไม่ให้หน้าต่างล้ำไปโดนช่องว่างระหว่างตู้:
+#   idx1 (ลูกศรชี้=ผิด) : slope=-0.504 |slope+0.5|=0.004 resid=0.33 excess= 0.0px floor_jump= 3px
+#   idx5 (ลูกศรชี้=ผิด) : slope=-0.497 |slope+0.5|=0.003 resid=0.38 excess= 0.0px floor_jump=72px
+#   idx2 (ไม่ได้ชี้=ถูก): slope=+0.189 |slope+0.5|=0.689 resid=2.60 excess=10.0px floor_jump=18px
+#   idx4 (dir=down)     : slope=+0.503 |slope+0.5|=1.003 resid=0.27 excess=58.5px
+#   -> ตัวแยกหลักคือ |slope+0.5| : ผิด 0.003-0.004 | ถูก 0.689 = ห่างกัน 172 เท่า
+#   -> ตัวแยกที่ 2 คือ excess    : ผิด 0.0px       | ถูก 10.0px
+#
+# FIX: ตรวจ "ความต่อเนื่องของหลังคา" จาก cargo_top_y โดยตรง (ไม่พึ่ง local_floor_y เลย จึงไม่
+# ถูก floor artifact ตัวต้นเหตุรบกวน) - ระงับเมื่อครบทั้ง 2 เงื่อนไขพร้อมกัน:
+#   (1) เส้นยอดฝั่งซ้ายเป็นเส้น isometric สะอาด : |slope+0.5| <= 0.06 และ resid_std <= 1.5
+#   (2) และยอดฝั่งขวาอยู่บนเส้นเดียวกันนั้น     : สูงกว่าเส้นไม่เกิน 4.0px
+# = "หลังคาทั้ง 2 ฝั่งอยู่ระนาบเดียวกันจริง ไม่มีกล่องใบใดโผล่พ้นขึ้นมา"
+#
+# *** สำคัญ: หน้าต่างต้องถูกจำกัดไว้ใน [x0, x1] ของคอลัมน์ Phase1B เสมอ ***
+# เหตุผล: ถ้าปล่อยให้ล้นออกนอกคอลัมน์ หน้าต่างของ idx5 จะยื่นไปถึง x=919 ซึ่งตกอยู่ในช่องว่าง
+# ระหว่างตู้ (913,931) ทำให้ fit เพี้ยนเป็น slope=-6.902 resid=58.18 แล้ว guard จะไม่ทำงาน
+# (ยืนยันด้วยการรันจริงทั้ง 2 แบบ - นี่คือเหตุผลที่ต้อง clip ไม่ใช่ทางเลือก)
+# fail-safe: ถ้า fit ไม่สำเร็จ หรือจุดข้อมูลไม่ถึง _HB_ISO_ROOF_MIN_PTS -> ไม่ระงับ (คง flag ไว้)
+# ขอบเขต: hidden_behind ทิศทาง 'up' เท่านั้น - ไม่แตะ pairwise / cross_view / tail_stepdown /
+# กรอบส้มทุกชนิด และไม่แตะทิศทาง 'down' (มี SNR + floor-stability guard ของ v25.70 อยู่แล้ว)
+_HB_ISO_ROOF_SLOPE = -0.5
+_HB_ISO_ROOF_SLOPE_TOL = 0.06
+_HB_ISO_ROOF_MAX_RESID = 1.5
+_HB_ISO_ROOF_MAX_EXCESS_PX = 4.0
+_HB_ISO_ROOF_WIN_PX = 40
+_HB_ISO_ROOF_EDGE_OFFSET_PX = 2
+_HB_ISO_ROOF_MIN_PTS = 8
 # v26.16 NEW: BOX-SUPPORT GUARD (กรอบแดง hidden_behind ที่ "ลอยอยู่เหนือสินค้า")
 # ที่มา: ผู้ใช้ชี้ด้วยลูกศรบนภาพจริง 17-Sep-2026 (CC07-01, CC40-02) ว่ากรอบแดงเหล่านี้
 # "วาดเกินมา บริเวณนั้นปลอดภัย"
@@ -7194,6 +7295,41 @@ def detect_step_down_hidden_behind(view_result, records, view_label):
         # (ไม่กระทบทิศทาง 'down' เดิมเลย และไม่กระทบกรณีที่กล่องโผล่สูงพ้นจริงซึ่งจะสูงกว่า median
         # มากกว่านี้มาก - ชั้นกล่องเพิ่ม 1 ชั้นตามปกติคิดเป็น ~25-35% ของความสูงกองทั้งหมด)
         if direction == "up":
+            # v26.21: UNBROKEN ISOMETRIC ROOF-LINE GUARD
+            # (ดู docstring + หลักฐาน pixel เต็มที่ _HB_ISO_ROOF_SLOPE)
+            _cty_g = view_result.get("cargo_top_y")
+            if _cty_g is not None:
+                _cty_g = np.asarray(_cty_g, int)
+                _off = _HB_ISO_ROOF_EDGE_OFFSET_PX
+
+                def _roof_win(_a, _b):
+                    # clip เข้าคอลัมน์ Phase1B เสมอ - ห้ามให้ล้ำไปโดนช่องว่างระหว่างตู้
+                    _a = max(_a, x0, 0)
+                    _b = min(_b, x1, len(_cty_g))
+                    _xs = [x for x in range(_a, _b) if _cty_g[x] >= 0]
+                    return _xs, [float(_cty_g[x]) for x in _xs]
+
+                _lx, _ly = _roof_win(split_x - _HB_ISO_ROOF_WIN_PX - _off, split_x - _off)
+                _rx, _ry = _roof_win(split_x + _off, split_x + _HB_ISO_ROOF_WIN_PX + _off)
+                if len(_lx) >= _HB_ISO_ROOF_MIN_PTS and len(_rx) >= _HB_ISO_ROOF_MIN_PTS:
+                    _lfit = _robust_local_line_fit(_lx, _ly)
+                    if _lfit is not None:
+                        _lslope = float(_lfit.get("a", 0.0))
+                        _lresid = float(_lfit.get("resid_std", 999.0))
+                        _lmx, _lmy = float(np.median(_lx)), float(np.median(_ly))
+                        _rmx, _rmy = float(np.median(_rx)), float(np.median(_ry))
+                        _expected = _lmy + _HB_ISO_ROOF_SLOPE * (_rmx - _lmx)
+                        _excess = _expected - _rmy   # >0 = ยอดฝั่งขวาลอยเหนือเส้น = สูงกว่าจริง
+                        if (abs(_lslope - _HB_ISO_ROOF_SLOPE) <= _HB_ISO_ROOF_SLOPE_TOL
+                                and _lresid <= _HB_ISO_ROOF_MAX_RESID
+                                and _excess <= _HB_ISO_ROOF_MAX_EXCESS_PX):
+                            print(f"[HB_ISO_ROOF] view={view_label} idx={idx} split_x={split_x} "
+                                  f"เส้นยอดฝั่งซ้าย slope={_lslope:.3f} resid_std={_lresid:.2f} "
+                                  f"(= เส้น isometric สะอาด) และยอดฝั่งขวาสูงกว่าเส้นเพียง "
+                                  f"{_excess:.1f}px (เกณฑ์ {_HB_ISO_ROOF_MAX_EXCESS_PX}) "
+                                  f"-> หลังคาต่อเนื่องเป็นระนาบเดียว ไม่มีกล่องโผล่พ้นจริง "
+                                  f"(jump {info['jump_px']:.1f}px มาจาก floor artifact) ไม่ flag")
+                            continue
             others = [r.get("height_px") for r in records
                       if r.get("idx") != idx and r.get("height_px")
                       and r.get("height_source") in ("direct", "cross_view_filled",
@@ -12200,8 +12336,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.17",
-            "benchmarkMode": "v26_17_gap_run_bridging_and_two_container_column_fix",
+            "checkerVersion": "V26.21",
+            "benchmarkMode": "v26_21_unbroken_isometric_roofline_guard",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -12233,8 +12369,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.17",
-            "benchmarkMode": "v26_17_gap_run_bridging_and_two_container_column_fix",
+            "checkerVersion": "V26.21",
+            "benchmarkMode": "v26_21_unbroken_isometric_roofline_guard",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
