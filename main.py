@@ -2,6 +2,66 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.17 (ผู้ใช้แจ้ง 17-Sep-2026 หลังทดสอบ v26.16 พร้อมไฟล์ CB15-04:
+        "กรอบส้มวาดคร่อม และกรอบแดง อาจมีผิดผสมเข้ามา"):
+
+*** ทั้ง 2 อาการมาจาก root cause เดียวกันจุดเดียว - ไม่ใช่ 2 บั๊กแยกกัน ***
+
+ROOT CAUSE (ยืนยันด้วย pixel จริง): _find_inter_container_gaps หา "ช่องว่างระหว่างตู้" ใน
+FRONT view ไม่เจอเลย (คืน []) ทั้งที่ช่องว่างปรากฏชัดในภาพ - เพราะ "ลูกศร/เส้นบอกระยะสีแดง"
+ของเส้นมิติ 7.3 / 8.2 วาดพาดผ่านช่องว่างพอดี
+  ค่านับสินค้าต่อคอลัมน์ FRONT view:
+    x=906..912 : 136,121,121,121,118,117,116          <- ท้ายกองตู้ที่ 1 (ชมพู)
+    x=913..930 : 1,0,1,0,1,3,3,5,5,2,1,1,2,5,1,0,0,0  <- ช่องว่างจริง (ปน pixel ลูกศร)
+    x=931..    : 98,101,102,103,...                   <- หัวกองตู้ที่ 2 (แดง)
+  สีที่วัดได้ในช่วงนั้น: (255,64,64) (254,62,58) (170,33,23) (148,65,65) = ลูกศร/เส้นมิติ
+  ผ่านเกณฑ์ vivid_cargo_mask จึงถูกนับเป็นสินค้า -> บางคอลัมน์ได้ 5px เกินเกณฑ์
+  _INTER_CONTAINER_MAX_CARGO_COL = 3
+  ผล: ช่องว่างเดียวยาว 18px ถูกฉีกเป็น 3 ท่อน (7px | 4px | 4px) ทุกท่อนสั้นกว่า _min_gap=15
+      -> FRONT gaps = [] -> กลไกที่พึ่ง gaps ตายพร้อมกันทั้งวิว 5 ตัว:
+      _suppress_inter_container_empty_space_risks / _clip_risks_at_container_gaps /
+      _is_gap_contaminated / _suppress_container_entry_column_stepdown / _analyse_per_container
+  หลักฐานยืนยันซ้ำจาก log เดิม: "[PER_CONTAINER] แบ่งตู้ไม่สมมาตร (FRONT=0 BACK=2)"
+  (BACK ไม่มีเส้นมิติพาดผ่าน จึงหาเจอปกติ x=[906,929] empty_frac=0.90)
+
+--- FIX A: BRIDGE FRAGMENTED EMPTY RUNS ----------------------------------------
+รวม 2 ท่อนว่างที่อยู่ติดกัน เมื่อคอลัมน์ที่คั่นมีสินค้าน้อยมาก (<=8px) และช่วงคั่นสั้น (<=10px)
+ค่าจริง: คอลัมน์คั่นสูงสุด 5px เทียบกองสินค้าข้างเคียง 98-136px = ห่าง 12-17 เท่า | คั่น 1-2px
+*** ปลอดภัยโดยการออกแบบ: "รวมท่อน" อย่างเดียว ไม่เคยขยายขอบนอกของท่อนใด ***
+  -> วิวที่ช่องว่างต่อเนื่องอยู่แล้วได้ผลเดิมทุก pixel | รถตู้เดียวไม่เข้าเส้นทางนี้เลย
+
+--- FIX B: COLUMN-SPANS-TWO-CONTAINERS GUARD -----------------------------------
+หลังแก้ FIX A พบว่าคอลัมน์ Phase1B idx=4 ของ FRONT = x=[872,950] "ครอบช่องว่าง [913,931]
+ไว้ทั้งช่อง" = คอลัมน์เดียวกินท้ายตู้ที่ 1 + ช่องว่าง + หัวตู้ที่ 2 -> ความสูง 192.0px เป็น
+ค่าผสมของ 2 ตู้กับพื้นที่ว่าง ใช้เทียบอะไรไม่ได้ (กรอบแดง 2 ใบถูกวาดลงบนช่องว่างสีขาวตรงๆ
+วัดพื้นขาวในกรอบได้ 42.1% และ 26.7%)
+ทำไมกฎเดิมไม่จับ: _is_gap_contaminated (v26.15) ใช้เกณฑ์ >=30% แต่เคสนี้ 18/78 = 23%
+และจำกัดเฉพาะ subtype cross_view ส่วน 2 กรอบนี้เป็น pairwise_floor_jump / hidden_behind
+กฎใหม่ไม่ต้องจูนเปอร์เซ็นต์เลย ใช้ข้อเท็จจริงเชิงโครงสร้างล้วนๆ (คอลัมน์ครอบช่องทั้งช่อง
+= พาดข้าม 2 ตู้ = เป็นกองเดียวไม่ได้ทางกายภาพ) ขอบเขต: STEP_DOWN เท่านั้น + รถหลายตู้เท่านั้น
+
+REGRESSION (CB15-04, เทียบ v26.16 ทีละจุด): 8 จุด -> 5 จุด
+  ลบ: silhouette_notch FRONT (820,1214) คร่อมทั้ง 2 ตู้            <- อาการที่ผู้ใช้แจ้ง
+      pairwise_floor_jump FRONT idx4 (กรอบตกในช่องว่างสีขาว)      <- อาการที่ผู้ใช้แจ้ง
+      hidden_behind FRONT idx4 (คอลัมน์เดียวกัน คร่อม 2 ตู้)       <- อาการที่ผู้ใช้แจ้ง
+  คงไว้: hidden_behind FRONT idx1/idx2/idx5, silhouette_notch FRONT (737,813),
+        silhouette_notch BACK (1009,1234)
+  ผลข้างเคียงที่ตรวจพบและยอมรับได้: BACK gap กว้างขึ้นเล็กน้อย (906,929) -> (906,932)
+  จากการเชื่อม 1 คอลัมน์ (empty_frac 0.90 -> 0.88) ไม่กระทบผลลัพธ์ใดของไฟล์นี้
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+- รอบนี้มี PDF ให้ทดสอบเพียงไฟล์เดียว (CB15-04) ยังไม่ได้ regression กับ 11 ไฟล์เดิมของ
+  v26.16 - แม้ FIX A จะปลอดภัยเชิงโครงสร้าง (รวมท่อนอย่างเดียว) แต่ควรรันยืนยันก่อน deploy
+- ยังมี 2 จุดที่ "น่าสงสัยแต่ยังไม่แก้" เพราะหลักฐานยังไม่พอ (ดูรายละเอียดในคำตอบแชท):
+  (1) hidden_behind FRONT idx1 : SNR = 4.0 (jump 20.5px / std 5.19) ซึ่งเท่ากับค่าของ
+      false positive ที่รู้จักอยู่แล้ว (RD01-01 = 4.2) เทียบ idx2=38.2 / idx5=48.3
+      guard SNR ที่มีอยู่ (_HIDDEN_BEHIND_DOWN_MIN_SNR=15.0) ใช้เฉพาะทิศทาง 'down'
+      ถ้าขยายไปทิศทาง 'up' ด้วยจะลบจุดนี้ - แต่จะลบ CC19 FRONT idx0 (SNR~4.2) ไปด้วย
+      ซึ่งผู้ใช้ยังไม่ได้ยืนยันสถานะ -> ยังไม่แตะจนกว่าจะได้ไฟล์ทดสอบครบ
+  (2) silhouette_notch BACK (1009,1234) : กรอบครอบ "ผิวหลังคาลาดเอียง + พื้นขาวเหนือมัน"
+      ทดลองใช้เกณฑ์ shoulder support แล้วแยกไม่ขาด (BACK ซ้าย=0.000 / FRONT (737,813)
+      ที่ดูถูกต้องก็ได้ซ้าย=0.000 เท่ากัน) -> ไม่ implement เพราะจะลบของถูกไปด้วย
+================================================================================
 v26.16 (ผู้ใช้แนบไฟล์จริง 12 ไฟล์ + ภาพชี้จุดด้วยลูกศร/วงกลม 7 ภาพ 17-Sep-2026):
   ลูกศร = "จุดที่วาดเกินมา บริเวณนั้นปลอดภัย" | วงกลม = "กล่องสูงต่ำ ต้องวาดกรอบ แต่ไม่พบ"
 แก้ 4 จุด (root cause อิสระต่อกัน) โดยยึดหลักฐาน pixel จริงจากไฟล์ชุดนี้ทุกข้อ:
@@ -8842,7 +8902,36 @@ _INTER_CONTAINER_MAX_CARGO_COL = 3    # คอลัมน์ที่ถือ�
 _INTER_CONTAINER_MIN_EMPTY_FRAC = 0.5 # ช่องว่างต้องเป็นพื้นหลัง/ไร้โครงสร้างตู้อย่างน้อย 50%
 # (วัดจริง 0.80/0.88 - ตั้งไว้ 0.50 ให้มี margin กว้าง แต่ยังกรองกรณีที่มีพื้นตู้ต่อเนื่องอยู่จริง
 # ซึ่งบ่งชี้ว่าเป็น "พื้นที่ว่างในตู้เดียวกัน" = ความเสี่ยงจริงที่ต้องคง flag ไว้)
-_INTER_CONTAINER_MATCH_TOL_PX = 40    # ระยะเผื่อเวลาจับคู่ notch_x กับขอบช่องว่าง (วัดจริง
+_INTER_CONTAINER_MATCH_TOL_PX = 40
+# v26.17 NEW: BRIDGE FRAGMENTED EMPTY RUNS (ผู้ใช้แจ้ง 17-Sep-2026: "กรอบส้มวาดคร่อม
+# และกรอบแดง อาจมีผิดผสมเข้ามา" พร้อมไฟล์ CB15-04)
+# ROOT CAUSE ที่ยืนยันด้วย pixel จริง (ค่านับสินค้าต่อคอลัมน์ใน FRONT view ของ CB15-04):
+#   x=906..912 : 136,121,121,121,118,117,116   <- ท้ายกองสินค้าตู้ที่ 1 (สีชมพู)
+#   x=913..930 : 1,0,1,0,1,3,3,5,5,2,1,1,2,5,1,0,0,0  <- ช่องว่างระหว่างตู้จริง
+#   x=931..    : 98,101,102,103,...            <- หัวกองสินค้าตู้ที่ 2 (สีแดง)
+# ค่า 1-5 px ในช่วงช่องว่างมาจาก "ลูกศร/เส้นบอกระยะสีแดง" ของเส้นมิติ 7.3/8.2 ที่วาดพาดผ่าน
+# ช่องว่างพอดี (ตัวอย่างสีที่วัดได้: (255,64,64) (254,62,58) (170,33,23) (148,65,65)) ซึ่งผ่าน
+# เกณฑ์ vivid_cargo_mask จึงถูกนับเป็น "สินค้า" - บางคอลัมน์ได้ 5 px ซึ่งเกินเกณฑ์
+# _INTER_CONTAINER_MAX_CARGO_COL = 3
+# ผลที่เกิด: ช่องว่างเดียวยาว 18px ถูกฉีกเป็น 3 ท่อน (913-920 = 7px | 922-926 = 4px |
+# 927-931 = 4px) ทุกท่อนสั้นกว่าเกณฑ์ _min_gap = 15px -> FRONT gaps = [] (ว่างเปล่า)
+# ผลกระทบลูกโซ่: กลไกทุกตัวที่พึ่ง gaps ตายหมดทั้งวิวพร้อมกัน ->
+#   _suppress_inter_container_empty_space_risks / _clip_risks_at_container_gaps /
+#   _is_gap_contaminated / _suppress_container_entry_column_stepdown / _analyse_per_container
+# = ต้นเหตุเดียวของทั้ง "กรอบส้มคร่อม 2 ตู้" และ "กรอบแดงในช่องว่าง" ที่ผู้ใช้แจ้ง
+# (ยืนยันเพิ่ม: log เดิมพิมพ์ "[PER_CONTAINER] แบ่งตู้ไม่สมมาตร (FRONT=0 BACK=2)" = FRONT
+#  หาช่องไม่เจอ ส่วน BACK ซึ่งไม่มีเส้นมิติพาดผ่าน หาเจอปกติ x=[906,929] empty_frac=0.90)
+#
+# FIX: "เชื่อมท่อนที่ถูกฉีก" (bridging) - รวม 2 ท่อนว่างที่อยู่ติดกัน เมื่อคอลัมน์ที่คั่นอยู่
+# ระหว่างท่อนมีสินค้าน้อยมาก (<= _INTER_CONTAINER_BRIDGE_MAX_CARGO_COL) และช่วงที่คั่นสั้น
+# (<= _INTER_CONTAINER_BRIDGE_MAX_WIDTH_PX)
+# *** ปลอดภัยโดยการออกแบบ: เป็นการ "รวมท่อน" เท่านั้น ไม่เคยขยายขอบนอกของท่อนใดเลย ***
+#   -> ไฟล์/วิวที่ช่องว่างต่อเนื่องอยู่แล้ว (เช่น BACK ของไฟล์นี้) ได้ผลเหมือนเดิมทุก pixel
+#   -> ไฟล์ที่ไม่มีช่องว่างเลย (รถตู้เดียว) ไม่เข้าเส้นทางนี้ตั้งแต่ต้น (n_containers < 2)
+# เกณฑ์ที่ใช้ vs ค่าจริงที่วัดได้: สินค้าในคอลัมน์คั่น สูงสุด 5 px (เกณฑ์ 8) เทียบกับกอง
+# สินค้าจริงข้างเคียง 98-136 px = ห่างกัน 12-17 เท่า | ความกว้างที่คั่น 1-2 px (เกณฑ์ 10)
+_INTER_CONTAINER_BRIDGE_MAX_CARGO_COL = 8
+_INTER_CONTAINER_BRIDGE_MAX_WIDTH_PX = 10    # ระยะเผื่อเวลาจับคู่ notch_x กับขอบช่องว่าง (วัดจริง
 # notch_x อยู่ห่างจากขอบช่องว่างเพียง 1-3px - ตั้ง 40px ให้เผื่อไฟล์อื่นที่อาจคลาดเคลื่อนกว่านี้)
 
 
@@ -8901,6 +8990,34 @@ def _find_inter_container_gaps(view_result, n_containers):
 
     col_cargo = cargo_mask.sum(axis=0)
     empty = col_cargo[sx:ex] <= _INTER_CONTAINER_MAX_CARGO_COL
+
+    # v26.17: เชื่อมท่อนว่างที่ถูกเส้นมิติ/ลูกศรฉีกออกจากกัน (ดู docstring ที่
+    # _INTER_CONTAINER_BRIDGE_MAX_CARGO_COL สำหรับ root cause + หลักฐาน pixel จริง)
+    _negligible = col_cargo[sx:ex] <= _INTER_CONTAINER_BRIDGE_MAX_CARGO_COL
+    _n_bridged = 0
+    _i = 0
+    _len = len(empty)
+    while _i < _len:
+        if not empty[_i]:
+            _i += 1
+            continue
+        _j = _i
+        while _j < _len and empty[_j]:
+            _j += 1
+        # _j = ตำแหน่งแรกหลังท่อนว่างนี้ -> มองไปข้างหน้าว่ามีท่อนว่างถัดไปใกล้ๆ หรือไม่
+        _k = _j
+        while (_k < _len and (_k - _j) < _INTER_CONTAINER_BRIDGE_MAX_WIDTH_PX
+               and _negligible[_k] and not empty[_k]):
+            _k += 1
+        if _k > _j and _k < _len and empty[_k]:
+            empty[_j:_k] = True          # เชื่อม: คอลัมน์คั่นมีสินค้าน้อยมากทุกคอลัมน์
+            _n_bridged += (_k - _j)
+            continue                      # เดินต่อจากตำแหน่งเดิม (ท่อนถูกรวมแล้ว)
+        _i = _j + 1
+    if _n_bridged:
+        print(f"[INTER_CONTAINER] เชื่อมท่อนว่างที่ถูกเส้นมิติ/ลูกศรฉีก {_n_bridged} คอลัมน์ "
+              f"(สินค้าในคอลัมน์คั่น <= {_INTER_CONTAINER_BRIDGE_MAX_CARGO_COL}px, "
+              f"ช่วงคั่น <= {_INTER_CONTAINER_BRIDGE_MAX_WIDTH_PX}px) - ดู FIX v26.17")
 
     def _runs(flags):
         out, st = [], None
@@ -9758,6 +9875,75 @@ _ENTRY_COLUMN_MAX_DROP_RATIO = 0.30
 _ENTRY_COLUMN_SUBTYPES = ("cross_view", "hidden_behind")
 
 
+# ============================================================================
+# v26.17 NEW: COLUMN-SPANS-TWO-CONTAINERS GUARD (คอลัมน์เดียวคร่อม 2 ตู้)
+# ============================================================================
+# ที่มา: ผู้ใช้แจ้ง 17-Sep-2026 "กรอบแดง อาจมีผิดผสมเข้ามา" (ไฟล์ CB15-04)
+# หลักฐานที่วัดได้หลังแก้ FIX A (FRONT view หาช่องว่างเจอแล้ว):
+#   ช่องว่างระหว่างตู้ FRONT = x=[913,931]
+#   คอลัมน์ Phase1B idx=4 = x=[872,950]  ->  872 < 913 และ 950 > 931
+#   = คอลัมน์เดียวนี้ "กินท้ายตู้ที่ 1 + ช่องว่าง + หัวตู้ที่ 2" ทั้งหมดรวมกัน
+#   ความสูงที่ได้ (192.0px, src=cross_view_corrected) จึงเป็นค่าผสมของกองสินค้า 2 ตู้กับ
+#   พื้นที่ว่าง = ไม่ใช่ความสูงของกองใดกองหนึ่งจริง
+#   ผลที่เกิด: กรอบแดง 2 ใบ (pairwise_floor_jump idx4 และ hidden_behind idx4) ถูกวาดลงบน
+#   "ช่องว่างสีขาวระหว่างตู้" ตรงๆ - วัดพื้นขาวในกรอบได้ 42.1% และ 26.7%
+#
+# ทำไมต้องเป็นกฎใหม่ ไม่ใช้ _is_gap_contaminated เดิม (v26.15):
+#   กฎเดิมใช้ "สัดส่วนช่องว่างในคอลัมน์ >= 30%" - เคสนี้วัดได้ 18/78 = 23% จึงลอดผ่าน
+#   และกฎเดิมจำกัดเฉพาะ subtype cross_view เท่านั้น แต่ 2 กรอบนี้เป็น pairwise_floor_jump
+#   กับ hidden_behind
+# กฎใหม่ไม่ต้องจูนเปอร์เซ็นต์ใดๆ เลย ใช้ข้อเท็จจริงเชิงโครงสร้างล้วนๆ: ถ้าคอลัมน์ "ครอบ
+# ช่องว่างระหว่างตู้ไว้ทั้งช่อง" แปลว่ามันพาดข้าม 2 ตู้ ซึ่งเป็นไปไม่ได้ทางกายภาพที่จะเป็น
+# กองสินค้ากองเดียว -> ค่าความสูงของมันใช้เทียบอะไรไม่ได้เลยทุก subtype
+# ขอบเขต: STEP_DOWN_RISK เท่านั้น + รถหลายตู้เท่านั้น (รถตู้เดียวไม่มีช่องว่าง = ไม่ถูกแตะ)
+#         ไม่แตะกรอบส้มแม้แต่จุดเดียว (กรอบส้มมีเส้นทางของตัวเองอยู่แล้ว)
+
+
+def _suppress_column_spanning_two_containers(risks, front, back, n_containers):
+    """v26.17: ระงับกรอบแดงที่คอลัมน์อ้างอิงคร่อมช่องว่างระหว่างตู้ทั้งช่อง (ดู docstring ด้านบน)"""
+    if n_containers < 2 or not risks:
+        return risks
+    gaps_by_view = {}
+    for label, v in (("FRONT", front), ("BACK", back)):
+        if v is None:
+            continue
+        g = v.get("_inter_container_gaps")
+        if g is None:
+            try:
+                g = _find_inter_container_gaps(v, n_containers)
+            except Exception:
+                g = []
+        gaps_by_view[label] = (g or [], v)
+    out = []
+    for r in risks:
+        if r.get("risk_type") != "STEP_DOWN_RISK":
+            out.append(r)
+            continue
+        label = r.get("mark_view") or r.get("view")
+        gaps, v = gaps_by_view.get(label, ([], None))
+        idx = r.get("mark_stack_idx")
+        if not gaps or v is None or idx is None:
+            out.append(r)
+            continue
+        try:
+            cx0, cx1 = v["stack_heights"][idx]["x_range"]
+        except Exception:
+            out.append(r)
+            continue
+        hit = None
+        for g0, g1 in gaps:
+            if cx0 < g0 and cx1 > g1:
+                hit = (g0, g1)
+                break
+        if hit is None:
+            out.append(r)
+            continue
+        print(f"[SPAN2CONT] ระงับ {r.get('subtype')} view={label} idx={idx} "
+              f"คอลัมน์ x=[{cx0},{cx1}] ครอบช่องว่างระหว่างตู้ {hit} ไว้ทั้งช่อง "
+              f"-> คอลัมน์พาดข้าม 2 ตู้ ความสูงที่วัดได้เป็นค่าผสม ใช้เทียบไม่ได้")
+    return out
+
+
 def _suppress_container_entry_column_stepdown(risks, front, back, n_containers):
     """v26.16: ระงับกรอบแดงที่คอลัมน์แรกของตู้ใบถัดไป (ดู docstring ด้านบน)"""
     if n_containers < 2 or not risks:
@@ -9936,6 +10122,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         risks = _clip_risks_at_container_gaps(risks, front, back, n_containers)
         # v26.16: ระงับกรอบแดงที่คอลัมน์แรกของตู้ใบถัดไป (ดู _suppress_container_entry_column_stepdown)
         risks = _suppress_container_entry_column_stepdown(risks, front, back, n_containers)
+        # v26.17: ระงับกรอบแดงที่คอลัมน์อ้างอิงคร่อม 2 ตู้ (ดู _suppress_column_spanning_two_containers)
+        risks = _suppress_column_spanning_two_containers(risks, front, back, n_containers)
 
     return {
         "front": front, "back": back,
@@ -10113,6 +10301,8 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
             risks = _clip_risks_at_container_gaps(risks, view, None, n_containers)
             # v26.16: ดู _suppress_container_entry_column_stepdown
             risks = _suppress_container_entry_column_stepdown(risks, view, None, n_containers)
+            # v26.17: ดู _suppress_column_spanning_two_containers
+            risks = _suppress_column_spanning_two_containers(risks, view, None, n_containers)
 
     print(f"[SINGLE_VIEW] n_stacks={view.get('n_stacks')} risks={len(risks)}")
     return {
@@ -12010,8 +12200,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.16",
-            "benchmarkMode": "v26_16_box_support_entry_column_tailzone_void_fix",
+            "checkerVersion": "V26.17",
+            "benchmarkMode": "v26_17_gap_run_bridging_and_two_container_column_fix",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -12043,8 +12233,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.16",
-            "benchmarkMode": "v26_16_box_support_entry_column_tailzone_void_fix",
+            "checkerVersion": "V26.17",
+            "benchmarkMode": "v26_17_gap_run_bridging_and_two_container_column_fix",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
