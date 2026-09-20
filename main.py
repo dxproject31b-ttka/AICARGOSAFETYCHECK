@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.22 = v26.21 + colorizer v29.9/v29.10/v29.11 (ตรรกะวิเคราะห์เดิมไม่แตะ)
 v26.21 (ฐาน = v26.17 ตามที่ผู้ใช้สั่ง "v26.18 ลบทิ้ง" - v26.18/19/20 ถูกยกเลิกทั้งหมด)
 ผู้ใช้ชี้ด้วยลูกศร 2 จุดบนภาพผลตรวจ CB15-04 (18-Sep-2026): "วาดกรอบแดงไม่ถูก ตรงนั้นปลอดภัย"
   ลูกศรที่ 1 -> FRONT idx1 (กรอบบนกองเขียว)
@@ -374,13 +375,13 @@ v26.08 (ผู้ใช้สั่ง 15-Sep-2026): "ไฟล์ที่น�
 ต้องการแท้จริงคือ ต้องการให้โปรแกรมหลัก เมื่อพบไฟล์ประเภท wireframe ให้ทำการลงสีและนำเข้า
 กระบวนการวิเคราะห์ต่อไป ช่วยผนวก code การลงสี เชื่อมต่อเข้าไปในโปรแกรมหลักด้วย"
 
-สิ่งที่ทำ: ผนวก MaxLoad Pro Manifest Colorizer v29.8 (ที่ผู้ใช้พัฒนาและทดสอบบน Colab จน
+สิ่งที่ทำ: ผนวก MaxLoad Pro Manifest Colorizer v29.11 (ที่ผู้ใช้พัฒนาและทดสอบบน Colab จน
 ใช้งานได้จริงแล้ว) เข้ามาเป็น "ด่านหน้าสุด" ของ pipeline โดยไม่แตะตรรกะการวิเคราะห์เดิม
 เลยแม้แต่บรรทัดเดียว:
     PDF เข้า -> ตรวจว่าเป็น wireframe ไหม -> ถ้าใช่ ลงสี -> เข้า pipeline เดิมทั้งหมด
 
 โครงสร้างที่เพิ่มเข้ามา (ดูรายละเอียดเต็มที่ COLORIZER SECTION):
-  1. โมดูลลงสีทั้งชุด (IsoScene + seed/grow + demote/promote/repair ทุกตัว v29.1-v29.8)
+  1. โมดูลลงสีทั้งชุด (IsoScene + seed/grow + demote/promote/repair ทุกตัว v29.1-v29.11)
      คงไว้ทุกบรรทัด ตัดเฉพาะส่วนที่ผูกกับ Colab: google.colab.files.upload() /
      matplotlib / run() / pip-install ตอน import / process_pdf ที่อ่านเขียนไฟล์บนดิสก์
   2. _detect_wireframe_pdf()        - ตรวจจับไฟล์ wireframe อัตโนมัติ
@@ -10477,7 +10478,7 @@ def risk_abs_box(risk, result):
 # _p1b_is_structural_container_color (สีโครงสร้างตู้) - ไฟล์ manifest แบบ wireframe เป็น
 # ภาพเส้นขาว-ดำล้วน ไม่มีสีใดๆ เลย ทำให้ทุกกลไกตรวจไม่พบสินค้าแม้แต่ชิ้นเดียว
 #
-# วิธีแก้: ผนวกโมดูลลงสี (MaxLoad Pro Manifest Colorizer v29.8 ซึ่งผู้ใช้พัฒนาและทดสอบ
+# วิธีแก้: ผนวกโมดูลลงสี (MaxLoad Pro Manifest Colorizer v29.11 ซึ่งผู้ใช้พัฒนาและทดสอบ
 # บน Colab จนใช้งานได้จริงแล้ว) เข้ามาเป็นขั้นตอน "ก่อน" กระบวนการวิเคราะห์เดิมทั้งหมด
 #   PDF เข้า -> ตรวจว่าเป็น wireframe ไหม -> ถ้าใช่ ลงสี -> ส่ง PDF ที่ลงสีแล้วเข้า
 #   pipeline เดิมทุกประการ (ไม่แตะตรรกะการวิเคราะห์เลยแม้แต่บรรทัดเดียว)
@@ -10485,7 +10486,7 @@ def risk_abs_box(risk, result):
 # สิ่งที่ตัดออกจากต้นฉบับ Colab (เฉพาะส่วนที่ผูกกับ Colab เท่านั้น):
 #   google.colab.files.upload() / matplotlib การแสดงผล / run() / pip-install ตอน import
 #   / process_pdf ที่อ่าน-เขียนไฟล์บนดิสก์ (เปลี่ยนเป็นทำงานในหน่วยความจำล้วน)
-# ตรรกะการลงสีทั้งหมด (IsoScene, seed/grow, demote/promote/repair ทุกตัว, v29.1-v29.8)
+# ตรรกะการลงสีทั้งหมด (IsoScene, seed/grow, demote/promote/repair ทุกตัว, v29.1-v29.11)
 # คงไว้ทุกบรรทัด ไม่แก้ไขแม้แต่ค่าเดียว
 #
 # ยืนยันความเข้ากันได้ของสี (วัดด้วยตัวจำแนกของโปรแกรมหลักเอง):
@@ -10503,7 +10504,21 @@ def risk_abs_box(risk, result):
 # (250 ชื่อในโปรแกรมหลัก vs 110 ชื่อในโมดูลลงสี - intersection = 0)
 # ============================================================================
 
-COLORIZER_VERSION = "v29.8"
+COLORIZER_VERSION = "v29.11"
+
+# --- v29.9: large SKU glyphs -------------------------------------------
+BIG_GLYPH_W, BIG_GLYPH_H = 260, 130
+BIG_GLYPH_AREA_MIN = 200
+BIG_GLYPH_FILL_MIN = 0.12
+BIG_GLYPH_ASP_LO, BIG_GLYPH_ASP_HI = 0.20, 6.0
+
+
+def _is_big_glyph(tw, th, ak):
+    if ak < BIG_GLYPH_AREA_MIN or tw > BIG_GLYPH_W or th > BIG_GLYPH_H:
+        return False
+    asp = float(tw) / (th + 1e-5)
+    if not (BIG_GLYPH_ASP_LO <= asp <= BIG_GLYPH_ASP_HI):
+        return False
 COLOR_BOX_CYAN = np.array([255, 255, 0], dtype=np.float32)
 COLOR_CREAM = np.array([155, 242, 245], dtype=np.uint8)
 SHADE_TOP, SHADE_RIGHT, SHADE_LEFT = 1.10, 1.00, 0.85
@@ -10547,7 +10562,7 @@ class IsoScene:
             asp = float(tw) / (th + 1e-5)
             is_text = ((tw <= 160 and th <= 35 and ak < 950) or (th < 18 and tw <= 170)
                        or (tw <= 200 and th <= 55 and ak < 3500 and asp > 0.25))
-            if is_text and not (th > 55 or tw > 200 or ak >= 3500):
+            if (is_text and not (th > 55 or tw > 200 or ak >= 3500)) or _is_big_glyph(tw, th, ak):
                 txt[lab == k] = 255
             else:
                 cad[lab == k] = 255
@@ -10577,7 +10592,8 @@ class IsoScene:
         self.horiz_px = np.zeros(self.n, np.int64)
         for k in range(1, n):
             tw, th, ak = st[k, 2], st[k, 3], st[k, 4]
-            if not (20 < ak < 4000 and tw <= 220 and th <= 60):
+            if not ((20 < ak < 4000 and tw <= 220 and th <= 60)
+                    or _is_big_glyph(tw, th, ak)):
                 continue
             pts = cv2.findNonZero((lab == k).astype(np.uint8))
             if pts is None or len(pts) < 5:
@@ -11514,7 +11530,8 @@ def _cad_mask(img_bgr):
         asp = float(tw) / (th + 1e-5)
         is_text = ((tw <= 160 and th <= 35 and ak < 950) or (th < 18 and tw <= 170)
                    or (tw <= 200 and th <= 55 and ak < 3500 and asp > 0.25))
-        if not (is_text and not (th > 55 or tw > 200 or ak >= 3500)):
+        if not ((is_text and not (th > 55 or tw > 200 or ak >= 3500))
+                or _is_big_glyph(tw, th, ak)):
             cad[lab == k] = 255
     return cad
 
@@ -11756,7 +11773,7 @@ def colorize_back_view(i):  return colorize_v297(i, "back")
 # ===========================================================================
 ORPHAN_SUP_MIN = PROMO_SUP_MIN       # ใช้เกณฑ์เดียวกับตอนรับเข้า (0.50)
 ORPHAN_EXT_MIN = RIM_EXTERIOR_MIN    # ต้องเปิดสู่พื้นหลัง (0.55)
-_SUPPORT_ADMITTED = ("promote", "repair_face", "repair_enclosed")
+_SUPPORT_ADMITTED = ("promote", "repair_face", "repair_enclosed", "repair_buried")
 
 
 def demote_orphans(S, box, report):
@@ -11820,6 +11837,257 @@ def colorize_view(img_bgr, view="front", trace=False):
 
 def colorize_front_view(i): return colorize_v298(i, "front")
 def colorize_back_view(i):  return colorize_v298(i, "back")
+
+
+
+
+# ===========================================================================
+#  v29.10 - BURIED TOP FACE  (จุดที่วงไว้บน PC02-01 front, r4 STEMA-SG)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    หน้าบนกล่อง STEMA-SG ที่อยู่ชิดมุมผนังตู้ (r4, 8,383 px) ยังเป็นครีม
+#    ทั้งที่นั่งเต็มหน้าอยู่บนกล่องใบล่าง
+#
+#  สาเหตุ (วัดค่าจริงหลังแก้ v29.9 แล้ว)
+#    ext = 0.03   จมอยู่ในภาพ มองไม่เห็นพื้นหลังเลย
+#    sup = 0.97   นั่งบน cargo เต็มหน้า
+#    cbox = 0.496 <-- ตกทั้ง PROMO_CBOX_MIN (0.54) และ ENC_CBOX_MIN (0.55)
+#    เพราะกล่องใบนี้อยู่ชิดมุมตู้ ขอบเกือบครึ่งหนึ่งไปติดผนัง r1/r2 ซึ่งเป็น
+#    ครีมอย่างถูกต้อง  cbox จึงถูกหารตกต่ำกว่าเกณฑ์แบบเฉียดฉิว
+#
+#  ตัวแยกที่ใช้แทน cbox
+#    ผนังตู้ / พื้นตู้ / คานบน ต้องแตะเส้นขอบนอกของภาพเสมอ -> ext สูงทุกชิ้น
+#    ระนาบที่ ext ~ 0 พร้อมกับ sup ~ 1 จึงเป็นหน้ากล่องได้อย่างเดียว
+#
+#  ความเสี่ยงต่อของเดิม - สแกนครบทั้ง 7 ไฟล์
+#    region ครีมที่เข้าเงื่อนไข ext <= 0.10 และ sup >= 0.90 มีเพียงชิ้นเดียว
+#    คือ r4 ของ PC02 อีก 6 ไฟล์ไม่มีเลยแม้แต่ชิ้นเดียว
+# ===========================================================================
+BURIED_EXT_MAX  = 0.10   # ต้องไม่เห็นพื้นหลังเลย
+BURIED_SUP_MIN  = 0.90   # ต้องนั่งบน cargo เต็มหน้า
+BURIED_CBOX_MIN = 0.35   # ยังต้องมี cargo ล้อมอยู่พอสมควร
+BURIED_MIN_AREA = 300
+BURIED_REL_MAX  = 1.00
+
+
+def repair_buried_faces(S, box, report):
+    """ลงสีหน้ากล่องที่จมอยู่ในกองและชิดผนังตู้ จน cbox ถูกหารตก."""
+    med = S.median_face_area()
+    pool = [r for r in range(1, S.n)
+            if r not in box and S.area(r) >= BURIED_MIN_AREA
+            and S.text_px[r] == 0 and S.tilt_px[r] == 0
+            and S.area(r) / med < BURIED_REL_MAX
+            and S.exterior_fraction(r) <= BURIED_EXT_MAX]
+    changed, rounds = True, 0
+    while changed and rounds < 6:
+        changed, rounds = False, rounds + 1
+        for r in list(pool):
+            if r in box:
+                continue
+            sup = S.support_fraction(r, box)
+            if sup < BURIED_SUP_MIN:
+                continue
+            cbox, _ = _ring(S, r, box)
+            if cbox < BURIED_CBOX_MIN:
+                continue
+            box.add(r)
+            changed = True
+            report.append(dict(action="repair_buried", region=int(r),
+                               area=int(S.area(r)), rel=round(S.area(r) / med, 3),
+                               sup=round(sup, 2), cbox=round(cbox, 2),
+                               ext=round(S.exterior_fraction(r), 2),
+                               reason="buried face against truck wall - cbox diluted",
+                               defect_class="MISS"))
+    return box
+
+
+def colorize_v2910(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    S = IsoScene(img_bgr)
+    report = []
+    if seal:
+        report.append(seal)
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    box = repair_buried_faces(S, box, report)          # <-- v29.10
+    box = demote_ground_band(S, box, report)
+    box = demote_end_deck_wedge(S, box, report)
+    v298box = set(box)
+    box = demote_orphans(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v298box=sorted(v298box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v2910(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v2910(i, "front")
+def colorize_back_view(i):  return colorize_v2910(i, "back")
+
+
+
+
+# ===========================================================================
+#  v29.11 - UPPER WALL BAND  (จุดที่วงน้ำเงินไว้บน PC01-02 / PC02-01 front)
+# ---------------------------------------------------------------------------
+#  อาการ
+#    แผงผนังตู้ด้านบน ช่วงที่โผล่พ้นยอดกองสินค้า ถูกลงสีฟ้าเป็นบางช่วง
+#      PC01-02 front : r6 (21,260 px)  r9 (6,561 px)
+#      PC02-01 front : r16 (14,328)  r26 (10,377)  r39 (7,879)
+#
+#  หลักฐานว่าเป็นผนัง ไม่ใช่ cargo  -  ตัววาดเองขัดแย้งกันเอง
+#    แผงเหล่านี้ต่อกันเป็นสายตามแนวนอน และปลายสายทั้งสองข้างเป็นครีมอยู่แล้ว
+#      PC01-02  r9 -L-> r11 ครีม        r6 -R-> r4 ครีม
+#      PC02-01  r39 -L-> r58 ครีม       r16 -R-> r5 ครีม   (r26 อยู่กลางสาย)
+#    ช่วงติดกันบนแผงผนังเดียวกันเป็นได้อย่างเดียวเท่านั้น จึงเป็น artefact ชัด
+#
+#  ทำไม v29.10 ปล่อยผ่านทุกด่าน (ไล่เช็กมาแล้วทีละด่าน)
+#    demote_ground_band  _ground_band_pool บังคับ _probe(r, False) >= 0.60
+#                        คือตรวจเฉพาะ "ขอบล่างเปิดสู่พื้นหลัง" ซึ่งเป็นลักษณะ
+#                        ของแถบพื้นตู้  แต่แผงผนังบนเปิดสู่พื้นหลัง "ทางด้านบน"
+#                        วัดได้ dn = 0.00-0.03 ทั้ง 5 ชิ้น -> ไม่เคยเข้า pool เลย
+#    demote_silhouette_rim  ต้อง area < 0.35*med  แต่ทั้ง 5 ชิ้นได้ rel 0.30-0.96
+#    demote_top_rail        ต้อง sup >= 0.99 และ fill >= 0.86  แต่ fill = 0.47-0.81
+#    repair_marked_planes / demote_end_deck_wedge  ต้อง text_px >= 300 แต่ txt = 0
+#
+#  ตัวแยกที่ใช้  -  ขอบบนเปิดสู่พื้นหลังเต็มความกว้าง
+#    ผนังตู้ช่วงที่พ้นยอดกองจะไม่มีอะไรอยู่เหนือมันเลย -> _probe(r, True) = 1.00
+#    ส่วนหน้ากล่องแนวตั้งที่อยู่ยอดกองจริง ๆ จะมีป้าย SKU พิมพ์อยู่เสมอ
+#    (หลัง v29.9 แก้ _split_ink แล้ว ป้ายตัวใหญ่ถูกนับเป็น text ครบ)
+#    จึงบังคับ txt == 0 และ tilt == 0 ควบคู่กันไป
+#
+#  ความเสี่ยงต่อของเดิม  -  สแกน cyan region ทุกใบในทั้ง 2 ไฟล์
+#    region ที่เป็น LEFT/RIGHT + txt==0 + tilt==0 มีทั้งหมด 15 ชิ้น
+#    ในจำนวนนี้มี up >= 0.95 เพียง 5 ชิ้น = ชิ้นที่วงไว้พอดี ไม่ขาดไม่เกิน
+#    อีก 10 ชิ้นได้ up = 0.00-0.44 จึงไม่ถูกแตะ
+#
+#  กันพลาดอีกชั้น  -  ต้องเชื่อมถึงครีม
+#    ถอดสีเฉพาะเมื่อสายของแผงที่เข้าเกณฑ์ ไปสิ้นสุดที่ region ครีมอย่างน้อย
+#    1 ข้าง  ถ้าสายนั้นถูกล้อมด้วย cargo ทั้งหมด แปลว่าไม่ใช่ผนัง จะไม่แตะ
+# ===========================================================================
+WALL_UP_MIN   = 0.95    # ขอบบนต้องเปิดสู่พื้นหลังเต็มความกว้าง
+WALL_MIN_AREA = 800
+WALL_REL_MAX  = 1.10    # ไม่ใหญ่เกินหน้ากล่องมาตรฐาน
+WALL_REACH    = 30      # ระยะมองหาเพื่อนบ้านแนวนอน
+
+
+def _wall_band_pool(S, box):
+    """แผงแนวตั้งบนยอด silhouette ที่ไม่มีป้าย SKU."""
+    med = S.median_face_area()
+    pool = []
+    for r in box:
+        if S.area(r) < WALL_MIN_AREA:
+            continue
+        if S.text_px[r] != 0 or S.tilt_px[r] != 0:
+            continue
+        if S.face_type(r) not in (FACE_LEFT, FACE_RIGHT):
+            continue
+        if S.area(r) / med > WALL_REL_MAX:
+            continue
+        if S._probe(r, True) < WALL_UP_MIN:
+            continue
+        pool.append(r)
+    return pool
+
+
+def demote_wall_band(S, box, report):
+    """ถอดสีแผงผนังตู้ด้านบนที่ถูกระบายฟ้า ทั้งที่ช่วงข้างเคียงเป็นครีม."""
+    pool = _wall_band_pool(S, box)
+    if not pool:
+        return box
+    poolset = set(pool)
+    frozen = set(box)
+    med = S.median_face_area()
+
+    # ต่อแผงที่เข้าเกณฑ์เป็นสาย แล้วดูว่าสายนั้นจบที่ครีมหรือไม่
+    link = {}
+    for r in pool:
+        L, R = S.horizontal_neighbours(r, reach=WALL_REACH)
+        link[r] = (L, R)
+
+    seen, chains = set(), []
+    for r in pool:
+        if r in seen:
+            continue
+        stack, comp = [r], []
+        seen.add(r)
+        while stack:
+            c = stack.pop()
+            comp.append(c)
+            for side in link[c]:
+                for k in side:
+                    if k in poolset and k not in seen:
+                        seen.add(k)
+                        stack.append(k)
+        chains.append(comp)
+
+    for comp in chains:
+        touches_cream = False
+        for c in comp:
+            for side in link[c]:
+                for k, v in side.items():
+                    if v >= 4 and k not in frozen and k not in poolset:
+                        touches_cream = True
+        if not touches_cream:
+            continue                       # สายนี้ถูกล้อมด้วย cargo ทั้งหมด
+        for c in comp:
+            box.discard(c)
+            report.append(dict(action="demote_wall", region=int(c),
+                               area=int(S.area(c)), rel=round(S.area(c) / med, 3),
+                               up=round(S._probe(c, True), 2),
+                               chain=len(comp),
+                               reason="upper wall panel - chain ends on cream wall",
+                               defect_class="OVERPAINT"))
+    return box
+
+
+def colorize_v2911(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    S = IsoScene(img_bgr)
+    report = []
+    if seal:
+        report.append(seal)
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    box = repair_buried_faces(S, box, report)
+    box = demote_ground_band(S, box, report)
+    box = demote_end_deck_wedge(S, box, report)
+    box = demote_wall_band(S, box, report)          # <-- v29.11
+    v2910box = set(box)
+    box = demote_orphans(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v2910box=sorted(v2910box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v2911(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v2911(i, "front")
+def colorize_back_view(i):  return colorize_v2911(i, "back")
 
 
 # ============================================================================
@@ -12032,7 +12300,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
             return None, info
         xref, img = hit
         front_shape = img.shape
-        out, tr = colorize_v298(img, "front", trace=True)
+        out, tr = colorize_v2911(img, "front", trace=True)
         _, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         front_bytes = enc.tobytes()
         doc[0].replace_image(xref, stream=front_bytes)
@@ -12049,7 +12317,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
                 raw = doc.extract_image(imgs[1]["xref"])
                 img2 = cv2.cvtColor(
                     np.array(Image.open(io.BytesIO(raw["image"]))), cv2.COLOR_RGB2BGR)
-                out2, tr2 = colorize_v298(img2, "back", trace=True)
+                out2, tr2 = colorize_v2911(img2, "back", trace=True)
                 _, enc2 = cv2.imencode(".jpg", out2, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                 page.replace_image(imgs[1]["xref"], stream=enc2.tobytes())
                 info["views"].append({"view": "back", "regions": tr2["regions"],
