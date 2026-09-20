@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.23 = v26.22 + แก้ _is_big_glyph ขาดบรรทัด return (v29.9 ไม่เคยทำงาน)
 v26.22 = v26.21 + colorizer v29.9/v29.10/v29.11 (ตรรกะวิเคราะห์เดิมไม่แตะ)
 v26.21 (ฐาน = v26.17 ตามที่ผู้ใช้สั่ง "v26.18 ลบทิ้ง" - v26.18/19/20 ถูกยกเลิกทั้งหมด)
 ผู้ใช้ชี้ด้วยลูกศร 2 จุดบนภาพผลตรวจ CB15-04 (18-Sep-2026): "วาดกรอบแดงไม่ถูก ตรงนั้นปลอดภัย"
@@ -10519,6 +10520,9 @@ def _is_big_glyph(tw, th, ak):
     asp = float(tw) / (th + 1e-5)
     if not (BIG_GLYPH_ASP_LO <= asp <= BIG_GLYPH_ASP_HI):
         return False
+    return ak / float(tw * th) >= BIG_GLYPH_FILL_MIN
+
+
 COLOR_BOX_CYAN = np.array([255, 255, 0], dtype=np.float32)
 COLOR_CREAM = np.array([155, 242, 245], dtype=np.uint8)
 SHADE_TOP, SHADE_RIGHT, SHADE_LEFT = 1.10, 1.00, 0.85
