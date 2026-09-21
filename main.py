@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.25 = v26.24 + กลไกที่ 7 BURIED FRONT ROW (กล่องแถวหน้าเตี้ยจมใต้เส้นเงา)
 v26.24 = v26.23 + แก้ HTTP 500 จากกรอบกลับหัว (negative stack height) - ไฟล์ SC23-02
 v26.23 = v26.22 + แก้ _is_big_glyph ขาดบรรทัด return (v29.9 ไม่เคยทำงาน)
 v26.22 = v26.21 + colorizer v29.9/v29.10/v29.11 (ตรรกะวิเคราะห์เดิมไม่แตะ)
@@ -10154,6 +10155,199 @@ def _suppress_container_entry_column_stepdown(risks, front, back, n_containers):
     return out
 
 
+
+# ============================================================================
+#  v26.25 NEW - BURIED FRONT ROW  (กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา)
+# ----------------------------------------------------------------------------
+#  ที่มา (ผู้ใช้แจ้ง 21-Sep-2026 จาก PA01 ครึ่งซ้าย front view): กล่อง SNF1A-T8 เตี้ยกว่า
+#  กองข้างหลังอย่างเห็นได้ชัดด้วยตาเปล่า แต่ไม่มีกรอบใดถูกวาดเลย
+#
+#  ROOT CAUSE เชิงโครงสร้าง (ยืนยันด้วยข้อมูล pixel จริง)
+#    กลไกตรวจความเสี่ยงเดิมทั้ง 6 ตัว (pairwise / hidden_behind / silhouette_notch /
+#    tail_stepdown / crossview / tailzone) อ่าน "ความสูง" จาก cargo_top_y เหมือนกันหมด
+#    ซึ่งเป็น "เส้นเงาบนสุด" (silhouette) - คือต่อ 1 คอลัมน์ x ได้ความสูงเพียง 1 ค่า
+#    สมมติฐานที่ซ่อนอยู่คือ "แต่ละตำแหน่ง x มีกองเดียว"
+#    แต่ภาพ isometric มีความลึก - ที่ตำแหน่ง x เดียวกันมีกล่องซ้อนกัน 2 แถว (หน้า/หลัง)
+#    เมื่อแถวหน้าเตี้ยกว่าแถวหลัง มันจะจมอยู่ใต้เส้นเงาของแถวหลัง "ทั้งใบ" จึงหายไปจาก
+#    ข้อมูลที่ระบบใช้ตัดสินโดยสิ้นเชิง
+#    วัดจริงจาก PA01 FRONT x=255-720 (ไล่ทีละ 8px): เส้นยอดไต่ขึ้นเรียบสนิท
+#    500->641 ไม่มีรอยกระโดดเลยแม้แต่จุดเดียว (เปลี่ยนสูงสุดในหน้าต่าง 6px = ~8px)
+#    ขณะที่ hidden_behind ต้องการ >= 20px จึงตรวจได้ 0 คอลัมน์
+#
+#  ทำไม hidden_behind (v25.23) ไม่ครอบคลุม
+#    มันจับทิศ "กลับกัน" คือแถวหลัง *สูงกว่า* จนโผล่พ้นแถวหน้า (เกิดรอยกระโดดในเส้นเงา)
+#    ส่วนกรณีแถวหน้า *เตี้ยกว่า* จนจมหาย ไม่เกิดรอยกระโดดใดๆ ในเส้นเงาเลย
+#
+#  ตัวแยกที่ใช้ - "ความลึกของหลังคา" (roof depth)
+#    _p1b_classify_view แยกหน้ากล่องทุกใบเป็น cell พร้อมประเภท roof/front/side อยู่แล้ว
+#    แต่ไม่เคยถูกนำมาเทียบกับเส้นเงาเลย  นิยาม:
+#         depth = roof_top_y - cargo_top_y(cx ของ roof นั้น)
+#    - หลังคาของกองที่ "เป็นเจ้าของเส้นเงา" ณ ตำแหน่งนั้น -> depth ~ 0 เสมอ
+#      (รวมถึงกองเตี้ยที่วางเรียงข้างกันตามปกติแบบ staircase ด้วย - หลังคาของมัน
+#       *คือ* เส้นเงา ณ ตำแหน่งนั้นเอง จึงไม่ถูก flag)
+#    - หลังคาที่อยู่ "ต่ำกว่าเส้นเงามาก" -> มีกล่องสูงกว่าครองตำแหน่ง x นั้นอยู่
+#      = กล่องแถวหน้าที่เตี้ยกว่าแถวหลัง ซึ่งเป็นเคสที่ระบบมองไม่เห็นพอดี
+#
+#  หลักฐานการกระจายตัว (วัดครบทั้ง 19 ไฟล์ที่ผู้ใช้แนบ, depth ของ roof cell ทุกใบ)
+#    กลุ่มปกติ   : -55 ถึง +59
+#    กลุ่มผิดปกติ: +84 ถึง +334
+#    มีช่องว่างระหว่างกันที่ 59-84 ไม่มีค่าใดตกอยู่ตรงกลางเลยแม้แต่ค่าเดียว
+#    ตรวจยืนยันด้วยภาพ (PA01 depth=189 drop=29.8%, PC01-01 depth=299/217/130)
+#    กรอบชี้ตรงกล่องแถวหน้าที่เตี้ยจริงทุกใบ ไม่มีใบใดตกไปโดนหลังคากองสูงปกติเลย
+#
+#  ขอบเขตความปลอดภัย - เป็นกลไก "เพิ่ม" ล้วน
+#    ไม่แตะกลไกเดิมทั้ง 6 ตัวเลยแม้แต่บรรทัดเดียว อ่านข้อมูลคนละชุด (roof cells ไม่ใช่
+#    cargo_top_y โดยตรง) และผ่าน dedup กับกรอบเดิมก่อนเสมอ
+#    ผล regression 18 ไฟล์: กรอบเดิมไม่เปลี่ยนเลยแม้แต่ไฟล์เดียว (0/18), HTTP 200 ครบ
+#
+#  ข้อจำกัดที่ทราบแล้ว (บอกตรงไปตรงมา)
+#    กลไกนี้ยังทำงานได้เฉพาะโหมด single_view_page1 เป็นหลัก - ในโหมด dual_view
+#    _p1b_classify_view คืน roof cell = 0 เพราะ area_min แบบ auto-calibrate ผูกกับขนาด
+#    region ที่ใหญ่กว่า จึงกรองหลังคาทิ้งหมด (ยืนยันจาก PC03-02: roof_cells=0 ทั้ง 2 วิว)
+#    เคยทดลองตั้ง area_min=1200 คงที่เพื่อให้ dual_view จับได้ แล้วพบ false positive
+#    รุนแรง: เศษขอบกล่องชั้นกลางในกองเดียวกันถูกนับเป็นหลังคา ทำให้เกิดกรอบซ้อนทุกชั้น
+#    (PA01 1->5 กรอบ, PC02 0->8 กรอบ ตรวจภาพแล้วผิดชัดเจน) จึงคงค่า auto ไว้ตามเดิม
+# ============================================================================
+_BURIED_ROOF_MIN_DEPTH_PX = 80      # กึ่งกลางช่องว่าง 59-84 ที่วัดได้จริงจาก 19 ไฟล์
+_BURIED_MIN_DROP_RATIO = 0.20       # ใช้เกณฑ์เดียวกับ STEP_DOWN_*_DROP_RATIO เดิมของระบบ
+                                    # (ทำหน้าที่ normalize depth ให้เป็นสัดส่วนกับความสูงกอง
+                                    #  จึงไม่ขึ้นกับ scale การ render)
+_BURIED_MIN_ROOF_AREA = 1500        # กันเศษ cell เล็กที่เกิดจาก noise/ตัวอักษร
+_BURIED_MIN_HEIGHT_PX = 40          # กล่องต้องมีความสูงที่วัดได้จริงพอสมควร
+_BURIED_DEDUP_XOVERLAP = 0.50       # ทับกับกรอบเดิมเกินนี้ = ถือว่าเป็นจุดเดียวกัน
+
+
+def _roof_cells_for_view(region_hires, down_factor=1.0):
+    """คืน roof cell ทุกใบในพิกัด local ของ view (สเกลเดียวกับ cargo_top_y).
+
+    ใช้ _p1b_classify_view ตัวเดียวกับที่ PHASE 1B ใช้อยู่แล้วทุกประการ (ไม่ได้เพิ่ม
+    การประมวลผลภาพใหม่) - คืน [] ถ้าทำไม่ได้ (fail-safe ไม่ทำให้ pipeline ล้ม)"""
+    try:
+        # ใช้ area_min แบบ auto-calibrate (ค่า default) - ดูเหตุผลที่ไม่ใช้ค่าคงที่
+        # ในหัวข้อ "ข้อจำกัดที่ทราบแล้ว" ด้านบน
+        cells = _p1b_classify_view(region_hires)
+    except Exception as e:
+        print(f"[BURIED] แยก roof cell ไม่สำเร็จ ({e}) -> ข้ามกลไกนี้")
+        return []
+    out = []
+    for c in cells:
+        if c.get("kind") != "roof":
+            continue
+        out.append({
+            "x0": int(c["x"] * down_factor),
+            "y0": int(c["y"] * down_factor),
+            "x1": int((c["x"] + c["w"]) * down_factor),
+            "y1": int((c["y"] + c["h"]) * down_factor),
+            "area": int(c["area"]),
+            "color": c.get("color"),
+        })
+    return out
+
+
+def _buried_overlap(a0, a1, b0, b1):
+    """สัดส่วนการทับกันของสองช่วง เทียบกับช่วงที่สั้นกว่า."""
+    lo, hi = max(a0, b0), min(a1, b1)
+    span = min(a1 - a0, b1 - b0)
+    if span <= 0:
+        return 0.0
+    return max(0.0, hi - lo) / span
+
+
+def detect_buried_front_row(view_result, records, view_label):
+    """v26.25 NEW: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมอยู่ใต้เส้นเงาทั้งใบ.
+
+    ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก PA01 ครึ่งซ้าย front view)
+    วาดกรอบครอบ "กล่องแถวหน้าที่เตี้ย" (จากหลังคาของมันลงไปถึงเส้นพื้น) ซึ่งเป็นฝั่งที่
+    เสี่ยงถูกกองสูงด้านหลังล้มทับ - คำนวณ abs_box ตรงนี้เลยเหมือน hidden_behind
+    (กล่องเหล่านี้ไม่มี index ของตัวเองใน stack_heights เพราะไม่เคยถูกมองเห็นมาก่อน)"""
+    risks = []
+    roofs = view_result.get("_roof_cells") or []
+    if not roofs:
+        return risks
+    cty = view_result.get("cargo_top_y")
+    lfy = view_result.get("local_floor_y")
+    if cty is None or lfy is None:
+        return risks
+    cty = np.asarray(cty, float)
+    lfy = np.asarray(lfy, float)
+    ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
+
+    for rc in roofs:
+        if rc["area"] < _BURIED_MIN_ROOF_AREA:
+            continue
+        cx = (rc["x0"] + rc["x1"]) // 2
+        if not (0 <= cx < len(cty) and 0 <= cx < len(lfy)):
+            continue
+        silh_top = float(cty[cx])
+        floor_y = float(lfy[cx])
+        if silh_top < 0 or floor_y < 0:
+            continue
+        roof_top = float(rc["y0"])
+        depth = roof_top - silh_top
+        if depth < _BURIED_ROOF_MIN_DEPTH_PX:
+            continue                      # หลังคานี้เป็นเจ้าของเส้นเงาเอง ไม่ใช่แถวหน้าที่จม
+        buried_h = floor_y - roof_top     # ความสูงจริงของกล่องแถวหน้าที่เตี้ย
+        taller_h = floor_y - silh_top     # ความสูงของกองที่ครองเส้นเงา ณ ตำแหน่งเดียวกัน
+        if buried_h < _BURIED_MIN_HEIGHT_PX or taller_h <= 0:
+            continue
+        drop = 1.0 - (buried_h / taller_h)
+        if drop < _BURIED_MIN_DROP_RATIO:
+            continue
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK", "subtype": "buried_front_row",
+            "view": view_label, "mark_view": view_label, "mark_stack_idx": None,
+            "mark_x_range": (rc["x0"], rc["x1"]),
+            "taller_height_px": taller_h, "shorter_height_px": buried_h,
+            "drop_ratio": drop, "roof_depth_px": depth,
+            "height_source": "roof_cell", "n_samples": None,
+            "abs_box": (ox + rc["x0"], oy + int(roof_top),
+                        ox + rc["x1"], oy + int(floor_y)),
+        })
+        print(f"[BURIED] view={view_label} x=[{rc['x0']},{rc['x1']}] "
+              f"roof_top={roof_top:.0f} silhouette_top={silh_top:.0f} "
+              f"depth={depth:.0f}px (เกณฑ์ {_BURIED_ROOF_MIN_DEPTH_PX}) "
+              f"h={buried_h:.0f} vs กองหลัง={taller_h:.0f} drop={drop:.1%} "
+              f"-> กล่องแถวหน้าเตี้ยกว่าแถวหลัง จมใต้เส้นเงา")
+    return risks
+
+
+def _dedup_buried_against_existing(risks, view_label):
+    """ตัด buried_front_row ที่ทับกับกรอบเดิมในวิวเดียวกันเกินเกณฑ์ออก.
+
+    กลไกเดิมอาจ flag บริเวณเดียวกันไว้แล้วด้วยเหตุผลอื่น - เก็บกรอบเดิมไว้เสมอ
+    ตัดของใหม่ทิ้ง เพื่อไม่ให้ hazardCount นับซ้ำและไม่ให้เกิด marker ซ้อนทับกันบนภาพ"""
+    keep, dropped = [], 0
+    others = [r for r in risks if r.get("subtype") != "buried_front_row"]
+    for r in risks:
+        if r.get("subtype") != "buried_front_row":
+            keep.append(r)
+            continue
+        b = r.get("abs_box")
+        clash = False
+        for o in others:
+            if o.get("mark_view") != r.get("mark_view"):
+                continue
+            ob = o.get("abs_box")
+            if not (b and ob):
+                continue
+            # v26.25: ต้องทับกัน "ทั้งแกน x และ y" จึงถือว่าเป็นจุดเดียวกัน - วัดจริงจาก PA01
+            # พบว่ากรอบ silhouette_notch (570,602)-(1196,791) ทับแกน x กับกรอบ buried
+            # (446,980)-(729,1425) ถึง 0.56 แต่ทับแกน y เพียง 0.00 (คนละครึ่งภาพในแนวตั้ง
+            # โดยสิ้นเชิง - notch อยู่ที่ยอดกอง ส่วน buried อยู่ที่กล่องแถวหน้าระดับพื้น)
+            # ถ้าดูแกน x อย่างเดียวจะตัดกรอบที่ถูกต้องทิ้งอย่างผิดพลาด
+            if (_buried_overlap(b[0], b[2], ob[0], ob[2]) >= _BURIED_DEDUP_XOVERLAP
+                    and _buried_overlap(b[1], b[3], ob[1], ob[3]) >= _BURIED_DEDUP_XOVERLAP):
+                clash = True
+                break
+        if clash:
+            dropped += 1
+            print(f"[BURIED] ตัดกรอบซ้ำกับกลไกเดิมที่ view={view_label} "
+                  f"x=[{b[0]},{b[2]}] ออก (เก็บกรอบเดิมไว้แทน)")
+        else:
+            keep.append(r)
+    return keep
+
+
 def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix_scale=3):
     # v25.11: PHASE 1B ต้องรู้ทั้ง FRONT และ BACK พร้อมกันก่อน (BACK = ground-truth ตำแหน่ง,
     # FRONT ถูก reconcile กับ BACK) จึงต้องคำนวณคอลัมน์ทั้งคู่ล่วงหน้า ก่อนเรียก
@@ -10182,12 +10376,17 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         front_hi, down_factor = render_hires_crop(page, front_origin, matrix_scale)
         back_hi, _ = render_hires_crop(page, back_origin, matrix_scale)
         phase1b = compute_phase1b_columns({"front": front_hi, "back": back_hi}, down_factor=down_factor)
+        # v26.25: เก็บ roof cell ไว้ก่อนคืน memory (ใช้ตรวจกล่องแถวหน้าที่จมใต้เส้นเงา)
+        _roofs_front = _roof_cells_for_view(front_hi, down_factor)
+        _roofs_back = _roof_cells_for_view(back_hi, down_factor)
         del front_hi, back_hi  # ปล่อย memory ของ hi-res crop ทันทีหลังใช้เสร็จ
     except Exception as e:
         print(f"PHASE1B hi-res crop ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
         phase1b = {"front": None, "back": None}
         front_precrop = None
         back_precrop = None
+        _roofs_front = []
+        _roofs_back = []
 
     front = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"),
@@ -10200,6 +10399,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     # _is_large_box_single_row ใช้ได้ (ดู docstring เต็มที่ _LARGEBOX_MAX_SIDE_FACES)
     front["n_cargo_side_faces"] = phase1b.get("n_side_front")
     back["n_cargo_side_faces"] = phase1b.get("n_side_back")
+    front["_roof_cells"] = _roofs_front     # v26.25
+    back["_roof_cells"] = _roofs_back       # v26.25
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -10245,6 +10446,11 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         risks += _analyse_whole_view(front, back, records_front, records_back)
     risks += detect_silhouette_notch_risk(front, "FRONT")
     risks += detect_silhouette_notch_risk(back, "BACK")
+    # v26.25: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา (ดู docstring เต็มด้านบน)
+    _buried = (detect_buried_front_row(front, records_front, "FRONT")
+               + detect_buried_front_row(back, records_back, "BACK"))
+    if _buried:
+        risks = _dedup_buried_against_existing(risks + _buried, "FRONT/BACK")
     # v26.15: ระงับกรอบส้มที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
     # (ดู docstring เต็มที่ _suppress_largebox_tail_notch - ผู้ใช้ระบุโดยตรง)
     risks = _suppress_largebox_tail_notch(risks, front, records_front, "FRONT")
@@ -10418,14 +10624,17 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     try:
         hi_region, down_factor = render_hires_crop(page, origin, matrix_scale)
         cols = compute_phase1b_columns_single(hi_region, down_factor=down_factor)
+        _roofs = _roof_cells_for_view(hi_region, down_factor)   # v26.25
         del hi_region
     except Exception as e:
         print(f"[SINGLE_VIEW] hi-res crop ล้มเหลว, fallback seam-based เดิม: {e}")
         cols = None
+        _roofs = []
 
     view = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=cols, precrop=precrop)
 
+    view["_roof_cells"] = _roofs        # v26.25
     records = build_stack_records(view, "FRONT")
     fill_missing_heights(sorted(records, key=lambda r: r["idx"]))
     for rec in records:
@@ -10444,6 +10653,10 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
     # v26.01: โพรงสูงต่ำท้ายรถ (หน้าที่ 1 เป็น front view จึงใช้ได้ตามปกติ)
     risks += detect_tailzone_wall_exposure(view, records, "FRONT")
+    # v26.25: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา (ดู docstring เต็มด้านบน)
+    _buried = detect_buried_front_row(view, records, "FRONT")
+    if _buried:
+        risks = _dedup_buried_against_existing(risks + _buried, "FRONT")
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
