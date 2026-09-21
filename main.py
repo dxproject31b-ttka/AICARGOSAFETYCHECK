@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.24 = v26.23 + แก้ HTTP 500 จากกรอบกลับหัว (negative stack height) - ไฟล์ SC23-02
 v26.23 = v26.22 + แก้ _is_big_glyph ขาดบรรทัด return (v29.9 ไม่เคยทำงาน)
 v26.22 = v26.21 + colorizer v29.9/v29.10/v29.11 (ตรรกะวิเคราะห์เดิมไม่แตะ)
 v26.21 (ฐาน = v26.17 ตามที่ผู้ใช้สั่ง "v26.18 ลบทิ้ง" - v26.18/19/20 ถูกยกเลิกทั้งหมด)
@@ -2470,7 +2471,15 @@ def extract_sku_from_pdf(pdf_bytes, page_idx=None):
 
 
 def _draw_single_rectangle(draw, coords, outline_color):
+    # v26.24 FIX (ด่านกันพังชั้นสุดท้าย - พบจริงจาก SC23-02 ที่ทำให้เกิด HTTP 500):
+    # เดิมส่งพิกัดดิบเข้า PIL ตรง ๆ  ถ้ากลไกตรวจจับใดคำนวณกรอบกลับหัว/กลับข้าง (y0 > y1
+    # หรือ x0 > x1) PIL จะโยน ValueError ออกมากลางการวาดภาพ ซึ่งอยู่นอก try ของแต่ละ
+    # detector จึงทะลุขึ้นไปทำให้ทั้ง request ล้มเป็น HTTP 500 ทั้งที่การวิเคราะห์เสร็จ
+    # สมบูรณ์ไปแล้ว  จัดเรียงพิกัดให้ถูกต้องก่อนวาดเสมอ - ผลลัพธ์ของกรอบที่ถูกต้องอยู่แล้ว
+    # ไม่เปลี่ยนแปลงแม้แต่พิกเซลเดียว (min/max ของค่าที่เรียงถูกอยู่แล้วคือค่าเดิม)
     x0, y0, x1, y1 = map(int, coords)
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
     draw.rectangle([x0, y0, x1, y1], outline=outline_color, width=8)
 
 
@@ -6009,6 +6018,18 @@ def _detect_hidden_behind_split(cargo_top_y, local_floor_y, x0, x1,
         right_med = float(np.median(right_win))
         jump = right_med - left_med
         if abs(jump) < jump_thresh_px or left_std > max_side_std or right_std > max_side_std:
+            continue
+        # v26.24 FIX (ROOT CAUSE ของ HTTP 500 บนไฟล์ SC23-02 - ยืนยันด้วยข้อมูล pixel จริง):
+        # vals[] = local_floor_y[x] - cargo_top_y[x] ซึ่งโดยนิยามทางกายภาพคือ "ความสูงของกอง"
+        # จึงต้องเป็นบวกเสมอ  แต่ถ้า local_floor_y ของคอลัมน์นั้นถูก fit ผิดจนไปอยู่ "เหนือ"
+        # ยอดกล่อง ค่าที่ได้จะติดลบทั้งแถบ  (SC23-02 FRONT คอลัมน์ x=670-871: floor=215 คงที่
+        # ขณะที่ cargo_top_y=316-405 -> 156 จาก 161 sample ติดลบ ต่ำสุด -198.0)
+        # เดิมไม่มีด่านตรวจใดสนใจเครื่องหมายเลย ค่าติดลบจึงไหลออกไปเป็น hidden_height=-114.5
+        # ทำให้ detect_step_down_hidden_behind คำนวณ top_y_local = floor - (-114.5) ได้ค่าที่
+        # อยู่ "ใต้" เส้นพื้น -> abs_box มี y0 > y1 -> PIL โยน ValueError -> HTTP 500
+        # เกณฑ์นี้ตัดเฉพาะกรณีที่เป็นไปไม่ได้ทางกายภาพ (ความสูง <= 0) จึงไม่มีทางกระทบ
+        # การตรวจจับที่ถูกต้องอยู่แล้วได้เลย เพราะกองสินค้าจริงมีความสูงเป็นบวกเสมอ
+        if left_med <= 0 or right_med <= 0:
             continue
         if jump >= jump_thresh_px:
             # v25.89 NEW (สำคัญ - พบจริงจาก EB73-01 ที่ผู้ใช้แนบ 2-Sep-2026, ผู้ใช้ยืนยันว่า
