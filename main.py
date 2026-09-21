@@ -10544,7 +10544,7 @@ def _is_big_glyph(tw, th, ak):
     return ak / float(tw * th) >= BIG_GLYPH_FILL_MIN
 
 
-COLOR_BOX_CYAN = np.array([255, 255, 0], dtype=np.float32)
+COLOR_BOX_CYAN = np.array([231, 231, 0], dtype=np.float32)
 COLOR_CREAM = np.array([155, 242, 245], dtype=np.uint8)
 SHADE_TOP, SHADE_RIGHT, SHADE_LEFT = 1.10, 1.00, 0.85
 
