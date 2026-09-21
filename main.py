@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.26 = v26.25 + BOX-RELATIVE ROOF GATE (ทำให้กลไกที่ 7 ทำงานในโหมด dual_view ได้)
 v26.25 = v26.24 + กลไกที่ 7 BURIED FRONT ROW (กล่องแถวหน้าเตี้ยจมใต้เส้นเงา)
 v26.24 = v26.23 + แก้ HTTP 500 จากกรอบกลับหัว (negative stack height) - ไฟล์ SC23-02
 v26.23 = v26.22 + แก้ _is_big_glyph ขาดบรรทัด return (v29.9 ไม่เคยทำงาน)
@@ -10213,6 +10214,48 @@ _BURIED_MIN_DROP_RATIO = 0.20       # ใช้เกณฑ์เดียวก
                                     # (ทำหน้าที่ normalize depth ให้เป็นสัดส่วนกับความสูงกอง
                                     #  จึงไม่ขึ้นกับ scale การ render)
 _BURIED_MIN_ROOF_AREA = 1500        # กันเศษ cell เล็กที่เกิดจาก noise/ตัวอักษร
+# ============================================================================
+#  v26.26 - BOX-RELATIVE ROOF GATE  (แก้ให้กลไก BURIED FRONT ROW ทำงานในโหมด dual_view)
+# ----------------------------------------------------------------------------
+#  อาการ (ผู้ใช้แจ้งจากไฟล์ประเภท "ลงสีมาแล้ว" 8 ไฟล์: SA02-02, SB01-*, SB02-02,
+#  SB16-03, SC01-*, SC03-02): ทุกไฟล์ได้ hazardCount = 0 ทั้งที่มีกล่องแถวหน้าเตี้ยกว่า
+#  แถวหลังเห็นชัดด้วยตาเปล่า (เช่น SC01-01 กอง TGT1D-OR ฟ้าอ่อนเตี้ยกว่า HMT1D-S4 น้ำเงิน)
+#
+#  ROOT CAUSE (วัดค่าจริงด้วย debug ทั้ง 8 ไฟล์ -> roof_cells = 0 ทั้ง FRONT และ BACK)
+#    v26.25 เรียก _p1b_classify_view โดยไม่ระบุ area_min จึงใช้ auto-calibrate:
+#        area_min = 1200 * (h*w) / (400*300)
+#    ซึ่งผูกกับ "ขนาด region" ไม่ใช่ "ขนาดกล่องจริง"  โหมด dual_view ครอปภาพกว้างเต็มหน้า
+#    (~912x2451) จึงได้ area_min ~ 22,400 สูงกว่าหลังคากล่องจริงทุกใบ (5,000-13,900)
+#    หลังคาจึงถูกกรองทิ้งหมดตั้งแต่ต้นทาง ก่อนกลไก BURIED จะได้เห็นข้อมูลด้วยซ้ำ
+#      SA02-02  area_min=22,353  หลังคาใหญ่สุด 7,340  -> ผ่าน 0 ใบ
+#      SC01-01  area_min=22,426  หลังคาใหญ่สุด 13,852 -> ผ่าน 0 ใบ
+#      SC03-02  area_min=22,353  หลังคาใหญ่สุด 5,862  -> ผ่าน 0 ใบ
+#
+#  ทำไมตั้ง area_min=1200 คงที่เฉย ๆ ไม่ได้ (เคยทดลองแล้วล้มเหลว - บันทึกไว้กันทำซ้ำ)
+#    ไฟล์ wireframe จะปล่อยให้ "เศษขอบกล่องชั้นกลางในกองเดียวกัน" ผ่านเข้ามาเป็นหลังคาด้วย
+#    เกิดกรอบซ้อนทุกชั้นของกองเดียว (PA01 1 -> 5 กรอบ, PC02 0 -> 8 กรอบ ตรวจภาพแล้วผิดชัด)
+#    วัดจริงจาก PA01: เศษเหล่านี้มีพื้นที่ 7,329 / 7,345 / 9,626 / 9,827 px ขณะที่หลังคา
+#    กล่องจริงอยู่ที่ 28,340-80,853 px
+#
+#  ตัวแยกที่ใช้ - เทียบกับ "ขนาดกล่องจริงในภาพนั้นเอง" แทนขนาด region
+#    _p1b_classify_view คืน front-face cell มาพร้อมกันอยู่แล้ว ซึ่งสะท้อน "สเกลกล่องจริง"
+#    ของภาพนั้น ๆ โดยตรง และไม่ขึ้นกับขนาด region หรือ scale การ render เลย
+#        gate = _BURIED_ROOF_FRONT_FRAC * median(area ของ front-face ทั้งวิว)
+#    หลักฐานการกระจายตัว (roof area / med_front ครบทั้ง 28 ไฟล์ 43 วิว)
+#      เศษขอบกล่องที่ต้องตัด (PA01)     : 0.24, 0.24, 0.31, 0.32
+#      หลังคากล่องจริงที่ต้องเก็บ (PA01): 0.92, 0.95, 0.96, 1.29, 1.30, 1.51, 2.64
+#      หลังคาจริงในไฟล์ลงสีแล้ว         : SC01-01 0.62-0.70 | SB01 0.65-0.68
+#                                         SA02-02 0.27-1.32 | SB16-03 0.24-1.36
+#    เลือก 0.45 เพราะอยู่เหนือเศษของ PA01 (สูงสุด 0.32) และต่ำกว่าหลังคาจริงที่เล็กที่สุด
+#    ในไฟล์ลงสีแล้ว (SC01-02 = 0.50) โดยมีระยะห่างทั้งสองฝั่ง
+#
+#  ผล regression 28 ไฟล์ (wireframe 20 + ลงสีแล้ว 8) เทียบ v26.25
+#    กลไกเดิมเปลี่ยน 0/28 ไฟล์ | HTTP 200 ครบ 28/28 | buried 12 -> 60 จุด
+#    ไฟล์ลงสีแล้วตรวจพบได้ 7/8 ไฟล์ (เดิม 0/8)
+# ============================================================================
+_BURIED_ROOF_FRONT_FRAC = 0.45      # หลังคาต้องใหญ่อย่างน้อยเท่านี้เทียบ median front-face
+_BURIED_ROOF_AREA_MIN_FIXED = 1200  # ค่าเดียวกับที่ _p1b_front_faces ใช้จริง
+_BURIED_SELF_XOVERLAP = 0.50        # buried 2 ใบที่ทับแกน x เกินนี้ = กองเดียวกัน
 _BURIED_MIN_HEIGHT_PX = 40          # กล่องต้องมีความสูงที่วัดได้จริงพอสมควร
 _BURIED_DEDUP_XOVERLAP = 0.50       # ทับกับกรอบเดิมเกินนี้ = ถือว่าเป็นจุดเดียวกัน
 
@@ -10223,17 +10266,21 @@ def _roof_cells_for_view(region_hires, down_factor=1.0):
     ใช้ _p1b_classify_view ตัวเดียวกับที่ PHASE 1B ใช้อยู่แล้วทุกประการ (ไม่ได้เพิ่ม
     การประมวลผลภาพใหม่) - คืน [] ถ้าทำไม่ได้ (fail-safe ไม่ทำให้ pipeline ล้ม)"""
     try:
-        # ใช้ area_min แบบ auto-calibrate (ค่า default) - ดูเหตุผลที่ไม่ใช้ค่าคงที่
-        # ในหัวข้อ "ข้อจำกัดที่ทราบแล้ว" ด้านบน
-        cells = _p1b_classify_view(region_hires)
+        # v26.26: ใช้ area_min คงที่เท่ากับที่ _p1b_front_faces ใช้ แล้วไปกรองด้วยเกณฑ์
+        # ที่อิง "ขนาดกล่องจริง" ในขั้นถัดไปแทน (ดู _BURIED_ROOF_FRONT_FRAC ด้านบน)
+        cells = _p1b_classify_view(region_hires, area_min=_BURIED_ROOF_AREA_MIN_FIXED)
     except Exception as e:
         print(f"[BURIED] แยก roof cell ไม่สำเร็จ ({e}) -> ข้ามกลไกนี้")
         return []
+    # v26.26: median ของ front-face = สเกลกล่องจริงของภาพนี้ (ไม่ขึ้นกับขนาด region)
+    _fa = sorted(c["area"] for c in cells if c.get("kind") == "front")
+    _med_front = float(_fa[len(_fa) // 2]) if _fa else 0.0
     out = []
     for c in cells:
         if c.get("kind") != "roof":
             continue
         out.append({
+            "med_front": _med_front,        # v26.26
             "x0": int(c["x"] * down_factor),
             "y0": int(c["y"] * down_factor),
             "x1": int((c["x"] + c["w"]) * down_factor),
@@ -10272,8 +10319,14 @@ def detect_buried_front_row(view_result, records, view_label):
     lfy = np.asarray(lfy, float)
     ox, oy = view_result["crop_origin_x"], view_result["crop_origin_y"]
 
+    # v26.26: เกณฑ์พื้นที่อิงขนาดกล่องจริงของภาพนี้ แทนที่จะอิงขนาด region
+    _med_front = float(roofs[0].get("med_front") or 0.0)
+    _area_gate = _BURIED_MIN_ROOF_AREA
+    if _med_front > 0:
+        _area_gate = max(_BURIED_MIN_ROOF_AREA, _med_front * _BURIED_ROOF_FRONT_FRAC)
+
     for rc in roofs:
-        if rc["area"] < _BURIED_MIN_ROOF_AREA:
+        if rc["area"] < _area_gate:
             continue
         cx = (rc["x0"] + rc["x1"]) // 2
         if not (0 <= cx < len(cty) and 0 <= cx < len(lfy)):
@@ -10309,6 +10362,25 @@ def detect_buried_front_row(view_result, records, view_label):
               f"h={buried_h:.0f} vs กองหลัง={taller_h:.0f} drop={drop:.1%} "
               f"-> กล่องแถวหน้าเตี้ยกว่าแถวหลัง จมใต้เส้นเงา")
     return risks
+
+
+def _dedup_buried_self(buried):
+    """v26.26: ยุบ buried ที่ทับกันเองในแนว x ให้เหลือใบเดียวต่อ 1 กอง.
+
+    ROOT CAUSE ที่ต้องมีขั้นนี้ (วัดจริงจาก PC02/PB01-01 หลังเปิด gate แบบอิงขนาดกล่อง):
+    กองสินค้าที่ซ้อนหลายชั้นจะให้ "หลังคาของแต่ละชั้น" ออกมาเป็น roof cell แยกกันหลายใบ
+    ซ้อนทับกันในแนว x เดียวกัน (ชั้นบนสุด depth น้อย, ชั้นล่าง ๆ depth มากขึ้นเรื่อย ๆ)
+    ถ้าไม่ยุบ จะเกิดกรอบซ้อนกันหลายชั้นบนกองเดียว (PC02 พบ 9 กรอบบนกองเดียวกัน)
+    เก็บใบที่ depth "น้อยที่สุด" ไว้ เพราะนั่นคือหลังคาจริงของยอดกองแถวหน้า
+    ส่วนใบที่ depth มากกว่าคือชั้นที่อยู่ลึกลงไปในกองเดียวกัน ไม่ใช่กองใหม่"""
+    keep = []
+    for r in sorted(buried, key=lambda z: z.get("roof_depth_px", 0)):
+        b = r["abs_box"]
+        if any(_buried_overlap(b[0], b[2], k["abs_box"][0], k["abs_box"][2])
+               >= _BURIED_SELF_XOVERLAP for k in keep):
+            continue
+        keep.append(r)
+    return keep
 
 
 def _dedup_buried_against_existing(risks, view_label):
@@ -10447,8 +10519,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     risks += detect_silhouette_notch_risk(front, "FRONT")
     risks += detect_silhouette_notch_risk(back, "BACK")
     # v26.25: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา (ดู docstring เต็มด้านบน)
-    _buried = (detect_buried_front_row(front, records_front, "FRONT")
-               + detect_buried_front_row(back, records_back, "BACK"))
+    _buried = (_dedup_buried_self(detect_buried_front_row(front, records_front, "FRONT"))
+               + _dedup_buried_self(detect_buried_front_row(back, records_back, "BACK")))
     if _buried:
         risks = _dedup_buried_against_existing(risks + _buried, "FRONT/BACK")
     # v26.15: ระงับกรอบส้มที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
@@ -10654,7 +10726,7 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
     # v26.01: โพรงสูงต่ำท้ายรถ (หน้าที่ 1 เป็น front view จึงใช้ได้ตามปกติ)
     risks += detect_tailzone_wall_exposure(view, records, "FRONT")
     # v26.25: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา (ดู docstring เต็มด้านบน)
-    _buried = detect_buried_front_row(view, records, "FRONT")
+    _buried = _dedup_buried_self(detect_buried_front_row(view, records, "FRONT"))
     if _buried:
         risks = _dedup_buried_against_existing(risks + _buried, "FRONT")
 
