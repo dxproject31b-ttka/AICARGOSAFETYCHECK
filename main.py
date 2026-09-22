@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.27 = v26.26 + แก้ false positive 2 จุด (CD11 buried aspect, CD08 tailzone หลายตู้)
 v26.26 = v26.25 + BOX-RELATIVE ROOF GATE (ทำให้กลไกที่ 7 ทำงานในโหมด dual_view ได้)
 v26.25 = v26.24 + กลไกที่ 7 BURIED FRONT ROW (กล่องแถวหน้าเตี้ยจมใต้เส้นเงา)
 v26.24 = v26.23 + แก้ HTTP 500 จากกรอบกลับหัว (negative stack height) - ไฟล์ SC23-02
@@ -9583,10 +9584,36 @@ def detect_tailzone_wall_exposure(view_result, records, view_label):
     cty = np.asarray(cty, int)
     lfy = np.asarray(lfy, float)
 
-    vals = [cty[x] for x in range(sx, ex) if 0 <= x < len(cty) and cty[x] >= 0]
+    # v26.27 FIX#2: PER-CONTAINER ROOF REFERENCE (พบจริงจาก CD08-all front view)
+    #  อาการ: ตู้ซ้ายของรถพ่วง 2 ตู้ (TTKAFT Double Trailer) ถูกวาดกรอบส้ม
+    #  tailzone_wall_exposure ทั้งที่กล่องในตู้นั้นสูงสม่ำเสมอกันทั้งตู้
+    #
+    #  ROOT CAUSE (วัดค่าจริงจาก log): roof_y ถูกคำนวณจาก percentile ของ cargo_top_y
+    #  ตลอดช่วง [start_x, end_x] ซึ่งกินทั้ง 2 ตู้รวมกัน  แต่ตู้ขวาของไฟล์นี้บรรทุกสูงกว่า
+    #  ตู้ซ้ายมาก (กล่องน้ำเงิน 3 ชั้น เทียบกล่องเขียว 2 ชั้น) roof_y จึงถูกดึงขึ้นไปอยู่ที่
+    #  ระดับหลังคาของ "ตู้ขวา"  พอเอามาเป็นเพดานของโซนหัวรถซึ่งอยู่ใน "ตู้ซ้าย" จึงนับ
+    #  ช่องว่างเหนือกองของตู้ซ้าย (ที่ว่างตามปกติเพราะตู้สูง 2400mm แต่ของสูงแค่ ~1016mm)
+    #  รวมเข้าเป็น "พื้นหลังว่าง" ด้วย  วัดได้ 26.2% เกินเกณฑ์ 22.0% ไปเล็กน้อย -> FLAG ผิด
+    #  (กล่อง=67.6% ผนัง=6.2% ซึ่งบ่งชี้ว่าโซนนี้มีสินค้าวางเต็มอยู่แล้วจริง)
+    #
+    #  FIX: ถ้าเป็นรถหลายตู้ ให้คิด roof_y จากเฉพาะ "ตู้ที่โซนนั้นอยู่" (ตู้แรก) เท่านั้น
+    #  ใช้ช่องว่างระหว่างตู้ที่ระบบคำนวณไว้แล้วใน _inter_container_gaps เป็นตัวตัดขอบ
+    #  ไม่กระทบรถตู้เดียวเลย (ไม่มี gap -> ใช้ช่วงเดิมทั้งหมดเหมือนเดิมทุกประการ)
+    _roof_ex = ex
+    _gaps = view_result.get("_inter_container_gaps") or []
+    for _g0, _g1 in _gaps:
+        if sx < _g0 < ex:
+            _roof_ex = min(_roof_ex, int(_g0))
+            break
+    if _roof_ex - sx < _TAILZONE_MIN_WIDTH_PX:
+        _roof_ex = ex
+    vals = [cty[x] for x in range(sx, _roof_ex) if 0 <= x < len(cty) and cty[x] >= 0]
     if len(vals) < 20:
         return []
     roof_y = int(np.percentile(vals, _TAILZONE_ROOF_PERCENTILE))
+    if _roof_ex != ex:
+        print(f"[TAILZONE] รถหลายตู้ -> คิดระดับหลังคาจากตู้แรกเท่านั้น "
+              f"x=[{sx},{_roof_ex}] (เดิมใช้ทั้งคัน x=[{sx},{ex}]) roof_y={roof_y}")
 
     span = ex - sx
     zx0 = sx
@@ -10256,6 +10283,27 @@ _BURIED_MIN_ROOF_AREA = 1500        # กันเศษ cell เล็กที
 _BURIED_ROOF_FRONT_FRAC = 0.45      # หลังคาต้องใหญ่อย่างน้อยเท่านี้เทียบ median front-face
 _BURIED_ROOF_AREA_MIN_FIXED = 1200  # ค่าเดียวกับที่ _p1b_front_faces ใช้จริง
 _BURIED_SELF_XOVERLAP = 0.50        # buried 2 ใบที่ทับแกน x เกินนี้ = กองเดียวกัน
+# --- v26.27 FIX#1: ISO ROOF SHAPE GUARD (พบจริงจาก CD11-ALL back view) ----------
+#  อาการ: back view ของ CD11 (กล่อง AWTHA-P7 สีน้ำเงิน เรียงสูงสม่ำเสมอ 3 ชั้นทั้งตู้)
+#  ถูกวาดกรอบแดง buried_front_row 2 จุด ทั้งที่ไม่มีกล่องแถวหน้าเตี้ยกว่าเลย
+#
+#  ROOT CAUSE (วัดค่าจริงจาก roof cell ทุกใบของไฟล์นี้)
+#    "หน้าบนกล่อง" ในภาพ isometric ถูกวาดด้วยความชันคงที่ (ISO_SLANT = atan(0.5)) เสมอ
+#    สัดส่วน h/w ของ bbox จึงอยู่ที่ ~0.50 ทุกใบโดยธรรมชาติของการ render
+#      roof จริงของ CD11: w=216 h=108 -> 0.50  | w=216 h=107 -> 0.50 (ทุกใบ 0.49-0.50)
+#    แต่ 2 ใบที่ถูก flag ผิดกลับได้:
+#      x=[757,903]  w=146 h=122 -> 0.84
+#      x=[1052,1197] w=145 h=121 -> 0.83
+#    ซึ่งเกือบเป็นสี่เหลี่ยมจัตุรัส = ไม่ใช่หน้าบนกล่องจริง แต่เป็นเศษมุมที่ถูกบัง/ตัดทอน
+#    (_p1b_classify_view จัดเป็น 'roof' เพราะเกณฑ์ที่นั่นคือ aspect < 0.85 ซึ่งหลวมเกินไป
+#     สำหรับงานนี้ - ทั้ง 2 ใบผ่านมาได้แบบเฉียดฉิว)
+#    ยืนยันซ้ำด้วยค่าความสูงที่คำนวณได้: bh = 89 และ 88 px ซึ่งต่ำผิดปกติเมื่อเทียบกับ
+#    ความสูงกองจริง (th = 307 และ 234) - กล่องจริงในไฟล์นี้สูงชั้นละ ~100px
+#
+#  ตัวแยกที่ใช้: บังคับ aspect ของ roof ให้อยู่ในช่วงที่เป็นไปได้ทางเรขาคณิตของ isometric
+#  เท่านั้น  ค่ากลางคือ 0.50 เผื่อความคลาดเคลื่อนจากการ render/crop เป็น 0.65
+#  (สูงกว่า roof จริงที่วัดได้ทุกใบ 0.50 อยู่ 30% แต่ยังต่ำกว่า 2 ใบที่ผิด 0.83/0.84 ชัดเจน)
+_BURIED_ROOF_MAX_ASPECT = 0.65      # h/w ของ bbox หน้าบนกล่อง (isometric จริง ~0.50)
 _BURIED_MIN_HEIGHT_PX = 40          # กล่องต้องมีความสูงที่วัดได้จริงพอสมควร
 _BURIED_DEDUP_XOVERLAP = 0.50       # ทับกับกรอบเดิมเกินนี้ = ถือว่าเป็นจุดเดียวกัน
 
@@ -10327,6 +10375,11 @@ def detect_buried_front_row(view_result, records, view_label):
 
     for rc in roofs:
         if rc["area"] < _area_gate:
+            continue
+        # v26.27 FIX#1: หน้าบนกล่อง isometric ต้องมี h/w ~ 0.50 เสมอ (ดู docstring ด้านบน)
+        _rw = rc["x1"] - rc["x0"]
+        _rh = rc["y1"] - rc["y0"]
+        if _rw <= 0 or (_rh / float(_rw)) > _BURIED_ROOF_MAX_ASPECT:
             continue
         cx = (rc["x0"] + rc["x1"]) // 2
         if not (0 <= cx < len(cty) and 0 <= cx < len(lfy)):
