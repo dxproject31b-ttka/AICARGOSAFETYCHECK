@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.28 = v26.27 + CARGO-FILL GUARD (กรอบ buried ต้องมีสินค้าจริง ไม่ครอบพื้นที่ว่าง)
 v26.27 = v26.26 + แก้ false positive 2 จุด (CD11 buried aspect, CD08 tailzone หลายตู้)
 v26.26 = v26.25 + BOX-RELATIVE ROOF GATE (ทำให้กลไกที่ 7 ทำงานในโหมด dual_view ได้)
 v26.25 = v26.24 + กลไกที่ 7 BURIED FRONT ROW (กล่องแถวหน้าเตี้ยจมใต้เส้นเงา)
@@ -10304,6 +10305,21 @@ _BURIED_SELF_XOVERLAP = 0.50        # buried 2 ใบที่ทับแกน
 #  เท่านั้น  ค่ากลางคือ 0.50 เผื่อความคลาดเคลื่อนจากการ render/crop เป็น 0.65
 #  (สูงกว่า roof จริงที่วัดได้ทุกใบ 0.50 อยู่ 30% แต่ยังต่ำกว่า 2 ใบที่ผิด 0.83/0.84 ชัดเจน)
 _BURIED_ROOF_MAX_ASPECT = 0.65      # h/w ของ bbox หน้าบนกล่อง (isometric จริง ~0.50)
+# --- v26.28 FIX: CARGO-FILL GUARD (พบจริงจาก CC04all front view ที่ผู้ใช้ชี้ว่าปลอดภัย) --
+#  อาการ: กรอบแดง buried_front_row ถูกวาดที่มุมล่างซ้ายของตู้แรก ทั้งที่ตรงนั้นแทบไม่มี
+#  สินค้าอยู่เลย (เป็นพื้นตู้/ขอบล่างที่ว่าง)
+#
+#  ROOT CAUSE: กลไกนี้เชื่อ "หลังคา" (roof cell) กับ "เส้นพื้น" อย่างเดียว แล้วลากกรอบจาก
+#  หลังคาลงไปถึงพื้นโดยไม่เคยตรวจว่าเนื้อที่ในกรอบนั้นมีสินค้าจริงหรือไม่  ถ้า roof cell
+#  ที่จับได้เป็นเศษขอบ/เงาที่ลอยอยู่เหนือพื้นที่ว่าง กรอบที่ได้จะครอบพื้นที่ว่างเป็นหลัก
+#
+#  หลักฐาน (วัดสัดส่วน cargo_mask ภายในกรอบ buried ทุกใบของ 2 ไฟล์ที่ผู้ใช้ชี้)
+#      CC04all  FRONT x=[524,651]  fill = 0.202   <-- กรอบผิด (พื้นที่ว่าง 80%)
+#      CA03     FRONT x=[760,909]  fill = 0.838
+#      CA03     FRONT x=[842,991]  fill = 0.847
+#      CA03     BACK  x=[760,895]  fill = 0.884
+#  แยกขาดชัดเจน - เลือก 0.55 ซึ่งอยู่กึ่งกลางช่องว่าง 0.20-0.84 พอดี
+_BURIED_MIN_CARGO_FILL = 0.55       # สัดส่วน cargo_mask ขั้นต่ำภายในกรอบที่จะวาด
 _BURIED_MIN_HEIGHT_PX = 40          # กล่องต้องมีความสูงที่วัดได้จริงพอสมควร
 _BURIED_DEDUP_XOVERLAP = 0.50       # ทับกับกรอบเดิมเกินนี้ = ถือว่าเป็นจุดเดียวกัน
 
@@ -10399,6 +10415,19 @@ def detect_buried_front_row(view_result, records, view_label):
         drop = 1.0 - (buried_h / taller_h)
         if drop < _BURIED_MIN_DROP_RATIO:
             continue
+        # v26.28: กรอบต้องมีสินค้าอยู่จริง ไม่ใช่ครอบพื้นที่ว่าง (ดู docstring ด้านบน)
+        _cm = view_result.get("cargo_mask")
+        if _cm is not None:
+            _y0 = int(max(0, roof_top)); _y1 = int(min(_cm.shape[0], floor_y))
+            _x0 = int(max(0, rc["x0"])); _x1 = int(min(_cm.shape[1], rc["x1"]))
+            _sub = _cm[_y0:_y1, _x0:_x1]
+            if _sub.size:
+                _fill = float(_sub.mean())
+                if _fill < _BURIED_MIN_CARGO_FILL:
+                    print(f"[BURIED] ข้าม view={view_label} x=[{rc['x0']},{rc['x1']}] "
+                          f"เพราะในกรอบมีสินค้าเพียง {_fill:.1%} "
+                          f"(เกณฑ์ {_BURIED_MIN_CARGO_FILL:.0%}) = กรอบครอบพื้นที่ว่าง")
+                    continue
         risks.append({
             "risk_type": "STEP_DOWN_RISK", "subtype": "buried_front_row",
             "view": view_label, "mark_view": view_label, "mark_stack_idx": None,
