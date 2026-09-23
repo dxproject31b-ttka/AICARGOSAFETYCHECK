@@ -2,6 +2,7 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.31 = v26.30 + SAME-BOX-SIZE GUARD (pairwise/tail_stepdown: กล่องขนาดเดียวกัน = ไม่ใช่ขั้น)
 v26.30 = v26.29 + FLAT-EDGE GUARD (hidden_behind up: เส้นยอดนิ่ง 2 ฝั่ง = กล่องเสมอกัน)
 v26.29 = v26.28 + FLAT-ROW GUARD (แถวเดียวยาวและราบ = ไม่ใช่ขั้น, CA03)
 v26.28 = v26.27 + CARGO-FILL GUARD (กรอบ buried ต้องมีสินค้าจริง ไม่ครอบพื้นที่ว่าง)
@@ -7006,6 +7007,13 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
+        # v26.31: SAME-BOX-SIZE GUARD (ดู docstring เต็มที่ _SAMEBOX_MIN_FH_RATIO)
+        _fr = _same_box_size_pair(view_result, a, b)
+        if _fr is not None and _fr >= _SAMEBOX_MIN_FH_RATIO:
+            print(f"[SAMEBOX] pairwise {view_label} idx={a.get('idx')}/{b.get('idx')} "
+                  f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
+                  f"{_SAMEBOX_MIN_FH_RATIO}) = วางเรียงระดับเดียวกัน ไม่ใช่ขั้น -> ไม่ flag")
+            continue
         # v25.55 FIX#3 (จุดเสี่ยงที่ 1): ถ้าทั้งคู่ได้ค่าจาก carry-forward (height_source=None
         # หลัง fill_missing_heights หรือ "carried_forward_same_view") แสดงว่าค่าที่เปรียบ
         # เทียบกันเป็นค่าเดียวกันที่ propagate มาจากตั้งเดียว ไม่ใช่การวัดอิสระ 2 ครั้ง -
@@ -7781,6 +7789,14 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     src_inner = inner_rec.get("height_source")
     _unreliable_sources = (None, "carried_forward_same_view")
     if src_tail in _unreliable_sources and src_inner in _unreliable_sources:
+        return risks
+
+    # v26.31: SAME-BOX-SIZE GUARD (ดู docstring เต็มที่ _SAMEBOX_MIN_FH_RATIO)
+    _fr = _same_box_size_pair(view_result, tail_rec, inner_rec)
+    if _fr is not None and _fr >= _SAMEBOX_MIN_FH_RATIO:
+        print(f"[SAMEBOX] tail_stepdown {view_label} idx={tail_rec.get('idx')} "
+              f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
+              f"{_SAMEBOX_MIN_FH_RATIO}) = วางเรียงระดับเดียวกัน ไม่ใช่ขั้น -> ไม่ flag")
         return risks
 
     tail_h = float(tail_rec["height_px"])
@@ -10483,6 +10499,95 @@ def _roof_cells_for_view(region_hires, down_factor=1.0):
     return out
 
 
+def _front_cells_for_view(region_hires, down_factor=1.0):
+    """v26.31: คืน front-face cell ทุกใบในพิกัด local ของ view.
+
+    ใช้ _p1b_classify_view ตัวเดียวกับ PHASE 1B / _roof_cells_for_view ทุกประการ
+    (ไม่ได้เพิ่มการประมวลผลภาพใหม่) - คืน [] ถ้าทำไม่ได้ (fail-safe)"""
+    try:
+        cells = _p1b_classify_view(region_hires, area_min=_BURIED_ROOF_AREA_MIN_FIXED)
+    except Exception as e:
+        print(f"[BOXSIZE] แยก front cell ไม่สำเร็จ ({e}) -> ข้ามกลไกนี้")
+        return []
+    out = []
+    for c in cells:
+        if c.get("kind") != "front":
+            continue
+        out.append({
+            "x0": int(c["x"] * down_factor),
+            "x1": int((c["x"] + c["w"]) * down_factor),
+            "h": float(c["h"] * down_factor),
+        })
+    return out
+
+
+# ============================================================================
+#  v26.31 - SAME-BOX-SIZE GUARD  (กล่องขนาดเดียวกัน = วางเรียงระดับเดียวกัน)
+# ----------------------------------------------------------------------------
+#  ที่มา (ผู้ใช้ยืนยันคำตอบทีละจุดจาก 22 ไฟล์ 22-23 Sep 2026)
+#    "กล่องน้ำเงิน TRDA8-OB เรียง 1 ชั้น ติดกับกล่องม่วง SLC1A-P5 เรียง 1 ชั้น
+#     คือสูงเท่ากัน" -> ไม่ใช่ขั้น แต่ระบบวาดกรอบแดงให้
+#
+#  ROOT CAUSE เชิงโครงสร้าง (วัดค่าจริงจาก CA03 FRONT)
+#    กลไก pairwise / tail_stepdown เทียบ "ความสูงกองทั้งกอง" (height_px) ซึ่งวัดจาก
+#    เส้นเงาบนสุด  เมื่อคอลัมน์ข้างเคียงมีกล่องวางซ้อนอยู่ด้านบน ความสูงที่วัดได้จะเป็น
+#    ผลรวมของทั้งตั้ง ไม่ใช่กล่องใบที่อยู่ระดับเดียวกัน
+#      idx=0 (น้ำเงิน) H=134.7  กล่อง 1 ใบสูง 114.0 -> 1.18 ชั้น
+#      idx=1 (ม่วง)   H=205.1  กล่อง 1 ใบสูง 114.8 -> 1.79 ชั้น  <-- วัดเกินเพราะมีส้มทับ
+#    ระบบจึงเห็น drop 34.3% ทั้งที่ระดับล่างสุดของทั้ง 2 คอลัมน์เสมอกันสนิท
+#
+#  ตัวแยกที่ใช้ - เทียบ "ขนาดกล่อง 1 ใบ" แทน "ความสูงกอง"
+#    _p1b_classify_view แยก front-face cell พร้อมความสูงไว้อยู่แล้ว ค่านี้สะท้อนขนาด
+#    กล่องจริงและไม่ถูกรบกวนจากกล่องที่วางซ้อนด้านบน
+#        fh_ratio = min(face_h_a, face_h_b) / max(face_h_a, face_h_b)
+#    ถ้าเข้าใกล้ 1.0 แปลว่าเป็นกล่องขนาดเดียวกัน วางเรียงระดับเดียวกัน = ไม่ใช่ขั้น
+#
+#  หลักฐาน (ผู้ใช้ยืนยันคำตอบครบ 12 จุด)
+#    ต้องไม่ flag (กล่องเสมอกัน)
+#      CD34-all   pairwise      FRONT  drop=0.256  fh_ratio=1.000
+#      CD12-all   pairwise      FRONT  drop=0.386  fh_ratio=0.995
+#      CA03-01    tail_stepdown FRONT  drop=0.343  fh_ratio=0.993
+#      CA03-01    tail_stepdown BACK   drop=0.524  fh_ratio=0.982
+#      CA03-02,05 tail_stepdown BACK   drop=0.561  fh_ratio=0.919
+#    ต้อง flag (กล่องสูงต่ำจริง)
+#      CB01-01    pairwise      FRONT  drop=0.319  fh_ratio=0.667
+#    ช่องว่างระหว่าง 0.667 กับ 0.919 กว้างมาก เลือก 0.95 ซึ่งอยู่ในช่องว่างนั้น
+#    และยังต่ำกว่าจุดที่ต้องตัดทุกจุด ยกเว้น CA03-02,05 (0.919) ที่จงใจไม่ตัด
+#
+#  ขอบเขตที่จำกัดไว้ (สำคัญ - อย่าขยายโดยไม่มีหลักฐานเพิ่ม)
+#    ใช้เฉพาะ pairwise และ tail_stepdown เท่านั้น  จงใจ "ไม่" ใส่ที่
+#      - cross_view    : CD08-all (ถูก, 0.996) ชนกับ CD12-all (ผิด, 0.995) ห่างกัน
+#                        เพียง 0.001 แยกไม่ได้ด้วยตัวชี้วัดนี้
+#      - hidden_behind : ไม่เคยผิดเลยสักจุดในทุกไฟล์ที่ผู้ใช้ยืนยัน (0.873-0.987)
+#    ตัวชี้วัดอื่นที่ทดลองแล้วแยกไม่ได้ (บันทึกไว้กันทำซ้ำ)
+#      drop / jump_px / med_front / จำนวนชั้น / span+std ของสายหลังคา / สีกล่อง 2 ฝั่ง
+# ============================================================================
+_SAMEBOX_MIN_FH_RATIO = 0.95   # กล่อง 2 ฝั่งขนาดใกล้กันเกินนี้ = วางเรียงระดับเดียวกัน
+
+
+def _same_box_size_pair(view_result, rec_a, rec_b):
+    """v26.31: คืน fh_ratio ของกล่อง 2 คอลัมน์ (None ถ้าวัดไม่ได้ = fail-safe)."""
+    if view_result is None or rec_a is None or rec_b is None:
+        return None
+    cells = view_result.get("_front_cells")
+    if not cells:
+        return None
+
+    def face_h(rec):
+        xr = rec.get("x_range")
+        if not xr:
+            return 0.0
+        x0, x1 = float(xr[0]), float(xr[1])
+        hs = [c["h"] for c in cells
+              if min(x1, c["x1"]) - max(x0, c["x0"]) > 0.4 * (c["x1"] - c["x0"])]
+        return float(np.median(hs)) if hs else 0.0
+
+    ha, hb = face_h(rec_a), face_h(rec_b)
+    if ha <= 0 or hb <= 0:
+        return None
+    return min(ha, hb) / max(ha, hb)
+
+
 def _buried_overlap(a0, a1, b0, b1):
     """สัดส่วนการทับกันของสองช่วง เทียบกับช่วงที่สั้นกว่า."""
     lo, hi = max(a0, b0), min(a1, b1)
@@ -10669,6 +10774,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         # v26.25: เก็บ roof cell ไว้ก่อนคืน memory (ใช้ตรวจกล่องแถวหน้าที่จมใต้เส้นเงา)
         _roofs_front = _roof_cells_for_view(front_hi, down_factor)
         _roofs_back = _roof_cells_for_view(back_hi, down_factor)
+        _fronts_front = _front_cells_for_view(front_hi, down_factor)   # v26.31
+        _fronts_back = _front_cells_for_view(back_hi, down_factor)     # v26.31
         del front_hi, back_hi  # ปล่อย memory ของ hi-res crop ทันทีหลังใช้เสร็จ
     except Exception as e:
         print(f"PHASE1B hi-res crop ล้มเหลว, fallback ให้ process_view_on_image ครอปเองตามปกติ: {e}")
@@ -10677,6 +10784,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
         back_precrop = None
         _roofs_front = []
         _roofs_back = []
+        _fronts_front = []
+        _fronts_back = []
 
     front = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=phase1b.get("front"),
@@ -10691,6 +10800,8 @@ def run_full_analysis_on_image(full_img, doc, page_idx=1, pdf_bytes=None, matrix
     back["n_cargo_side_faces"] = phase1b.get("n_side_back")
     front["_roof_cells"] = _roofs_front     # v26.25
     back["_roof_cells"] = _roofs_back       # v26.25
+    front["_front_cells"] = _fronts_front   # v26.31
+    back["_front_cells"] = _fronts_back     # v26.31
     records_front = build_stack_records(front, "FRONT")
     records_back = build_stack_records(back, "BACK")
 
@@ -10915,16 +11026,19 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
         hi_region, down_factor = render_hires_crop(page, origin, matrix_scale)
         cols = compute_phase1b_columns_single(hi_region, down_factor=down_factor)
         _roofs = _roof_cells_for_view(hi_region, down_factor)   # v26.25
+        _fronts = _front_cells_for_view(hi_region, down_factor)  # v26.31
         del hi_region
     except Exception as e:
         print(f"[SINGLE_VIEW] hi-res crop ล้มเหลว, fallback seam-based เดิม: {e}")
         cols = None
         _roofs = []
+        _fronts = []
 
     view = process_view_with_height_on_image(
         full_img, doc, "front", page_idx=page_idx, override_cols=cols, precrop=precrop)
 
     view["_roof_cells"] = _roofs        # v26.25
+    view["_front_cells"] = _fronts      # v26.31
     records = build_stack_records(view, "FRONT")
     fill_missing_heights(sorted(records, key=lambda r: r["idx"]))
     for rec in records:
