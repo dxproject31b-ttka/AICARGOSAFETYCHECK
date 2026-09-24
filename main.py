@@ -11274,7 +11274,7 @@ def risk_abs_box(risk, result):
 # (250 ชื่อในโปรแกรมหลัก vs 110 ชื่อในโมดูลลงสี - intersection = 0)
 # ============================================================================
 
-COLORIZER_VERSION = "v29.12"
+COLORIZER_VERSION = "v29.11"
 
 # --- v29.9: large SKU glyphs -------------------------------------------
 BIG_GLYPH_W, BIG_GLYPH_H = 260, 130
@@ -11672,66 +11672,6 @@ def demote_silhouette_rim(S, box, report):
                            area=int(S.area(r)), exterior=round(ext, 2),
                            rel_face=round(S.area(r) / med, 3),
                            reason="unlabelled sliver on outer silhouette",
-                           defect_class="OVERPAINT"))
-    return box
-
-
-# ============================================================================
-#  v29.12 - BLANK SEAM GAP  (ผู้ใช้วงไว้ - AA02-01 BACK view มุมขวาบน)
-# ----------------------------------------------------------------------------
-#  อาการ: หน้าบน(TOP)/หน้าข้าง(LEFT) ขนาดเล็กที่ "ว่างเปล่าสนิท" (ไม่มีเส้น ไม่มีตัวอักษร
-#  ใดๆ เลยในภาพต้นฉบับ) ถูกระบายเป็นสีฟ้าเหมือนเป็นกล่องสินค้า ทั้งที่จริงเป็นเพียง
-#  "ช่องว่างของโครงตู้" ที่โผล่ระหว่างรอยต่อกองสินค้า 2 กองที่วางไม่ชิดกันสนิทในมุมมอง
-#  isometric (มองเห็นเป็นกระดาษเปล่าสีขาวผ่านช่องนั้น) - พบ 2 จุดในไฟล์เดียวกัน:
-#    region 6  (TOP,  rel=0.144, มุมขวาบน - จุดที่ผู้ใช้วงไว้)
-#    region 86 (LEFT, rel=0.162, แถบแนวตั้งกลางภาพ - จุดที่ยังไม่ถูกวงแต่ผิดเหมือนกัน)
-#
-#  ROOT CAUSE: demote_silhouette_rim (v28) ตรวจจับ "แถบไม่มีป้าย" ได้เฉพาะกรณีที่อยู่
-#  "ขอบนอกสุดของภาพ" (ext_frac >= RIM_EXTERIOR_MIN=0.55, เปิดสู่พื้นหลังจริง) เท่านั้น
-#  แต่กรณีนี้แถบว่างเปล่าถูก "ขนาบข้าง" ด้วยหน้ากล่องจริงทั้ง 2 ฝั่ง (ext_frac วัดได้จริง
-#  เพียง 0.025-0.05) กฎเดิมจึงเข้าเงื่อนไข "enclosed by cargo -> genuine face" ที่เขียนไว้
-#  ในโค้ดเดิม (ข้าม continue) ซึ่งผิดในกรณีนี้ เพราะสิ่งที่ล้อมรอบไม่ใช่กล่อง แต่เป็นช่องว่าง
-#
-#  ตัวแยกที่ใช้ - เนื้อหาพิกเซลดิบ (ก่อนลงสี) ต้อง "ว่างเปล่าสนิท" ไม่ใช่แค่ไม่มีป้าย SKU
-#  กล่องสินค้าจริงทุกใบในไฟล์นี้มี text_px > 2000 เสมอ (มีป้าย SKU พิมพ์อยู่) ส่วนบริเวณ
-#  ที่ผิดทั้ง 2 จุดมี text_px=0 และ blank_frac (สัดส่วนพิกเซลขาวล้วนก่อนลงสี) = 1.000
-#
-#  หลักฐานความปลอดภัย - สแกนทั้งภาพ FRONT/BACK ของไฟล์นี้ทุก region ที่ไม่มีป้าย SKU
-#    ที่ต้องถูกจับ (rel>=0.05): 2 จุด (region 6, 86) ทั้งคู่ blank_frac=1.000
-#    เศษ noise เล็กที่ไม่ควรแตะ (front view 15+ ชิ้น): ทุกชิ้น rel<=0.010 -> กรองด้วย
-#      เกณฑ์ขนาดขั้นต่ำได้หมด ไม่ปนกับ 2 จุดข้างบนเลย (ช่องว่าง 0.010 -> 0.144 ชัดเจน)
-#    region ที่ไม่มีป้ายแต่ "มีเนื้อหาจริง" (เสี่ยงเป็นกล่องจริงที่ไม่มีป้าย): 0 จุด
-#      (ตรวจครบทั้ง 2 view - ไม่มีจุดใดเข้าเงื่อนไข rel>=0.05 และ blank_frac<0.90 พร้อมกัน)
-# ============================================================================
-_BLANKGAP_MIN_REL = 0.05            # ต้องใหญ่พอจะมีผลต่อภาพ (กันเศษ noise <5% ของ median)
-_BLANKGAP_MAX_REL = RIM_MAX_FACE_FRAC  # ไม่ใหญ่เกินหน้ากล่องมาตรฐาน (เกณฑ์เดียวกับ rim)
-_BLANKGAP_MIN_BLANK_FRAC = 0.90     # สัดส่วนพิกเซลขาวล้วนขั้นต่ำ (เนื้อในว่างเปล่าจริง)
-
-
-def demote_blank_seam_gap(S, box, report):
-    """v29.12 - ถอดสีช่องว่างโครงตู้ที่โผล่ระหว่างรอยต่อกองสินค้า (blank + no label).
-
-    ต่างจาก demote_silhouette_rim (v28) ตรงที่ไม่ต้องการ ext_frac สูง (เปิดสู่พื้นหลัง)
-    เพราะกรณีนี้ถูกขนาบด้วยกล่องจริงทั้ง 2 ฝั่ง - ใช้ "ความว่างเปล่าของเนื้อพิกเซลดิบ"
-    เป็นตัวชี้ขาดแทน (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล)"""
-    med = S.median_face_area()
-    if med <= 0:
-        return box
-    for r in sorted(box, key=lambda x: S.area(x)):
-        if S.text_px[r] > 0 or S.tilt_px[r] > 0:
-            continue                      # มีป้าย/มีเส้นเอียง -> กล่องจริงแน่นอน ไม่แตะ
-        rel = S.area(r) / med
-        if rel < _BLANKGAP_MIN_REL or rel > _BLANKGAP_MAX_REL:
-            continue
-        mask = (S.labels == r)
-        blank_frac = float((S.gray[mask] >= 250).mean()) if mask.any() else 0.0
-        if blank_frac < _BLANKGAP_MIN_BLANK_FRAC:
-            continue                      # มีเนื้อหา/เส้นจริงอยู่ข้างใน -> ไม่ตัด (fail-safe)
-        box.discard(r)
-        report.append(dict(action="demote_blank_gap", region=int(r), face=S.face_type(r),
-                           area=int(S.area(r)), rel_face=round(rel, 3),
-                           blank_frac=round(blank_frac, 3),
-                           reason="ช่องว่างโครงตู้ว่างเปล่าสนิท ถูกขนาบด้วยกล่องจริง 2 ฝั่ง",
                            defect_class="OVERPAINT"))
     return box
 
@@ -12923,44 +12863,6 @@ def colorize_front_view(i): return colorize_v2911(i, "front")
 def colorize_back_view(i):  return colorize_v2911(i, "back")
 
 
-def colorize_v2912(img_bgr, view="front", trace=False):
-    img_bgr, seal = close_clipped_silhouette(img_bgr)
-    S = IsoScene(img_bgr)
-    report = []
-    if seal:
-        report.append(seal)
-    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
-    base = set(box)
-    box = demote_unsupported_planes(S, box, report)
-    box = promote_supported_faces(S, box, report)
-    box = demote_silhouette_rim(S, box, report)
-    box = repair_marked_faces(S, box, report)
-    box = repair_marked_planes(S, box, report)
-    box = demote_top_rail(S, box, report)
-    box = repair_enclosed_faces(S, box, report)
-    box = repair_buried_faces(S, box, report)
-    box = demote_ground_band(S, box, report)
-    box = demote_end_deck_wedge(S, box, report)
-    box = demote_wall_band(S, box, report)
-    box = demote_blank_seam_gap(S, box, report)     # <-- v29.12
-    v2911box = set(box)
-    box = demote_orphans(S, box, report)
-    out = paint(S, box)
-    if trace:
-        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
-                         final_boxes=len(box), actions=report,
-                         v2911box=sorted(v2911box), box=sorted(box))
-    return out
-
-
-def colorize_view(img_bgr, view="front", trace=False):
-    return colorize_v2912(img_bgr, view, trace)
-
-
-def colorize_front_view(i): return colorize_v2912(i, "front")
-def colorize_back_view(i):  return colorize_v2912(i, "back")
-
-
 # ============================================================================
 #  v29.5 - ROTATION-AWARE PAGE-2 PAIR  (แก้เคส Front บน / Back ล่าง)
 # ----------------------------------------------------------------------------
@@ -13171,7 +13073,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
             return None, info
         xref, img = hit
         front_shape = img.shape
-        out, tr = colorize_v2912(img, "front", trace=True)
+        out, tr = colorize_v2911(img, "front", trace=True)
         _, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         front_bytes = enc.tobytes()
         doc[0].replace_image(xref, stream=front_bytes)
@@ -13188,7 +13090,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
                 raw = doc.extract_image(imgs[1]["xref"])
                 img2 = cv2.cvtColor(
                     np.array(Image.open(io.BytesIO(raw["image"]))), cv2.COLOR_RGB2BGR)
-                out2, tr2 = colorize_v2912(img2, "back", trace=True)
+                out2, tr2 = colorize_v2911(img2, "back", trace=True)
                 _, enc2 = cv2.imencode(".jpg", out2, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                 page.replace_image(imgs[1]["xref"], stream=enc2.tobytes())
                 info["views"].append({"view": "back", "regions": tr2["regions"],
