@@ -2,6 +2,9 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
+v26.36 = v26.34 + COLORIZER v29.12: STRUCTURE-ADJACENT BLANK GAP (ช่องว่างโครงตู้ติดครีม
+         ถูกลงสีผิด, AA02-01 - แก้ให้ตรงจุดเดียว ไม่แตะหน้ากล่องจริงที่ไม่มีป้าย SKU เหมือน
+         v26.35 ที่เคยพังทั้งไฟล์ - ดู docstring เต็มที่ demote_structure_adjacent_blank_gap)
 v26.33 = v26.31 + GREEN-THEME FLOOR/WALL EXCLUSION (เฉพาะจุด cargo-fill ของ buried_front_row)
 v26.31 = v26.30 + SAME-BOX-SIZE GUARD (pairwise/tail_stepdown: กล่องขนาดเดียวกัน = ไม่ใช่ขั้น)
 v26.30 = v26.29 + FLAT-EDGE GUARD (hidden_behind up: เส้นยอดนิ่ง 2 ฝั่ง = กล่องเสมอกัน)
@@ -11274,7 +11277,7 @@ def risk_abs_box(risk, result):
 # (250 ชื่อในโปรแกรมหลัก vs 110 ชื่อในโมดูลลงสี - intersection = 0)
 # ============================================================================
 
-COLORIZER_VERSION = "v29.11"
+COLORIZER_VERSION = "v29.12"
 
 # --- v29.9: large SKU glyphs -------------------------------------------
 BIG_GLYPH_W, BIG_GLYPH_H = 260, 130
@@ -11672,6 +11675,105 @@ def demote_silhouette_rim(S, box, report):
                            area=int(S.area(r)), exterior=round(ext, 2),
                            rel_face=round(S.area(r) / med, 3),
                            reason="unlabelled sliver on outer silhouette",
+                           defect_class="OVERPAINT"))
+    return box
+
+
+# ============================================================================
+#  v29.12 - STRUCTURE-ADJACENT BLANK GAP  (ผู้ใช้วงไว้ - AA02-01 BACK มุมขวาบน)
+# ----------------------------------------------------------------------------
+#  อาการ: แถบว่างเปล่าสนิท (ไม่มีป้าย SKU ไม่มีเส้นเอียง) ที่ตำแหน่งรอยต่อระหว่างยอด
+#  กองสินค้ากับหลังคา/ผนังตู้ (ceiling ridge) ถูกระบายเป็นสีฟ้าเหมือนเป็นสินค้า ทั้งที่
+#  จริงเป็นเพียง "ช่องว่างของโครงตู้" ที่โผล่ขึ้นมาตรงรอยต่อ ไม่ใช่กล่องสินค้า
+#
+#  ROOT CAUSE: demote_silhouette_rim (v28) ใช้ ext_frac (เปิดสู่พื้นหลังภายนอกภาพ) เป็น
+#  ตัวตัดสิน แต่บริเวณนี้ "ไม่ได้เปิดสู่พื้นหลังนอกภาพ" (ext_frac เพียง 0.025-0.05) เพราะถูก
+#  ขนาบด้วยกล่องสินค้าจริงในแนวนอน จึงถูกเข้าใจผิดว่าเป็น "หน้ากล่องที่ถูกล้อมรอบ = ของจริง"
+#
+#  ทำไมแก้ด้วย "ไม่มีป้าย SKU + ว่างเปล่าสนิท" อย่างเดียวไม่ได้ (v29.12 รุ่นแรกเคยลองแล้ว
+#  ทำให้ไฟล์อื่นพังหนัก - บันทึกไว้กันทำซ้ำ): สแกนทั้งภาพพบว่ามีหน้ากล่องสินค้าจริงจำนวนมาก
+#  ที่ "ว่างเปล่าสนิทและไม่มีป้าย" เช่นกัน (ป้าย SKU ไปติดอยู่ที่ชิ้นส่วนข้างเคียงของกล่อง
+#  ใบเดียวกัน แต่ตัว region นี้เองไม่มี) ตัวอย่างที่วัดได้จริงในไฟล์เดียวกัน:
+#    region 17 (LEFT, rel=1.27) region 19 (RIGHT, rel=2.18) region 31 (RIGHT, rel=1.93)
+#    region 210 (TOP, rel=0.96) region 24 (LEFT, rel=0.62) region 25 (RIGHT, rel=0.36)
+#  ทั้ง 6 region นี้ "ว่างเปล่าสนิท 100%" เหมือนกันทุกประการกับ 2 จุดที่ผิด (region 6
+#  rel=0.144, region 86 rel=0.162) - ขนาด(rel)/รูปทรง/ป้าย ไม่สามารถแยกสองกลุ่มนี้ได้เลย
+#
+#  ตัวแยกที่ใช้แทน - เพื่อนบ้านแนวตั้ง (บน/ล่าง) ต้องมีบริเวณโครงสร้างตู้ (ครีม) ขนาดใหญ่
+#  พอจะนับได้ ติดอยู่จริง ไม่ใช่แค่เศษ noise เล็กๆ
+#    ตรวจพบว่า region 6 มีเพื่อนบ้านด้านบนเป็นครีม area=12999,17007 (ผนัง/หลังคาตู้)
+#    ส่วน region 86 มีเพื่อนบ้านด้านล่างเป็นครีม area=994 (ขอบผนังชิ้นเล็ก)
+#    ขณะที่ทั้ง 6 region ที่เป็นหน้ากล่องจริง มีเพื่อนบ้านบน-ล่างเป็น "คาร์โก้" ล้วน
+#    (เพื่อนบ้านที่ไม่ใช่คาร์โก้ ถ้ามี จะเป็นเศษ noise ขนาด 9-23px เท่านั้น)
+#    ตั้งเกณฑ์ขั้นต่ำที่ 400px (สูงกว่าเศษ noise สูงสุด 23px มาก แต่ต่ำกว่า region86 ที่ 994px)
+#
+#  หลักฐานความปลอดภัย - ทดสอบกฎนี้กับทั้ง 8 region ที่ทราบคำตอบแล้ว (2 บั๊ก + 6 ของจริง)
+#  แยกถูกต้องครบทั้ง 8/8 จุด ไม่มีจุดใดถูกตัดสินผิดเลย
+# ============================================================================
+_BLANKGAP_MIN_REL = 0.05            # ต้องใหญ่พอจะมีผลต่อภาพ (กันเศษ noise <5% ของ median)
+_BLANKGAP_MAX_REL = RIM_MAX_FACE_FRAC  # ใช้เพดานเดียวกับ rim (0.35) - ถ้าใหญ่กว่านี้ไม่แตะ
+_BLANKGAP_VSCAN_REACH = 8            # ระยะสแกนขึ้น/ลงเพื่อหาเพื่อนบ้านแนวตั้ง (px)
+_BLANKGAP_VSCAN_STRIDE = 3           # ระยะห่างของคอลัมน์ x ที่สุ่มตรวจ (ประหยัดเวลา)
+_BLANKGAP_MIN_STRUCT_NEIGHBOUR_AREA = 400  # เพื่อนบ้านครีมต้องใหญ่กว่านี้ (กันเศษ noise 9-23px)
+
+
+def _vertical_neighbours(S, rid, reach=_BLANKGAP_VSCAN_REACH, stride=_BLANKGAP_VSCAN_STRIDE):
+    """หา region ที่อยู่ติดกันในแนวตั้ง (เหนือ/ใต้) ของ region rid พร้อมจำนวนจุดที่ติด."""
+    ys, xs = np.where(S.labels == rid)
+    top_n, bot_n = {}, {}
+    for x in np.unique(xs)[::stride]:
+        col_ys = ys[xs == x]
+        if len(col_ys) == 0:
+            continue
+        top_y, bot_y = col_ys.min(), col_ys.max()
+        for dy in range(1, reach + 1):
+            ty = top_y - dy
+            if 0 <= ty < S.labels.shape[0]:
+                v = S.labels[ty, x]
+                if v != 0 and v != rid:
+                    top_n[v] = top_n.get(v, 0) + 1
+                    break
+        for dy in range(1, reach + 1):
+            by = bot_y + dy
+            if 0 <= by < S.labels.shape[0]:
+                v = S.labels[by, x]
+                if v != 0 and v != rid:
+                    bot_n[v] = bot_n.get(v, 0) + 1
+                    break
+    return top_n, bot_n
+
+
+def demote_structure_adjacent_blank_gap(S, box, report):
+    """v29.12 - ถอดสีช่องว่างโครงตู้ที่โผล่ตรงรอยต่อยอดกอง/หลังคาตู้ (blank + no label
+    + ติดครีมในแนวตั้ง) ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก AA02-01)
+
+    ต่างจาก demote_silhouette_rim (v28) ตรงที่ไม่ต้องการ ext_frac สูง (เปิดสู่พื้นหลัง
+    ภายนอกภาพ) เพราะกรณีนี้ถูกขนาบด้วยกล่องจริงในแนวนอน - ใช้ "เพื่อนบ้านแนวตั้งที่เป็น
+    โครงสร้างตู้ขนาดใหญ่พอ" เป็นตัวชี้ขาดแทน ซึ่งแยกจาก "หน้ากล่องจริงที่ไม่มีป้าย" ได้
+    เพราะหน้ากล่องจริงจะถูกล้อมด้วยคาร์โก้ทั้งบนล่างเสมอ ไม่มีโครงสร้างตู้มาติดเลย"""
+    med = S.median_face_area()
+    if med <= 0:
+        return box
+    for r in sorted(box, key=lambda x: S.area(x)):
+        if S.text_px[r] > 0 or S.tilt_px[r] > 0:
+            continue                      # มีป้าย/มีเส้นเอียง -> กล่องจริงแน่นอน ไม่แตะ
+        rel = S.area(r) / med
+        if rel < _BLANKGAP_MIN_REL or rel > _BLANKGAP_MAX_REL:
+            continue
+        mask = (S.labels == r)
+        if not mask.any() or S.gray[mask].max() < 255:
+            continue                      # มีเนื้อหา/เส้นจริงอยู่ข้างใน -> ไม่ตัด (fail-safe)
+        top_n, bot_n = _vertical_neighbours(S, r)
+        has_struct_neighbour = any(
+            (label not in box) and (S.area(label) >= _BLANKGAP_MIN_STRUCT_NEIGHBOUR_AREA)
+            for label in list(top_n) + list(bot_n)
+        )
+        if not has_struct_neighbour:
+            continue                      # ล้อมด้วยคาร์โก้ล้วน -> หน้ากล่องจริงที่ไม่มีป้าย
+        box.discard(r)
+        report.append(dict(action="demote_blank_gap", region=int(r), face=S.face_type(r),
+                           area=int(S.area(r)), rel_face=round(rel, 3),
+                           reason="ช่องว่างโครงตู้ที่โผล่ตรงรอยต่อยอดกอง - ติดครีมแนวตั้ง",
                            defect_class="OVERPAINT"))
     return box
 
@@ -12863,6 +12965,44 @@ def colorize_front_view(i): return colorize_v2911(i, "front")
 def colorize_back_view(i):  return colorize_v2911(i, "back")
 
 
+def colorize_v2912(img_bgr, view="front", trace=False):
+    img_bgr, seal = close_clipped_silhouette(img_bgr)
+    S = IsoScene(img_bgr)
+    report = []
+    if seal:
+        report.append(seal)
+    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
+    base = set(box)
+    box = demote_unsupported_planes(S, box, report)
+    box = promote_supported_faces(S, box, report)
+    box = demote_silhouette_rim(S, box, report)
+    box = repair_marked_faces(S, box, report)
+    box = repair_marked_planes(S, box, report)
+    box = demote_top_rail(S, box, report)
+    box = repair_enclosed_faces(S, box, report)
+    box = repair_buried_faces(S, box, report)
+    box = demote_ground_band(S, box, report)
+    box = demote_end_deck_wedge(S, box, report)
+    box = demote_wall_band(S, box, report)
+    box = demote_structure_adjacent_blank_gap(S, box, report)   # <-- v29.12
+    v2911box = set(box)
+    box = demote_orphans(S, box, report)
+    out = paint(S, box)
+    if trace:
+        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
+                         final_boxes=len(box), actions=report,
+                         v2911box=sorted(v2911box), box=sorted(box))
+    return out
+
+
+def colorize_view(img_bgr, view="front", trace=False):
+    return colorize_v2912(img_bgr, view, trace)
+
+
+def colorize_front_view(i): return colorize_v2912(i, "front")
+def colorize_back_view(i):  return colorize_v2912(i, "back")
+
+
 # ============================================================================
 #  v29.5 - ROTATION-AWARE PAGE-2 PAIR  (แก้เคส Front บน / Back ล่าง)
 # ----------------------------------------------------------------------------
@@ -13073,7 +13213,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
             return None, info
         xref, img = hit
         front_shape = img.shape
-        out, tr = colorize_v2911(img, "front", trace=True)
+        out, tr = colorize_v2912(img, "front", trace=True)
         _, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         front_bytes = enc.tobytes()
         doc[0].replace_image(xref, stream=front_bytes)
@@ -13090,7 +13230,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
                 raw = doc.extract_image(imgs[1]["xref"])
                 img2 = cv2.cvtColor(
                     np.array(Image.open(io.BytesIO(raw["image"]))), cv2.COLOR_RGB2BGR)
-                out2, tr2 = colorize_v2911(img2, "back", trace=True)
+                out2, tr2 = colorize_v2912(img2, "back", trace=True)
                 _, enc2 = cv2.imencode(".jpg", out2, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                 page.replace_image(imgs[1]["xref"], stream=enc2.tobytes())
                 info["views"].append({"view": "back", "regions": tr2["regions"],
