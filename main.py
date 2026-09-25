@@ -7900,7 +7900,7 @@ def _tail_stepdown_crossview_confirmed(risk, records_front, records_back):
     return True
 
 
-def detect_tail_stepdown(records, view_label, view_result=None):
+def detect_tail_stepdown(records, view_label, view_result=None, single_front=False):
     """ตรวจ step-down โซนท้ายตู้ (pos > TAIL_STEPDOWN_REAR_POS_MIN)
 
     v25.54 FIX: เพิ่ม 2 guards ป้องกัน false-positive จากตู้เต็ม (EA07-01):
@@ -7941,7 +7941,11 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     # พื้นขั้นต่ำสัมบูรณ์ 40px กันคอลัมน์เศษ: CC28-01 ผ่าน (62 >= 51.5) | EA07-01 ยังถูกตัด
     # (57 < 70.0) = รักษาเจตนาเดิมของ Guard 1 ไว้ครบ
     TAIL_STEPDOWN_MIN_COL_WIDTH_ABS = 40  # px พื้นขั้นต่ำสัมบูรณ์ (คอลัมน์เศษ/artifact)
-    TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC = 0.70  # เทียบ median ความกว้างคอลัมน์ของวิวนี้
+    TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC = 0.70  # dual-view / FRONT-BACK ปกติ
+    # v26.40: single-view page 1 เป็น FRONT แต่กล่องท้ายจริงอาจแคบกว่า median มาก
+    # PB01 วัดได้ 82px เทียบ median 150px = 54.7%; ใช้ 0.50 เฉพาะ single FRONT
+    # เพื่อให้กล่องจริงผ่าน width guard โดยยังคง absolute floor 40px และ guards อื่นทั้งหมด
+    TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC_SINGLE_FRONT = 0.50
     TAIL_STEPDOWN_DROP_RATIO_STRICT = 0.25  # เกณฑ์เข้มสำหรับ cross_view_corrected
 
     risks = []
@@ -7963,11 +7967,14 @@ def detect_tail_stepdown(records, view_label, view_result=None):
     _widths = [float(r["x_range"][1] - r["x_range"][0]) for r in valid
                if r.get("x_range") and (r["x_range"][1] - r["x_range"][0]) > 0]
     _med_w = float(np.median(_widths)) if len(_widths) >= 3 else 100.0
-    _min_w = max(TAIL_STEPDOWN_MIN_COL_WIDTH_ABS, _med_w * TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC)
+    _width_frac = (TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC_SINGLE_FRONT
+                   if single_front else TAIL_STEPDOWN_MIN_COL_WIDTH_FRAC)
+    _min_w = max(TAIL_STEPDOWN_MIN_COL_WIDTH_ABS, _med_w * _width_frac)
     if (x1t - x0t) < _min_w:
         print(f"[TAIL_STEPDOWN] {view_label} คอลัมน์ท้าย x={tail_rec['x_range']} "
               f"กว้าง {x1t - x0t}px < เกณฑ์ {_min_w:.1f}px "
-              f"(median คอลัมน์ของวิวนี้ {_med_w:.1f}px) -> ไม่เชื่อค่าความสูง ไม่ flag")
+              f"(median คอลัมน์ของวิวนี้ {_med_w:.1f}px, width_frac={_width_frac:.2f}, "
+              f"single_front={single_front}) -> ไม่เชื่อค่าความสูง ไม่ flag")
         return risks
 
     inner_rec = valid[tail_idx - 1]
@@ -11440,6 +11447,128 @@ def compute_phase1b_columns_single(region_hires, down_factor=1.0):
         return None
 
 
+
+# ============================================================================
+# v26.41 - SINGLE FRONT SMALL-BOX STEP GROUP
+# Detect individual small front faces before Phase-1B column merging destroys
+# their geometry. Adjacent/overlapping boxes are merged into one clean frame.
+# ============================================================================
+def detect_single_front_smallbox_group(view_result, view_label="FRONT"):
+    if view_label != "FRONT" or not view_result:
+        return []
+    cells = view_result.get("_front_cells") or []
+    floor = view_result.get("local_floor_y")
+    if len(cells) < 3 or floor is None:
+        return []
+
+    origin_x = int(view_result.get("crop_origin_x", 0))
+    origin_y = int(view_result.get("crop_origin_y", 0))
+
+    # Face ranges measured from PB01 and normalized by all detected cells.
+    widths = [float(c.get("x1", 0) - c.get("x0", 0)) for c in cells
+              if c.get("x1", 0) > c.get("x0", 0)]
+    if not widths:
+        return []
+    med_w = float(np.median(widths))
+    min_w = max(24.0, med_w * 0.22)
+    max_w = max(180.0, med_w * 1.45)
+
+    boxes = []
+    for c in cells:
+        x0 = int(round(c.get("x0", 0)))
+        x1 = int(round(c.get("x1", 0)))
+        h = float(c.get("h", 0))
+        w = x1 - x0
+        if w < min_w or w > max_w:
+            continue
+        # Small-box faces in PB01 are distinct from full-height stacks.
+        if h < 70.0 or h > 330.0:
+            continue
+        cx = max(0, min(len(floor) - 1, int(round((x0 + x1) / 2.0))))
+        fy = float(floor[cx])
+        if not np.isfinite(fy):
+            continue
+        y1 = int(round(fy))
+        y0 = int(round(fy - h))
+        if y1 <= y0:
+            continue
+        boxes.append([x0, y0, x1, y1])
+
+    if len(boxes) < 2:
+        return []
+
+    # Remove near-duplicate faces. Keep the tighter physical face.
+    boxes.sort(key=lambda b: ((b[2]-b[0])*(b[3]-b[1]), b[0]))
+    kept = []
+    for b in boxes:
+        duplicate = False
+        for k in kept:
+            ix = max(0, min(b[2], k[2]) - max(b[0], k[0]))
+            iy = max(0, min(b[3], k[3]) - max(b[1], k[1]))
+            inter = ix * iy
+            amin = min((b[2]-b[0])*(b[3]-b[1]), (k[2]-k[0])*(k[3]-k[1]))
+            if amin > 0 and inter / amin >= 0.82:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(b)
+
+    # Connected-component merge. Frames touching or separated by <= 22 px
+    # horizontally are one visual group, avoiding clutter from many boxes.
+    groups = []
+    for b in sorted(kept, key=lambda z: z[0]):
+        attached = []
+        for i, g in enumerate(groups):
+            hgap = max(0, max(g[0], b[0]) - min(g[2], b[2]))
+            vover = max(0, min(g[3], b[3]) - max(g[1], b[1]))
+            vmin = max(1, min(g[3]-g[1], b[3]-b[1]))
+            if hgap <= 22 and (vover / vmin >= 0.15 or hgap == 0):
+                attached.append(i)
+        if not attached:
+            groups.append(b[:])
+        else:
+            base = attached[0]
+            groups[base] = [min(groups[base][0], b[0]), min(groups[base][1], b[1]),
+                            max(groups[base][2], b[2]), max(groups[base][3], b[3])]
+            for j in reversed(attached[1:]):
+                g = groups.pop(j)
+                groups[base] = [min(groups[base][0], g[0]), min(groups[base][1], g[1]),
+                                max(groups[base][2], g[2]), max(groups[base][3], g[3])]
+
+    risks = []
+    for g in groups:
+        # Require a meaningful multi-box span; reject isolated CAD fragments.
+        members = [b for b in kept if not (b[2] < g[0] or b[0] > g[2])]
+        if len(members) < 2 or (g[2] - g[0]) < max(120.0, med_w * 1.35):
+            continue
+        # Extend the top edge to the matching small roof cells, not merely the
+        # visible front-face fragment. This covers the complete stepped group.
+        roofs = view_result.get("_roof_cells") or []
+        roof_areas = [float(r.get("area", 0)) for r in roofs if r.get("area", 0) > 0]
+        med_ra = float(np.median(roof_areas)) if roof_areas else 0.0
+        small_roof_tops = []
+        for r in roofs:
+            rx0, rx1 = float(r.get("x0", 0)), float(r.get("x1", 0))
+            inter = max(0.0, min(float(g[2]), rx1) - max(float(g[0]), rx0))
+            if inter <= 0:
+                continue
+            if med_ra > 0 and float(r.get("area", 0)) <= med_ra * 0.78:
+                small_roof_tops.append(float(r.get("y0", g[1])))
+        top_local = min([float(g[1])] + small_roof_tops)
+        top_local = max(0.0, top_local - 45.0)
+        abs_box = (g[0] + origin_x, int(round(top_local)) + origin_y,
+                   g[2] + origin_x, g[3] + origin_y)
+        risks.append({
+            "risk_type": "STEP_DOWN_RISK",
+            "subtype": "single_front_smallbox_group",
+            "view": "FRONT", "mark_view": "FRONT", "mark_stack_idx": None,
+            "abs_box": abs_box,
+            "smallbox_count": len(members),
+            "height_source": "front_cells_pre_phase1b",
+        })
+        print(f"[SINGLE_SMALLBOX] merged {len(members)} faces -> abs_box={abs_box}")
+    return risks
+
 def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_IDX,
                                        matrix_scale=3, pdf_bytes=None):
     """v25.91 NEW: วิเคราะห์ "หน้าที่ 1 หน้าเดียว" ตามกฎที่ผู้ใช้กำหนด (ใช้เมื่อไม่มีหน้าใดเป็น
@@ -11493,21 +11622,26 @@ def run_single_view_analysis_on_image(full_img, doc, page_idx=_SINGLE_VIEW_PAGE_
         sh["height_px"] = rec["height_px"]
         sh["height_source"] = rec["height_source"]
 
+    # v26.39: SINGLE_VIEW_PAGE1 ใช้กลไก FRONT ทั้งหมดที่ไม่ต้องพึ่ง BACK
+    # รักษาลำดับเดียวกับ FRONT pipeline: ตรวจทั้งหมดก่อน แล้วจึงใช้ suppress/dedup
+    # เพื่อไม่ให้ risk ที่เพิ่มภายหลังหลุดจาก guard ของ FRONT (เช่น large-box tail notch).
     risks = []
     risks += detect_step_down_pairwise(records, "FRONT", view_result=view)
     risks += detect_step_down_hidden_behind(view, records, "FRONT")
-    risks += detect_silhouette_notch_risk(view, "FRONT")
-    # v26.15: ระงับกรอบส้มที่ปลายสุดของกองกล่องใหญ่วางเรียงแถวเดียว
-    risks = _suppress_largebox_tail_notch(risks, view, records, "FRONT")
-    # v25.92 NEW: เปิด tail_stepdown ตามที่ผู้ใช้ยืนยันว่า "หน้าที่ 1 เป็น front view ใช้การ
-    # วิเคราะห์ตามระบบได้" (ดู docstring ด้านบน) - ใช้ทิศทางเดียวกับ FRONT view มาตรฐาน
     risks += detect_tail_stepdown(records, "FRONT", view_result=view)
-    # v26.01: โพรงสูงต่ำท้ายรถ (หน้าที่ 1 เป็น front view จึงใช้ได้ตามปกติ)
     risks += detect_tailzone_wall_exposure(view, records, "FRONT")
-    # v26.25: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมใต้เส้นเงา (ดู docstring เต็มด้านบน)
-    _buried = _dedup_buried_self(detect_buried_front_row(view, records, "FRONT"))
+    risks += detect_single_front_smallbox_group(view, "FRONT")
+    risks += detect_silhouette_notch_risk(view, "FRONT")
+
+    # FRONT buried-row detector ใช้ roof/front cells ที่เก็บจาก single-view crop โดยตรง
+    _buried = _dedup_buried_self(
+        detect_buried_front_row(view, records, "FRONT")
+    )
     if _buried:
         risks = _dedup_buried_against_existing(risks + _buried, "FRONT")
+
+    # FRONT post-guards ต้องทำหลังรวบรวม risk ครบทุกกลไก
+    risks = _suppress_largebox_tail_notch(risks, view, records, "FRONT")
 
     risks = _dedup_overlapping_stepdown_risks(risks)
     risks = _dedup_stepdown_corrupted_by_adjacent_notch(risks, records, [])
