@@ -2,9 +2,195 @@
 ================================================================================
 AI Cargo Safety Checker - v25.22 ZERO-AI EDITION
 ================================================================================
-v26.36 = v26.34 + COLORIZER v29.12: STRUCTURE-ADJACENT BLANK GAP (ช่องว่างโครงตู้ติดครีม
-         ถูกลงสีผิด, AA02-01 - แก้ให้ตรงจุดเดียว ไม่แตะหน้ากล่องจริงที่ไม่มีป้าย SKU เหมือน
-         v26.35 ที่เคยพังทั้งไฟล์ - ดู docstring เต็มที่ demote_structure_adjacent_blank_gap)
+v26.38 = v26.37 + FLOOR-LEVEL ROOF GUARD - แก้ false positive ที่ผู้ใช้ชี้ในไฟล์ TC51-03.pdf
+FRONT view ("กรอบตรงพื้นสีเหลือง วาดเกินมา")
+
+--- อาการที่ผู้ใช้แจ้ง (24-Sep-2026) --------------------------------------------
+FRONT view มีกรอบแดง 2 จุด: จุดหนึ่งอยู่บนกล่องสีเขียว TGT1BB1-P1 (ถูกต้อง) อีกจุดอยู่บน "พื้นตู้
+สีเหลืองเปล่า" มุมล่างซ้ายของภาพ (ไม่มีกล่องใดๆอยู่ในกรอบเลย) - ผู้ใช้ถามว่าตำแหน่งที่ถูกต้องคือ
+ตรงไหน
+
+--- ROOT CAUSE (ยืนยันด้วย pixel/region จริงจาก TC51-03.pdf) ---------------------------
+detect_buried_front_row ตรวจพบ "roof cell" (หลังคากล่อง) ปลอมที่ x=[610,822] สี (255,255,0) ซึ่ง
+เป็นสีพื้นตู้ของไฟล์นี้ (ไม่ใช่สีกล่องสินค้า) - ไฟล์นี้ใช้สีพื้นตู้เป็นเหลืองสดจัด ต่างจากไฟล์อื่น
+ที่มักใช้สีน้ำตาล/ทองอมเหลืองจาง (เช่น 255,255,133) ซึ่งเป็นสีที่ _p1b_is_structural_container_color
+ถูก calibrate ไว้ให้จับได้อยู่แล้ว - สีเหลืองสดของไฟล์นี้ (R-B=255) หลุดพ้นช่วง hue-pattern ที่ตั้งไว้
+(R-B ต้องอยู่ในช่วง 75-125) จึงไม่ถูกกรองออกเป็นสีโครงสร้างตู้ และเนื่องจากเป็นสีอิ่มตัวสูง (sat=1.0)
+จึงผ่านเกณฑ์ vivid_cargo_mask ได้ง่าย ถูกจัดเป็น "หลังคากล่อง" (roof) ไปด้วยความบังเอิญทางเรขาคณิต
+(ชิ้นส่วนพื้นที่ถูกล้อมด้วยเส้นตัดจนมี aspect ratio เข้าเกณฑ์ roof พอดี)
+
+*** ทำไมจึงไม่แก้ด้วยการ "แบล็กลิสต์สีเหลือง" ***: ตรวจสอบ CHANGELOG เดิมพบว่าไฟล์ EC16-01/EA02-02
+เคยใช้สีเหลืองสดเดียวกันนี้ (255,255,0) เป็น "สีกล่องสินค้าจริง" (ITC1A-BL) มาก่อน - การแบล็กลิสต์
+สีนี้ตรงๆ จะทำให้เกิด false-negative กับไฟล์กลุ่มนั้นทันที จึงต้องหาสัญญาณเชิงเรขาคณิต ไม่ใช่สีเชิงเดียว
+
+--- สัญญาณที่ใช้แก้ (เชิงเรขาคณิต ไม่ขึ้นกับสี) --------------------------------------
+ตรวจสอบ margin = local_floor_y (เส้นพื้นตู้จริง ณ x กึ่งกลางของ roof) - roof_y1 (ขอบล่างของ roof)
+สำหรับทุก roof cell ในไฟล์นี้:
+  roof ปลอม (สีพื้นตู้ 255,255,0) : margin = -17, -11, -1, -10 px  (ขอบล่าง "ต่ำกว่า" พื้นตู้จริง)
+  roof จริง (กล่องม่วง/เขียว)     : margin = +245, +213, +135, +103 px (สูงกว่าพื้นตู้มาก)
+เป็นไปไม่ได้ทางกายภาพที่ "หลังคากล่อง" จะอยู่ต่ำกว่าหรือเสมอพื้นตู้ (กล่องต้องมีความสูงเป็นบวกเสมอ)
+ช่องว่างระหว่าง 2 กลุ่มกว้างมาก (กล่องจริงต่ำสุด=103px เทียบของปลอมสูงสุด=-1px) เลือกเกณฑ์ 20px
+(ต่ำกว่ากลุ่มจริงมาก แต่สูงกว่ากลุ่มปลอมทุกจุด)
+
+--- FIX: FLOOR-LEVEL ROOF GUARD ใน detect_buried_front_row -----------------------------
+ปฏิเสธ roof cell ที่ margin < _BURIED_ROOF_MIN_FLOOR_MARGIN_PX (20px) ทันที ก่อนเช็คเงื่อนไขอื่นใด
+ทั้งหมด (area/aspect/depth ฯลฯ) - เป็น pre-filter ทางเรขาคณิตล้วนๆ ไม่แตะเงื่อนไขสีใดๆ ที่มีอยู่เดิม
+
+ผลการรันจริง TC51-03.pdf หลังแก้: FRONT view เหลือกรอบแดงเพียงจุดเดียว (บนกล่องเขียว TGT1BB1-P1,
+x=[1082,1203], drop=30.5%) - กรอบปลอมบนพื้นเหลืองหายไปสมบูรณ์ | BACK view (EMPTY_SPACE_RISK/
+silhouette_notch) ไม่เปลี่ยนแปลง
+
+REGRESSION (รันซ้ำ 3 ไฟล์ที่เคยยืนยันแล้วในรอบก่อน - PA01/EA06/EB14): ผลลัพธ์เหมือนเดิมทุกประการ
+ทั้ง 3 ไฟล์ (PA01 buried_front_row ยังคงถูก flag ถูกต้อง, EA06/EB14 ยังคงถูกระงับเหมือนเดิม) เพราะ
+roof cell ของทั้ง 3 ไฟล์นั้นมี margin เป็นบวกมากอยู่แล้ว (เป็นกล่องจริง ไม่ใช่พื้นตู้) ไม่เข้าเงื่อนไข
+guard ใหม่นี้เลย
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+รอบนี้ยืนยันด้วยไฟล์ที่มีปัญหาจริงเพียงไฟล์เดียว (TC51-03.pdf) แม้หลักการจะมั่นคงทางฟิสิกส์ (หลังคา
+ต้องอยู่เหนือพื้นเสมอ) และช่องว่างระหว่าง 2 กลุ่มข้อมูลกว้างมาก (103px vs -1px) แต่ยังแนะนำให้รันกับ
+ไฟล์ buried_front_row อื่นเพิ่มเติม (ถ้ามี) ก่อน deploy วงกว้าง เพื่อยืนยันว่าไม่กระทบกรณีกล่องเตี้ย
+มากที่วางอยู่บนพื้นตู้จริงๆ (margin ควรยังคงเป็นบวกแม้กล่องจะเตี้ยมาก เพราะพื้นตู้กับหลังคากล่องคนละ
+เส้นกันเสมอ แต่ยังไม่มีไฟล์ทดสอบยืนยันกรณีสุดขั้วนี้โดยตรง)
+================================================================================
+v26.37 = v26.36 + FRONT-CELL DIRECT CONFIRMATION - แก้ false negative ที่ v26.36 เอง introduce
+โดยไม่ตั้งใจ (ไปลบ true positive ของไฟล์ต้นทาง PA01.pdf ที่ใช้สร้างกลไก buried_front_row เอง)
+
+--- อาการที่พบ (24-Sep-2026 หลังผู้ใช้แนบ PA01.pdf เพื่อทดสอบ regression) --------------
+รัน PA01.pdf (ไฟล์ต้นทางของกลไก buried_front_row v26.25) ผ่าน v26.36 พบว่า true positive ที่
+เคยตรวจพบถูกต้อง (กล่อง SNF1A-T8 แถวหน้าเตี้ยกว่า จมใต้เส้นเงาของกอง SNF1A-S1 ด้านหลัง - ยืนยัน
+ด้วยภาพจริง) หายไป เพราะ STACK-HEIGHT-PARITY GUARD (v26.36) เข้าใจผิดว่าเป็น false positive
+
+--- ROOT CAUSE (ยืนยันด้วยข้อมูลจริงจาก PA01.pdf) --------------------------------------
+docstring เดิมของ detect_buried_front_row (v26.25) เขียนไว้เองตั้งแต่ต้นว่า "กล่องเหล่านี้ไม่มี
+index ของตัวเองใน stack_heights เพราะไม่เคยถูกมองเห็นมาก่อน" - กล่องที่จมใต้เส้นเงาไม่มี record/
+คอลัมน์เป็นของตัวเองเลย เพราะ front-face ของมันถูกกล่องแถวหลังบังมิด (เห็นแค่หลังคาโผล่นิดเดียว)
+เมื่อ parity guard (v26.36) หา record ที่ x-range ทับซ้อนกับ roof cell นี้มากที่สุด จึงได้ record
+ของ "กองสูงข้างเคียง" มาโดยบังเอิญ (คนละกล่องกันโดยสิ้นเชิง) แล้วเทียบกับ record ถัดไป (ก็เป็นกอง
+สูงเช่นกัน) -> ได้ผลว่า "สูงเท่ากัน" (record_drop=0.3%) ทั้งที่ไม่ได้เทียบกล่องที่จมกับกองสูงเลย
+ยืนยันด้วยตัวเลขจริง PA01 x=[308,591]: buried_h(จาก roof/silhouette จริง)=445.5px แต่ record ที่
+parity guard จับคู่มาให้ (idx1 x_range=(450,598)) กลับมีค่า 640.2px (เป็นค่าของกองสูงข้างเคียง
+ไม่ใช่ของกล่องที่จมเลย) -> parity guard เข้าใจผิดว่า "ผ่าน" (drop เพี้ยนต่ำ) จึงระงับผิดพลาด
+
+--- FIX: _buried_front_cell_confirms() - ตรวจสอบก่อน parity guard เสมอ ----------------
+ใช้ _front_cells (fragment หน้ากล่องดิบ ก่อน merge เป็นคอลัมน์ - ต่างจาก records) แทน: ถ้ามี
+fragment ที่ทับซ้อนกับ roof cell มากพอ (>=40%) และมีความสูงใกล้เคียงกับ buried_h ที่วัดได้จริง
+(ภายใน 12%) แสดงว่า fragment นั้นคือ "หน้ากล่องจริงบางส่วนของกล่องที่จมเอง" ที่ยังพอมองเห็นได้ -
+ยืนยันว่าเป็นกล่องแยกต่างหากจริง ให้ข้าม parity guard ไปเลย (ไม่ระงับ)
+
+หลักฐานเปรียบเทียบ 3 ไฟล์ (front cell ที่ทับซ้อน>=40% กับ roof แล้วใกล้ buried_h ที่สุด):
+  PA01.pdf (ต้องยืนยัน)     : buried_h=445.5px | fragment ใกล้ที่สุด=422.25px, diff=5.2%  -> ผ่าน
+  EA06-01-10-Sep-26 (ต้องไม่): buried_h~255px   | fragment ใกล้ที่สุด=152.25px, diff~40%  -> ไม่ผ่าน
+  EB14-01-12-Sep-26 (ต้องไม่): buried_h=258px    | fragment ใกล้ที่สุด=218.25px, diff=15.4% -> ไม่ผ่าน
+เกณฑ์ 12% แยกทั้ง 3 ไฟล์ได้ขาด (PA01 ผ่านสบายๆที่ 5.2% | EB14 ที่ใกล้เกณฑ์ที่สุดยังห่าง 3.4 จุด)
+
+ผลการรันจริงหลังแก้ (รันครบทั้ง 3 ไฟล์อีกครั้ง):
+  PA01.pdf : buried_front_row กลับมา flag ถูกต้อง (x=[308,591], SNF1A-T8) - true positive คืนมา
+  EA06/EB14: ยังคงถูกระงับด้วย parity guard เหมือนเดิมทุกประการ (ไม่ confirmed -> parity ทำงาน
+             ตามปกติ, record_drop ต่ำกว่าเกณฑ์เหมือนเดิม) - false positive ทั้ง 2 ไฟล์ยังคงหายไป
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+รอบนี้ยืนยันด้วยไฟล์ 3 ไฟล์ (PA01/EA06/EB14) เกณฑ์ 12% คาลิเบรตจากช่องว่างระหว่าง 5.2% (ต้องผ่าน)
+กับ 15.4% (ต้องไม่ผ่าน) ของ 3 ไฟล์นี้เท่านั้น - แนะนำให้รันกับไฟล์ buried_front_row อื่นเพิ่มเติม
+(ถ้ามี) ก่อน deploy วงกว้าง เพื่อยืนยันว่าเกณฑ์ 12% ยัง generalize ได้ดีกับกรณีอื่น
+================================================================================
+v26.36 = v26.34 + BURIED_FRONT_ROW STACK-HEIGHT-PARITY GUARD - แก้ false positive ที่
+ผู้ใช้ชี้ในไฟล์ EA06-01-10-Sep-26.pdf (FRONT) และ EB14-01-12-Sep-26.pdf (BACK)
+
+--- อาการที่ผู้ใช้แจ้ง (24-Sep-2026) --------------------------------------------
+ทั้ง 2 ไฟล์ผู้ใช้ยืนยันว่า "ปลอดภัย" (การจัดวางถูกต้อง) แต่ระบบวาดกรอบแดง STEP_DOWN_RISK/
+buried_front_row (กลไกที่ 7) ทั้งคู่:
+  EA06-01-10-Sep-26 FRONT x=[685,834] drop=23.9% depth=80px (เกณฑ์ 80 - พอดีเป๊ะ)
+  EB14-01-12-Sep-26 BACK  x=[846,993] drop=23.7% depth=80px (เกณฑ์ 80 - พอดีเป๊ะ)
+ผู้ใช้ระบุว่าปัญหาลักษณะนี้ "เคยแก้ไปแล้ว" - ตรวจสอบพบว่าเป็นคนละกลไกกับที่เคยแก้ (SAME-
+BOX-SIZE GUARD v26.31 ถูกจำกัดขอบเขตไว้เฉพาะ pairwise/tail_stepdown เท่านั้นตามที่ระบุไว้
+ในบันทึกเดิม - ไม่เคยครอบคลุมถึง buried_front_row เลย)
+
+--- ROOT CAUSE (ยืนยันด้วยการรันจริงทั้ง 2 ไฟล์ เทียบ records vs roof/silhouette) --------
+detect_buried_front_row() รับพารามิเตอร์ "records" (ความสูงกองต่อคอลัมน์ที่ผ่าน
+reconcile_heights_cross_view + fill_missing_heights มาแล้ว - แหล่งเดียวกับที่ SAME-BOX-SIZE
+GUARD ใช้ตรวจสอบและกลไกอื่นทั้งหมดเชื่อถือ) แต่ไม่เคยใช้งานเลยแม้แต่บรรทัดเดียวตั้งแต่ v26.25
+- คำนวณ "drop" จาก roof_top/silhouette_top (จุดตัวอย่างเดียวที่ cx = กึ่งกลาง roof cell)
+ล้วนๆ ซึ่งคลาดเคลื่อนได้ง่ายเมื่อ cx ตกที่รอยต่อคอลัมน์พอดี (ยืนยันจริง: EA06 cx=759 ตรงกับ
+ขอบเขตคอลัมน์ idx1(683-759)/idx2(759-837) เป๊ะ | EB14 cx=920 ใกล้ขอบคอลัมน์ idx1(839-918)/
+idx2(918-959) มาก)
+
+เปรียบเทียบ drop ที่วัดได้ 2 วิธี (roof/silhouette แบบเดิม vs records แบบที่กลไกอื่นเชื่อถือ):
+  EA06 FRONT: roof-based drop=23.9%   | records idx1=300.8px, idx2=340.3px -> drop=11.6%
+  EB14 BACK : roof-based drop=23.7%   | records idx1=338.8px, idx2=338.9px -> drop=0.03%
+ทั้ง 2 ไฟล์ records-based drop ต่ำกว่าเกณฑ์ขั้นต่ำของกลไกเอง (_BURIED_MIN_DROP_RATIO=20%)
+มาก แสดงว่าความสูงกองจริง (total stack height ต่อคอลัมน์) แทบไม่ต่างกันเลย - ที่ roof/
+silhouette วัดว่าต่าง 23.7-23.9% เป็นความคลาดเคลื่อนของวิธีวัดแบบจุดเดียว ไม่ใช่ขั้นจริง
+
+--- FIX: _buried_record_height_check() + STACK-HEIGHT-PARITY GUARD ---------------------
+เพิ่มการตรวจสอบไขว้ (cross-check) กับ records ทันทีหลังคำนวณ roof-based drop เสร็จ:
+หา record ที่ x_range ทับกับ roof cell นี้ (>=40% overlap) และ record ถัดไป ถ้าทั้งคู่มี
+height_px จริง และ record-based drop < เกณฑ์ขั้นต่ำเดียวกัน (20%) -> ระงับกรอบทันที (roof/
+silhouette วัดคลาดเคลื่อน ไม่ใช่ขั้นจริง) - fail-safe: หา record ไม่ได้ -> ไม่ระงับ (คงพฤติกรรม
+เดิมทุกประการ เพื่อไม่กระทบกรณี "กล่องที่ไม่เคยถูกมองเห็นมาก่อน" ซึ่งเป็นเจตนาดั้งเดิมของ
+กลไกนี้และไม่มี record ให้เทียบอยู่แล้ว)
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+รอบนี้มีไฟล์ทดสอบเพียง 2 ไฟล์ (EA06-01-10-Sep-26, EB14-01-12-Sep-26) - ยืนยันว่าไม่กระทบ
+ไฟล์อื่นที่เคยทดสอบ (AA02-01.pdf ไม่มี buried_front_row triggered อยู่แล้วจึงไม่ได้ทดสอบ
+เส้นทางนี้) แนะนำให้รันกับไฟล์ที่มี buried_front_row true positive จริง (เช่นไฟล์ต้นทาง PA01
+ที่ใช้สร้างกลไกนี้ครั้งแรกใน v26.25) เพื่อยืนยันว่า guard ใหม่นี้ไม่ไปลบกรณีที่ถูกต้องด้วย
+================================================================================
+v26.34 = v26.33 + REAR FLOOR EXTENSION GUARD (COLORIZER v29.12) - แก้ "ลงสีพื้นท้ายรถ
+เกินมา" ที่ผู้ใช้ชี้ในไฟล์ AA02-01.pdf หน้า 2 (BACK VIEW) เท่านั้น
+
+--- อาการที่ผู้ใช้แจ้ง (24-Sep-2026) --------------------------------------------
+หน้า 2 ภาพ BACK VIEW: แถบพื้นตู้ว่าง (unused floor strip ต่อจากกองสินค้าไปทางท้ายรถ
+บริเวณป้ายระยะ "603 (mm) (1200-1200)") ถูกลงสีฟ้า (COLOR_BOX_CYAN) ทั้งที่ไม่มีสินค้า
+จริงอยู่ตรงนั้น - ครึ่งล่างของแถบเดียวกันนี้ (คนละ connected component เพราะมีข้อความ
+คั่นกลาง) ถูกระบุและถอดสีถูกต้องแล้วโดยฟังก์ชันเดิม (repair_marked_planes) กลายเป็น
+ครีมตามปกติ ยืนยันว่าทั้งแถบเป็นพื้นที่ว่างจริง ไม่ใช่กล่อง แต่ระบบแบ่งเป็น 2 ชิ้น
+(บน/ล่าง) และแก้ไขถูกแค่ชิ้นล่าง
+
+--- ROOT CAUSE (ยืนยันด้วย pixel/region จริงจากไฟล์ AA02-01.pdf BACK VIEW) -------
+region ที่ถูกระบายผิด (id=18 ณ ตอนตรวจสอบ, bbox 1374,693,316x212, rel=1.133,
+face_type=LEFT, ข้อความ "1200-1200" เอียงตามแนว isometric ทั้งหมด tilt_px=text_px)
+ใหญ่เกิน DEMOTE_REL_MAX (0.90) ของ repair_marked_planes() จึงหลุดรอด และรูปทรงเป็น
+สี่เหลี่ยมด้านขนาน (ไม่ใช่สามเหลี่ยม 3 มุม) จึงหลุดจาก demote_end_deck_wedge() ด้วย
+เช่นเดียวกับที่เคยพบใน v26.30-33
+
+สัญญาณที่แท้จริงและปลอดภัยที่สุดที่พบจากการตรวจสอบ "แรงรองรับด้านล่าง" (below-support)
+ของ region 18: below={27: 64, 38: 2, 35: 2} - เกือบทั้งหมด (64/68) มาจาก region 27
+ซึ่งเป็น "แถบพื้นเดียวกัน" ที่ระบบถอดสีถูกต้องไปแล้วก่อนหน้านี้ในขั้นตอนเดียวกัน
+(repair_marked_planes ผลลัพธ์: action=repair_plane, region=27, rel=0.656) กล่าวคือ
+region 18 "ลอยอยู่บนพื้นที่ที่ระบบเองก็ยืนยันแล้วว่าไม่ใช่สินค้า" - นี่คือข้อขัดแย้งภายใน
+(internal inconsistency) ที่พิสูจน์ว่า region 18 ก็ต้องเป็นพื้นเช่นกัน ไม่ใช่กล่อง
+
+--- การตรวจสอบเพื่อกันการกระทบกล่องจริง (regression บนไฟล์เดียวกัน) --------------
+ทดสอบสัญญาณ "support_fraction จาก region ที่ยังถูกระบายสีอยู่จริง (final box หลัง
+ผ่านทุกขั้นตอนเดิม)" กับทุกจุดที่ถูกระบายสีในภาพ BACK VIEW เดียวกัน (21 จุด):
+  - จุดที่ below ไม่ว่างเปล่า (มีอะไรอยู่ใต้จริง) ทุกจุด ยกเว้น region 18 มี
+    support_fraction (จากของที่ยังเป็นสีอยู่) >= 0.723 เสมอ (ส่วนใหญ่ = 0.93-1.00)
+    เพราะกล่องจริงต้องวางพิงกล่องจริงอื่นหรือพื้นตู้จริงเท่านั้น
+  - มีเพียง region 18 จุดเดียวที่ support_fraction = 0.000 ทั้งที่ below ไม่ว่างเปล่า
+    (below รวม 68px แต่ 0px มาจาก region ที่ยังถูกระบายสี) - ห่างจากค่าต่ำสุดของกล่อง
+    จริงจุดอื่น (0.723) มาก จึงเป็นเกณฑ์ที่ปลอดภัยและไม่ชนกล่องจริงจุดใดเลยในไฟล์นี้
+  - จุดที่ below ว่างเปล่าจริง ๆ (แถวล่างสุดวางบนพื้นตู้ตรง ๆ ไม่มี region คั่น เช่น
+    region 96,76,32,97) ถูกยกเว้นออกจากเกณฑ์นี้โดยอัตโนมัติ เพราะเช็คว่า below ต้อง
+    ไม่ว่างเปล่าก่อนเป็นเงื่อนไขแรก
+
+--- FIX: demote_rear_floor_extension() (ทำงานเฉพาะ view=="back" เท่านั้น) --------
+ถอดสีเฉพาะ region ที่เข้าเกณฑ์ครบทุกข้อพร้อมกัน (แคบโดยตั้งใจ):
+  (1) below-support ไม่ว่างเปล่า (มีบางอย่างอยู่ใต้จริงภายในระยะ 4-22px)
+  (2) support_fraction จาก region ที่ยังถูกระบายสีอยู่ ("final box" ปัจจุบัน) <=
+      REAR_FLOOR_SUPPORT_MAX (0.05 - แทบเป็นศูนย์) กล่าวคือ สิ่งที่รองรับอยู่ "ถูกถอดสี
+      ไปแล้วทั้งหมด" ไม่ใช่กล่องจริงเลยสักชิ้น
+  (3) rel(area) >= REAR_FLOOR_REL_MIN (0.30) กันไม่ให้ชนเศษ noise ชิ้นเล็ก ๆ
+ขอบเขต: ทำงานเฉพาะ BACK VIEW เท่านั้น (ตามคำสั่งผู้ใช้ "แก้เฉพาะท้ายรถที่ back view
+เพียงเท่านั้น ห้ามนอกกรอบ") ไม่แตะ FRONT VIEW และไม่แตะฟังก์ชัน demote/repair อื่นเดิม
+เลยแม้แต่บรรทัดเดียว - เพิ่มเป็นขั้นตอนใหม่ต่อท้ายเท่านั้น (รันหลัง demote_wall_band
+เพื่อให้ "final box ปัจจุบัน" ที่ใช้เช็ค support เป็นผลลัพธ์หลังผ่านการถอดสีอื่นครบแล้ว)
+
+*** ข้อจำกัดที่ต้องบอกตรงไปตรงมา ***
+รอบนี้มีไฟล์ทดสอบเพียงไฟล์เดียว (AA02-01.pdf) - ยังไม่ได้ regression กับไฟล์ BACK VIEW
+อื่น แม้เกณฑ์นี้จะอิงหลักการทั่วไป (กล่องจริงต้องพิงกล่องจริงหรือพื้นจริงเท่านั้น ไม่พิง
+ระนาบที่ระบบเองถอดสีทิ้งไปแล้ว) ซึ่งน่าจะ generalize ได้ดีกว่าเกณฑ์ขนาด/ตำแหน่งเดิม
+แต่ยังแนะนำให้รันกับไฟล์ BACK VIEW อื่นเพิ่มเติมก่อน deploy วงกว้าง
+================================================================================
 v26.33 = v26.31 + GREEN-THEME FLOOR/WALL EXCLUSION (เฉพาะจุด cargo-fill ของ buried_front_row)
 v26.31 = v26.30 + SAME-BOX-SIZE GUARD (pairwise/tail_stepdown: กล่องขนาดเดียวกัน = ไม่ใช่ขั้น)
 v26.30 = v26.29 + FLAT-EDGE GUARD (hidden_behind up: เส้นยอดนิ่ง 2 ฝั่ง = กล่องเสมอกัน)
@@ -10437,6 +10623,13 @@ _BURIED_SELF_XOVERLAP = 0.50        # buried 2 ใบที่ทับแกน
 #  เท่านั้น  ค่ากลางคือ 0.50 เผื่อความคลาดเคลื่อนจากการ render/crop เป็น 0.65
 #  (สูงกว่า roof จริงที่วัดได้ทุกใบ 0.50 อยู่ 30% แต่ยังต่ำกว่า 2 ใบที่ผิด 0.83/0.84 ชัดเจน)
 _BURIED_ROOF_MAX_ASPECT = 0.65      # h/w ของ bbox หน้าบนกล่อง (isometric จริง ~0.50)
+# v26.38 NEW: ดู docstring เต็มที่จุดใช้งานจริงใน detect_buried_front_row (FLOOR-LEVEL ROOF GUARD)
+# สำหรับหลักฐาน+เหตุผล (พบจริงจาก TC51-03.pdf) - ยืนยันด้วยข้อมูลจริงทุก roof cell ในไฟล์นั้น:
+#   roof สีพื้นตู้ปลอม (255,255,0) ทั้ง 4 ชิ้น: margin (floor_y - roof_y1) = -17,-11,-1,-10 px
+#   roof กล่องจริง (ม่วง/เขียว) ทั้ง 4 ชิ้น: margin = +245,+213,+135,+103 px
+# ช่องว่างระหว่าง 2 กลุ่มกว้างมาก (ต่ำสุดของกล่องจริง=103px เทียบสูงสุดของของปลอม=-1px) จึงเลือก
+# เกณฑ์ที่ 20px (ต่ำกว่ากลุ่มจริงมาก แต่สูงกว่ากลุ่มปลอมทุกจุด ให้ margin ปลอดภัยทั้ง 2 ฝั่ง)
+_BURIED_ROOF_MIN_FLOOR_MARGIN_PX = 20
 # --- v26.28 FIX: CARGO-FILL GUARD (พบจริงจาก CC04all front view ที่ผู้ใช้ชี้ว่าปลอดภัย) --
 #  อาการ: กรอบแดง buried_front_row ถูกวาดที่มุมล่างซ้ายของตู้แรก ทั้งที่ตรงนั้นแทบไม่มี
 #  สินค้าอยู่เลย (เป็นพื้นตู้/ขอบล่างที่ว่าง)
@@ -10712,6 +10905,77 @@ def _buried_overlap(a0, a1, b0, b1):
     return max(0.0, hi - lo) / span
 
 
+def _buried_front_cell_confirms(front_cells, x0, x1, buried_h,
+                                 min_overlap=0.4, tol=0.12):
+    """v26.37 NEW: True ถ้ามี front-face fragment (จาก _front_cells - ไม่ผ่านการ merge เป็น
+    คอลัมน์ ต่างจาก records) ที่ทับซ้อนกับ roof cell นี้มากพอ (>=min_overlap) และมีความสูงใกล้
+    เคียงกับ buried_h (ที่คำนวณจาก roof/silhouette ตรงจุดนี้) มาก (ภายใน tol=12%) - ถ้าพบ แสดง
+    ว่ามี "หน้ากล่องจริงของตัวมันเอง" ยืนยันว่านี่คือกล่องแยกต่างหากที่มีขนาดต่างจากกองข้างเคียง
+    จริง (ไม่ใช่แค่ค่าที่วัดคลาดเคลื่อน) - ใช้เป็นสัญญาณยืนยันเพื่อ "ยกเว้น" การระงับของ
+    STACK-HEIGHT-PARITY GUARD (ดู docstring เต็มที่หัวไฟล์ หัวข้อ v26.37)
+
+    ที่มา (ยืนยันด้วยไฟล์จริง PA01.pdf - ไฟล์ต้นทางที่ใช้สร้างกลไก buried_front_row เป็นครั้งแรก
+    ใน v26.25): STACK-HEIGHT-PARITY GUARD (v26.36) ที่เทียบกับ records (คอลัมน์ที่ผ่านการ merge
+    แล้ว) กลับไประงับ true positive ของไฟล์นี้เองโดยไม่ตั้งใจ เพราะกล่องที่ "จมใต้เส้นเงา" ไม่มี
+    record/คอลัมน์เป็นของตัวเองเลย (ตามที่ docstring เดิมของกลไกนี้ระบุไว้ตั้งแต่ v26.25: "กล่อง
+    เหล่านี้ไม่มี index ของตัวเองใน stack_heights เพราะไม่เคยถูกมองเห็นมาก่อน") roof cell ของมันจึง
+    ถูกจับคู่กับ record ของกองสูงข้างเคียงแทน (คนละกล่องกันโดยสิ้นเชิง) ทำให้ parity guard เข้าใจ
+    ผิดว่า "สูงเท่ากัน" ทั้งที่จริงแล้วกำลังเทียบกองสูงกับกองสูงข้างๆ กันเอง ไม่ใช่กองเตี้ยกับกองสูง
+
+    หลักฐานเปรียบเทียบ 3 ไฟล์ (front cell ที่ overlap>=0.4 กับ roof แล้วใกล้ buried_h ที่สุด):
+      PA01.pdf (จริง)         : buried_h=445.5px | front_cell h=422.25px (overlap=0.495)
+                                diff=5.2% <= 12% -> ยืนยันจริง (ต้อง flag)
+      EA06-01-10-Sep-26 (ผิด) : buried_h~255px   | front_cell ที่ overlap สูงสุด h=126.75-152.25px
+                                diff สูงสุด 40-50% > 12% -> ไม่ยืนยัน (ถูกระงับต่อด้วย parity guard)
+      EB14-01-12-Sep-26 (ผิด) : buried_h=258px    | front_cell ที่ใกล้ที่สุด h=218.25px (overlap=0.96)
+                                diff=15.4% > 12% -> ไม่ยืนยัน (ถูกระงับต่อด้วย parity guard)
+    ทั้ง 3 ไฟล์แยกออกจากกันได้ขาดด้วยเกณฑ์ 12% (ห่างจากทั้ง 2 ฝั่ง: PA01=5.2% ผ่านสบายๆ,
+    EB14=15.4% ใกล้ที่สุดของฝั่งที่ต้องไม่ผ่านแต่ยังห่างเกณฑ์ 3.4 จุด)
+
+    คืนค่า False ถ้าตรวจสอบไม่ได้ (fail-safe - จะตกไปใช้ parity guard เดิมตามปกติ)"""
+    if buried_h is None or buried_h <= 0 or not front_cells:
+        return False
+    for fc in front_cells:
+        ov = _buried_overlap(x0, x1, fc.get("x0", 0), fc.get("x1", 0))
+        if ov < min_overlap:
+            continue
+        fh = fc.get("h") or 0.0
+        if fh <= 0:
+            continue
+        if abs(fh - buried_h) / buried_h <= tol:
+            return True
+    return False
+
+
+def _buried_record_height_check(records, x0, x1):
+    """v26.36 NEW: คืน (my_h, next_h) จาก records จริง (height_px ที่ผ่านการ reconcile/guard
+    ของกลไกอื่นมาแล้ว - แหล่งข้อมูลเดียวกับที่ SAME-BOX-SIZE GUARD v26.31 ใช้) เทียบกับ
+    x-range ของ roof cell นี้ - คืน (None, None) ถ้าหาไม่ได้ (fail-safe: ปล่อยให้กลไกเดิม
+    ทำงานต่อตามปกติ ไม่ระงับ)
+
+    ที่มา (ดู docstring เต็มที่หัวไฟล์ หัวข้อ v26.36 สำหรับหลักฐาน pixel/region จริงจาก
+    EA06-01-10-Sep-26.pdf FRONT และ EB14-01-12-Sep-26.pdf BACK): buried_front_row รับ
+    พารามิเตอร์ records มาตั้งแต่ v26.25 แต่ไม่เคยใช้งานเลยแม้แต่บรรทัดเดียว - ทำให้ต้องพึ่ง
+    roof_top/silhouette_top (จุดตัวอย่างเดียวที่ cx) ล้วนๆ ซึ่งคลาดเคลื่อนได้ง่ายเมื่อ cx ตกที่
+    รอยต่อ/ขอบคอลัมน์พอดี ในขณะที่ records.height_px เป็นค่าที่ผ่าน reconcile_heights_cross_view
+    + fill_missing_heights มาแล้ว น่าเชื่อถือกว่ามาก"""
+    if not records:
+        return None, None
+    valid = sorted([r for r in records if not r.get("is_corner_duplicate")],
+                   key=lambda r: r["idx"])
+    best, best_ov = None, 0.0
+    for i, r in enumerate(valid):
+        rx0, rx1 = r["x_range"]
+        ov = _buried_overlap(x0, x1, rx0, rx1)
+        if ov > best_ov:
+            best_ov, best = ov, i
+    if best is None or best_ov < 0.4:
+        return None, None
+    my_h = valid[best].get("height_px")
+    next_h = valid[best + 1].get("height_px") if best + 1 < len(valid) else None
+    return my_h, next_h
+
+
 def detect_buried_front_row(view_result, records, view_label):
     """v26.25 NEW: กล่องแถวหน้าที่เตี้ยกว่าแถวหลังจนจมอยู่ใต้เส้นเงาทั้งใบ.
 
@@ -10740,6 +11004,24 @@ def detect_buried_front_row(view_result, records, view_label):
     for rc in roofs:
         if rc["area"] < _area_gate:
             continue
+        # v26.38 FLOOR-LEVEL ROOF GUARD (ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล - พบจริง
+        # จาก TC51-03.pdf): ปฏิเสธ roof cell ที่ขอบล่าง (y1) อยู่ "ที่หรือต่ำกว่า" เส้นพื้นตู้จริง
+        # (local_floor_y) ณ ตำแหน่งกึ่งกลางของมัน - เป็นไปไม่ได้ทางกายภาพที่ "หลังคากล่อง" จะอยู่
+        # ต่ำกว่าหรือเสมอพื้นตู้ (กล่องต้องมีความสูงเป็นบวกเสมอ หลังคาต้องอยู่เหนือฐานของมันเอง ซึ่ง
+        # ฐานก็ต้องอยู่เหนือ/เท่ากับพื้นตู้เท่านั้น) - roof cell ที่ผิดเงื่อนไขนี้คือพื้น/ผนังตู้ที่ถูก
+        # จัดประเภทผิดพลาดว่าเป็น "หลังคากล่อง" (มักเกิดเมื่อไฟล์นั้นใช้สีพื้นตู้ที่สดมากจนหลุดรอด
+        # การกรองสีโครงสร้างตู้ - ดู _p1b_is_structural_container_color)
+        _rcx_check = (rc["x0"] + rc["x1"]) // 2
+        if 0 <= _rcx_check < len(lfy) and lfy[_rcx_check] >= 0:
+            _floor_margin = float(lfy[_rcx_check]) - float(rc["y1"])
+            if _floor_margin < _BURIED_ROOF_MIN_FLOOR_MARGIN_PX:
+                print(f"[BURIED_FLOOR_GUARD] ข้าม view={view_label} x=[{rc['x0']},{rc['x1']}] "
+                      f"color={rc.get('color')} เพราะขอบล่างของ roof (y1={rc['y1']}) อยู่ต่ำกว่า/"
+                      f"เกือบถึงเส้นพื้นตู้จริง (floor_y={lfy[_rcx_check]:.0f} ที่ cx={_rcx_check}, "
+                      f"margin={_floor_margin:.0f}px < เกณฑ์ {_BURIED_ROOF_MIN_FLOOR_MARGIN_PX}px) "
+                      f"= เป็นไปไม่ได้ทางกายภาพที่หลังคากล่องจะอยู่ต่ำกว่าพื้นตู้ -> พื้น/ผนังตู้ที่ถูก"
+                      f"จัดประเภทผิดพลาด ไม่ใช่หลังคากล่องจริง")
+                continue
         # v26.27 FIX#1: หน้าบนกล่อง isometric ต้องมี h/w ~ 0.50 เสมอ (ดู docstring ด้านบน)
         _rw = rc["x1"] - rc["x0"]
         _rh = rc["y1"] - rc["y0"]
@@ -10775,6 +11057,37 @@ def detect_buried_front_row(view_result, records, view_label):
         drop = 1.0 - (buried_h / taller_h)
         if drop < _BURIED_MIN_DROP_RATIO:
             continue
+        # v26.36 STACK-HEIGHT-PARITY GUARD: ตรวจกับความสูงกองจริงจาก records (ผ่าน
+        # reconcile/guard ของกลไกอื่นมาแล้ว - เชื่อถือได้กว่า roof/silhouette sampling จุดเดียว)
+        # ก่อนยืนยัน - ถ้าความสูงกองจริงของคอลัมน์นี้กับคอลัมน์ถัดไปแทบเท่ากัน (record_drop ต่ำ
+        # กว่าเกณฑ์ขั้นต่ำเดียวกัน) แสดงว่า roof/silhouette ที่วัดได้คลาดเคลื่อน ไม่ใช่ขั้นจริง
+        # (ดู docstring เต็มที่หัวไฟล์ หัวข้อ v26.36 สำหรับหลักฐาน EA06-01-10-Sep-26 FRONT
+        # idx1=300.8px/idx2=340.3px record_drop=11.6%<20% และ EB14-01-12-Sep-26 BACK
+        # idx1=338.8px/idx2=338.9px record_drop=0.03%<20% - ทั้ง 2 ไฟล์ roof-based drop วัดได้
+        # 23.7-23.9% (ผ่านเกณฑ์ 20% ผิดพลาด) แต่ record-based drop ที่แม่นยำกว่าไม่ถึงเกณฑ์เลย)
+        # v26.37 FRONT-CELL DIRECT CONFIRMATION (ตรวจก่อน parity guard เสมอ - ดู docstring
+        # เต็มที่ _buried_front_cell_confirms สำหรับหลักฐาน+เหตุผล พบจริงจาก PA01.pdf ที่ parity
+        # guard v26.36 เคยระงับ true positive ของไฟล์ต้นทางไปโดยไม่ตั้งใจ): ถ้ามี front-face
+        # fragment ของตัวมันเอง (ไม่ผ่าน merge เป็นคอลัมน์) ที่ทับซ้อนกับ roof นี้มากพอและสูงใกล้
+        # เคียงกับ buried_h ที่วัดได้ - ถือว่ายืนยันแล้วว่าเป็นกล่องแยกต่างหากจริง ข้าม parity
+        # guard ไปเลย (ไม่ระงับ) แม้ record ข้างเคียงจะดูสูงเท่ากันก็ตาม
+        _confirmed_genuine = _buried_front_cell_confirms(
+            view_result.get("_front_cells") or [], rc["x0"], rc["x1"], buried_h)
+        if not _confirmed_genuine:
+            _my_h, _next_h = _buried_record_height_check(records, rc["x0"], rc["x1"])
+            if _my_h and _next_h and _next_h > 0:
+                _rdrop = 1.0 - (_my_h / _next_h) if _next_h >= _my_h else 0.0
+                if _rdrop < _BURIED_MIN_DROP_RATIO:
+                    print(f"[BURIED_PARITY] ข้าม view={view_label} x=[{rc['x0']},{rc['x1']}] "
+                          f"เพราะความสูงกองจริงจาก records แทบเท่ากัน (my={_my_h:.0f}px "
+                          f"next={_next_h:.0f}px record_drop={_rdrop:.1%} < เกณฑ์ "
+                          f"{_BURIED_MIN_DROP_RATIO:.0%}) - roof/silhouette วัดคลาดเคลื่อน "
+                          f"(roof_drop={drop:.1%}) ไม่ใช่ขั้นจริง")
+                    continue
+        else:
+            print(f"[BURIED_CONFIRMED] view={view_label} x=[{rc['x0']},{rc['x1']}] "
+                  f"ยืนยันด้วย front-face fragment ของตัวเอง (สูงใกล้เคียง buried_h={buried_h:.0f}px "
+                  f"ภายใน 12%) -> ข้าม parity guard, ยืนยันเป็นกล่องแยกต่างหากจริง")
         # v26.29: แถวเดียวยาวและราบ = ของที่สูงกว่าวางซ้อนอยู่ข้างบน ไม่ใช่ขั้น
         _flat, _spn, _sd = _buried_is_flat_row(roofs, rc["x0"], rc["x1"], roof_top)
         if _flat:
@@ -11675,105 +11988,6 @@ def demote_silhouette_rim(S, box, report):
                            area=int(S.area(r)), exterior=round(ext, 2),
                            rel_face=round(S.area(r) / med, 3),
                            reason="unlabelled sliver on outer silhouette",
-                           defect_class="OVERPAINT"))
-    return box
-
-
-# ============================================================================
-#  v29.12 - STRUCTURE-ADJACENT BLANK GAP  (ผู้ใช้วงไว้ - AA02-01 BACK มุมขวาบน)
-# ----------------------------------------------------------------------------
-#  อาการ: แถบว่างเปล่าสนิท (ไม่มีป้าย SKU ไม่มีเส้นเอียง) ที่ตำแหน่งรอยต่อระหว่างยอด
-#  กองสินค้ากับหลังคา/ผนังตู้ (ceiling ridge) ถูกระบายเป็นสีฟ้าเหมือนเป็นสินค้า ทั้งที่
-#  จริงเป็นเพียง "ช่องว่างของโครงตู้" ที่โผล่ขึ้นมาตรงรอยต่อ ไม่ใช่กล่องสินค้า
-#
-#  ROOT CAUSE: demote_silhouette_rim (v28) ใช้ ext_frac (เปิดสู่พื้นหลังภายนอกภาพ) เป็น
-#  ตัวตัดสิน แต่บริเวณนี้ "ไม่ได้เปิดสู่พื้นหลังนอกภาพ" (ext_frac เพียง 0.025-0.05) เพราะถูก
-#  ขนาบด้วยกล่องสินค้าจริงในแนวนอน จึงถูกเข้าใจผิดว่าเป็น "หน้ากล่องที่ถูกล้อมรอบ = ของจริง"
-#
-#  ทำไมแก้ด้วย "ไม่มีป้าย SKU + ว่างเปล่าสนิท" อย่างเดียวไม่ได้ (v29.12 รุ่นแรกเคยลองแล้ว
-#  ทำให้ไฟล์อื่นพังหนัก - บันทึกไว้กันทำซ้ำ): สแกนทั้งภาพพบว่ามีหน้ากล่องสินค้าจริงจำนวนมาก
-#  ที่ "ว่างเปล่าสนิทและไม่มีป้าย" เช่นกัน (ป้าย SKU ไปติดอยู่ที่ชิ้นส่วนข้างเคียงของกล่อง
-#  ใบเดียวกัน แต่ตัว region นี้เองไม่มี) ตัวอย่างที่วัดได้จริงในไฟล์เดียวกัน:
-#    region 17 (LEFT, rel=1.27) region 19 (RIGHT, rel=2.18) region 31 (RIGHT, rel=1.93)
-#    region 210 (TOP, rel=0.96) region 24 (LEFT, rel=0.62) region 25 (RIGHT, rel=0.36)
-#  ทั้ง 6 region นี้ "ว่างเปล่าสนิท 100%" เหมือนกันทุกประการกับ 2 จุดที่ผิด (region 6
-#  rel=0.144, region 86 rel=0.162) - ขนาด(rel)/รูปทรง/ป้าย ไม่สามารถแยกสองกลุ่มนี้ได้เลย
-#
-#  ตัวแยกที่ใช้แทน - เพื่อนบ้านแนวตั้ง (บน/ล่าง) ต้องมีบริเวณโครงสร้างตู้ (ครีม) ขนาดใหญ่
-#  พอจะนับได้ ติดอยู่จริง ไม่ใช่แค่เศษ noise เล็กๆ
-#    ตรวจพบว่า region 6 มีเพื่อนบ้านด้านบนเป็นครีม area=12999,17007 (ผนัง/หลังคาตู้)
-#    ส่วน region 86 มีเพื่อนบ้านด้านล่างเป็นครีม area=994 (ขอบผนังชิ้นเล็ก)
-#    ขณะที่ทั้ง 6 region ที่เป็นหน้ากล่องจริง มีเพื่อนบ้านบน-ล่างเป็น "คาร์โก้" ล้วน
-#    (เพื่อนบ้านที่ไม่ใช่คาร์โก้ ถ้ามี จะเป็นเศษ noise ขนาด 9-23px เท่านั้น)
-#    ตั้งเกณฑ์ขั้นต่ำที่ 400px (สูงกว่าเศษ noise สูงสุด 23px มาก แต่ต่ำกว่า region86 ที่ 994px)
-#
-#  หลักฐานความปลอดภัย - ทดสอบกฎนี้กับทั้ง 8 region ที่ทราบคำตอบแล้ว (2 บั๊ก + 6 ของจริง)
-#  แยกถูกต้องครบทั้ง 8/8 จุด ไม่มีจุดใดถูกตัดสินผิดเลย
-# ============================================================================
-_BLANKGAP_MIN_REL = 0.05            # ต้องใหญ่พอจะมีผลต่อภาพ (กันเศษ noise <5% ของ median)
-_BLANKGAP_MAX_REL = RIM_MAX_FACE_FRAC  # ใช้เพดานเดียวกับ rim (0.35) - ถ้าใหญ่กว่านี้ไม่แตะ
-_BLANKGAP_VSCAN_REACH = 8            # ระยะสแกนขึ้น/ลงเพื่อหาเพื่อนบ้านแนวตั้ง (px)
-_BLANKGAP_VSCAN_STRIDE = 3           # ระยะห่างของคอลัมน์ x ที่สุ่มตรวจ (ประหยัดเวลา)
-_BLANKGAP_MIN_STRUCT_NEIGHBOUR_AREA = 400  # เพื่อนบ้านครีมต้องใหญ่กว่านี้ (กันเศษ noise 9-23px)
-
-
-def _vertical_neighbours(S, rid, reach=_BLANKGAP_VSCAN_REACH, stride=_BLANKGAP_VSCAN_STRIDE):
-    """หา region ที่อยู่ติดกันในแนวตั้ง (เหนือ/ใต้) ของ region rid พร้อมจำนวนจุดที่ติด."""
-    ys, xs = np.where(S.labels == rid)
-    top_n, bot_n = {}, {}
-    for x in np.unique(xs)[::stride]:
-        col_ys = ys[xs == x]
-        if len(col_ys) == 0:
-            continue
-        top_y, bot_y = col_ys.min(), col_ys.max()
-        for dy in range(1, reach + 1):
-            ty = top_y - dy
-            if 0 <= ty < S.labels.shape[0]:
-                v = S.labels[ty, x]
-                if v != 0 and v != rid:
-                    top_n[v] = top_n.get(v, 0) + 1
-                    break
-        for dy in range(1, reach + 1):
-            by = bot_y + dy
-            if 0 <= by < S.labels.shape[0]:
-                v = S.labels[by, x]
-                if v != 0 and v != rid:
-                    bot_n[v] = bot_n.get(v, 0) + 1
-                    break
-    return top_n, bot_n
-
-
-def demote_structure_adjacent_blank_gap(S, box, report):
-    """v29.12 - ถอดสีช่องว่างโครงตู้ที่โผล่ตรงรอยต่อยอดกอง/หลังคาตู้ (blank + no label
-    + ติดครีมในแนวตั้ง) ดู docstring เต็มด้านบนสำหรับหลักฐาน+เหตุผล (พบจริงจาก AA02-01)
-
-    ต่างจาก demote_silhouette_rim (v28) ตรงที่ไม่ต้องการ ext_frac สูง (เปิดสู่พื้นหลัง
-    ภายนอกภาพ) เพราะกรณีนี้ถูกขนาบด้วยกล่องจริงในแนวนอน - ใช้ "เพื่อนบ้านแนวตั้งที่เป็น
-    โครงสร้างตู้ขนาดใหญ่พอ" เป็นตัวชี้ขาดแทน ซึ่งแยกจาก "หน้ากล่องจริงที่ไม่มีป้าย" ได้
-    เพราะหน้ากล่องจริงจะถูกล้อมด้วยคาร์โก้ทั้งบนล่างเสมอ ไม่มีโครงสร้างตู้มาติดเลย"""
-    med = S.median_face_area()
-    if med <= 0:
-        return box
-    for r in sorted(box, key=lambda x: S.area(x)):
-        if S.text_px[r] > 0 or S.tilt_px[r] > 0:
-            continue                      # มีป้าย/มีเส้นเอียง -> กล่องจริงแน่นอน ไม่แตะ
-        rel = S.area(r) / med
-        if rel < _BLANKGAP_MIN_REL or rel > _BLANKGAP_MAX_REL:
-            continue
-        mask = (S.labels == r)
-        if not mask.any() or S.gray[mask].max() < 255:
-            continue                      # มีเนื้อหา/เส้นจริงอยู่ข้างใน -> ไม่ตัด (fail-safe)
-        top_n, bot_n = _vertical_neighbours(S, r)
-        has_struct_neighbour = any(
-            (label not in box) and (S.area(label) >= _BLANKGAP_MIN_STRUCT_NEIGHBOUR_AREA)
-            for label in list(top_n) + list(bot_n)
-        )
-        if not has_struct_neighbour:
-            continue                      # ล้อมด้วยคาร์โก้ล้วน -> หน้ากล่องจริงที่ไม่มีป้าย
-        box.discard(r)
-        report.append(dict(action="demote_blank_gap", region=int(r), face=S.face_type(r),
-                           area=int(S.area(r)), rel_face=round(rel, 3),
-                           reason="ช่องว่างโครงตู้ที่โผล่ตรงรอยต่อยอดกอง - ติดครีมแนวตั้ง",
                            defect_class="OVERPAINT"))
     return box
 
@@ -12857,6 +13071,10 @@ WALL_MIN_AREA = 800
 WALL_REL_MAX  = 1.10    # ไม่ใหญ่เกินหน้ากล่องมาตรฐาน
 WALL_REACH    = 30      # ระยะมองหาเพื่อนบ้านแนวนอน
 
+# ---- v29.12: REAR FLOOR EXTENSION GUARD (BACK VIEW เท่านั้น) --------------
+REAR_FLOOR_REL_MIN     = 0.30   # กันเศษ noise ชิ้นเล็ก ๆ ไม่ให้เข้าเกณฑ์นี้
+REAR_FLOOR_SUPPORT_MAX = 0.05   # แรงรองรับจาก region ที่ยังถูกระบายสีอยู่ต้องแทบเป็น 0
+
 
 def _wall_band_pool(S, box):
     """แผงแนวตั้งบนยอด silhouette ที่ไม่มีป้าย SKU."""
@@ -12928,6 +13146,41 @@ def demote_wall_band(S, box, report):
     return box
 
 
+def demote_rear_floor_extension(S, box, report, view):
+    """v29.12 - ถอดสีแถบพื้นตู้ท้ายรถที่ถูกระบายฟ้าเกินมาใน BACK VIEW เท่านั้น
+    (ดู docstring เต็มที่หัวไฟล์ หัวข้อ v26.34 สำหรับหลักฐาน pixel/region และผลทดสอบ
+    เทียบกับหน้ากล่องจริงทุกจุดในไฟล์ AA02-01.pdf)
+
+    หลักการ: กล่องสินค้าจริงต้องวางพิงอยู่บนกล่องจริงอื่น หรือบนพื้นตู้จริง (below
+    ว่างเปล่า = แตะพื้นจริง) เท่านั้น ถ้า region ที่ถูกระบายสีมี "แรงรองรับด้านล่าง"
+    (below) ไม่ว่างเปล่า แต่สิ่งที่รองรับอยู่นั้นถูกถอดสีทิ้งไปแล้วทั้งหมด (ไม่ใช่กล่อง
+    จริงเลยสักชิ้น) แสดงว่า region นี้ก็เป็นส่วนต่อขยายของระนาบที่ไม่ใช่กล่องเช่นกัน
+
+    ขอบเขต: ทำงานเฉพาะ view == "back" เท่านั้น ตามคำสั่งผู้ใช้ - ไม่แตะ FRONT VIEW
+    """
+    if view != "back":
+        return box
+    med = S.median_face_area()
+    for r in sorted(box, key=lambda x: -S.area(x)):
+        rel = S.area(r) / med
+        if rel < REAR_FLOOR_REL_MIN:
+            continue
+        below = S.below(r)
+        tot = sum(below.values())
+        if tot == 0:
+            continue                       # แตะพื้นจริงตรง ๆ ไม่มีอะไรคั่น -> ปล่อยไว้
+        support = sum(v for k, v in below.items() if k in box) / tot
+        if support > REAR_FLOOR_SUPPORT_MAX:
+            continue                       # มีกล่องจริงรองรับอยู่จริง -> ปล่อยไว้
+        box.discard(r)
+        report.append(dict(action="demote_rear_floor", region=int(r), area=int(S.area(r)),
+                           rel=round(rel, 3), support=round(support, 3), below=dict(below),
+                           reason="rests entirely on an already-demoted (non-cargo) plane "
+                                  "- rear floor strip continuation, back view only",
+                           defect_class="OVERPAINT"))
+    return box
+
+
 def colorize_v2911(img_bgr, view="front", trace=False):
     img_bgr, seal = close_clipped_silhouette(img_bgr)
     S = IsoScene(img_bgr)
@@ -12947,6 +13200,7 @@ def colorize_v2911(img_bgr, view="front", trace=False):
     box = demote_ground_band(S, box, report)
     box = demote_end_deck_wedge(S, box, report)
     box = demote_wall_band(S, box, report)          # <-- v29.11
+    box = demote_rear_floor_extension(S, box, report, view)   # <-- v29.12 (BACK VIEW เท่านั้น)
     v2910box = set(box)
     box = demote_orphans(S, box, report)
     out = paint(S, box)
@@ -12963,44 +13217,6 @@ def colorize_view(img_bgr, view="front", trace=False):
 
 def colorize_front_view(i): return colorize_v2911(i, "front")
 def colorize_back_view(i):  return colorize_v2911(i, "back")
-
-
-def colorize_v2912(img_bgr, view="front", trace=False):
-    img_bgr, seal = close_clipped_silhouette(img_bgr)
-    S = IsoScene(img_bgr)
-    report = []
-    if seal:
-        report.append(seal)
-    box = _grow_front(S, _seed_front(S)) if view == "front" else _grow_back(S, _seed_back(S))
-    base = set(box)
-    box = demote_unsupported_planes(S, box, report)
-    box = promote_supported_faces(S, box, report)
-    box = demote_silhouette_rim(S, box, report)
-    box = repair_marked_faces(S, box, report)
-    box = repair_marked_planes(S, box, report)
-    box = demote_top_rail(S, box, report)
-    box = repair_enclosed_faces(S, box, report)
-    box = repair_buried_faces(S, box, report)
-    box = demote_ground_band(S, box, report)
-    box = demote_end_deck_wedge(S, box, report)
-    box = demote_wall_band(S, box, report)
-    box = demote_structure_adjacent_blank_gap(S, box, report)   # <-- v29.12
-    v2911box = set(box)
-    box = demote_orphans(S, box, report)
-    out = paint(S, box)
-    if trace:
-        return out, dict(view=view, regions=int(S.n - 1), baseline_boxes=len(base),
-                         final_boxes=len(box), actions=report,
-                         v2911box=sorted(v2911box), box=sorted(box))
-    return out
-
-
-def colorize_view(img_bgr, view="front", trace=False):
-    return colorize_v2912(img_bgr, view, trace)
-
-
-def colorize_front_view(i): return colorize_v2912(i, "front")
-def colorize_back_view(i):  return colorize_v2912(i, "back")
 
 
 # ============================================================================
@@ -13213,7 +13429,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
             return None, info
         xref, img = hit
         front_shape = img.shape
-        out, tr = colorize_v2912(img, "front", trace=True)
+        out, tr = colorize_v2911(img, "front", trace=True)
         _, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         front_bytes = enc.tobytes()
         doc[0].replace_image(xref, stream=front_bytes)
@@ -13230,7 +13446,7 @@ def colorize_wireframe_pdf_bytes(pdf_bytes):
                 raw = doc.extract_image(imgs[1]["xref"])
                 img2 = cv2.cvtColor(
                     np.array(Image.open(io.BytesIO(raw["image"]))), cv2.COLOR_RGB2BGR)
-                out2, tr2 = colorize_v2912(img2, "back", trace=True)
+                out2, tr2 = colorize_v2911(img2, "back", trace=True)
                 _, enc2 = cv2.imencode(".jpg", out2, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                 page.replace_image(imgs[1]["xref"], stream=enc2.tobytes())
                 info["views"].append({"view": "back", "regions": tr2["regions"],
