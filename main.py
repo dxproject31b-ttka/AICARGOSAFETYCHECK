@@ -7197,13 +7197,29 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
-        # v26.31: SAME-BOX-SIZE GUARD (ดู docstring เต็มที่ _SAMEBOX_MIN_FH_RATIO)
+        # v26.42: SAME-BOX BACK + GENUINE-SEAM OVERRIDE
+        # ปกติกล่องที่ face-height เท่ากันจะถูก suppress ตาม v26.31 เหมือนเดิม
+        # ข้อยกเว้นแคบมาก: BACK view เท่านั้น, stack-height ต่าง >=12%, และ pixel geometry
+        # ยืนยัน seam jump จริง จึงอนุญาตให้ประเมินต่อด้วย threshold 12% เฉพาะคู่นี้
         _fr = _same_box_size_pair(view_result, a, b)
+        _back_samebox_seam_override = False
+        _raw_drop = 1 - (shorter_h / taller_h) if taller_h > 0 else 0.0
         if _fr is not None and _fr >= _SAMEBOX_MIN_FH_RATIO:
-            print(f"[SAMEBOX] pairwise {view_label} idx={a.get('idx')}/{b.get('idx')} "
-                  f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
-                  f"{_SAMEBOX_MIN_FH_RATIO}) = วางเรียงระดับเดียวกัน ไม่ใช่ขั้น -> ไม่ flag")
-            continue
+            _seam_ok = None
+            if view_label == "BACK" and _raw_drop >= 0.12:
+                _seam_ok = _edge_outlier_has_genuine_seam_jump(
+                    view_result, shorter_rec, taller_rec, min_ratio=0.10)
+            if view_label == "BACK" and _raw_drop >= 0.12 and _seam_ok is True:
+                _back_samebox_seam_override = True
+                print(f"[SAMEBOX_BACK_SEAM] pairwise BACK idx={a.get('idx')}/{b.get('idx')} "
+                      f"fh_ratio={_fr:.3f}, drop={_raw_drop:.1%}, genuine_seam=True "
+                      f"-> override same-box suppress และใช้เกณฑ์ BACK 12%")
+            else:
+                print(f"[SAMEBOX] pairwise {view_label} idx={a.get('idx')}/{b.get('idx')} "
+                      f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
+                      f"{_SAMEBOX_MIN_FH_RATIO}), drop={_raw_drop:.1%}, seam={_seam_ok} "
+                      f"-> ไม่ flag")
+                continue
         # v25.55 FIX#3 (จุดเสี่ยงที่ 1): ถ้าทั้งคู่ได้ค่าจาก carry-forward (height_source=None
         # หลัง fill_missing_heights หรือ "carried_forward_same_view") แสดงว่าค่าที่เปรียบ
         # เทียบกันเป็นค่าเดียวกันที่ propagate มาจากตั้งเดียว ไม่ใช่การวัดอิสระ 2 ครั้ง -
@@ -7348,7 +7364,9 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 hi_ab2 = max(a["x_range"][1], b["x_range"][1])
                 if not _has_internal_sharp_jump(cty_apex_check2, (lo_ab2, hi_ab2)):
                     continue
-        threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
+        _pairwise_drop_ratio = (0.12 if _back_samebox_seam_override
+                                else STEP_DOWN_PAIRWISE_DROP_RATIO)
+        threshold = taller_h * (1 - _pairwise_drop_ratio)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
         # guard ใดๆ เลยสำหรับ height_source="apex_fallback" (guard ที่มีอยู่เดิมเช็คแค่ n_samples
@@ -7462,7 +7480,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                           f"multi-color merge - recheck สี {taller_color_pw} ได้ h={recheck_h:.1f}px "
                           f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={shorter_h:.1f}px "
                           f"-> recheck_drop={recheck_drop:.1%}")
-                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
+                    if recheck_drop < _pairwise_drop_ratio:
                         pairwise_recheck_suppressed = True
             elif taller_color_pw is None and shorter_color_pw is not None:
                 recheck = _recheck_stack_height_via_color(
@@ -7474,7 +7492,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                           f"multi-color merge - recheck สี {shorter_color_pw} ได้ h={recheck_h:.1f}px "
                           f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={taller_h:.1f}px "
                           f"-> recheck_drop={recheck_drop:.1%}")
-                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
+                    if recheck_drop < _pairwise_drop_ratio:
                         pairwise_recheck_suppressed = True
         if pairwise_recheck_suppressed:
             continue
