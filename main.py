@@ -7197,29 +7197,63 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         shorter_rec = b if taller_rec is a else a
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
-        # v26.42: SAME-BOX BACK + GENUINE-SEAM OVERRIDE
-        # ปกติกล่องที่ face-height เท่ากันจะถูก suppress ตาม v26.31 เหมือนเดิม
-        # ข้อยกเว้นแคบมาก: BACK view เท่านั้น, stack-height ต่าง >=12%, และ pixel geometry
-        # ยืนยัน seam jump จริง จึงอนุญาตให้ประเมินต่อด้วย threshold 12% เฉพาะคู่นี้
+
+        # v26.43: BACK SAME-BOX REAL-SEAM DIRECT DETECTOR
+        # เหตุผล: v26.42 เพียงปล่อยให้คู่ผ่าน same-box guard แต่คู่ยังอาจถูก suppress
+        # ภายหลังโดย apex/recheck/general pairwise guards จึงไม่สร้าง risk จริงใน SB01.
+        # เส้นทางนี้สร้าง risk โดยตรงเฉพาะ BACK เมื่อมีหลักฐานครบ 4 ชั้น:
+        #   1) face height เท่ากัน (same-box), 2) stack drop >=12%,
+        #   3) height source + samples เชื่อถือได้, 4) pixel seam jump จริง >=10%.
         _fr = _same_box_size_pair(view_result, a, b)
-        _back_samebox_seam_override = False
         _raw_drop = 1 - (shorter_h / taller_h) if taller_h > 0 else 0.0
+        _reliable_sources_back = ("direct", "cross_view_corrected", "cross_view_filled")
+        _sources_ok_back = (taller_rec.get("height_source") in _reliable_sources_back
+                            and shorter_rec.get("height_source") in _reliable_sources_back)
+        _samples_ok_back = (int(taller_rec.get("n_samples") or 0) >= STEP_DOWN_MIN_RELIABLE_SAMPLES
+                            and int(shorter_rec.get("n_samples") or 0) >= STEP_DOWN_MIN_RELIABLE_SAMPLES)
+        _seam_ok_back = None
+        if (view_label == "BACK" and _fr is not None
+                and _fr >= _SAMEBOX_MIN_FH_RATIO and _raw_drop >= 0.12
+                and _sources_ok_back and _samples_ok_back):
+            _seam_ok_back = _edge_outlier_has_genuine_seam_jump(
+                view_result, shorter_rec, taller_rec, win=15,
+                min_ratio=0.10, scan_margin=40)
+
+        if _seam_ok_back is True:
+            risks.append({
+                "risk_type": "STEP_DOWN_RISK",
+                "subtype": "back_samebox_real_seam",
+                "view": "BACK", "mark_view": "BACK",
+                "mark_stack_idx": shorter_rec["idx"],
+                "mark_x_range": shorter_rec["x_range"],
+                "taller_height_px": taller_h,
+                "shorter_height_px": shorter_h,
+                "drop_ratio": _raw_drop,
+                "pair_indices": (a["idx"], b["idx"]),
+                "height_source": shorter_rec.get("height_source"),
+                "n_samples": shorter_rec.get("n_samples"),
+                "samebox_fh_ratio": _fr,
+                "genuine_seam": True,
+            })
+            print(f"[BACK_SAMEBOX_SEAM_RISK] idx={a.get('idx')}/{b.get('idx')} "
+                  f"fh_ratio={_fr:.3f} drop={_raw_drop:.1%} "
+                  f"sources_ok={_sources_ok_back} samples_ok={_samples_ok_back} "
+                  f"seam=True -> append risk directly")
+            continue
+        elif (view_label == "BACK" and _fr is not None
+              and _fr >= _SAMEBOX_MIN_FH_RATIO and _raw_drop >= 0.12):
+            print(f"[BACK_SAMEBOX_SEAM_SKIP] idx={a.get('idx')}/{b.get('idx')} "
+                  f"fh_ratio={_fr:.3f} drop={_raw_drop:.1%} "
+                  f"sources_ok={_sources_ok_back} samples_ok={_samples_ok_back} "
+                  f"seam={_seam_ok_back}")
+
+        # v26.31: SAME-BOX-SIZE GUARD (ดู docstring เต็มที่ _SAMEBOX_MIN_FH_RATIO)
+        _fr = _same_box_size_pair(view_result, a, b)
         if _fr is not None and _fr >= _SAMEBOX_MIN_FH_RATIO:
-            _seam_ok = None
-            if view_label == "BACK" and _raw_drop >= 0.12:
-                _seam_ok = _edge_outlier_has_genuine_seam_jump(
-                    view_result, shorter_rec, taller_rec, min_ratio=0.10)
-            if view_label == "BACK" and _raw_drop >= 0.12 and _seam_ok is True:
-                _back_samebox_seam_override = True
-                print(f"[SAMEBOX_BACK_SEAM] pairwise BACK idx={a.get('idx')}/{b.get('idx')} "
-                      f"fh_ratio={_fr:.3f}, drop={_raw_drop:.1%}, genuine_seam=True "
-                      f"-> override same-box suppress และใช้เกณฑ์ BACK 12%")
-            else:
-                print(f"[SAMEBOX] pairwise {view_label} idx={a.get('idx')}/{b.get('idx')} "
-                      f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
-                      f"{_SAMEBOX_MIN_FH_RATIO}), drop={_raw_drop:.1%}, seam={_seam_ok} "
-                      f"-> ไม่ flag")
-                continue
+            print(f"[SAMEBOX] pairwise {view_label} idx={a.get('idx')}/{b.get('idx')} "
+                  f"กล่อง 2 ฝั่งขนาดเท่ากัน (fh_ratio={_fr:.3f} >= "
+                  f"{_SAMEBOX_MIN_FH_RATIO}) = วางเรียงระดับเดียวกัน ไม่ใช่ขั้น -> ไม่ flag")
+            continue
         # v25.55 FIX#3 (จุดเสี่ยงที่ 1): ถ้าทั้งคู่ได้ค่าจาก carry-forward (height_source=None
         # หลัง fill_missing_heights หรือ "carried_forward_same_view") แสดงว่าค่าที่เปรียบ
         # เทียบกันเป็นค่าเดียวกันที่ propagate มาจากตั้งเดียว ไม่ใช่การวัดอิสระ 2 ครั้ง -
@@ -7364,9 +7398,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                 hi_ab2 = max(a["x_range"][1], b["x_range"][1])
                 if not _has_internal_sharp_jump(cty_apex_check2, (lo_ab2, hi_ab2)):
                     continue
-        _pairwise_drop_ratio = (0.12 if _back_samebox_seam_override
-                                else STEP_DOWN_PAIRWISE_DROP_RATIO)
-        threshold = taller_h * (1 - _pairwise_drop_ratio)
+        threshold = taller_h * (1 - STEP_DOWN_PAIRWISE_DROP_RATIO)
         floor_jump = None
         # v25.71 NEW (สำคัญ - พบจริงจาก ED84/ED85-01/02/03, 30-Aug-2026): เดิมไม่มี reliability
         # guard ใดๆ เลยสำหรับ height_source="apex_fallback" (guard ที่มีอยู่เดิมเช็คแค่ n_samples
@@ -7480,7 +7512,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                           f"multi-color merge - recheck สี {taller_color_pw} ได้ h={recheck_h:.1f}px "
                           f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={shorter_h:.1f}px "
                           f"-> recheck_drop={recheck_drop:.1%}")
-                    if recheck_drop < _pairwise_drop_ratio:
+                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
                         pairwise_recheck_suppressed = True
             elif taller_color_pw is None and shorter_color_pw is not None:
                 recheck = _recheck_stack_height_via_color(
@@ -7492,7 +7524,7 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                           f"multi-color merge - recheck สี {shorter_color_pw} ได้ h={recheck_h:.1f}px "
                           f"(n={recheck_n},resid={recheck_resid:.2f}) เทียบเดิม={taller_h:.1f}px "
                           f"-> recheck_drop={recheck_drop:.1%}")
-                    if recheck_drop < _pairwise_drop_ratio:
+                    if recheck_drop < STEP_DOWN_PAIRWISE_DROP_RATIO:
                         pairwise_recheck_suppressed = True
         if pairwise_recheck_suppressed:
             continue
@@ -13885,8 +13917,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.21",
-            "benchmarkMode": "v26_21_unbroken_isometric_roofline_guard",
+            "checkerVersion": "V26.43",
+            "benchmarkMode": "v26_43_back_samebox_real_seam_direct",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -13918,8 +13950,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.21",
-            "benchmarkMode": "v26_21_unbroken_isometric_roofline_guard",
+            "checkerVersion": "V26.43",
+            "benchmarkMode": "v26_43_back_samebox_real_seam_direct",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
