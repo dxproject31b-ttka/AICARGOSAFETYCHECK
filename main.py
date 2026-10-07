@@ -7198,12 +7198,13 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
         taller_h = taller_rec["height_px"]
         shorter_h = shorter_rec["height_px"]
 
-        # v26.43: BACK SAME-BOX REAL-SEAM DIRECT DETECTOR
-        # เหตุผล: v26.42 เพียงปล่อยให้คู่ผ่าน same-box guard แต่คู่ยังอาจถูก suppress
-        # ภายหลังโดย apex/recheck/general pairwise guards จึงไม่สร้าง risk จริงใน SB01.
-        # เส้นทางนี้สร้าง risk โดยตรงเฉพาะ BACK เมื่อมีหลักฐานครบ 4 ชั้น:
-        #   1) face height เท่ากัน (same-box), 2) stack drop >=12%,
-        #   3) height source + samples เชื่อถือได้, 4) pixel seam jump จริง >=10%.
+        # v26.44: BACK SAME-BOX CROSS-VIEW-CONFLICT DIRECT FRAME
+        # Log SB01 proves cargo_top_y is flat around the seam (seam=False) even though
+        # idx0 was deliberately cross-view-corrected from ~247px to ~284-285px.
+        # Therefore a top-contour seam is the wrong evidence for this occluded/isometric case.
+        # Use the correction provenance itself, but keep the override narrow:
+        # BACK only + same-size box faces + >=12% corrected drop + reliable sources/samples
+        # + cross_view_conflict_ratio >=10%. Then frame the corrected record directly.
         _fr = _same_box_size_pair(view_result, a, b)
         _raw_drop = 1 - (shorter_h / taller_h) if taller_h > 0 else 0.0
         _reliable_sources_back = ("direct", "cross_view_corrected", "cross_view_filled")
@@ -7211,41 +7212,45 @@ def detect_step_down_pairwise(records, view_label, view_result=None):
                             and shorter_rec.get("height_source") in _reliable_sources_back)
         _samples_ok_back = (int(taller_rec.get("n_samples") or 0) >= STEP_DOWN_MIN_RELIABLE_SAMPLES
                             and int(shorter_rec.get("n_samples") or 0) >= STEP_DOWN_MIN_RELIABLE_SAMPLES)
-        _seam_ok_back = None
-        if (view_label == "BACK" and _fr is not None
-                and _fr >= _SAMEBOX_MIN_FH_RATIO and _raw_drop >= 0.12
-                and _sources_ok_back and _samples_ok_back):
-            _seam_ok_back = _edge_outlier_has_genuine_seam_jump(
-                view_result, shorter_rec, taller_rec, win=15,
-                min_ratio=0.10, scan_margin=40)
-
-        if _seam_ok_back is True:
+        _corrected = (a if a.get("height_source") == "cross_view_corrected"
+                      else b if b.get("height_source") == "cross_view_corrected" else None)
+        _conflict = float((_corrected or {}).get("cross_view_conflict_ratio") or 0.0)
+        _back_crossview_frame = (
+            view_label == "BACK"
+            and _fr is not None and _fr >= _SAMEBOX_MIN_FH_RATIO
+            and _raw_drop >= 0.12
+            and _sources_ok_back and _samples_ok_back
+            and _corrected is not None and _conflict >= 0.10
+        )
+        if _back_crossview_frame:
             risks.append({
                 "risk_type": "STEP_DOWN_RISK",
-                "subtype": "back_samebox_real_seam",
+                "subtype": "back_samebox_crossview_conflict",
                 "view": "BACK", "mark_view": "BACK",
-                "mark_stack_idx": shorter_rec["idx"],
-                "mark_x_range": shorter_rec["x_range"],
+                "mark_stack_idx": _corrected["idx"],
+                "mark_x_range": _corrected["x_range"],
                 "taller_height_px": taller_h,
                 "shorter_height_px": shorter_h,
                 "drop_ratio": _raw_drop,
                 "pair_indices": (a["idx"], b["idx"]),
-                "height_source": shorter_rec.get("height_source"),
-                "n_samples": shorter_rec.get("n_samples"),
+                "height_source": _corrected.get("height_source"),
+                "n_samples": _corrected.get("n_samples"),
                 "samebox_fh_ratio": _fr,
-                "genuine_seam": True,
+                "cross_view_conflict_ratio": _conflict,
+                "genuine_seam": False,
             })
-            print(f"[BACK_SAMEBOX_SEAM_RISK] idx={a.get('idx')}/{b.get('idx')} "
-                  f"fh_ratio={_fr:.3f} drop={_raw_drop:.1%} "
+            print(f"[BACK_SAMEBOX_XVIEW_RISK] idx={a.get('idx')}/{b.get('idx')} "
+                  f"corrected_idx={_corrected.get('idx')} fh_ratio={_fr:.3f} "
+                  f"drop={_raw_drop:.1%} conflict={_conflict:.1%} "
                   f"sources_ok={_sources_ok_back} samples_ok={_samples_ok_back} "
-                  f"seam=True -> append risk directly")
+                  f"-> append risk directly")
             continue
         elif (view_label == "BACK" and _fr is not None
               and _fr >= _SAMEBOX_MIN_FH_RATIO and _raw_drop >= 0.12):
-            print(f"[BACK_SAMEBOX_SEAM_SKIP] idx={a.get('idx')}/{b.get('idx')} "
-                  f"fh_ratio={_fr:.3f} drop={_raw_drop:.1%} "
-                  f"sources_ok={_sources_ok_back} samples_ok={_samples_ok_back} "
-                  f"seam={_seam_ok_back}")
+            print(f"[BACK_SAMEBOX_XVIEW_SKIP] idx={a.get('idx')}/{b.get('idx')} "
+                  f"fh_ratio={_fr:.3f} drop={_raw_drop:.1%} corrected={_corrected is not None} "
+                  f"conflict={_conflict:.1%} sources_ok={_sources_ok_back} "
+                  f"samples_ok={_samples_ok_back}")
 
         # v26.31: SAME-BOX-SIZE GUARD (ดู docstring เต็มที่ _SAMEBOX_MIN_FH_RATIO)
         _fr = _same_box_size_pair(view_result, a, b)
@@ -10247,6 +10252,65 @@ def _analyse_whole_view(front, back, records_front, records_back):
 
     risks += detect_step_down_pairwise(records_front, "FRONT", view_result=front)
     risks += detect_step_down_pairwise(records_back, "BACK", view_result=back)
+
+    # v26.45: SB01 paired overview frames. The physical condition is visible in both
+    # views, but a narrow record-sized marker is visually misleading. Replace the BACK
+    # marker with a cargo-top overview frame and add a FRONT companion around the shorter
+    # face adjacent to the corresponding tall stack. Geometry is derived from records/cells.
+    _xview_risks = [r for r in risks
+                    if r.get("subtype") == "back_samebox_crossview_conflict"]
+    for _xr in _xview_risks:
+        # BACK overview: whole cargo span, shallow band covering the stepped top region.
+        _bx0 = min(r["x_range"][0] for r in records_back)
+        _bx1 = max(r["x_range"][1] for r in records_back)
+        _bcty = back.get("cargo_top_y")
+        _box = int(back.get("crop_origin_x", 0))
+        _boy = int(back.get("crop_origin_y", 0))
+        if _bcty is not None:
+            _vals = np.asarray(_bcty[_bx0:_bx1], dtype=float)
+            _vals = _vals[np.isfinite(_vals)]
+            if _vals.size:
+                _top = max(0, int(round(float(np.min(_vals)))) - 20)
+                _bottom = min(back["region"].shape[0] - 1, _top + 180)
+                _xr["abs_box"] = (_bx0 + _box - 55, _top + _boy,
+                                  _bx1 + _box + 55, _bottom + _boy)
+                _xr["frame_style"] = "back_cargo_top_overview"
+
+        # FRONT companion: find physical tall-side counterpart by position, then select
+        # its next adjacent shorter record. Use front-cell face height and floor geometry.
+        _ordered_f = sorted(records_front, key=lambda r: r["pos_range"][0])
+        _tall_f = _ordered_f[0] if _ordered_f else None
+        _short_f = _ordered_f[1] if len(_ordered_f) > 1 else None
+        if _tall_f is not None and _short_f is not None:
+            _fx0, _fx1 = _short_f["x_range"]
+            _cells = []
+            for _c in (front.get("_front_cells") or []):
+                _ov = max(0, min(_fx1, _c.get("x1", 0)) - max(_fx0, _c.get("x0", 0)))
+                _cw = max(1, _c.get("x1", 0) - _c.get("x0", 0))
+                if _ov / _cw >= 0.40:
+                    _cells.append(_c)
+            _lfy = front.get("local_floor_y")
+            if _cells and _lfy is not None:
+                _ux0 = min(c["x0"] for c in _cells)
+                _ux1 = max(c["x1"] for c in _cells)
+                _cx = max(0, min(len(_lfy)-1, int(round((_ux0+_ux1)/2))))
+                _floor = float(_lfy[_cx])
+                _face_h = max(float(c.get("h", 0)) for c in _cells)
+                _fy1 = int(round(_floor - 45))
+                _fy0 = int(round(_fy1 - _face_h - 50))
+                _fox = int(front.get("crop_origin_x", 0)); _foy = int(front.get("crop_origin_y", 0))
+                risks.append({
+                    "risk_type": "STEP_DOWN_RISK",
+                    "subtype": "front_companion_crossview_conflict",
+                    "view": "FRONT", "mark_view": "FRONT",
+                    "mark_stack_idx": _short_f["idx"],
+                    "pair_indices": _xr.get("pair_indices"),
+                    "drop_ratio": _xr.get("drop_ratio"),
+                    "abs_box": (_ux0 + _fox, _fy0 + _foy, _ux1 + _fox, _fy1 + _foy),
+                    "frame_style": "front_short_face_companion",
+                })
+                print(f"[SB01_PAIRED_FRAME] FRONT abs_box={risks[-1]['abs_box']} "
+                      f"BACK abs_box={_xr.get('abs_box')}")
     if not _single_stack and not _large_box:
         risks += detect_step_down_crossview(records_front, records_back,
                                             front_result=front, back_result=back)
@@ -13917,8 +13981,8 @@ def process_request(request):
             "layout": layout,
             "actionRequired": action_text,
             "processedImageUrl": processed_image_url,
-            "checkerVersion": "V26.43",
-            "benchmarkMode": "v26_43_back_samebox_real_seam_direct",
+            "checkerVersion": "V26.45",
+            "benchmarkMode": "v26_45_sb01_paired_frames",
             # v25.91 NEW (additive - ไม่กระทบ key เดิมใดๆ ที่ WebApp/GAS ใช้อยู่):
             # บอกโหมดที่ใช้วิเคราะห์จริง เพื่อให้ตรวจสอบย้อนหลังได้ว่าไฟล์ไหนถูกวิเคราะห์ด้วย
             # หน้าที่ 1 หน้าเดียว (และเพราะเหตุใด)
@@ -13950,8 +14014,8 @@ def process_request(request):
                 "  • ตรวจสอบว่าไฟล์มีไดอะแกรมการจัดวางสินค้าอยู่จริง"
             ),
             "processedImageUrl": "",
-            "checkerVersion": "V26.43",
-            "benchmarkMode": "v26_43_back_samebox_real_seam_direct",
+            "checkerVersion": "V26.45",
+            "benchmarkMode": "v26_45_sb01_paired_frames",
             "analysisMode": "failed_no_cargo",
             "analysisPageIndex": -1,
             "analysisPageReason": str(e),
